@@ -48,6 +48,28 @@ app.post('/update-watched', async (req, res) => {
   res.json({ success:true });
 });
 
+app.post('/test-push', async (req, res) => {
+  try {
+    const subs = await sbGet('subscriptions', 'select=*');
+    if (!subs?.length) return res.json({ success:true, sent:0, message:'Aucun abonné' });
+    let sent = 0, errors = 0;
+    for (const sub of subs) {
+      try {
+        await webpush.sendNotification(
+          { endpoint:sub.endpoint, keys:{ p256dh:sub.p256dh, auth:sub.auth } },
+          JSON.stringify({ title:'🧪 Test Balise Watch', body:'Notification de test reçue avec succès !', icon:'/apple-touch-icon.png', badge:'/apple-touch-icon.png', tag:'test-push', data:{ url:'/' } })
+        );
+        sent++;
+      } catch(err) {
+        if (err.statusCode===410||err.statusCode===404) { await sbDelete('subscriptions', `endpoint=eq.${encodeURIComponent(sub.endpoint)}`); }
+        else { console.warn(`⚠️ Test-push error ${err.statusCode}: ${err.message}`); errors++; }
+      }
+    }
+    console.log(`🧪 Test-push: ${sent} envoyés, ${errors} erreurs`);
+    res.json({ success:true, sent, errors });
+  } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
 app.delete('/unsubscribe', async (req, res) => {
   const { endpoint } = req.body;
   if (!endpoint) return res.status(400).json({ error:'Endpoint manquant' });
