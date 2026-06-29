@@ -53,14 +53,17 @@ app.post('/sync', async (req, res) => {
   const { access_token, subscription, watched } = req.body;
   const user = await verifyUser(access_token);
   if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
-  if (!subscription?.endpoint) return res.status(400).json({ error:'Subscription invalide' });
 
   try {
-    await sbUpsert('user_devices', {
-      user_id: user.id, endpoint: subscription.endpoint,
-      p256dh: subscription.keys.p256dh, auth: subscription.keys.auth,
-      updated_at: new Date().toISOString(),
-    }, 'endpoint');
+    // subscription optionnelle : la surveillance doit pouvoir se synchroniser
+    // au compte même si l'utilisateur n'a pas (encore) activé les push
+    if (subscription?.endpoint) {
+      await sbUpsert('user_devices', {
+        user_id: user.id, endpoint: subscription.endpoint,
+        p256dh: subscription.keys.p256dh, auth: subscription.keys.auth,
+        updated_at: new Date().toISOString(),
+      }, 'endpoint');
+    }
 
     const list = watched || [];
     if (list.length) {
@@ -78,7 +81,8 @@ app.post('/sync', async (req, res) => {
       : `user_id=eq.${user.id}`;
     await sbDelete('user_watched', staleQuery);
 
-    console.log(`✅ Sync ${user.email||user.id.slice(0,8)} — ${list.length} balise(s), device ...${subscription.endpoint.slice(-12)}`);
+    const deviceLabel = subscription?.endpoint ? `device ...${subscription.endpoint.slice(-12)}` : 'sans device';
+    console.log(`✅ Sync ${user.email||user.id.slice(0,8)} — ${list.length} balise(s), ${deviceLabel}`);
     res.json({ success:true });
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
