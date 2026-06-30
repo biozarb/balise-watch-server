@@ -26,6 +26,7 @@ const SB_HEADERS = { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Con
 async function sbGet(table, query='') { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { headers: SB_HEADERS }); return r.json(); }
 async function sbUpsert(table, body, onConflict) { const r = await fetch(`${SB_URL}/rest/v1/${table}?on_conflict=${onConflict}`, { method:'POST', headers:{...SB_HEADERS,'Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
 async function sbDelete(table, query) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'DELETE', headers:SB_HEADERS }); return r.ok; }
+async function sbPatch(table, query, body) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
 
 // ── AUTH : vérifie un access_token Supabase et renvoie le user (ou null) ──
 // Le client envoie son access_token de session ; on ne fait JAMAIS confiance
@@ -43,7 +44,7 @@ async function verifyUser(accessToken) {
   } catch { return null; }
 }
 
-app.get('/', (req, res) => res.json({ status:'ok', version:'2.0.0', service:'Balise Watch Push Server' }));
+app.get('/', (req, res) => res.json({ status:'ok', version:'2.1.0', service:'Balise Watch Push Server' }));
 app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
 
 // ── /sync : lie l'appareil (endpoint push) au compte + remplace la liste
@@ -70,6 +71,7 @@ app.post('/sync', async (req, res) => {
       const rows = list.map(w => ({
         user_id: user.id, beacon_id: String(w.id), beacon_nom: w.nom,
         seuil_moy: w.seuilMoy ?? null, seuil_rafale: w.seuilRafale ?? null,
+        repeat_interval_min: w.repeatIntervalMin ?? null,
         updated_at: new Date().toISOString(),
       }));
       await sbUpsert('user_watched', rows, 'user_id,beacon_id');
@@ -97,6 +99,26 @@ app.delete('/unsubscribe-device', async (req, res) => {
   res.json({ success:true });
 });
 
+// ── /ack : acquittement manuel d'une alerte en cours (étape 5) ──
+// Stoppe les rappels pour CETTE surveillance jusqu'à ce que la balise
+// repasse sous le seuil (réarmement automatique côté pollAndNotify).
+// L'utilisateur ne peut acquitter que ses propres lignes — filtre user_id
+// en plus de l'id, même si verifyUser garantit déjà l'identité.
+app.post('/ack', async (req, res) => {
+  const { access_token, beacon_id } = req.body;
+  const user = await verifyUser(access_token);
+  if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
+  if (!beacon_id) return res.status(400).json({ error:'beacon_id manquant' });
+  const ok = await sbPatch(
+    'user_watched',
+    `user_id=eq.${user.id}&beacon_id=eq.${encodeURIComponent(String(beacon_id))}`,
+    { alert_acked_at: new Date().toISOString() }
+  );
+  if (!ok) return res.status(500).json({ error:'Échec acquittement' });
+  console.log(`🔕 Ack ${user.email||user.id.slice(0,8)} — balise ${beacon_id}`);
+  res.json({ success:true });
+});
+
 app.post('/test-push', async (req, res) => {
   try {
     const devices = await sbGet('user_devices', 'select=*');
@@ -119,7 +141,6 @@ app.post('/test-push', async (req, res) => {
   } catch(e) { res.status(500).json({ error:e.message }); }
 });
 
-let lastAlerts = {};
 async function pollAndNotify() {
   console.log(`[${new Date().toLocaleTimeString('fr-FR')}] Polling...`);
   try {
@@ -145,14 +166,37 @@ async function pollAndNotify() {
       if (!rel) continue;
       const overM = rel.moy!==null && w.seuil_moy    && rel.moy>=w.seuil_moy;
       const overR = rel.raf!==null && w.seuil_rafale && rel.raf>=w.seuil_rafale;
-      if (!overM && !overR) continue;
-
-      // Anti-spam : par compte + balise (pas par appareil, sinon
-      // incohérent entre les devices d'un même utilisateur)
-      const key = `${w.user_id}_${w.beacon_id}`;
       const now = Date.now();
-      if (lastAlerts[key] && (now-lastAlerts[key])<10*60*1000) continue;
-      lastAlerts[key] = now;
+
+      if (!overM && !overR) {
+        // Repassé sous le seuil : réarme l'alerte pour la prochaine fois
+        // (alert_active + alert_acked_at remis à zéro). On ne touche pas
+        // alert_last_sent (inutile, et garde une trace pour debug).
+        if (w.alert_active) {
+          await sbPatch('user_watched', `id=eq.${w.id}`,
+            { alert_active: false, alert_acked_at: null });
+        }
+        continue;
+      }
+
+      // Alerte en cours. Intervalle de rappel : réglage utilisateur
+      // (plancher 5 min imposé en base) sinon 10 min par défaut (valeur
+      // historique du serveur).
+      const intervalMs = (w.repeat_interval_min ?? 10) * 60 * 1000;
+      const lastSent = w.alert_last_sent ? new Date(w.alert_last_sent).getTime() : 0;
+      const justActivated = !w.alert_active;
+
+      // Acquittée et toujours dans le même épisode de dépassement (pas
+      // de réarmement) : on ne renvoie plus, mais on marque quand même
+      // alert_active=true si ce n'était pas encore le cas (1er passage
+      // au-dessus du seuil après un ancien ack qui n'a jamais été reset
+      // — cas limite défensif, ne devrait pas arriver vu le reset ci-dessus).
+      const acked = w.alert_acked_at && new Date(w.alert_acked_at).getTime() >= lastSent;
+      if (acked && !justActivated) {
+        continue;
+      }
+
+      if (!justActivated && (now-lastSent) < intervalMs) continue;
 
       let body='';
       if (overM) body+=`Moy. ${Math.round(rel.moy)} km/h`;
@@ -160,6 +204,7 @@ async function pollAndNotify() {
       if (overR) body+=`Rafale ${Math.round(rel.raf)} km/h`;
 
       const userDevices = devicesByUser[w.user_id] || [];
+      let anySent = false;
       for (const dv of userDevices) {
         try {
           await webpush.sendNotification(
@@ -167,11 +212,19 @@ async function pollAndNotify() {
             JSON.stringify({ title:`⚠️ ${rel.nom}`, body, icon:'/apple-touch-icon.png', badge:'/apple-touch-icon.png', tag:`alert-${w.beacon_id}`, data:{ url:'/' } })
           );
           console.log(`📲 Push → ${rel.nom} (${body})`);
+          anySent = true;
         } catch(err) {
           if (err.statusCode===410||err.statusCode===404) { await sbDelete('user_devices', `endpoint=eq.${encodeURIComponent(dv.endpoint)}`); }
           else console.warn(`⚠️ Push error ${err.statusCode}`);
         }
       }
+
+      // Marque l'alerte active + l'horodatage même si l'utilisateur n'a
+      // aucun device (sinon justActivated resterait vrai indéfiniment et
+      // l'intervalle ne serait jamais respecté pour un compte sans push).
+      await sbPatch('user_watched', `id=eq.${w.id}`,
+        { alert_active: true, alert_last_sent: new Date(now).toISOString() });
+      void anySent;
     }
   } catch(e) { console.error('pollAndNotify error:', e.message); }
 }
