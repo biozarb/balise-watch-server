@@ -119,7 +119,17 @@ app.post('/ack', async (req, res) => {
   res.json({ success:true });
 });
 
+// ── /test-push : notif de test à tous les appareils enregistrés ──
+// Réservé admin (F1, audit sécurité 30/06) : exige un access_token valide
+// ET vérifie que le compte est admin avant tout envoi. Sans ça, n'importe
+// qui sur Internet pouvait spammer une notif à TOUS les abonnés.
 app.post('/test-push', async (req, res) => {
+  const { access_token } = req.body;
+  const user = await verifyUser(access_token);
+  if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
+  const admins = await sbGet('admins', `user_id=eq.${user.id}&select=user_id`);
+  if (!admins?.length) return res.status(403).json({ error:'Réservé admin' });
+
   try {
     const devices = await sbGet('user_devices', 'select=*');
     if (!devices?.length) return res.json({ success:true, sent:0, message:'Aucun appareil enregistré' });
