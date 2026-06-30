@@ -1,6 +1,7 @@
 const express  = require('express');
 const webpush  = require('web-push');
 const fetch    = require('node-fetch');
+const rateLimit = require('express-rate-limit');
 
 const PORT         = process.env.PORT || 3000;
 const VAPID_PUB    = process.env.VAPID_PUBLIC_KEY;
@@ -13,6 +14,11 @@ const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
 
 webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUB, VAPID_PRIV);
 const app = express();
+// Render est derrière un proxy inverse (load balancer) : sans ça,
+// express-rate-limit verrait l'IP du proxy pour tout le monde (un seul
+// compteur partagé) au lieu de l'IP réelle de chaque appelant — ou lève
+// une erreur si le header X-Forwarded-For est présent sans ce réglage.
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -21,6 +27,20 @@ app.use((req, res, next) => {
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
+
+// ── Rate-limit global (F7, audit sécurité 30/06) ──
+// 60 req/min/IP, recommandation du rapport. Combiné à F1 (test-push
+// authentifié), ça ferme le risque résiduel de flood — chaque endpoint
+// authentifié (/sync, /ack, /unsubscribe-device, /test-push) reste de
+// toute façon borné au périmètre d'un seul compte.
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Trop de requêtes, réessaie dans une minute.' },
+});
+app.use(limiter);
 
 const SB_HEADERS = { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' };
 async function sbGet(table, query='') { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { headers: SB_HEADERS }); return r.json(); }
