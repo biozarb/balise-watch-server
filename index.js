@@ -189,11 +189,45 @@ async function pollAndNotify() {
     const devicesByUser = {};
     (devices||[]).forEach(dv => { (devicesByUser[dv.user_id] ??= []).push(dv); });
 
-    console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s)`);
+    // Session débogage 01/07 : la surveillance (liste de balises,
+    // user_watched) ne suffit plus à elle seule pour alerter — il faut
+    // aussi que le compte ait explicitement DÉMARRÉ la surveillance
+    // (bouton dédié, PWA). Sans ça, un pilote recevait des push dès
+    // qu'une balise était dans sa liste, même chez lui/au travail,
+    // jamais parti voler. Pas de ligne dans user_surveillance = traité
+    // comme inactif par défaut (comportement sûr pour tout compte qui
+    // n'a encore jamais démarré la surveillance sous ce système).
+    const surveillanceRows = await sbGet('user_surveillance', 'select=user_id,active');
+    // Défensif : si la table n'existe pas encore côté Supabase (SQL pas
+    // encore exécuté par Yann) ou toute autre erreur de fetch, sbGet
+    // renvoie un objet d'erreur (pas un tableau) — .filter planterait et
+    // ferait échouer TOUT pollAndNotify (y compris le réarmement des
+    // seuils repassés en dessous, sans rapport). Repli sûr : liste vide
+    // -> personne n'est traité "actif" -> aucun push part, pas de crash.
+    const activeByUser = new Set(
+      (Array.isArray(surveillanceRows) ? surveillanceRows : []).filter(s => s.active).map(s => s.user_id)
+    );
+
+    console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s), ${activeByUser.size} avec surveillance démarrée`);
 
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
       if (!rel) continue;
+
+      // Surveillance non démarrée pour ce compte : aucune alerte, ni
+      // push ni (indirectement) voix — la voix est déjà bloquée côté
+      // client par le même bouton. On réarme aussi l'état d'alerte tout
+      // de suite plutôt que de le laisser traîner : à la prochaine
+      // activation, un dépassement déjà en cours redéclenche un envoi
+      // immédiat (justActivated ci-dessous), sans devoir attendre un
+      // repeat_interval_min hérité d'une session d'avant l'arrêt.
+      if (!activeByUser.has(w.user_id)) {
+        if (w.alert_active || w.alert_acked_at) {
+          await sbPatch('user_watched', `id=eq.${w.id}`, { alert_active: false, alert_acked_at: null });
+        }
+        continue;
+      }
+
       const overM = rel.moy!==null && w.seuil_moy    && rel.moy>=w.seuil_moy;
       const overR = rel.raf!==null && w.seuil_rafale && rel.raf>=w.seuil_rafale;
       const now = Date.now();
