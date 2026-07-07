@@ -12,6 +12,21 @@ const SB_KEY       = process.env.SUPABASE_SERVICE_KEY;
 const POLL_MS      = 5 * 60 * 1000;
 const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
 
+// ── Étape 8 (i18n), Lot 3 : dictionnaire de push traduits ──────────
+// Seuls fr (référence) et en (fallback) sont remplis pour l'instant —
+// même état que les fichiers src/locales/ côté client : les 6 autres
+// langues sont préparées (Lot 3, mécanique) mais pas encore traduites
+// (Lot 4, relecture native requise avant d'y mettre du texte de
+// sécurité). PUSH_LABELS[lang] absent → repli sur 'en', jamais de
+// texte manquant ni de crash. « km/h » n'est pas dans ce dictionnaire :
+// symbole d'unité international, identique dans toutes les langues
+// (même convention que nativeName côté client, cf. i18n.ts).
+const PUSH_LABELS = {
+  fr: { avg: 'Moy.', gust: 'Rafale' },
+  en: { avg: 'Avg.', gust: 'Gust' },
+};
+function pushLabels(lang) { return PUSH_LABELS[lang] || PUSH_LABELS.en; }
+
 webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUB, VAPID_PRIV);
 const app = express();
 // Render est derrière un proxy inverse (load balancer) : sans ça,
@@ -208,6 +223,18 @@ async function pollAndNotify() {
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).filter(s => s.active).map(s => s.user_id)
     );
 
+    // Langue par compte (Lot 3) : même lecture batchée par table que
+    // surveillanceRows ci-dessus (sbGet sur user_language, jamais
+    // l'Admin API Auth — voir supabase_step10_user_language.sql). Repli
+    // défensif identique : si la table n'existe pas encore côté
+    // Supabase ou toute erreur de fetch, sbGet renvoie un objet
+    // d'erreur (pas un tableau) — Map vide -> pushLabels() retombe sur
+    // 'en' pour tout le monde, aucun crash de pollAndNotify.
+    const languageRows = await sbGet('user_language', 'select=user_id,lang');
+    const langByUser = new Map(
+      (Array.isArray(languageRows) ? languageRows : []).map(l => [l.user_id, l.lang])
+    );
+
     console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s), ${activeByUser.size} avec surveillance démarrée`);
 
     for (const w of watchedRows) {
@@ -262,10 +289,11 @@ async function pollAndNotify() {
 
       if (!justActivated && (now-lastSent) < intervalMs) continue;
 
+      const lbl = pushLabels(langByUser.get(w.user_id));
       let body='';
-      if (overM) body+=`Moy. ${Math.round(rel.moy)} km/h`;
+      if (overM) body+=`${lbl.avg} ${Math.round(rel.moy)} km/h`;
       if (overM&&overR) body+=' · ';
-      if (overR) body+=`Rafale ${Math.round(rel.raf)} km/h`;
+      if (overR) body+=`${lbl.gust} ${Math.round(rel.raf)} km/h`;
 
       const userDevices = devicesByUser[w.user_id] || [];
       let anySent = false;
