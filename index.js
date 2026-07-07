@@ -9,6 +9,11 @@ const VAPID_PRIV   = process.env.VAPID_PRIVATE_KEY;
 const VAPID_EMAIL  = process.env.VAPID_EMAIL || 'mailto:admin@balise-watch.fr';
 const SB_URL       = process.env.SUPABASE_URL;
 const SB_KEY       = process.env.SUPABASE_SERVICE_KEY;
+const DEEPL_API_KEY = process.env.DEEPL_API_KEY;
+// api-free.deepl.com pour une clé Free (se termine par ":fx"). Si un
+// jour passage en Pro, il faudra changer pour api.deepl.com — clé et
+// host sont liés, DeepL refuse une clé Free sur l'host Pro et vice versa.
+const DEEPL_URL     = 'https://api-free.deepl.com/v2';
 const POLL_MS      = 5 * 60 * 1000;
 const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
 
@@ -26,6 +31,16 @@ const PUSH_LABELS = {
   en: { avg: 'Avg.', gust: 'Gust' },
 };
 function pushLabels(lang) { return PUSH_LABELS[lang] || PUSH_LABELS.en; }
+
+// ── Module de traduction (commentaires), 08/07 ──────────────────────
+// Nos codes langue (i18next, sans région) → codes cible DeepL (certaines
+// langues DeepL exigent une variante régionale précise, ex. EN-US vs
+// EN-GB, PT-PT vs PT-BR — on fixe un choix par langue, cohérent avec
+// les traductions déjà livrées côté client, cf. Lot 4).
+const DEEPL_LANG_MAP = {
+  fr: 'FR', en: 'EN-US', de: 'DE', it: 'IT',
+  es: 'ES', pt: 'PT-PT', nl: 'NL', sl: 'SL',
+};
 
 webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUB, VAPID_PRIV);
 const app = express();
@@ -184,6 +199,66 @@ app.post('/test-push', async (req, res) => {
     console.log(`🧪 Test-push: ${sent} envoyés, ${errors} erreurs`);
     res.json({ success:true, sent, errors });
   } catch(e) { res.status(500).json({ error:e.message }); }
+});
+
+// ── /translate : traduction à la demande d'un commentaire (08/07) ──
+// Auth requise (accès réservé aux comptes connectés, comme le reste
+// de l'app) mais PAS admin — n'importe quel pilote peut traduire un
+// commentaire qu'il lit. Cache-first : ne rappelle DeepL que si la
+// paire (contenu, langue cible) n'a jamais été traduite. Garde-fou
+// quota avant tout appel payant : /v2/usage ne consomme pas le quota
+// de traduction, on peut donc le vérifier à chaque fois sans coût.
+app.post('/translate', async (req, res) => {
+  const { access_token, content_type, content_id, text, target_lang } = req.body;
+  const user = await verifyUser(access_token);
+  if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
+  if (!DEEPL_API_KEY) return res.status(503).json({ error:'Traduction non configurée' });
+  if (content_type !== 'beacon_comment') return res.status(400).json({ error:'Type de contenu non pris en charge' });
+  if (!content_id || !text || !target_lang) return res.status(400).json({ error:'Paramètres manquants' });
+  const deeplLang = DEEPL_LANG_MAP[target_lang];
+  if (!deeplLang) return res.status(400).json({ error:'Langue non prise en charge' });
+
+  try {
+    const cached = await sbGet(
+      'content_translations',
+      `content_type=eq.${content_type}&content_id=eq.${content_id}&target_lang=eq.${target_lang}&select=translated_text,source_lang`,
+    );
+    if (Array.isArray(cached) && cached.length) {
+      return res.json({ translatedText: cached[0].translated_text, sourceLang: cached[0].source_lang, cached: true });
+    }
+
+    // Jamais de bascule silencieuse vers du payant (app gratuite, sans
+    // financement) : si le quota mensuel gratuit DeepL est presque
+    // atteint, on refuse proprement plutôt que de risquer une facture.
+    const usageRes = await fetch(`${DEEPL_URL}/usage`, {
+      headers: { 'Authorization': `DeepL-Auth-Key ${DEEPL_API_KEY}` },
+    });
+    if (!usageRes.ok) return res.status(502).json({ error:'Service de traduction indisponible' });
+    const usage = await usageRes.json();
+    const remaining = (usage.character_limit ?? 0) - (usage.character_count ?? 0);
+    if (remaining < text.length + 500) {
+      return res.status(503).json({ error:'Quota de traduction mensuel atteint' });
+    }
+
+    const trRes = await fetch(`${DEEPL_URL}/translate`, {
+      method: 'POST',
+      headers: { 'Authorization': `DeepL-Auth-Key ${DEEPL_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: [text], target_lang: deeplLang }),
+    });
+    if (!trRes.ok) return res.status(502).json({ error:'Erreur du service de traduction' });
+    const trData = await trRes.json();
+    const translated = trData?.translations?.[0]?.text;
+    const sourceLang = trData?.translations?.[0]?.detected_source_language ?? null;
+    if (!translated) return res.status(502).json({ error:'Réponse de traduction invalide' });
+
+    await sbUpsert(
+      'content_translations',
+      { content_type, content_id, target_lang, translated_text: translated, source_lang: sourceLang },
+      'content_type,content_id,target_lang',
+    );
+
+    res.json({ translatedText: translated, sourceLang, cached: false });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 async function pollAndNotify() {
