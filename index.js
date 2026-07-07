@@ -9,11 +9,20 @@ const VAPID_PRIV   = process.env.VAPID_PRIVATE_KEY;
 const VAPID_EMAIL  = process.env.VAPID_EMAIL || 'mailto:admin@balise-watch.fr';
 const SB_URL       = process.env.SUPABASE_URL;
 const SB_KEY       = process.env.SUPABASE_SERVICE_KEY;
-const DEEPL_API_KEY = process.env.DEEPL_API_KEY;
-// api-free.deepl.com pour une clé Free (se termine par ":fx"). Si un
-// jour passage en Pro, il faudra changer pour api.deepl.com — clé et
-// host sont liés, DeepL refuse une clé Free sur l'host Pro et vice versa.
-const DEEPL_URL     = 'https://api-free.deepl.com/v2';
+// Traduction : Azure Translator, palier gratuit F0 — préféré à DeepL
+// (revu le 08/07 : le plan "API Free" DeepL n'existe plus pour les
+// nouveaux comptes, remplacé par "Developer" = 1M caractères UNIQUES,
+// pas renouvelés, puis payant. Azure F0 = 2M caractères/mois,
+// renouvelé indéfiniment, gratuit à vie — seul choix compatible avec
+// la contrainte "jamais de facture possible, zéro budget").
+const AZURE_TRANSLATOR_KEY    = process.env.AZURE_TRANSLATOR_KEY;
+const AZURE_TRANSLATOR_REGION = process.env.AZURE_TRANSLATOR_REGION; // ex. 'westeurope'
+const AZURE_TRANSLATOR_URL    = 'https://api.cognitive.microsofttranslator.com';
+// Palier F0, cf. learn.microsoft.com/azure/ai-services/translator/service-limits
+// (vérifié 08/07/2026). Pas d'endpoint "usage restant" côté Azure
+// (contrairement à DeepL /v2/usage) — on compte nous-mêmes les
+// caractères envoyés, par mois, dans translation_usage_monthly.
+const AZURE_MONTHLY_CHAR_LIMIT = 2_000_000;
 const POLL_MS      = 5 * 60 * 1000;
 const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
 
@@ -33,13 +42,15 @@ const PUSH_LABELS = {
 function pushLabels(lang) { return PUSH_LABELS[lang] || PUSH_LABELS.en; }
 
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
-// Nos codes langue (i18next, sans région) → codes cible DeepL (certaines
-// langues DeepL exigent une variante régionale précise, ex. EN-US vs
-// EN-GB, PT-PT vs PT-BR — on fixe un choix par langue, cohérent avec
-// les traductions déjà livrées côté client, cf. Lot 4).
-const DEEPL_LANG_MAP = {
-  fr: 'FR', en: 'EN-US', de: 'DE', it: 'IT',
-  es: 'ES', pt: 'PT-PT', nl: 'NL', sl: 'SL',
+// Nos codes langue (i18next, sans région) → codes cible Azure.
+// Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
+// portugais BRÉSILIEN ("Language code pt defaults to pt-br" — doc
+// officielle Azure, vérifié 08/07) ; nos traductions client (Lot 4)
+// sont en portugais du Portugal, d'où le 'pt-pt' explicite ici. Les
+// 7 autres langues correspondent telles quelles aux codes Azure.
+const AZURE_LANG_MAP = {
+  fr: 'fr', en: 'en', de: 'de', it: 'it',
+  es: 'es', pt: 'pt-pt', nl: 'nl', sl: 'sl',
 };
 
 webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUB, VAPID_PRIV);
@@ -77,6 +88,7 @@ async function sbGet(table, query='') { const r = await fetch(`${SB_URL}/rest/v1
 async function sbUpsert(table, body, onConflict) { const r = await fetch(`${SB_URL}/rest/v1/${table}?on_conflict=${onConflict}`, { method:'POST', headers:{...SB_HEADERS,'Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
 async function sbDelete(table, query) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'DELETE', headers:SB_HEADERS }); return r.ok; }
 async function sbPatch(table, query, body) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
+async function sbRpc(fn, body) { const r = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, { method:'POST', headers:SB_HEADERS, body:JSON.stringify(body) }); return r.json(); }
 
 // ── AUTH : vérifie un access_token Supabase et renvoie le user (ou null) ──
 // Le client envoie son access_token de session ; on ne fait JAMAIS confiance
@@ -212,11 +224,11 @@ app.post('/translate', async (req, res) => {
   const { access_token, content_type, content_id, text, target_lang } = req.body;
   const user = await verifyUser(access_token);
   if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
-  if (!DEEPL_API_KEY) return res.status(503).json({ error:'Traduction non configurée' });
+  if (!AZURE_TRANSLATOR_KEY) return res.status(503).json({ error:'Traduction non configurée' });
   if (content_type !== 'beacon_comment') return res.status(400).json({ error:'Type de contenu non pris en charge' });
   if (!content_id || !text || !target_lang) return res.status(400).json({ error:'Paramètres manquants' });
-  const deeplLang = DEEPL_LANG_MAP[target_lang];
-  if (!deeplLang) return res.status(400).json({ error:'Langue non prise en charge' });
+  const azureLang = AZURE_LANG_MAP[target_lang];
+  if (!azureLang) return res.status(400).json({ error:'Langue non prise en charge' });
 
   try {
     const cached = await sbGet(
@@ -228,27 +240,32 @@ app.post('/translate', async (req, res) => {
     }
 
     // Jamais de bascule silencieuse vers du payant (app gratuite, sans
-    // financement) : si le quota mensuel gratuit DeepL est presque
-    // atteint, on refuse proprement plutôt que de risquer une facture.
-    const usageRes = await fetch(`${DEEPL_URL}/usage`, {
-      headers: { 'Authorization': `DeepL-Auth-Key ${DEEPL_API_KEY}` },
-    });
-    if (!usageRes.ok) return res.status(502).json({ error:'Service de traduction indisponible' });
-    const usage = await usageRes.json();
-    const remaining = (usage.character_limit ?? 0) - (usage.character_count ?? 0);
-    if (remaining < text.length + 500) {
+    // financement) : Azure n'expose pas d'endpoint "quota restant" (à
+    // la différence de DeepL) — on compte nous-mêmes les caractères
+    // envoyés ce mois-ci et on refuse avant de dépasser le palier F0.
+    const month = new Date().toISOString().slice(0, 7); // 'YYYY-MM'
+    const usageRows = await sbGet('translation_usage_monthly', `month=eq.${month}&select=chars_used`);
+    const used = Array.isArray(usageRows) && usageRows.length ? usageRows[0].chars_used : 0;
+    if (used + text.length + 5000 > AZURE_MONTHLY_CHAR_LIMIT) {
       return res.status(503).json({ error:'Quota de traduction mensuel atteint' });
     }
 
-    const trRes = await fetch(`${DEEPL_URL}/translate`, {
-      method: 'POST',
-      headers: { 'Authorization': `DeepL-Auth-Key ${DEEPL_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: [text], target_lang: deeplLang }),
-    });
+    const trRes = await fetch(
+      `${AZURE_TRANSLATOR_URL}/translate?api-version=3.0&to=${encodeURIComponent(azureLang)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': AZURE_TRANSLATOR_KEY,
+          ...(AZURE_TRANSLATOR_REGION ? { 'Ocp-Apim-Subscription-Region': AZURE_TRANSLATOR_REGION } : {}),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([{ text }]),
+      },
+    );
     if (!trRes.ok) return res.status(502).json({ error:'Erreur du service de traduction' });
     const trData = await trRes.json();
-    const translated = trData?.translations?.[0]?.text;
-    const sourceLang = trData?.translations?.[0]?.detected_source_language ?? null;
+    const translated = trData?.[0]?.translations?.[0]?.text;
+    const sourceLang = trData?.[0]?.detectedLanguage?.language ?? null;
     if (!translated) return res.status(502).json({ error:'Réponse de traduction invalide' });
 
     await sbUpsert(
@@ -256,6 +273,9 @@ app.post('/translate', async (req, res) => {
       { content_type, content_id, target_lang, translated_text: translated, source_lang: sourceLang },
       'content_type,content_id,target_lang',
     );
+    // Comptabilise APRÈS succès uniquement — un échec Azure ne doit pas
+    // consommer de quota côté compteur maison.
+    await sbRpc('increment_translation_usage', { p_month: month, p_chars: text.length });
 
     res.json({ translatedText: translated, sourceLang, cached: false });
   } catch (e) { res.status(500).json({ error: e.message }); }
