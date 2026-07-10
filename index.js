@@ -35,9 +35,29 @@ const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
 // texte manquant ni de crash. « km/h » n'est pas dans ce dictionnaire :
 // symbole d'unité international, identique dans toutes les langues
 // (même convention que nativeName côté client, cf. i18n.ts).
+// Lot 1 flightwatch (10/07) : sous-objet `flightwatch` par langue, même
+// convention (fr rempli en référence + en de secours, cf. §4
+// FLIGHTWATCH_LOT0.md — on ne sème pas les 6 autres langues tant qu'elles
+// n'ont pas de relecture native, texte de sécurité oblige).
 const PUSH_LABELS = {
-  fr: { avg: 'Moy.', gust: 'Rafale' },
-  en: { avg: 'Avg.', gust: 'Gust' },
+  fr: {
+    avg: 'Moy.', gust: 'Rafale',
+    flightwatch: {
+      windSurge: {
+        body: (nowKmh, baseKmh, windowMin) =>
+          `Vent en forte hausse : ${nowKmh} km/h (${baseKmh} km/h il y a ${windowMin} min)`,
+      },
+    },
+  },
+  en: {
+    avg: 'Avg.', gust: 'Gust',
+    flightwatch: {
+      windSurge: {
+        body: (nowKmh, baseKmh, windowMin) =>
+          `Wind rising sharply: ${nowKmh} km/h (${baseKmh} km/h ${windowMin} min ago)`,
+      },
+    },
+  },
 };
 function pushLabels(lang) { return PUSH_LABELS[lang] || PUSH_LABELS.en; }
 
@@ -71,6 +91,45 @@ function fwPrefs(row) {
   return p;
 }
 
+// ── Étape 10 (flightwatch), Lot 1 : signaux "gratuits" (vent/brise) ─
+// Aucune nouvelle source : on dérive tout de `releves` (déjà pollé).
+// Historique en RAM du process (par balise, pas par compte — plusieurs
+// comptes peuvent surveiller la même balise, la dérive physique est
+// unique). Volontairement PAS persisté en base : c'est du signal brut
+// dérivé, pas un état d'alerte (celui-là vit dans user_flightwatch_alerts,
+// cf. plus bas) — un redémarrage Render (free tier, veille) vide juste le
+// buffer, qui se reremplit poll après poll ; conséquence assumée : pas de
+// détection de montée de vent tant que `wind_surge_window_min` minutes de
+// buffer n'ont pas été accumulées après un redémarrage, jamais de fausse
+// alerte par contre (cf. §8 garde-fou "informer, pas juger" — on préfère
+// rater une détection à en inventer une).
+const FW_HISTORY_MAX_AGE_MS = 60 * 60 * 1000; // 1h, large marge sur toute fenêtre réglée (défaut 15 min)
+const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
+const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
+
+const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
+
+function fwRecordHistory(beaconId, sample) {
+  const arr = beaconHistory.get(beaconId) || [];
+  arr.push(sample);
+  const cutoff = Date.now() - FW_HISTORY_MAX_AGE_MS;
+  while (arr.length && arr[0].t < cutoff) arr.shift();
+  beaconHistory.set(beaconId, arr);
+}
+// Renvoie l'échantillon le plus RÉCENT qui a au moins `windowMin` minutes
+// (le plus proche possible de cette borne vu la cadence de poll 5 min).
+// null si l'historique n'a pas encore assez de recul (pas de faux positif
+// au démarrage du process).
+function fwBaselineAt(beaconId, windowMin) {
+  const arr = beaconHistory.get(beaconId);
+  if (!arr || !arr.length) return null;
+  const targetT = Date.now() - windowMin * 60 * 1000;
+  let candidate = null;
+  for (const s of arr) {
+    if (s.t <= targetT) candidate = s; else break;
+  }
+  return candidate;
+}
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -329,6 +388,14 @@ async function pollAndNotify() {
       lon: b.location?.longitude ?? null,
       nom: b.meta?.name || `Balise ${b.id}`,
     }; });
+    // Historique flightwatch (Lot 1) : un échantillon par balise réelle à
+    // chaque poll, AVANT d'ajouter la balise de test (fictive, pas de
+    // dérive physique à surveiller). Sert aux dérivées vent/direction
+    // ci-dessous (fwBaselineAt).
+    const fwPollT = Date.now();
+    Object.entries(releves).forEach(([id, rel]) => {
+      fwRecordHistory(id, { t: fwPollT, moy: rel.moy, dir: rel.dir });
+    });
     const testData = await sbGet('test_beacon', 'id=eq.singleton&select=*');
     const test = testData?.[0];
     if (test?.enabled) releves['__test__'] = { moy:test.wind_avg, raf:test.wind_max, nom:'🧪 '+(test.label||'Balise de test') };
@@ -377,6 +444,63 @@ async function pollAndNotify() {
       (Array.isArray(languageRows) ? languageRows : []).map(l => [l.user_id, l.lang])
     );
 
+    // État d'alerte flightwatch (Lot 1) : mêmes défensifs que le reste —
+    // table pas encore créée (SQL Lot 0 pas exécuté) → sbGet renvoie une
+    // erreur, pas un tableau → Map vide → tout signal se comporte comme
+    // "jamais encore alerté" (envoi immédiat au 1er dépassement dès que la
+    // table existera, aucun crash entre-temps).
+    const fwAlertRows = await sbGet('user_flightwatch_alerts', 'select=*');
+    const fwAlertMap = new Map(
+      (Array.isArray(fwAlertRows) ? fwAlertRows : []).map(r => [`${r.user_id}|${r.scope}|${r.signal}`, r])
+    );
+
+    // Cycle d'alerte par signal (mirroir du cycle user_watched étape 5,
+    // mais par (user, scope, signal) — cf. §2 FLIGHTWATCH_LOT0.md).
+    // `active=false` réarme silencieusement (alert_active=false,
+    // acked_at=null) sans envoyer de push, exactement comme le
+    // réarmement des seuils vent existants.
+    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush }) {
+      const key = `${userId}|${scope}|${signal}`;
+      const row = fwAlertMap.get(key);
+      const now = Date.now();
+
+      if (!active) {
+        if (row?.alert_active) {
+          await sbUpsert('user_flightwatch_alerts', {
+            user_id: userId, scope, signal, level,
+            alert_active: false, alert_acked_at: null,
+            updated_at: new Date(now).toISOString(),
+          }, 'user_id,scope,signal');
+        }
+        return;
+      }
+
+      const lastSent = row?.alert_last_sent ? new Date(row.alert_last_sent).getTime() : 0;
+      const justActivated = !row?.alert_active;
+      const acked = row?.alert_acked_at && new Date(row.alert_acked_at).getTime() >= lastSent;
+      if (acked && !justActivated) return;
+      if (!justActivated && (now - lastSent) < FW_ALERT_REPEAT_MS) return;
+
+      const userDevices = devicesByUser[userId] || [];
+      for (const dv of userDevices) {
+        try {
+          await webpush.sendNotification(
+            { endpoint: dv.endpoint, keys: { p256dh: dv.p256dh, auth: dv.auth } },
+            JSON.stringify(buildPush())
+          );
+          console.log(`📲 Push flightwatch → ${signal} (${scope})`);
+        } catch (err) {
+          if (err.statusCode === 410 || err.statusCode === 404) { await sbDelete('user_devices', `endpoint=eq.${encodeURIComponent(dv.endpoint)}`); }
+          else console.warn(`⚠️ Push flightwatch error ${err.statusCode}`);
+        }
+      }
+
+      await sbUpsert('user_flightwatch_alerts', {
+        user_id: userId, scope, signal, level,
+        alert_active: true, alert_last_sent: new Date(now).toISOString(),
+      }, 'user_id,scope,signal');
+    }
+
     console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s), ${activeByUser.size} avec surveillance démarrée`);
 
     for (const w of watchedRows) {
@@ -395,6 +519,39 @@ async function pollAndNotify() {
           await sbPatch('user_watched', `id=eq.${w.id}`, { alert_active: false, alert_acked_at: null });
         }
         continue;
+      }
+
+      // ── Lot 1 flightwatch : montée soudaine du vent ──────────────
+      // Dérivée pure sur la balise déjà surveillée : compare le relevé
+      // courant à la référence prise ~`wind_surge_window_min` minutes
+      // plus tôt (fwBaselineAt, historique en RAM ci-dessus). Indépendant
+      // des seuils moy/rafale de user_watched (peut se déclencher même
+      // sous le seuil habituel — c'est la VITESSE de montée qui compte,
+      // pas la valeur absolue). Niveau 3 (danger imminent, §7.5 cadrage :
+      // "vent qui explose sur ta balise").
+      const fwPrefsForUser = prefsByUser.get(w.user_id) || fwPrefs(null);
+      if (fwPrefsForUser.sig_wind_surge) {
+        const baseline = fwBaselineAt(String(w.beacon_id), fwPrefsForUser.wind_surge_window_min);
+        let surging = false;
+        if (baseline && baseline.moy != null && rel.moy != null) {
+          const effBaseline = Math.max(baseline.moy, FW_WIND_MIN_BASELINE_KMH);
+          surging = rel.moy >= effBaseline * fwPrefsForUser.wind_surge_factor;
+        }
+        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.windSurge;
+        await evaluateFwSignal({
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'wind_surge', level: 3, active: surging,
+          buildPush: () => ({
+            title: `💨 ${rel.nom}`,
+            body: lbl.body(Math.round(rel.moy), Math.round(baseline.moy), fwPrefsForUser.wind_surge_window_min),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-wind_surge-${w.beacon_id}`, requireInteraction: true,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'wind_surge', level: 3,
+              scope: String(w.beacon_id), voice: !!fwPrefsForUser.voice_enabled,
+              value: rel.moy, unit: 'km/h',
+            },
+          }),
+        });
       }
 
       const overM = rel.moy!==null && w.seuil_moy    && rel.moy>=w.seuil_moy;
