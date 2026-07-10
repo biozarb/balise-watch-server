@@ -41,6 +41,36 @@ const PUSH_LABELS = {
 };
 function pushLabels(lang) { return PUSH_LABELS[lang] || PUSH_LABELS.en; }
 
+// ── Étape 10 (flightwatch), Lot 1 : préférences de veille météo ────
+// user_surveillance porte désormais, en plus du flag `active`, les
+// colonnes de préférences ajoutées par supabase_flightwatch.sql (Lot 0) :
+// interrupteurs par signal (sig_*), seuils, voix. Défauts SAINS répliqués
+// ici : si une valeur manque (ligne pré-existante, ou colonne pas encore
+// vue par sbGet pour une raison quelconque), on retombe dessus — jamais
+// de crash, même politique défensive que le reste de pollAndNotify.
+const FW_DEFAULTS = {
+  sig_wind_surge:        true,
+  sig_breeze_reversal:   true,
+  sig_pressure_drop:     true,
+  sig_convection:        true,
+  sig_vigilance:         true,
+  sig_lightning:         true,
+  sig_freezing_level:    false, // info pure, off par défaut (cf. schéma Lot 0)
+  lightning_radius_km:   50,
+  wind_surge_factor:     1.8,
+  wind_surge_window_min: 15,
+  pressure_drop_hpa_h:   2.0,
+  voice_enabled:         true,
+};
+function fwPrefs(row) {
+  const p = {};
+  for (const k of Object.keys(FW_DEFAULTS)) {
+    const v = row?.[k];
+    p[k] = (v === undefined || v === null) ? FW_DEFAULTS[k] : v;
+  }
+  return p;
+}
+
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -287,7 +317,18 @@ async function pollAndNotify() {
     const r = await fetch(API_ALL);
     const d = await r.json();
     const releves = {};
-    (d.data||[]).forEach(b => { releves[String(b.id)] = { moy:b.measurements?.wind_speed_avg??null, raf:b.measurements?.wind_speed_max??null, nom:b.meta?.name||`Balise ${b.id}` }; });
+    // dir/lat/lon : déjà présents dans la même réponse API (aucune nouvelle
+    // source, cf. cadrage §2 point 4) — ajoutés pour les signaux flightwatch
+    // Lot 1 (montée du vent = dérivée sur `moy` ; bascule de brise = `dir` +
+    // proximité géo entre balises surveillées).
+    (d.data||[]).forEach(b => { releves[String(b.id)] = {
+      moy: b.measurements?.wind_speed_avg ?? null,
+      raf: b.measurements?.wind_speed_max ?? null,
+      dir: b.measurements?.wind_heading ?? null,
+      lat: b.location?.latitude ?? null,
+      lon: b.location?.longitude ?? null,
+      nom: b.meta?.name || `Balise ${b.id}`,
+    }; });
     const testData = await sbGet('test_beacon', 'id=eq.singleton&select=*');
     const test = testData?.[0];
     if (test?.enabled) releves['__test__'] = { moy:test.wind_avg, raf:test.wind_max, nom:'🧪 '+(test.label||'Balise de test') };
@@ -307,15 +348,21 @@ async function pollAndNotify() {
     // jamais parti voler. Pas de ligne dans user_surveillance = traité
     // comme inactif par défaut (comportement sûr pour tout compte qui
     // n'a encore jamais démarré la surveillance sous ce système).
-    const surveillanceRows = await sbGet('user_surveillance', 'select=user_id,active');
-    // Défensif : si la table n'existe pas encore côté Supabase (SQL pas
-    // encore exécuté par Yann) ou toute autre erreur de fetch, sbGet
-    // renvoie un objet d'erreur (pas un tableau) — .filter planterait et
-    // ferait échouer TOUT pollAndNotify (y compris le réarmement des
-    // seuils repassés en dessous, sans rapport). Repli sûr : liste vide
-    // -> personne n'est traité "actif" -> aucun push part, pas de crash.
+    // select élargi (Lot 1 flightwatch) : les colonnes de prefs voyagent
+    // avec la même lecture que le flag `active` (décision coût Lot 0,
+    // §2 — zéro requête ajoutée par poll). Même repli défensif qu'avant :
+    // si sbGet échoue (table/colonnes pas prêtes), on retombe sur une
+    // liste vide -> personne actif -> aucun push (météo ou seuil), jamais
+    // de crash.
+    const surveillanceRows = await sbGet('user_surveillance',
+      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled');
     const activeByUser = new Set(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).filter(s => s.active).map(s => s.user_id)
+    );
+    // Préférences flightwatch par compte (Lot 1) : mêmes lignes que
+    // ci-dessus, défauts sains appliqués via fwPrefs (cf. plus haut).
+    const prefsByUser = new Map(
+      (Array.isArray(surveillanceRows) ? surveillanceRows : []).map(s => [s.user_id, fwPrefs(s)])
     );
 
     // Langue par compte (Lot 3) : même lecture batchée par table que
