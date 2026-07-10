@@ -47,6 +47,10 @@ const PUSH_LABELS = {
         body: (nowKmh, baseKmh, windowMin) =>
           `Vent en forte hausse : ${nowKmh} km/h (${baseKmh} km/h il y a ${windowMin} min)`,
       },
+      breezeReversal: {
+        title: '🔄 Bascule de brise',
+        body: names => `Changement de direction du vent détecté sur plusieurs balises voisines : ${names}`,
+      },
     },
   },
   en: {
@@ -55,6 +59,10 @@ const PUSH_LABELS = {
       windSurge: {
         body: (nowKmh, baseKmh, windowMin) =>
           `Wind rising sharply: ${nowKmh} km/h (${baseKmh} km/h ${windowMin} min ago)`,
+      },
+      breezeReversal: {
+        title: '🔄 Wind shift',
+        body: names => `Wind direction shift detected across nearby beacons: ${names}`,
       },
     },
   },
@@ -105,6 +113,8 @@ function fwPrefs(row) {
 // rater une détection à en inventer une).
 const FW_HISTORY_MAX_AGE_MS = 60 * 60 * 1000; // 1h, large marge sur toute fenêtre réglée (défaut 15 min)
 const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
+const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
+const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
@@ -130,6 +140,46 @@ function fwBaselineAt(beaconId, windowMin) {
   }
   return candidate;
 }
+// Différence angulaire absolue (0-180°), gère le passage 359°→0°.
+function fwAngularDiff(a, b) {
+  if (a == null || b == null) return null;
+  let d = Math.abs(a - b) % 360;
+  if (d > 180) d = 360 - d;
+  return d;
+}
+// Distance à vol d'oiseau (km) — formule haversine, précision suffisante
+// pour juger "balises voisines" (pas de calcul géodésique de précision).
+function fwHaversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = deg => deg * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+// Regroupe une liste de {beaconId, rel:{lat,lon,...}} en composantes
+// connexes par proximité (BFS, chaînage transitif — deux balises à la
+// limite du rayon l'une de l'autre suffisent à relier deux clusters).
+function fwClusterByProximity(items, radiusKm) {
+  const n = items.length;
+  const visited = new Array(n).fill(false);
+  const clusters = [];
+  for (let i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    const stack = [i]; visited[i] = true;
+    const cluster = [items[i]];
+    while (stack.length) {
+      const cur = stack.pop();
+      for (let j = 0; j < n; j++) {
+        if (visited[j]) continue;
+        const dKm = fwHaversineKm(items[cur].rel.lat, items[cur].rel.lon, items[j].rel.lat, items[j].rel.lon);
+        if (dKm <= radiusKm) { visited[j] = true; cluster.push(items[j]); stack.push(j); }
+      }
+    }
+    clusters.push(cluster);
+  }
+  return clusters;
+}
+
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -503,6 +553,11 @@ async function pollAndNotify() {
 
     console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s), ${activeByUser.size} avec surveillance démarrée`);
 
+    // Balises surveillées valides (lat/lon/dir connus) par compte actif
+    // avec le signal bascule de brise activé — alimenté dans la boucle
+    // ci-dessous, consommé juste après (§ bascule de brise).
+    const watchedBeaconsByUser = new Map();
+
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
       if (!rel) continue;
@@ -552,6 +607,17 @@ async function pollAndNotify() {
             },
           }),
         });
+      }
+
+      // ── Lot 1 flightwatch : bascule de brise (préparation) ───────
+      // On ne décide rien balise par balise : la cohérence multi-balises
+      // se juge une fois toutes les balises du compte connues (après
+      // cette boucle). On collecte ici seulement les balises valides
+      // (lat/lon/dir présents) pour un compte qui a le signal activé.
+      if (fwPrefsForUser.sig_breeze_reversal && rel.lat != null && rel.lon != null && rel.dir != null) {
+        const arr = watchedBeaconsByUser.get(w.user_id) || [];
+        arr.push({ beaconId: String(w.beacon_id), rel, windowMin: fwPrefsForUser.wind_surge_window_min, prefs: fwPrefsForUser });
+        watchedBeaconsByUser.set(w.user_id, arr);
       }
 
       const overM = rel.moy!==null && w.seuil_moy    && rel.moy>=w.seuil_moy;
@@ -616,6 +682,59 @@ async function pollAndNotify() {
       await sbPatch('user_watched', `id=eq.${w.id}`,
         { alert_active: true, alert_last_sent: new Date(now).toISOString() });
       void anySent;
+    }
+
+    // ── Lot 1 flightwatch : bascule de brise (cohérence multi-balises) ──
+    // Piège classique de rentrée maritime/thermique qui bascule : un
+    // retournement de direction isolé sur une seule balise est du bruit
+    // (rafale, turbulence locale) — la cohérence sur au moins 2 balises
+    // VOISINES (même compte, à moins de FW_BREEZE_NEIGHBOR_RADIUS_KM
+    // l'une de l'autre) est le signal recherché. Niveau 2 (vigilance,
+    // §7.5 cadrage : "brise qui bascule").
+    const fwBreezeActiveScopes = new Set();
+    for (const [userId, beacons] of watchedBeaconsByUser) {
+      if (beacons.length < 2) continue; // pas de "cohérence" possible à 1 seule balise
+
+      const reversed = beacons.filter(b => {
+        const baseline = fwBaselineAt(b.beaconId, b.windowMin);
+        if (!baseline || baseline.dir == null) return false;
+        const diff = fwAngularDiff(baseline.dir, b.rel.dir);
+        return diff !== null && diff >= FW_BREEZE_REVERSAL_MIN_DEG;
+      });
+      if (reversed.length < 2) continue;
+
+      const clusters = fwClusterByProximity(reversed, FW_BREEZE_NEIGHBOR_RADIUS_KM);
+      for (const cluster of clusters) {
+        if (cluster.length < 2) continue;
+        const anchor = cluster.map(b => b.beaconId).sort()[0];
+        const scope = `zone:${anchor}`;
+        fwBreezeActiveScopes.add(`${userId}|${scope}`);
+        const names = cluster.map(b => b.rel.nom).join(', ');
+        const lbl = pushLabels(langByUser.get(userId)).flightwatch.breezeReversal;
+        await evaluateFwSignal({
+          userId, scope, signal: 'breeze_reversal', level: 2, active: true,
+          buildPush: () => ({
+            title: lbl.title,
+            body: lbl.body(names),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-breeze_reversal-${scope}`, requireInteraction: false,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'breeze_reversal', level: 2,
+              scope, voice: false, // niveau 2 = push doux, voix réservée niveau 3 (§7.5)
+              value: null, unit: null,
+            },
+          }),
+        });
+      }
+    }
+    // Réarmement : toute zone `breeze_reversal` active lors d'un poll
+    // précédent mais non retrouvée ce poll-ci (le compte n'a pas de bascule
+    // à collecter au-dessus, ou le cluster ne s'est pas reformé) est
+    // remise à plat — même logique de réarmement silencieux que le reste.
+    for (const row of (Array.isArray(fwAlertRows) ? fwAlertRows : [])) {
+      if (row.signal !== 'breeze_reversal' || !row.alert_active) continue;
+      if (fwBreezeActiveScopes.has(`${row.user_id}|${row.scope}`)) continue;
+      await evaluateFwSignal({ userId: row.user_id, scope: row.scope, signal: 'breeze_reversal', level: 2, active: false, buildPush: () => ({}) });
     }
   } catch(e) { console.error('pollAndNotify error:', e.message); }
 }
