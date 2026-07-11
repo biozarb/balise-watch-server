@@ -1,2 +1,13 @@
 node_modules/
 .env
+
+# SEC-A : fichiers d'audit/plan/prompt — jamais à committer publiquement
+AUDIT_*.md
+PLAN_*.md
+PROMPT_*.md
+LETTRE_*.md
+MAIL_*.md
+
+# Fichiers parasites de sessions/sondes (DIV-1)
+.test_mf_tmp_UNUSED_ignore.js
+newfile_probe.txt
