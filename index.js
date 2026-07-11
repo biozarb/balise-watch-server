@@ -2,6 +2,7 @@ const express  = require('express');
 const webpush  = require('web-push');
 const fetch    = require('node-fetch');
 const rateLimit = require('express-rate-limit');
+const WebSocket = require('ws'); // Étape 10 Lot 5 : flux foudre Blitzortung (WebSocket temps réel)
 
 const PORT         = process.env.PORT || 3000;
 const VAPID_PUB    = process.env.VAPID_PUBLIC_KEY;
@@ -214,6 +215,167 @@ const FW_CONVECTION_CAPE_RISE_MIN_JKG = 150; // hausse minimale sur la fenêtre 
 // y aura un endroit pour le montrer sans spammer une notification dessus.
 // En attendant, l'iso 0°C n'apparaît qu'en info dans le corps du push
 // convection ci-dessous (cf. commentaire ci-dessus), jamais en push seul.
+
+// ── Étape 10 (flightwatch), Lot 5 : foudre temps réel (Blitzortung) ──
+// Source COMMUNAUTAIRE (réseau bénévole de capteurs), à distinguer nettement
+// des sources officielles Open-Meteo/Météo-France des lots précédents.
+// ⚠️ Conditions d'usage Blitzortung (revérifiées le 11/07/2026,
+// blitzortung.org) : données fournies « à des fins privées et de
+// divertissement », le projet « n'est pas une autorité officielle », et les
+// apps tierces doivent servir les données via LEUR PROPRE serveur (jamais en
+// direct depuis chaque client). D'où l'ingestion ci-dessous CÔTÉ SERVEUR
+// (balise-watch-server), la PWA ne parle jamais à Blitzortung. Décision
+// produit (avec Yann) : on présente ces impacts comme une INFO INDICATIVE et
+// NON OFFICIELLE — cohérent avec le garde-fou n°1 du cadrage (« aide à la
+// décision, jamais garantie ») et avec le disclaimer d'inscription à ajouter
+// côté client. Le corps du push le dit explicitement (cf. PUSH_LABELS).
+// Architecture (passe Opus 11/07) : connexion WebSocket persistante,
+// ACTIVÉE À LA DEMANDE (ouverte tant qu'au moins un compte actif a
+// sig_lightning, fermée après un délai de grâce sinon → pas de firehose
+// mondial inutile), payload obfusqué décodé (variante LZW, cf.
+// www.gkbrk.com/blitzortung), filtré à la bbox France À LA RÉCEPTION (le
+// reste du monde est jeté avant tout stockage), buffer RAM glissant (même
+// philosophie que beaconHistory : JAMAIS persisté, un redémarrage le vide →
+// re-remplissage progressif, jamais de fausse alerte). Détection au poll
+// 5 min (réutilise evaluateFwSignal comme tous les autres signaux). Tout
+// défensif : WS coupé / kill switch / ws absent → buffer vide → signal
+// simplement non évalué, jamais de crash (même politique que
+// METEOFRANCE_APP_ID absent au Lot 4).
+const FW_LIGHTNING_ENABLED = process.env.FW_LIGHTNING_ENABLED !== '0'; // kill switch (défaut ON), coupe toute la chaîne foudre d'un coup
+const FW_LIGHTNING_WS_SERVERS = ['wss://ws1.blitzortung.org', 'wss://ws7.blitzortung.org', 'wss://ws8.blitzortung.org']; // rotation en cas d'échec/silence
+const FW_LIGHTNING_BBOX = { latMin: 41.0, latMax: 51.6, lonMin: -5.5, lonMax: 10.0 }; // France métropolitaine + marge (Alpes/Corse) — filtre à la réception
+const FW_LIGHTNING_BUFFER_MAX_AGE_MS = 60 * 60 * 1000; // fenêtre glissante du buffer (60 min), large marge sur la fenêtre de comptage
+const FW_LIGHTNING_WINDOW_MIN = 15; // fenêtre de comptage des impacts autour d'une balise (min)
+const FW_LIGHTNING_REPEAT_MS = 10 * 60 * 1000; // anti-répétition DÉDIÉE, plus courte que FW_ALERT_REPEAT_MS (15 min) vu la criticité niveau 3 — un orage = un push par épisode puis rappel toutes les ~10 min tant que des impacts tombent dans la zone, JAMAIS un push par impact
+const FW_LIGHTNING_BUFFER_HARD_MAX = 20000; // garde-fou mémoire dur (borne le buffer même en cas d'orage massif sur la France)
+
+// Buffer RAM des impacts récents, filtrés France. [{t: ms (heure d'arrivée),
+// lat, lon}], ordre d'arrivée ~ chronologique. Jamais persisté (cf. ci-dessus).
+const lightningStrikes = [];
+
+function fwLightningPrune() {
+  const cutoff = Date.now() - FW_LIGHTNING_BUFFER_MAX_AGE_MS;
+  while (lightningStrikes.length && lightningStrikes[0].t < cutoff) lightningStrikes.shift();
+}
+
+// Décodage du flux Blitzortung (obfusqué, variante LZW) — portage JS fidèle
+// de la fonction Python de référence (www.gkbrk.com/blitzortung). Renvoie la
+// chaîne JSON décodée (l'appelant fait le JSON.parse dans un try).
+function fwLightningDecode(b) {
+  const e = {};
+  const d = String(b).split('');
+  let c = d[0];
+  let f = c;
+  const g = [c];
+  const h = 256;
+  let o = h;
+  for (let i = 1; i < d.length; i++) {
+    const code = d[i].charCodeAt(0);
+    let a;
+    if (h > code) a = d[i];
+    else if (e[code]) a = e[code];
+    else a = f + c;
+    g.push(a);
+    c = a.charAt(0);
+    e[o] = f + c;
+    o++;
+    f = a;
+  }
+  return g.join('');
+}
+
+// Décode + filtre bbox France + bufferise un message brut du WS. Toute
+// anomalie (message non décodable, non-JSON, sans lat/lon, message de
+// contrôle) est silencieusement ignorée — jamais de crash de l'ingestion.
+function fwLightningIngest(raw) {
+  try {
+    const json = JSON.parse(fwLightningDecode(raw));
+    const lat = json?.lat, lon = json?.lon;
+    if (typeof lat !== 'number' || typeof lon !== 'number') return;
+    const bb = FW_LIGHTNING_BBOX;
+    if (lat < bb.latMin || lat > bb.latMax || lon < bb.lonMin || lon > bb.lonMax) return; // hors France → jeté avant stockage
+    lightningStrikes.push({ t: Date.now(), lat, lon }); // heure d'arrivée : suffisant pour une fenêtre de minutes, évite le parsing ns / la dérive d'horloge
+    if (lightningStrikes.length > FW_LIGHTNING_BUFFER_HARD_MAX) lightningStrikes.splice(0, lightningStrikes.length - FW_LIGHTNING_BUFFER_HARD_MAX);
+  } catch { /* message non décodable/non-strike → ignoré */ }
+}
+
+// Compte les impacts à <= radiusKm d'un point sur les `windowMin` dernières
+// minutes (parcours de la fin du buffer, coupé dès qu'on sort de la fenêtre).
+function fwLightningCountNear(lat, lon, radiusKm, windowMin) {
+  if (lat == null || lon == null) return 0;
+  const since = Date.now() - windowMin * 60 * 1000;
+  let n = 0;
+  for (let i = lightningStrikes.length - 1; i >= 0; i--) {
+    const s = lightningStrikes[i];
+    if (s.t < since) break; // buffer trié chronologiquement → on peut s'arrêter
+    if (fwHaversineKm(lat, lon, s.lat, s.lon) <= radiusKm) n++;
+  }
+  return n;
+}
+
+// ── Gestion de la connexion WebSocket (activée à la demande, robuste) ──
+let fwLightningWs = null;
+let fwLightningWantConnected = false;
+let fwLightningServerIdx = 0;
+let fwLightningBackoffMs = 1000;
+let fwLightningReconnectTimer = null;
+let fwLightningIdleTimer = null;      // watchdog de silence (reconnecte si le flux se tait)
+let fwLightningStopGraceTimer = null; // délai de grâce avant fermeture quand plus personne n'a besoin
+
+function fwLightningResetIdleWatchdog() {
+  if (fwLightningIdleTimer) clearTimeout(fwLightningIdleTimer);
+  fwLightningIdleTimer = setTimeout(() => {
+    console.warn('⚡ Blitzortung : silence prolongé, reconnexion');
+    try { fwLightningWs?.terminate(); } catch {}
+  }, 60 * 1000);
+}
+
+function fwLightningConnect() {
+  if (!FW_LIGHTNING_ENABLED || !fwLightningWantConnected || fwLightningWs) return;
+  const url = FW_LIGHTNING_WS_SERVERS[fwLightningServerIdx % FW_LIGHTNING_WS_SERVERS.length];
+  let ws;
+  try { ws = new WebSocket(url); } catch { fwLightningScheduleReconnect(); return; }
+  fwLightningWs = ws;
+  ws.on('open', () => {
+    fwLightningBackoffMs = 1000; // reset backoff sur connexion réussie
+    try { ws.send(JSON.stringify({ a: 111 })); } catch {} // handshake d'abonnement au flux
+    fwLightningResetIdleWatchdog();
+    console.log(`⚡ Blitzortung connecté (${url})`);
+  });
+  ws.on('message', (data) => { fwLightningResetIdleWatchdog(); fwLightningIngest(data.toString()); });
+  ws.on('close', () => { fwLightningWs = null; fwLightningScheduleReconnect(); });
+  ws.on('error', (err) => { console.warn(`⚡ Blitzortung erreur WS: ${err?.message || err}`); try { ws.terminate(); } catch {} });
+}
+
+function fwLightningScheduleReconnect() {
+  if (fwLightningIdleTimer) { clearTimeout(fwLightningIdleTimer); fwLightningIdleTimer = null; }
+  if (!FW_LIGHTNING_ENABLED || !fwLightningWantConnected || fwLightningReconnectTimer) return;
+  fwLightningServerIdx++; // rotation serveur au prochain essai
+  const delay = fwLightningBackoffMs;
+  fwLightningBackoffMs = Math.min(fwLightningBackoffMs * 2, 30000); // backoff exponentiel plafonné à 30 s
+  fwLightningReconnectTimer = setTimeout(() => { fwLightningReconnectTimer = null; fwLightningConnect(); }, delay);
+}
+
+// Appelé à CHAQUE poll : ouvre/maintient la connexion si au moins un compte
+// actif a besoin de la foudre, sinon programme sa fermeture (avec un délai de
+// grâce de 2 polls pour éviter un cycle open/close si l'activité oscille).
+function fwLightningSetNeeded(needed) {
+  if (!FW_LIGHTNING_ENABLED) return;
+  if (needed) {
+    if (fwLightningStopGraceTimer) { clearTimeout(fwLightningStopGraceTimer); fwLightningStopGraceTimer = null; }
+    if (!fwLightningWantConnected) { fwLightningWantConnected = true; fwLightningConnect(); }
+  } else if (fwLightningWantConnected && !fwLightningStopGraceTimer) {
+    fwLightningStopGraceTimer = setTimeout(() => {
+      fwLightningStopGraceTimer = null;
+      fwLightningWantConnected = false;
+      if (fwLightningReconnectTimer) { clearTimeout(fwLightningReconnectTimer); fwLightningReconnectTimer = null; }
+      if (fwLightningIdleTimer) { clearTimeout(fwLightningIdleTimer); fwLightningIdleTimer = null; }
+      try { fwLightningWs?.close(); } catch {}
+      fwLightningWs = null;
+      console.log('⚡ Blitzortung : plus de besoin, déconnexion');
+    }, 2 * POLL_MS);
+  }
+}
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
 
