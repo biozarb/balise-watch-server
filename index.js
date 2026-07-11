@@ -36,6 +36,43 @@ const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
 // couverture France (comportement "_seamless" documenté Open-Meteo).
 const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 
+// ── Étape 10 (flightwatch), Lot 4 : Vigilance Météo-France ─────────
+// Source OFFICIELLE (contrairement à Open-Meteo, gratuite mais PAS sans
+// compte) : portail-api.meteofrance.fr, produit « Bulletin Vigilance ».
+// Vérifié le 11/07/2026 (confluence-meteofrance.atlassian.net, guide de
+// démarrage rapide) : compte requis + abonnement gratuit à l'API +
+// génération d'un « Application ID » (valeur Basic prête à l'emploi,
+// PAS à ré-encoder). Flux OAuth2 client_credentials :
+//   1) POST METEOFRANCE_TOKEN_URL, Authorization: Basic <APP_ID>,
+//      body grant_type=client_credentials -> access_token (~1h, mis en
+//      cache ci-dessous, jamais persisté en base).
+//   2) GET METEOFRANCE_VIGILANCE_URL, Authorization: Bearer <token>.
+// Quota 60 req/min (documenté) — un seul appel vigilance PAR POLL (carte
+// nationale en un coup, pas par département) + un renouvellement de
+// token toutes les ~heure : très loin du quota.
+// ⚠️ Si METEOFRANCE_APP_ID n'est pas configuré (Yann n'a pas encore créé
+// de compte/abonnement), toute la chaîne se dégrade en douceur : aucun
+// token -> aucune donnée -> signal vigilance simplement pas évalué,
+// jamais de crash (même politique que AZURE_TRANSLATOR_KEY absent).
+// ⚠️ Forme JSON de la réponse `cartevigilance/encours` reconstituée à
+// partir de la documentation et d'intégrations tierces publiées
+// (meteofrance-api, jeedom, Home Assistant) — PAS vérifiée en direct
+// dans cette session (nécessite un compte que je n'ai pas). À
+// reconfirmer par Yann avec un vrai token avant mise en prod (cf. le
+// point signalé en fin de Lot 4 dans ROADMAP.md).
+const METEOFRANCE_APP_ID       = process.env.METEOFRANCE_APP_ID;
+const METEOFRANCE_TOKEN_URL    = 'https://portail-api.meteofrance.fr/token';
+const METEOFRANCE_VIGILANCE_URL = 'https://public-api.meteofrance.fr/public/DPVigilance/v1/cartevigilance/encours';
+
+// Mapping balise -> département (Lot 4) : API Découpage administratif
+// (geo.api.gouv.fr, Etalab/IGN), officielle, gratuite, SANS clé — aucune
+// contrainte d'usage commerciale contrairement à Open-Meteo. Un beacon a
+// des coordonnées FIXES (station météo immobile) : le département ne
+// change jamais -> résolu UNE SEULE FOIS par balise puis mis en cache en
+// RAM pour le reste de la vie du process (pas un cache par poll comme
+// beaconHistory/weatherByBeacon), cf. getBeaconDepartment plus bas.
+const GEO_COMMUNES_URL = 'https://geo.api.gouv.fr/communes';
+
 // ── Étape 8 (i18n), Lot 3 : dictionnaire de push traduits ──────────
 // Seuls fr (référence) et en (fallback) sont remplis pour l'instant —
 // même état que les fichiers src/locales/ côté client : les 6 autres
@@ -69,6 +106,10 @@ const PUSH_LABELS = {
           `Risque de développement convectif : CAPE ${capeNow} J/kg en hausse, nébulosité basse/moyenne ${cloudPct}%` +
           (freezingM != null ? `, iso 0°C ${freezingM} m` : ''),
       },
+      vigilance: {
+        title: (level, dept) => `${level === 3 ? '🔴 Vigilance rouge' : '🟠 Vigilance orange'} — département ${dept}`,
+        body: names => `Vigilance météo officielle en cours sur : ${names}. Recroise ta propre météo avant de voler.`,
+      },
     },
   },
   en: {
@@ -89,6 +130,10 @@ const PUSH_LABELS = {
         body: (capeNow, cloudPct, freezingM) =>
           `Convective development risk: CAPE ${capeNow} J/kg rising, low/mid cloud cover ${cloudPct}%` +
           (freezingM != null ? `, freezing level ${freezingM} m` : ''),
+      },
+      vigilance: {
+        title: (level, dept) => `${level === 3 ? '🔴 Red weather warning' : '🟠 Orange weather warning'} — department ${dept}`,
+        body: names => `Official weather warning in effect for: ${names}. Double-check your own forecast before flying.`,
       },
     },
   },
@@ -292,6 +337,84 @@ async function fetchOpenMeteoSignals(lat, lon) {
       cloudHighNow: fwPick(h.cloud_cover_high, idxNow),
       freezingLevelNow: fwPick(h.freezing_level_height, idxNow),
     };
+  } catch { return null; }
+}
+
+// ── Vigilance Météo-France (Lot 4) ──────────────────────────────────
+// Token en cache module (RAM, jamais persisté — comme beaconHistory) :
+// obtenu via OAuth2 client_credentials, marge de sécurité 60 s avant
+// expiration pour ne jamais présenter un token tout juste périmé.
+let mfTokenCache = { token: null, expiresAt: 0 };
+async function getMeteoFranceToken() {
+  if (!METEOFRANCE_APP_ID) return null; // fonctionnalité non configurée -> dégradation silencieuse
+  const now = Date.now();
+  if (mfTokenCache.token && mfTokenCache.expiresAt > now + 60_000) return mfTokenCache.token;
+  try {
+    const r = await fetch(METEOFRANCE_TOKEN_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${METEOFRANCE_APP_ID}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d?.access_token) return null;
+    const ttlMs = (Number(d.expires_in) || 3600) * 1000;
+    mfTokenCache = { token: d.access_token, expiresAt: now + ttlMs };
+    return d.access_token;
+  } catch { return null; }
+}
+
+// Carte de vigilance NATIONALE en un seul appel (pas par département, pas
+// par balise) — un poll = au plus un renouvellement de token (~1h de
+// validité, donc rarement) + un GET vigilance. Retourne une Map
+// codeDépartement (string "01".."2B"..) -> color_id (1 vert, 2 jaune,
+// 3 orange, 4 rouge), ou null si indisponible (token/API en échec, ou
+// forme de réponse inattendue) — l'appelant doit alors s'abstenir
+// d'évaluer le signal ce poll-ci (même politique défensive que le reste).
+async function fetchVigilanceColors() {
+  const token = await getMeteoFranceToken();
+  if (!token) return null;
+  try {
+    const r = await fetch(METEOFRANCE_VIGILANCE_URL, {
+      headers: { 'Authorization': `Bearer ${token}`, 'accept': '*/*' },
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    const periods = d?.product?.periods;
+    if (!Array.isArray(periods) || !periods.length) return null;
+    const period = periods.find(p => p?.echeance === 'J') || periods[0];
+    const domainIds = period?.timelaps?.domain_ids;
+    if (!Array.isArray(domainIds)) return null;
+
+    const colors = new Map();
+    for (const entry of domainIds) {
+      if (entry?.domain_id != null && entry?.max_color_id != null) {
+        colors.set(String(entry.domain_id), Number(entry.max_color_id));
+      }
+    }
+    return colors.size ? colors : null;
+  } catch { return null; }
+}
+
+// Mapping balise -> département, mis en cache EN PERMANENCE pour la
+// durée de vie du process (pas un cache par poll : les coordonnées d'une
+// balise ne changent jamais). On ne met en cache QUE les succès — un
+// échec réseau ponctuel n'empoisonne pas le cache, on retentera au
+// prochain poll (contraste volontaire avec fwRecordHistory/beaconHistory,
+// qui eux se rafraîchissent en continu).
+const beaconDepartmentCache = new Map(); // beacon_id (string) -> code département (string) — jamais de valeur null stockée
+async function getBeaconDepartment(beaconId, lat, lon) {
+  if (beaconDepartmentCache.has(beaconId)) return beaconDepartmentCache.get(beaconId);
+  try {
+    const r = await fetch(`${GEO_COMMUNES_URL}?lat=${lat}&lon=${lon}&fields=departement&format=json`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    const dept = Array.isArray(d) && d[0]?.departement?.code ? String(d[0].departement.code) : null;
+    if (dept) beaconDepartmentCache.set(beaconId, dept);
+    return dept;
   } catch { return null; }
 }
 
