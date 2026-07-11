@@ -64,6 +64,11 @@ const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const METEOFRANCE_APP_ID       = process.env.METEOFRANCE_APP_ID;
 const METEOFRANCE_TOKEN_URL    = 'https://portail-api.meteofrance.fr/token';
 const METEOFRANCE_VIGILANCE_URL = 'https://public-api.meteofrance.fr/public/DPVigilance/v1/cartevigilance/encours';
+// Vigilance MF RETIRÉE des alertes (demande de Yann, 11/07/2026) : les pilotes
+// connaissent déjà la vigilance orange/rouge officielle. On CONSERVE tout le
+// code Lot 4 (token, fetch, mapping département) mais on ne l'ÉVALUE plus dans
+// le poll — repasser ce flag à true pour réactiver le signal vigilance.
+const FW_VIGILANCE_ENABLED = false;
 
 // Mapping balise -> département (Lot 4) : API Découpage administratif
 // (geo.api.gouv.fr, Etalab/IGN), officielle, gratuite, SANS clé — aucune
@@ -1016,6 +1021,7 @@ async function pollAndNotify() {
     // signal ou si METEOFRANCE_APP_ID n'est pas configuré.
     const beaconDeptById = new Map();
     for (const w of watchedRows) {
+      if (!FW_VIGILANCE_ENABLED) break; // vigilance retirée (cf. FW_VIGILANCE_ENABLED) -> map vide -> aucune évaluation en aval
       if (!activeByUser.has(w.user_id)) continue;
       const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
       if (!prefs.sig_vigilance) continue;
@@ -1180,7 +1186,7 @@ async function pollAndNotify() {
       // a 2 balises dans le même département on ne veut qu'UN push, pas
       // deux. On collecte ici (compte, département) -> noms de balises,
       // l'évaluation elle-même se fait après la boucle (cf. plus bas).
-      if (fwPrefsForUser.sig_vigilance) {
+      if (FW_VIGILANCE_ENABLED && fwPrefsForUser.sig_vigilance) {
         const dept = beaconDeptById.get(String(w.beacon_id));
         if (dept) {
           const key = `${w.user_id}|${dept}`;
