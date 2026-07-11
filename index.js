@@ -1099,7 +1099,9 @@ async function pollAndNotify() {
     // liste vide -> personne actif -> aucun push (météo ou seuil), jamais
     // de crash.
     const surveillanceRows = await sbGet('user_surveillance',
-      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled');
+      // beta_lightning : accès bêta foudre Blitzortung, activé par l'admin par compte
+      // (colonne ajoutée par beta_lightning.sql — défaut FALSE, invisible pour les non-bêta)
+      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning');
     const activeByUser = new Set(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).filter(s => s.active).map(s => s.user_id)
     );
@@ -1108,6 +1110,9 @@ async function pollAndNotify() {
     const prefsByUser = new Map(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).map(s => [s.user_id, fwPrefs(s)])
     );
+    const betaByUser = new Map(
+      (Array.isArray(surveillanceRows) ? surveillanceRows : []).map(s => [s.user_id, !!s.beta_lightning])
+    );
 
     // ── Lot 5 flightwatch : foudre Blitzortung — connexion WS à la demande ──
     // Recalcule à chaque poll si au moins un compte actif a besoin de la
@@ -1115,8 +1120,11 @@ async function pollAndNotify() {
     // de la connexion WS en conséquence (pas de firehose mondial inutile).
     // Prune du buffer glissant au passage. Défensif : si tout est absent/coupé
     // le buffer reste vide et le signal ne sera simplement pas évalué plus bas.
+    // beta_lightning : seuls les comptes explicitement activés par l'admin
+    // reçoivent le signal foudre. Double garde : FW_LIGHTNING_ENABLED (env var
+    // Render, doit être posé à '1' manuellement) ET beta_lightning par compte.
     const anyLightningWanted = (Array.isArray(surveillanceRows) ? surveillanceRows : [])
-      .some(s => s.active && fwPrefs(s).sig_lightning);
+      .some(s => s.active && s.beta_lightning && fwPrefs(s).sig_lightning);
     fwLightningSetNeeded(anyLightningWanted);
     fwLightningPrune();
 
@@ -1321,7 +1329,7 @@ async function pollAndNotify() {
       // = un push par épisode puis rappel tant que des impacts tombent dans la
       // zone, jamais un push par impact. Buffer vide (WS coupé, démarrage,
       // kill switch) -> count 0 -> active=false -> pas d'alerte, jamais de crash.
-      if (FW_LIGHTNING_ENABLED && fwPrefsForUser.sig_lightning && rel.lat != null && rel.lon != null) {
+      if (FW_LIGHTNING_ENABLED && betaByUser.get(w.user_id) && fwPrefsForUser.sig_lightning && rel.lat != null && rel.lon != null) {
         const radiusKm = fwPrefsForUser.lightning_radius_km;
         const strikeCount = fwLightningCountNear(rel.lat, rel.lon, radiusKm, FW_LIGHTNING_WINDOW_MIN);
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.lightning;
