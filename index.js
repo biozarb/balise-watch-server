@@ -249,7 +249,7 @@ const FW_CONVECTION_CAPE_RISE_MIN_JKG = 150; // hausse minimale sur la fenêtre 
 // défensif : WS coupé / kill switch / ws absent → buffer vide → signal
 // simplement non évalué, jamais de crash (même politique que
 // METEOFRANCE_APP_ID absent au Lot 4).
-const FW_LIGHTNING_ENABLED = process.env.FW_LIGHTNING_ENABLED !== '0'; // kill switch (défaut ON), coupe toute la chaîne foudre d'un coup
+const FW_LIGHTNING_ENABLED = process.env.FW_LIGHTNING_ENABLED === '1'; // OPT-IN : OFF par défaut. La chaîne foudre reste DORMANTE en prod (aucune connexion WS, aucun push) tant que FW_LIGHTNING_ENABLED=1 n'est pas mis sur Render — à n'activer qu'une fois le décodage validé sur le vrai flux ET l'accès Blitzortung régularisé (ToU, cf. ROADMAP Lot 5). En local : `export FW_LIGHTNING_ENABLED=1` pour tester.
 const FW_LIGHTNING_WS_SERVERS = ['wss://ws1.blitzortung.org', 'wss://ws7.blitzortung.org', 'wss://ws8.blitzortung.org']; // rotation en cas d'échec/silence
 const FW_LIGHTNING_BBOX = { latMin: 41.0, latMax: 51.6, lonMin: -5.5, lonMax: 10.0 }; // France métropolitaine + marge (Alpes/Corse) — filtre à la réception
 const FW_LIGHTNING_BUFFER_MAX_AGE_MS = 60 * 60 * 1000; // fenêtre glissante du buffer (60 min), large marge sur la fenêtre de comptage
