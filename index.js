@@ -813,6 +813,21 @@ app.get('/meteofrance-stations', (req, res) => {
   res.json({ stations: out, fetchedAt: mfObsCacheFetchedAt });
 });
 
+// ── Étape 11 (suite, 11/07) — Historique court d'une station MF ─────
+// Réutilise TEL QUEL le buffer RAM `beaconHistory` (cf. plus haut) déjà
+// alimenté à CHAQUE poll (5 min, pollAndNotify) pour toute entrée de
+// `releves` — donc aussi les stations MF avec du vent, fondues dedans
+// depuis le Lot 7 suite. Aucun nouveau cache, aucun appel réseau ajouté.
+// Limites assumées (vs l'archive Pioupiou, hébergée par Pioupiou) :
+// (1) moy/direction/pression SEULEMENT — fwRecordHistory n'enregistre
+// pas la rafale (jamais utilisée par les signaux flightwatch en amont),
+// (2) 3h30 de profondeur MAX (FW_HISTORY_MAX_AGE_MS), (3) buffer RAM
+// pur, vidé à chaque redémarrage du process — pas d'archive rétroactive.
+// Pas d'auth : même donnée publique en lecture que /meteofrance-stations.
+app.get('/meteofrance-history/:id', (req, res) => {
+  res.json({ points: beaconHistory.get(req.params.id) || [] });
+});
+
 // ── /sync : lie l'appareil (endpoint push) au compte + remplace la liste
 //    de surveillance du compte par celle envoyée (upsert + suppression
 //    des balises qui ne sont plus dans la liste) ──
