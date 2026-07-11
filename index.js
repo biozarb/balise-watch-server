@@ -838,9 +838,18 @@ app.post('/sync', async (req, res) => {
         user_id: user.id, beacon_id: String(w.id), beacon_nom: w.nom,
         seuil_moy: w.seuilMoy ?? null, seuil_rafale: w.seuilRafale ?? null,
         repeat_interval_min: w.repeatIntervalMin ?? null,
+        // Lot 7 (suite) : 'pioupiou' si absent — colonne pas encore
+        // créée tant que Yann n'a pas exécuté
+        // supabase_step12_mf_stations_watch.sql (sbUpsert POST-erait
+        // alors une colonne inconnue ; Supabase/PostgREST l'ignore
+        // silencieusement pour les colonnes non reconnues côté insert
+        // simple, donc pas de casse tant que le script n'a pas tourné —
+        // MAIS l'onConflict ci-dessous suppose déjà la contrainte à 3
+        // colonnes : à activer seulement après exécution du script).
+        source: w.source ?? 'pioupiou',
         updated_at: new Date().toISOString(),
       }));
-      await sbUpsert('user_watched', rows, 'user_id,beacon_id');
+      await sbUpsert('user_watched', rows, 'user_id,beacon_id,source');
     }
     // Supprime les balises qui ne sont plus dans la liste envoyée
     const ids = list.map(w => String(w.id));
@@ -1004,6 +1013,31 @@ async function pollAndNotify() {
       lon: b.location?.longitude ?? null,
       nom: b.meta?.name || `Balise ${b.id}`,
     }; });
+
+    // Lot 7 (suite, 11/07/2026) — fusion des stations Météo-France
+    // surveillées dans `releves`, EXACT même format que les balises
+    // Pioupiou ci-dessus. Choix de Yann : une station MF surveillée doit
+    // déclencher les mêmes alertes seuil moy/rafale qu'une balise
+    // Pioupiou — en la fondant dans `releves` avec les mêmes clés, TOUTE
+    // la logique en aval (seuils classiques § plus bas, ET les signaux
+    // flightwatch génériques : montée de vent, chute de pression réelle,
+    // etc.) fonctionne SANS AUCUNE branche conditionnelle sur la source.
+    // mfObsCache/mfStationsList sont déjà maintenus indépendamment (cf.
+    // refreshMeteoFranceData, poll 6 min) — lecture pure ici, aucun appel
+    // réseau ajouté à ce poll. Seules les stations avec du vent effectif
+    // sont utilisables (même filtre que /meteofrance-stations).
+    const mfStationsById = new Map(mfStationsList.map(s => [s.id, s]));
+    for (const [mfId, obs] of mfObsCache) {
+      if (obs.ff == null) continue;
+      const meta = mfStationsById.get(mfId);
+      if (!meta) continue;
+      releves[mfId] = {
+        moy: obs.ff, raf: obs.raf10, dir: obs.dd,
+        pressure: obs.pmer ?? obs.pres ?? null,
+        lat: meta.lat, lon: meta.lon, nom: meta.nom,
+      };
+    }
+
     // Historique flightwatch (Lot 1, +pressure Lot 2b) : un échantillon par
     // balise réelle à chaque poll, AVANT d'ajouter la balise de test
     // (fictive, pas de dérive physique à surveiller). Sert aux dérivées
