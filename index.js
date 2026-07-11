@@ -220,6 +220,8 @@ const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation
 const FW_HISTORY_MAX_AGE_MS = (FW_TREND_WINDOW_H * 60 + 30) * 60 * 1000; // 3h30 (Lot 2b) : couvre la fenêtre de tendance pression réelle avec marge — large au-dessus des autres fenêtres réglées (vent/brise, défaut 15 min)
 const FW_PRESSURE_MIN_SAMPLES_SPAN_MIN = 150; // Lot 2b : n'évalue la pression RÉELLE (beaconHistory) qu'avec au moins 2h30 de recul (proche de la fenêtre 3h visée) — sinon repli Open-Meteo, jamais un taux calculé sur un intervalle trop court ou juste après un redémarrage
 const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
+const FW_WIND_SURGE_ABS_MIN_KMH = 15; // FIA-1 : plancher absolu sur wind_surge — pas d'alerte niveau 3 si le vent courant reste sous ce seuil (évite les faux positifs "danger imminent" à ~6 km/h les matins calmes thermiques)
+const MF_OBS_MAX_AGE_MS = 30 * 60 * 1000; // DATA-1 : garde-fraîcheur MF — une observation dont validityTime dépasse ce seuil est ignorée dans la fusion (évite d'alerter sur des données figées si l'API MF tombe plusieurs heures)
 const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
 const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
@@ -1046,9 +1048,18 @@ async function pollAndNotify() {
       if (obs.ff == null) continue;
       const meta = mfStationsById.get(mfId);
       if (!meta) continue;
+      // DATA-1 : garde-fraîcheur — si validityTime est connue et trop vieille
+      // (API MF en panne depuis > 30 min, mfObsCache figé), on ignore cette
+      // observation plutôt que d'évaluer du vent qui n'existe peut-être plus.
+      // Si validityTime est null (champ absent du paquet), on laisse passer :
+      // dégradation gracieuse, mieux qu'un silence total.
+      if (obs.validityTime) {
+        const ageMs = Date.now() - new Date(obs.validityTime).getTime();
+        if (ageMs > MF_OBS_MAX_AGE_MS) continue;
+      }
       releves[mfId] = {
         moy: obs.ff, raf: obs.raf10, dir: obs.dd,
-        pressure: obs.pmer ?? obs.pres ?? null,
+        pressure: obs.pmer ?? null, // FIA-3 : n'utiliser QUE pmer (pression ramenée au niveau de la mer) — mélanger pmer et pres (pression station, différente de ~50-100 hPa en montagne) produirait une fausse chute de dizaines de hPa/h si le pipeline alterne les champs entre deux polls
         lat: meta.lat, lon: meta.lon, nom: meta.nom,
       };
     }
@@ -1273,7 +1284,13 @@ async function pollAndNotify() {
         let surging = false;
         if (baseline && baseline.moy != null && rel.moy != null) {
           const effBaseline = Math.max(baseline.moy, FW_WIND_MIN_BASELINE_KMH);
-          surging = rel.moy >= effBaseline * fwPrefsForUser.wind_surge_factor;
+          // FIA-1 : double condition — plancher absolu ET facteur multiplicatif.
+          // Sans plancher absolu, un vent à 5,4 km/h avec baseline à 3 km/h
+          // suffisait à déclencher un niveau 3 (voix) : bruit inacceptable
+          // par vent calme. FW_WIND_SURGE_ABS_MIN_KMH = 15 km/h est
+          // documenté en constante serveur — ajustable à l'usage.
+          surging = rel.moy >= FW_WIND_SURGE_ABS_MIN_KMH &&
+                    rel.moy >= effBaseline * fwPrefsForUser.wind_surge_factor;
         }
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.windSurge;
         await evaluateFwSignal({
