@@ -686,6 +686,35 @@ async function pollAndNotify() {
         });
       }
 
+      // ── Lot 2 flightwatch : chute de pression rapide ─────────────
+      // Tendance déjà calculée en amont (pressureByBeacon, mutualisée par
+      // balise, pas par compte). Si absente (fetch Open-Meteo en échec ou
+      // balise hors couverture) : on N'ÉVALUE PAS ce poll-ci — ni alerte
+      // ni reset — plutôt que de risquer un faux reset sur un simple aléa
+      // réseau (§8 garde-fou "informer, pas juger"). Niveau 2 (vigilance,
+      // §7.5 cadrage : "pression qui chute").
+      if (fwPrefsForUser.sig_pressure_drop) {
+        const trend = pressureByBeacon.get(String(w.beacon_id));
+        if (trend) {
+          const dropping = trend.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
+          const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
+          await evaluateFwSignal({
+            userId: w.user_id, scope: String(w.beacon_id), signal: 'pressure_drop', level: 2, active: dropping,
+            buildPush: () => ({
+              title: `📉 ${rel.nom}`,
+              body: lbl.body(Math.abs(trend.rate).toFixed(1), FW_PRESSURE_WINDOW_H),
+              icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+              tag: `fw-pressure_drop-${w.beacon_id}`, requireInteraction: false,
+              data: {
+                url: '/', kind: 'flightwatch', signal: 'pressure_drop', level: 2,
+                scope: String(w.beacon_id), voice: false, // niveau 2 = push doux
+                value: trend.rate, unit: 'hPa/h',
+              },
+            }),
+          });
+        }
+      }
+
       // ── Lot 1 flightwatch : bascule de brise (préparation) ───────
       // On ne décide rien balise par balise : la cohérence multi-balises
       // se juge une fois toutes les balises du compte connues (après
