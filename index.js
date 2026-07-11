@@ -196,12 +196,13 @@ function fwPrefs(row) {
 // buffer n'ont pas été accumulées après un redémarrage, jamais de fausse
 // alerte par contre (cf. §8 garde-fou "informer, pas juger" — on préfère
 // rater une détection à en inventer une).
-const FW_HISTORY_MAX_AGE_MS = 60 * 60 * 1000; // 1h, large marge sur toute fenêtre réglée (défaut 15 min)
+const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent. Depuis le Lot 2b : sert aussi de fenêtre à la pression RÉELLE mesurée par la balise (beaconHistory), pas seulement au modèle Open-Meteo.
+const FW_HISTORY_MAX_AGE_MS = (FW_TREND_WINDOW_H * 60 + 30) * 60 * 1000; // 3h30 (Lot 2b) : couvre la fenêtre de tendance pression réelle avec marge — large au-dessus des autres fenêtres réglées (vent/brise, défaut 15 min)
+const FW_PRESSURE_MIN_SAMPLES_SPAN_MIN = 150; // Lot 2b : n'évalue la pression RÉELLE (beaconHistory) qu'avec au moins 2h30 de recul (proche de la fenêtre 3h visée) — sinon repli Open-Meteo, jamais un taux calculé sur un intervalle trop court ou juste après un redémarrage
 const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
 const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
 const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
-const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md, upgrade v2 SYNOP/METAR) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent
 const FW_OM_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
 
 // ── Étape 10 (flightwatch), Lot 3 : risque de développement convectif ──
@@ -390,7 +391,7 @@ function fwLightningSetNeeded(needed) {
   }
 }
 
-const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
+const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressure}] trié par t croissant
 
 function fwRecordHistory(beaconId, sample) {
   const arr = beaconHistory.get(beaconId) || [];
@@ -412,6 +413,29 @@ function fwBaselineAt(beaconId, windowMin) {
     if (s.t <= targetT) candidate = s; else break;
   }
   return candidate;
+}
+// Étape 10 (flightwatch), Lot 2b : tendance de pression RÉELLE, mesurée par
+// le baromètre embarqué de la balise elle-même (`measurements.pressure` de
+// l'API Pioupiou live, déjà présent dans le poll existant — ZÉRO appel
+// réseau supplémentaire), à la place de la pression MODÈLE Open-Meteo
+// utilisée jusqu'ici seule. Avantage double : mesure au point exact du site
+// de vol (jamais le cas d'une station SYNOP/METAR, presque toujours en
+// fond de vallée ou sur un aérodrome) ; un biais de calibration du capteur
+// s'annule dans le calcul puisque c'est une dérivée avant/après sur LE
+// MÊME capteur. Limite : toutes les balises n'ont pas de baromètre
+// (`pressure` peut être `null`) → repli Open-Meteo dans ce cas (cf.
+// pollAndNotify, section "chute de pression rapide"). Renvoie `null` sans
+// calcul si l'historique n'a pas encore FW_PRESSURE_MIN_SAMPLES_SPAN_MIN
+// minutes de recul réel (pas juste un vieil échantillon isolé) — même
+// politique défensive que fwBaselineAt, jamais de taux calculé sur un
+// intervalle trop court ou juste après un redémarrage serveur.
+function fwRealPressureTrend(beaconId, nowPressure) {
+  if (nowPressure == null) return null;
+  const past = fwBaselineAt(beaconId, FW_TREND_WINDOW_H * 60);
+  if (!past || past.pressure == null) return null;
+  const spanMin = (Date.now() - past.t) / 60000;
+  if (spanMin < FW_PRESSURE_MIN_SAMPLES_SPAN_MIN) return null;
+  return { now: nowPressure, past: past.pressure, rate: (nowPressure - past.pressure) / (spanMin / 60) };
 }
 // Différence angulaire absolue (0-180°), gère le passage 359°→0°.
 function fwAngularDiff(a, b) {
@@ -847,17 +871,18 @@ async function pollAndNotify() {
       moy: b.measurements?.wind_speed_avg ?? null,
       raf: b.measurements?.wind_speed_max ?? null,
       dir: b.measurements?.wind_heading ?? null,
+      pressure: b.measurements?.pressure ?? null, // Lot 2b : baromètre embarqué, null si la balise n'en a pas — même champ déjà lu côté client dans l'archive Pioupiou
       lat: b.location?.latitude ?? null,
       lon: b.location?.longitude ?? null,
       nom: b.meta?.name || `Balise ${b.id}`,
     }; });
-    // Historique flightwatch (Lot 1) : un échantillon par balise réelle à
-    // chaque poll, AVANT d'ajouter la balise de test (fictive, pas de
-    // dérive physique à surveiller). Sert aux dérivées vent/direction
-    // ci-dessous (fwBaselineAt).
+    // Historique flightwatch (Lot 1, +pressure Lot 2b) : un échantillon par
+    // balise réelle à chaque poll, AVANT d'ajouter la balise de test
+    // (fictive, pas de dérive physique à surveiller). Sert aux dérivées
+    // vent/direction/pression ci-dessous (fwBaselineAt / fwRealPressureTrend).
     const fwPollT = Date.now();
     Object.entries(releves).forEach(([id, rel]) => {
-      fwRecordHistory(id, { t: fwPollT, moy: rel.moy, dir: rel.dir });
+      fwRecordHistory(id, { t: fwPollT, moy: rel.moy, dir: rel.dir, pressure: rel.pressure });
     });
     const testData = await sbGet('test_beacon', 'id=eq.singleton&select=*');
     const test = testData?.[0];
@@ -1122,28 +1147,33 @@ async function pollAndNotify() {
         });
       }
 
-      // ── Lot 2 flightwatch : chute de pression rapide ─────────────
-      // Signaux Open-Meteo déjà calculés en amont (weatherByBeacon,
-      // mutualisés par balise, pas par compte). Si absents (fetch en échec
-      // ou balise hors couverture) : on N'ÉVALUE PAS ce poll-ci — ni alerte
-      // ni reset — plutôt que de risquer un faux reset sur un simple aléa
-      // réseau (§8 garde-fou "informer, pas juger"). Niveau 2 (vigilance,
-      // §7.5 cadrage : "pression qui chute").
+      // ── Lot 2/2b flightwatch : chute de pression rapide ────────────
+      // Lot 2b : préfère la pression RÉELLE mesurée par le baromètre de la
+      // balise (fwRealPressureTrend, beaconHistory) — repli sur le modèle
+      // Open-Meteo (weatherByBeacon, mutualisé par balise, calculé en amont)
+      // seulement si la balise n'a pas de baromètre ou pas encore assez de
+      // recul dans l'historique (cf. FW_PRESSURE_MIN_SAMPLES_SPAN_MIN). Si
+      // aucune des deux source n'est disponible : on N'ÉVALUE PAS ce
+      // poll-ci — ni alerte ni reset — plutôt que de risquer un faux reset
+      // sur un simple aléa réseau/capteur (§8 garde-fou "informer, pas
+      // juger"). Niveau 2 (vigilance, §7.5 cadrage : "pression qui chute").
       const fwWeather = weatherByBeacon.get(String(w.beacon_id));
-      if (fwPrefsForUser.sig_pressure_drop && fwWeather?.pressure?.rate != null) {
-        const dropping = fwWeather.pressure.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
+      const fwPressureReal = fwRealPressureTrend(String(w.beacon_id), rel.pressure);
+      const fwPressure = fwPressureReal ?? fwWeather?.pressure ?? null;
+      if (fwPrefsForUser.sig_pressure_drop && fwPressure?.rate != null) {
+        const dropping = fwPressure.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
         await evaluateFwSignal({
           userId: w.user_id, scope: String(w.beacon_id), signal: 'pressure_drop', level: 2, active: dropping,
           buildPush: () => ({
             title: `📉 ${rel.nom}`,
-            body: lbl.body(Math.abs(fwWeather.pressure.rate).toFixed(1), FW_TREND_WINDOW_H),
+            body: lbl.body(Math.abs(fwPressure.rate).toFixed(1), FW_TREND_WINDOW_H),
             icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
             tag: `fw-pressure_drop-${w.beacon_id}`, requireInteraction: false,
             data: {
               url: '/', kind: 'flightwatch', signal: 'pressure_drop', level: 2,
               scope: String(w.beacon_id), voice: false, // niveau 2 = push doux
-              value: fwWeather.pressure.rate, unit: 'hPa/h',
+              value: fwPressure.rate, unit: 'hPa/h',
             },
           }),
         });
