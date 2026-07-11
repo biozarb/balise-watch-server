@@ -132,8 +132,8 @@ const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le
 const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
 const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
-const FW_PRESSURE_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md, upgrade v2 SYNOP/METAR) — pas de colonne dédiée au schéma Lot 0 (seul le seuil pressure_drop_hpa_h existe), fenêtre fixée ici
-const FW_PRESSURE_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
+const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md, upgrade v2 SYNOP/METAR) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent
+const FW_OM_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
 
@@ -198,36 +198,65 @@ function fwClusterByProximity(items, radiusKm) {
   return clusters;
 }
 
-// Tendance barométrique (Lot 2) : UNE requête Open-Meteo par balise
-// distincte (mutualisée entre tous les comptes qui la surveillent — cf.
-// cadrage §5 "une requête par zone/balise, mutualisée"), jamais par
-// compte. `past_days=1` donne l'historique horaire nécessaire pour la
-// dérivée SANS buffer RAM à reconstituer après un redémarrage (contraste
-// avec l'approche vent/brise ci-dessus : Open-Meteo porte déjà l'historique,
-// pas besoin de le repolluer nous-mêmes). Défensif : toute erreur (réseau,
-// hors couverture, réponse inattendue) renvoie null — l'appelant doit alors
-// s'abstenir d'évaluer le signal ce poll-ci plutôt que de risquer un faux
-// reset (cf. §8 garde-fou "informer, pas juger").
-async function fetchPressureTrend(lat, lon) {
+// Signaux Open-Meteo (Lot 2 pression, généralisé Lot 3 convection) : UNE
+// requête par balise distincte (mutualisée entre tous les comptes qui la
+// surveillent — cf. cadrage §5 "une requête par zone/balise, mutualisée"),
+// jamais par compte. `past_days=1` donne l'historique horaire nécessaire
+// aux dérivées SANS buffer RAM à reconstituer après un redémarrage
+// (contraste avec l'approche vent/brise ci-dessus : Open-Meteo porte déjà
+// l'historique). Lot 3 réutilise EXACTEMENT cette requête (mêmes
+// latitude/longitude/past_days/modèle) en ajoutant des variables
+// `hourly=` supplémentaires — aucun appel réseau de plus par balise (cf.
+// cadrage : "Réutilise l'appel Open-Meteo du Lot 2, pas de coût réseau
+// supplémentaire"). Défensif : toute erreur (réseau, hors couverture,
+// réponse inattendue) renvoie null — l'appelant doit alors s'abstenir
+// d'évaluer TOUS les signaux dérivés de cet appel ce poll-ci plutôt que
+// de risquer un faux reset (cf. §8 garde-fou "informer, pas juger").
+function fwPick(arr, idx) {
+  return (Array.isArray(arr) && idx != null && idx >= 0 && arr[idx] != null) ? arr[idx] : null;
+}
+async function fetchOpenMeteoSignals(lat, lon) {
   try {
-    const url = `${OPEN_METEO_URL}?latitude=${lat}&longitude=${lon}&hourly=pressure_msl&past_days=1&forecast_days=1&models=meteofrance_seamless&timezone=UTC`;
+    const url = `${OPEN_METEO_URL}?latitude=${lat}&longitude=${lon}` +
+      `&hourly=pressure_msl,cape,cloud_cover_low,cloud_cover_mid,cloud_cover_high,freezing_level_height` +
+      `&past_days=1&forecast_days=1&models=meteofrance_seamless&timezone=UTC`;
     const r = await fetch(url);
     if (!r.ok) return null;
     const d = await r.json();
-    const times = d?.hourly?.time;
-    const pressures = d?.hourly?.pressure_msl;
-    if (!Array.isArray(times) || !Array.isArray(pressures) || !times.length) return null;
+    const h = d?.hourly;
+    const times = h?.time;
+    if (!Array.isArray(times) || !times.length) return null;
 
     const nowMs = Date.now();
     let idxNow = -1;
     for (let i = 0; i < times.length; i++) {
       if (new Date(`${times[i]}Z`).getTime() <= nowMs) idxNow = i; else break;
     }
-    const idxPast = idxNow - FW_PRESSURE_WINDOW_H;
-    if (idxNow < 0 || idxPast < 0 || pressures[idxNow] == null || pressures[idxPast] == null) return null;
+    if (idxNow < 0) return null;
+    const idxPast = idxNow - FW_TREND_WINDOW_H;
 
-    const rate = (pressures[idxNow] - pressures[idxPast]) / FW_PRESSURE_WINDOW_H; // hPa/h, négatif = chute
-    return { now: pressures[idxNow], past: pressures[idxPast], rate };
+    // Dérivée (now vs il y a FW_TREND_WINDOW_H heures) pour les variables qui
+    // en ont besoin (pression, CAPE) ; null si historique insuffisant plutôt
+    // qu'une dérivée bancale — même politique que le Lot 1 (fwBaselineAt).
+    const trendOf = (arr) => {
+      const now = fwPick(arr, idxNow);
+      const past = idxPast >= 0 ? fwPick(arr, idxPast) : null;
+      const rate = (now != null && past != null) ? (now - past) / FW_TREND_WINDOW_H : null;
+      return { now, past, rate };
+    };
+
+    return {
+      pressure: trendOf(h.pressure_msl),
+      cape: trendOf(h.cape),
+      // Nuages/iso 0°C : valeur COURANTE seulement (pas de dérivée requise
+      // par le cadrage Lot 3, cf. §4 — utilisées comme contexte/info, pas
+      // comme déclencheur à elles seules, cf. commentaire d'évaluation
+      // plus bas dans pollAndNotify).
+      cloudLowNow: fwPick(h.cloud_cover_low, idxNow),
+      cloudMidNow: fwPick(h.cloud_cover_mid, idxNow),
+      cloudHighNow: fwPick(h.cloud_cover_high, idxNow),
+      freezingLevelNow: fwPick(h.freezing_level_height, idxNow),
+    };
   } catch { return null; }
 }
 
@@ -609,30 +638,32 @@ async function pollAndNotify() {
     // ci-dessous, consommé juste après (§ bascule de brise).
     const watchedBeaconsByUser = new Map();
 
-    // ── Lot 2 flightwatch : tendance barométrique (Open-Meteo, mutualisée) ──
+    // ── Lot 2/3 flightwatch : signaux Open-Meteo (mutualisés) ──────────
     // UNE requête par balise distincte surveillée par au moins un compte
-    // actif avec sig_pressure_drop activé — jamais par (compte, balise),
-    // même principe que le mutualisme Pioupiou existant. Récupérée AVANT
-    // la boucle principale pour être disponible en lecture pure (Map)
-    // dans la boucle, sans appel réseau par itération.
-    const pressureBeaconIds = new Set();
+    // actif avec sig_pressure_drop OU sig_convection activé — jamais par
+    // (compte, balise), même principe que le mutualisme Pioupiou existant.
+    // Un seul appel sert les deux signaux (cf. fetchOpenMeteoSignals) :
+    // pas de requête séparée pour la convection (cadrage Lot 3). Récupérée
+    // AVANT la boucle principale pour être disponible en lecture pure
+    // (Map) dans la boucle, sans appel réseau par itération.
+    const weatherBeaconIds = new Set();
     for (const w of watchedRows) {
       if (!activeByUser.has(w.user_id)) continue;
       const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
-      if (!prefs.sig_pressure_drop) continue;
+      if (!prefs.sig_pressure_drop && !prefs.sig_convection) continue;
       const rel = releves[String(w.beacon_id)];
       if (!rel || rel.lat == null || rel.lon == null) continue;
-      pressureBeaconIds.add(String(w.beacon_id));
+      weatherBeaconIds.add(String(w.beacon_id));
     }
-    const pressureByBeacon = new Map();
-    const pressureIdsCapped = [...pressureBeaconIds].slice(0, FW_PRESSURE_MAX_BEACONS_PER_POLL);
-    if (pressureBeaconIds.size > pressureIdsCapped.length) {
-      console.warn(`⚠️ flightwatch pressure_drop : ${pressureBeaconIds.size - pressureIdsCapped.length} balise(s) ignorée(s) (garde-fou FW_PRESSURE_MAX_BEACONS_PER_POLL)`);
+    const weatherByBeacon = new Map();
+    const weatherIdsCapped = [...weatherBeaconIds].slice(0, FW_OM_MAX_BEACONS_PER_POLL);
+    if (weatherBeaconIds.size > weatherIdsCapped.length) {
+      console.warn(`⚠️ flightwatch Open-Meteo : ${weatherBeaconIds.size - weatherIdsCapped.length} balise(s) ignorée(s) (garde-fou FW_OM_MAX_BEACONS_PER_POLL)`);
     }
-    for (const id of pressureIdsCapped) {
+    for (const id of weatherIdsCapped) {
       const rel = releves[id];
-      const trend = await fetchPressureTrend(rel.lat, rel.lon);
-      if (trend) pressureByBeacon.set(id, trend);
+      const signals = await fetchOpenMeteoSignals(rel.lat, rel.lon);
+      if (signals) weatherByBeacon.set(id, signals);
     }
 
     for (const w of watchedRows) {
@@ -687,32 +718,30 @@ async function pollAndNotify() {
       }
 
       // ── Lot 2 flightwatch : chute de pression rapide ─────────────
-      // Tendance déjà calculée en amont (pressureByBeacon, mutualisée par
-      // balise, pas par compte). Si absente (fetch Open-Meteo en échec ou
-      // balise hors couverture) : on N'ÉVALUE PAS ce poll-ci — ni alerte
+      // Signaux Open-Meteo déjà calculés en amont (weatherByBeacon,
+      // mutualisés par balise, pas par compte). Si absents (fetch en échec
+      // ou balise hors couverture) : on N'ÉVALUE PAS ce poll-ci — ni alerte
       // ni reset — plutôt que de risquer un faux reset sur un simple aléa
       // réseau (§8 garde-fou "informer, pas juger"). Niveau 2 (vigilance,
       // §7.5 cadrage : "pression qui chute").
-      if (fwPrefsForUser.sig_pressure_drop) {
-        const trend = pressureByBeacon.get(String(w.beacon_id));
-        if (trend) {
-          const dropping = trend.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
-          const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
-          await evaluateFwSignal({
-            userId: w.user_id, scope: String(w.beacon_id), signal: 'pressure_drop', level: 2, active: dropping,
-            buildPush: () => ({
-              title: `📉 ${rel.nom}`,
-              body: lbl.body(Math.abs(trend.rate).toFixed(1), FW_PRESSURE_WINDOW_H),
-              icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
-              tag: `fw-pressure_drop-${w.beacon_id}`, requireInteraction: false,
-              data: {
-                url: '/', kind: 'flightwatch', signal: 'pressure_drop', level: 2,
-                scope: String(w.beacon_id), voice: false, // niveau 2 = push doux
-                value: trend.rate, unit: 'hPa/h',
-              },
-            }),
-          });
-        }
+      const fwWeather = weatherByBeacon.get(String(w.beacon_id));
+      if (fwPrefsForUser.sig_pressure_drop && fwWeather?.pressure?.rate != null) {
+        const dropping = fwWeather.pressure.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
+        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
+        await evaluateFwSignal({
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'pressure_drop', level: 2, active: dropping,
+          buildPush: () => ({
+            title: `📉 ${rel.nom}`,
+            body: lbl.body(Math.abs(fwWeather.pressure.rate).toFixed(1), FW_TREND_WINDOW_H),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-pressure_drop-${w.beacon_id}`, requireInteraction: false,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'pressure_drop', level: 2,
+              scope: String(w.beacon_id), voice: false, // niveau 2 = push doux
+              value: fwWeather.pressure.rate, unit: 'hPa/h',
+            },
+          }),
+        });
       }
 
       // ── Lot 1 flightwatch : bascule de brise (préparation) ───────
