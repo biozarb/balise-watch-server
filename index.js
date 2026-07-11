@@ -220,6 +220,7 @@ const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation
 const FW_HISTORY_MAX_AGE_MS = (FW_TREND_WINDOW_H * 60 + 30) * 60 * 1000; // 3h30 (Lot 2b) : couvre la fenêtre de tendance pression réelle avec marge — large au-dessus des autres fenêtres réglées (vent/brise, défaut 15 min)
 const MF_HISTORY_RETENTION_H = 48; // Lot 8 (12/07) : rétention de la table persistante mf_station_history — INDÉPENDANTE de FW_HISTORY_MAX_AGE_MS/beaconHistory ci-dessus, qui reste à 3h30 pour la veille météo (flightwatch) uniquement
 const FW_PRESSURE_MIN_SAMPLES_SPAN_MIN = 150; // Lot 2b : n'évalue la pression RÉELLE (beaconHistory) qu'avec au moins 2h30 de recul (proche de la fenêtre 3h visée) — sinon repli Open-Meteo, jamais un taux calculé sur un intervalle trop court ou juste après un redémarrage
+const FW_PRESSURE_NEARBY_STATION_MAX_KM = 40; // Débogage 12/07/2026 : rayon de recherche d'une station MF PROCHE (pression uniquement, vent ou pas) comme repli intermédiaire avant le modèle — la pression est un champ spatialement lisse (contrairement au vent), une vraie mesure à 40 km reste plus fiable qu'une valeur de grille modèle interpolée
 const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
 const FW_WIND_SURGE_ABS_MIN_KMH = 15; // FIA-1 : plancher absolu sur wind_surge — pas d'alerte niveau 3 si le vent courant reste sous ce seuil (évite les faux positifs "danger imminent" à ~6 km/h les matins calmes thermiques)
 const MF_OBS_MAX_AGE_MS = 30 * 60 * 1000; // DATA-1 : garde-fraîcheur MF — une observation dont validityTime dépasse ce seuil est ignorée dans la fusion (évite d'alerter sur des données figées si l'API MF tombe plusieurs heures)
@@ -746,7 +747,26 @@ async function refreshMfObs() {
         validityTime: s.validity_time ?? null,
       });
     }
-    if (next.size) { mfObsCache = next; mfObsCacheFetchedAt = Date.now(); }
+    if (next.size) {
+      mfObsCache = next;
+      mfObsCacheFetchedAt = Date.now();
+      // Débogage 12/07/2026 — historique de pression pour TOUTES les
+      // stations MF qui en mesurent (FIA-3 : pmer seulement, jamais pres
+      // brute — même règle que releves plus bas), PAS SEULEMENT celles
+      // avec du vent. Contrairement à la boucle releves (pollAndNotify,
+      // filtrée sur obs.ff != null), ici on enregistre indépendamment de
+      // tout vent : plusieurs centaines de stations MF n'ont qu'un
+      // baromètre (pas d'anémomètre) et sont jusqu'ici invisibles/inutiles
+      // pour l'app — cf. retour Yann : elles servent désormais de repli
+      // "station proche" pour les balises Pioupiou sans baromètre (voir
+      // findNearbyMfStations plus bas). Coût négligeable : ~2150 stations
+      // max, échantillons courts, purgées à 3h30 comme le reste de
+      // beaconHistory.
+      const t = Date.now();
+      for (const [id, obs] of next) {
+        if (obs.pmer != null) fwRecordHistory(id, { t, pressure: obs.pmer });
+      }
+    }
   } catch (e) { console.error('refreshMfObs error:', e.message); }
 }
 
@@ -756,6 +776,38 @@ async function refreshMeteoFranceData() {
     await refreshMfStationsList();
   }
   await refreshMfObs();
+}
+
+// Débogage 12/07/2026 — stations MF PROCHES d'une balise (pression
+// uniquement, avec ou sans vent), triées par distance croissante, dans
+// FW_PRESSURE_NEARBY_STATION_MAX_KM. Cache PERMANENT par balise (mêmes
+// coordonnées fixes, même philosophie que beaconDepartmentCache
+// ci-dessus) : la géographie ne change jamais, seule la donnée mfObsCache
+// (fraîcheur/validité de pmer à l'instant T) est revérifiée à chaque
+// appel côté appelant. Sert de repli intermédiaire pour pressure_drop
+// (fwRealPressureTrend propre à la balise > station MF proche > modèle
+// AROME, cf. pollAndNotify) — beaucoup de balises Pioupiou n'ont pas de
+// baromètre, mais une station MF (même sans anémomètre) est presque
+// toujours à moins de 40 km, et une vraie mesure reste plus fiable
+// qu'une valeur de grille modèle sur un champ aussi lisse que la
+// pression.
+const nearbyMfStationsCache = new Map(); // beacon_id (string) -> [{id, nom, distanceKm}] trié croissant
+function findNearbyMfStations(beaconId, lat, lon) {
+  if (nearbyMfStationsCache.has(beaconId)) return nearbyMfStationsCache.get(beaconId);
+  const candidates = [];
+  if (lat != null && lon != null) {
+    for (const s of mfStationsList) {
+      const d = fwHaversineKm(lat, lon, s.lat, s.lon);
+      if (d <= FW_PRESSURE_NEARBY_STATION_MAX_KM) candidates.push({ id: s.id, nom: s.nom, distanceKm: d });
+    }
+    candidates.sort((a, b) => a.distanceKm - b.distanceKm);
+  }
+  // Cache seulement une fois mfStationsList non vide (sinon une balise
+  // évaluée avant le tout premier refreshMeteoFranceData resterait
+  // bloquée à [] pour toujours) — ré-essayé au prochain appel tant que
+  // la liste n'est pas encore chargée.
+  if (mfStationsList.length) nearbyMfStationsCache.set(beaconId, candidates);
+  return candidates;
 }
 
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
@@ -1463,16 +1515,35 @@ async function pollAndNotify() {
       // juger"). Niveau 2 (vigilance, §7.5 cadrage : "pression qui chute").
       const fwWeather = weatherByBeacon.get(String(w.beacon_id));
       const fwPressureReal = fwRealPressureTrend(String(w.beacon_id), rel.pressure);
-      const fwPressure = fwPressureReal ?? fwWeather?.pressure ?? null;
+      // Débogage 12/07/2026 — repli intermédiaire "station MF proche"
+      // (pression uniquement, avec ou sans vent — cf. findNearbyMfStations)
+      // AVANT le modèle : on essaie les candidates par distance croissante
+      // et on prend la première qui a une tendance calculable (assez de
+      // recul dans son propre historique, cf. FW_PRESSURE_MIN_SAMPLES_SPAN_MIN)
+      // — pas juste la plus proche géographiquement si celle-ci n'a pas
+      // encore assez de recul ou une observation valide à l'instant T.
+      let fwPressureNearby = null;
+      let nearbyStationUsed = null;
+      if (!fwPressureReal) {
+        for (const cand of findNearbyMfStations(String(w.beacon_id), rel.lat, rel.lon)) {
+          const obs = mfObsCache.get(cand.id);
+          const trend = fwRealPressureTrend(cand.id, obs?.pmer ?? null);
+          if (trend) { fwPressureNearby = trend; nearbyStationUsed = cand; break; }
+        }
+      }
+      const fwPressure = fwPressureReal ?? fwPressureNearby ?? fwWeather?.pressure ?? null;
       // Débogage 12/07/2026 — mémorise la source effectivement retenue
-      // (capteur si dispo, sinon modèle AROME, sinon aucune) pour cette
-      // balise, servie par GET /pressure-signal (voir WatchCard côté
-      // client). Écriture idempotente : plusieurs comptes surveillant la
-      // même balise réécrivent la même valeur, sans coût réel.
+      // (capteur embarqué > station MF proche > modèle AROME > aucune)
+      // pour cette balise, servie par GET /pressure-signal (voir
+      // WatchCard côté client). Écriture idempotente : plusieurs comptes
+      // surveillant la même balise réécrivent la même valeur, sans coût
+      // réel.
       pressureSignalCache.set(String(w.beacon_id), {
-        source: fwPressureReal ? 'sensor' : fwWeather?.pressure ? 'model' : null,
+        source: fwPressureReal ? 'sensor' : fwPressureNearby ? 'sensor_nearby' : fwWeather?.pressure ? 'model' : null,
         value: fwPressure?.now ?? null,
         rate: fwPressure?.rate ?? null,
+        stationName: nearbyStationUsed?.nom ?? null,
+        distanceKm: nearbyStationUsed ? Math.round(nearbyStationUsed.distanceKm) : null,
         updatedAt: Date.now(),
       });
       if (fwPrefsForUser.sig_pressure_drop && fwPressure?.rate != null) {
