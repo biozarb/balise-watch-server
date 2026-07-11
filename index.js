@@ -111,6 +111,10 @@ const PUSH_LABELS = {
         title: (level, dept) => `${level === 3 ? '🔴 Vigilance rouge' : '🟠 Vigilance orange'} — département ${dept}`,
         body: names => `Vigilance météo officielle en cours sur : ${names}. Recroise ta propre météo avant de voler.`,
       },
+      lightning: {
+        body: (count, radiusKm, windowMin) =>
+          `${count} impact${count > 1 ? 's' : ''} de foudre détecté${count > 1 ? 's' : ''} à moins de ${radiusKm} km (${windowMin} dernières min) — donnée indicative Blitzortung, non officielle`,
+      },
     },
   },
   en: {
@@ -135,6 +139,10 @@ const PUSH_LABELS = {
       vigilance: {
         title: (level, dept) => `${level === 3 ? '🔴 Red weather warning' : '🟠 Orange weather warning'} — department ${dept}`,
         body: names => `Official weather warning in effect for: ${names}. Double-check your own forecast before flying.`,
+      },
+      lightning: {
+        body: (count, radiusKm, windowMin) =>
+          `${count} lightning strike${count > 1 ? 's' : ''} detected within ${radiusKm} km (last ${windowMin} min) — indicative Blitzortung data, unofficial`,
       },
     },
   },
@@ -882,6 +890,17 @@ async function pollAndNotify() {
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).map(s => [s.user_id, fwPrefs(s)])
     );
 
+    // ── Lot 5 flightwatch : foudre Blitzortung — connexion WS à la demande ──
+    // Recalcule à chaque poll si au moins un compte actif a besoin de la
+    // foudre ; fwLightningSetNeeded ouvre/maintient ou programme la fermeture
+    // de la connexion WS en conséquence (pas de firehose mondial inutile).
+    // Prune du buffer glissant au passage. Défensif : si tout est absent/coupé
+    // le buffer reste vide et le signal ne sera simplement pas évalué plus bas.
+    const anyLightningWanted = (Array.isArray(surveillanceRows) ? surveillanceRows : [])
+      .some(s => s.active && fwPrefs(s).sig_lightning);
+    fwLightningSetNeeded(anyLightningWanted);
+    fwLightningPrune();
+
     // Langue par compte (Lot 3) : même lecture batchée par table que
     // surveillanceRows ci-dessus (sbGet sur user_language, jamais
     // l'Admin API Auth — voir supabase_step10_user_language.sql). Repli
@@ -909,7 +928,7 @@ async function pollAndNotify() {
     // `active=false` réarme silencieusement (alert_active=false,
     // acked_at=null) sans envoyer de push, exactement comme le
     // réarmement des seuils vent existants.
-    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush }) {
+    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush, repeatMs }) {
       const key = `${userId}|${scope}|${signal}`;
       const row = fwAlertMap.get(key);
       const now = Date.now();
@@ -929,7 +948,8 @@ async function pollAndNotify() {
       const justActivated = !row?.alert_active;
       const acked = row?.alert_acked_at && new Date(row.alert_acked_at).getTime() >= lastSent;
       if (acked && !justActivated) return;
-      if (!justActivated && (now - lastSent) < FW_ALERT_REPEAT_MS) return;
+      const repeatWindow = repeatMs || FW_ALERT_REPEAT_MS; // anti-répétition par défaut 15 min, surchargée par signal (ex. foudre 10 min, Lot 5)
+      if (!justActivated && (now - lastSent) < repeatWindow) return;
 
       const userDevices = devicesByUser[userId] || [];
       for (const dv of userDevices) {
@@ -1059,6 +1079,38 @@ async function pollAndNotify() {
               url: '/', kind: 'flightwatch', signal: 'wind_surge', level: 3,
               scope: String(w.beacon_id), voice: !!fwPrefsForUser.voice_enabled,
               value: rel.moy, unit: 'km/h',
+            },
+          }),
+        });
+      }
+
+      // ── Lot 5 flightwatch : foudre temps réel (Blitzortung) ──────
+      // Compte les impacts bufferisés (ingestion WS temps réel, cf. haut du
+      // fichier) à <= lightning_radius_km de la balise sur la fenêtre récente.
+      // Niveau 3 (danger imminent, §7.5 : "foudre dans le rayon") + voix si
+      // activée — MAIS donnée INDICATIVE et NON OFFICIELLE (réseau bénévole
+      // Blitzortung) : le corps du push le dit explicitement (garde-fou n°1
+      // "aide à la décision, jamais garantie"). Anti-répétition DÉDIÉE
+      // (FW_LIGHTNING_REPEAT_MS ~10 min) passée à evaluateFwSignal : un orage
+      // = un push par épisode puis rappel tant que des impacts tombent dans la
+      // zone, jamais un push par impact. Buffer vide (WS coupé, démarrage,
+      // kill switch) -> count 0 -> active=false -> pas d'alerte, jamais de crash.
+      if (FW_LIGHTNING_ENABLED && fwPrefsForUser.sig_lightning && rel.lat != null && rel.lon != null) {
+        const radiusKm = fwPrefsForUser.lightning_radius_km;
+        const strikeCount = fwLightningCountNear(rel.lat, rel.lon, radiusKm, FW_LIGHTNING_WINDOW_MIN);
+        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.lightning;
+        await evaluateFwSignal({
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'lightning', level: 3, active: strikeCount > 0,
+          repeatMs: FW_LIGHTNING_REPEAT_MS,
+          buildPush: () => ({
+            title: `⛈️ ${rel.nom}`,
+            body: lbl.body(strikeCount, radiusKm, FW_LIGHTNING_WINDOW_MIN),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-lightning-${w.beacon_id}`, requireInteraction: true,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'lightning', level: 3,
+              scope: String(w.beacon_id), voice: !!fwPrefsForUser.voice_enabled,
+              value: strikeCount, unit: 'strikes',
             },
           }),
         });
