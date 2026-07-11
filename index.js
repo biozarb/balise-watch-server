@@ -218,6 +218,7 @@ function fwPrefs(row) {
 // rater une détection à en inventer une).
 const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent. Depuis le Lot 2b : sert aussi de fenêtre à la pression RÉELLE mesurée par la balise (beaconHistory), pas seulement au modèle Open-Meteo.
 const FW_HISTORY_MAX_AGE_MS = (FW_TREND_WINDOW_H * 60 + 30) * 60 * 1000; // 3h30 (Lot 2b) : couvre la fenêtre de tendance pression réelle avec marge — large au-dessus des autres fenêtres réglées (vent/brise, défaut 15 min)
+const MF_HISTORY_RETENTION_H = 48; // Lot 8 (12/07) : rétention de la table persistante mf_station_history — INDÉPENDANTE de FW_HISTORY_MAX_AGE_MS/beaconHistory ci-dessus, qui reste à 3h30 pour la veille météo (flightwatch) uniquement
 const FW_PRESSURE_MIN_SAMPLES_SPAN_MIN = 150; // Lot 2b : n'évalue la pression RÉELLE (beaconHistory) qu'avec au moins 2h30 de recul (proche de la fenêtre 3h visée) — sinon repli Open-Meteo, jamais un taux calculé sur un intervalle trop court ou juste après un redémarrage
 const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
 const FW_WIND_SURGE_ABS_MIN_KMH = 15; // FIA-1 : plancher absolu sur wind_surge — pas d'alerte niveau 3 si le vent courant reste sous ce seuil (évite les faux positifs "danger imminent" à ~6 km/h les matins calmes thermiques)
@@ -422,6 +423,27 @@ function fwRecordHistory(beaconId, sample) {
   const cutoff = Date.now() - FW_HISTORY_MAX_AGE_MS;
   while (arr.length && arr[0].t < cutoff) arr.shift();
   beaconHistory.set(beaconId, arr);
+}
+
+// Lot 8 (12/07) — persistance 48h de l'historique des stations MF, en
+// complément du buffer RAM ci-dessus (qui reste inchangé, 3h30, pour la
+// veille météo). Table : mf_station_history (cf.
+// supabase_step13_mf_station_history.sql). Volontairement
+// fire-and-forget (pas de await côté appelant, erreurs avalées ici) :
+// une panne/lenteur Supabase sur CETTE écriture ne doit jamais retarder
+// ni casser l'évaluation des alertes flightwatch qui suit dans
+// pollAndNotify — même philosophie défensive que le reste du fichier
+// (§8 cadrage "informer, pas juger" : mieux vaut perdre quelques points
+// d'historique qu'un poll d'alertes entier). Purge (>48h) regroupée ici
+// plutôt que dans un cron séparé : un DELETE indexé sur `t` à chaque
+// poll est trivial pour Postgres, pas besoin de pg_cron.
+function mfPersistHistory(rows) {
+  if (!rows.length) return;
+  sbUpsert('mf_station_history', rows, 'station_id,t')
+    .catch(e => console.error('mfPersistHistory upsert error:', e.message));
+  const cutoff = Date.now() - MF_HISTORY_RETENTION_H * 3600 * 1000;
+  sbDelete('mf_station_history', `t=lt.${cutoff}`)
+    .catch(e => console.error('mfPersistHistory purge error:', e.message));
 }
 // Renvoie l'échantillon le plus RÉCENT qui a au moins `windowMin` minutes
 // (le plus proche possible de cette borne vu la cadence de poll 5 min).
@@ -824,11 +846,51 @@ app.get('/meteofrance-stations', (req, res) => {
 // Limites assumées (vs l'archive Pioupiou, hébergée par Pioupiou) :
 // (1) moy/direction/pression SEULEMENT — fwRecordHistory n'enregistre
 // pas la rafale (jamais utilisée par les signaux flightwatch en amont),
-// (2) 3h30 de profondeur MAX (FW_HISTORY_MAX_AGE_MS), (3) buffer RAM
-// pur, vidé à chaque redémarrage du process — pas d'archive rétroactive.
+// (2) 3h30 de profondeur MAX (FW_HISTORY_MAX_AGE_MS) pour CE buffer RAM,
+// (3) buffer RAM pur, vidé à chaque redémarrage du process.
 // Pas d'auth : même donnée publique en lecture que /meteofrance-stations.
-app.get('/meteofrance-history/:id', (req, res) => {
-  res.json({ points: beaconHistory.get(req.params.id) || [] });
+//
+// Lot 8 (12/07) — paramètre optionnel ?hours=N : SANS lui, comportement
+// rigoureusement inchangé (buffer RAM 3h30 intégral, zéro risque de
+// régression pour les appelants existants qui ne le précisent pas).
+// Avec, et seulement si N dépasse la profondeur RAM (3h30), complète
+// avec mf_station_history — la table persistante 48h créée ce même Lot
+// (supabase_step13_mf_station_history.sql) — pour les points plus
+// anciens que ce que le buffer RAM couvre encore. Le buffer RAM reste
+// systématiquement la source des points les plus récents (jamais en
+// retard, jamais remplacé par une lecture Supabase potentiellement
+// périmée de quelques secondes).
+app.get('/meteofrance-history/:id', async (req, res) => {
+  const ramPts = beaconHistory.get(req.params.id) || [];
+  const hoursParam = Number(req.query.hours);
+  const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 0), MF_HISTORY_RETENTION_H) : null;
+  if (!hours || hours * 3600 * 1000 <= FW_HISTORY_MAX_AGE_MS) {
+    return res.json({ points: ramPts });
+  }
+  try {
+    const cutoff = Date.now() - hours * 3600 * 1000;
+    const oldPts = await sbGet(
+      'mf_station_history',
+      `station_id=eq.${encodeURIComponent(req.params.id)}&t=gte.${cutoff}&select=t,moy,dir,pressure&order=t.asc`
+    );
+    const ramCutoff = ramPts[0]?.t ?? Infinity; // évite les doublons : ne garde du passé persistant que ce qui précède le buffer RAM
+    const merged = [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
+    res.json({ points: merged });
+  } catch (e) {
+    console.error('meteofrance-history (hours) error:', e.message);
+    res.json({ points: ramPts }); // dégradation gracieuse : au pire, la profondeur RAM habituelle
+  }
+});
+
+// ── Lot 5 — Éclairs (public, lecture seule) ──────────────────────────
+// Retourne le buffer RAM lightningStrikes, élagué aux 60 dernières
+// minutes (fwLightningPrune appelé ici en garde-fou). Retourne [] si
+// FW_LIGHTNING_ENABLED=0 (kill-switch env, bêta opt-in côté serveur).
+// Pas d'auth : affiché en couche carte optionnelle, donnée publique.
+app.get('/lightning-strikes', (req, res) => {
+  fwLightningPrune();
+  if (!FW_LIGHTNING_ENABLED) return res.json([]);
+  res.json(lightningStrikes.map(s => ({ lat: s.lat, lon: s.lon, t: s.t })));
 });
 
 // ── /sync : lie l'appareil (endpoint push) au compte + remplace la liste
@@ -1044,6 +1106,11 @@ async function pollAndNotify() {
     // refreshMeteoFranceData, poll 6 min) — lecture pure ici, aucun appel
     // réseau ajouté à ce poll. Seules les stations avec du vent effectif
     // sont utilisables (même filtre que /meteofrance-stations).
+    // fwPollT hoisté ici (au lieu de juste avant fwRecordHistory plus bas)
+    // pour aussi horodater les lignes de mf_station_history créées dans
+    // CETTE boucle, avec le même instant que le reste du poll (Lot 8, 12/07).
+    const fwPollT = Date.now();
+    const mfHistoryRows = []; // Lot 8 (12/07) — persistance 48h, cf. mfPersistHistory
     const mfStationsById = new Map(mfStationsList.map(s => [s.id, s]));
     for (const [mfId, obs] of mfObsCache) {
       if (obs.ff == null) continue;
@@ -1063,13 +1130,19 @@ async function pollAndNotify() {
         pressure: obs.pmer ?? null, // FIA-3 : n'utiliser QUE pmer (pression ramenée au niveau de la mer) — mélanger pmer et pres (pression station, différente de ~50-100 hPa en montagne) produirait une fausse chute de dizaines de hPa/h si le pipeline alterne les champs entre deux polls
         lat: meta.lat, lon: meta.lon, nom: meta.nom,
       };
+      // Lot 8 (12/07) — même échantillon que fwRecordHistory plus bas
+      // (moy/dir/pressure, pas de rafale — jamais enregistrée pour les
+      // stations MF, même limitation assumée), mais destiné à
+      // mf_station_history (persistant 48h) plutôt qu'au buffer RAM.
+      mfHistoryRows.push({ station_id: mfId, t: fwPollT, moy: obs.ff, dir: obs.dd, pressure: obs.pmer ?? null });
     }
+    mfPersistHistory(mfHistoryRows); // fire-and-forget — cf. définition, ne bloque/casse jamais la suite du poll
 
     // Historique flightwatch (Lot 1, +pressure Lot 2b) : un échantillon par
     // balise réelle à chaque poll, AVANT d'ajouter la balise de test
     // (fictive, pas de dérive physique à surveiller). Sert aux dérivées
     // vent/direction/pression ci-dessous (fwBaselineAt / fwRealPressureTrend).
-    const fwPollT = Date.now();
+    // fwPollT hoisté plus haut (avant la boucle MF, Lot 8) — inchangé ici.
     Object.entries(releves).forEach(([id, rel]) => {
       fwRecordHistory(id, { t: fwPollT, moy: rel.moy, dir: rel.dir, pressure: rel.pressure });
     });
