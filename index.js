@@ -824,6 +824,33 @@ async function pollAndNotify() {
       if (signals) weatherByBeacon.set(id, signals);
     }
 
+    // ── Lot 4 flightwatch : vigilance Météo-France (mutualisée) ────────
+    // Mapping balise -> département résolu une fois par balise (cache
+    // permanent, cf. getBeaconDepartment) pour tout compte actif avec
+    // sig_vigilance activé. La carte de vigilance elle-même est UN SEUL
+    // appel national (fetchVigilanceColors), pas par département/balise —
+    // demandé seulement s'il y a au moins une balise à évaluer, pour ne
+    // pas déclencher inutilement le flux OAuth si personne n'a activé ce
+    // signal ou si METEOFRANCE_APP_ID n'est pas configuré.
+    const beaconDeptById = new Map();
+    for (const w of watchedRows) {
+      if (!activeByUser.has(w.user_id)) continue;
+      const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
+      if (!prefs.sig_vigilance) continue;
+      const bid = String(w.beacon_id);
+      if (beaconDeptById.has(bid)) continue;
+      const rel = releves[bid];
+      if (!rel || rel.lat == null || rel.lon == null) continue;
+      beaconDeptById.set(bid, await getBeaconDepartment(bid, rel.lat, rel.lon));
+    }
+    const vigilanceColors = beaconDeptById.size > 0 ? await fetchVigilanceColors() : null;
+    // Regroupement (compte, département) -> noms de balises concernées,
+    // alimenté dans la boucle principale, consommé juste après (comme le
+    // patron bascule de brise) : on ne veut PAS un push par balise si un
+    // compte a 2 balises dans le même département, un seul par département
+    // suffit (la vigilance ne varie pas à l'intérieur d'un département).
+    const vigilanceByUserDept = new Map();
+
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
       if (!rel) continue;
@@ -931,6 +958,22 @@ async function pollAndNotify() {
             },
           }),
         });
+      }
+
+      // ── Lot 4 flightwatch : vigilance Météo-France (préparation) ─
+      // Comme la brise, on ne décide rien balise par balise : la
+      // vigilance est PAR DÉPARTEMENT (pas par balise), donc si un compte
+      // a 2 balises dans le même département on ne veut qu'UN push, pas
+      // deux. On collecte ici (compte, département) -> noms de balises,
+      // l'évaluation elle-même se fait après la boucle (cf. plus bas).
+      if (fwPrefsForUser.sig_vigilance) {
+        const dept = beaconDeptById.get(String(w.beacon_id));
+        if (dept) {
+          const key = `${w.user_id}|${dept}`;
+          const entry = vigilanceByUserDept.get(key) || { userId: w.user_id, dept, names: new Set() };
+          entry.names.add(rel.nom);
+          vigilanceByUserDept.set(key, entry);
+        }
       }
 
       // ── Lot 1 flightwatch : bascule de brise (préparation) ───────
@@ -1059,6 +1102,47 @@ async function pollAndNotify() {
       if (row.signal !== 'breeze_reversal' || !row.alert_active) continue;
       if (fwBreezeActiveScopes.has(`${row.user_id}|${row.scope}`)) continue;
       await evaluateFwSignal({ userId: row.user_id, scope: row.scope, signal: 'breeze_reversal', level: 2, active: false, buildPush: () => ({}) });
+    }
+
+    // ── Lot 4 flightwatch : vigilance Météo-France (évaluation) ────────
+    // Contrairement à la brise (clusters recalculés à chaque poll, d'où
+    // la passe de réarmement ci-dessus), la carte de vigilance couvre
+    // TOUS les départements en un seul appel réussi : on évalue donc
+    // CHAQUE paire (compte, département) collectée, active ou pas — le
+    // réarmement (passage orange/rouge -> jaune/vert) est déjà couvert
+    // nativement par active:false ci-dessous, pas besoin d'une passe
+    // séparée. Si fetchVigilanceColors a échoué (pas de token, API MF en
+    // panne) : vigilanceColors est null, on n'évalue RIEN ce poll-ci — ni
+    // alerte ni reset (§8 garde-fou "informer, pas juger").
+    // Rappel niveaux (§7.5 cadrage + précision Lot 4 "push si orange/
+    // rouge") : vert/jaune = pas de push (jaune = niveau 1 info passive,
+    // Lot 6 UI, hors scope ici) ; orange = niveau 2 (push doux) ; rouge =
+    // niveau 3 (push fort + voix si activée).
+    if (vigilanceColors) {
+      for (const { userId, dept, names } of vigilanceByUserDept.values()) {
+        const color = vigilanceColors.get(dept);
+        if (color == null) continue; // département absent de la réponse -> pas d'évaluation (défensif)
+        const active = color >= 3;
+        const level = color >= 4 ? 3 : 2;
+        const scope = `dept:${dept}`;
+        const namesList = [...names].join(', ');
+        const lbl = pushLabels(langByUser.get(userId)).flightwatch.vigilance;
+        const prefs = prefsByUser.get(userId) || fwPrefs(null);
+        await evaluateFwSignal({
+          userId, scope, signal: 'vigilance', level, active,
+          buildPush: () => ({
+            title: lbl.title(level, dept),
+            body: lbl.body(namesList),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-vigilance-${scope}`, requireInteraction: level === 3,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'vigilance', level,
+              scope, voice: level === 3 ? !!prefs.voice_enabled : false,
+              value: color, unit: 'color_id',
+            },
+          }),
+        });
+      }
     }
   } catch(e) { console.error('pollAndNotify error:', e.message); }
 }
