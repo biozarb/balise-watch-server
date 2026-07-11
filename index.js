@@ -25,6 +25,16 @@ const AZURE_TRANSLATOR_URL    = 'https://api.cognitive.microsofttranslator.com';
 const AZURE_MONTHLY_CHAR_LIMIT = 2_000_000;
 const POLL_MS      = 5 * 60 * 1000;
 const API_ALL      = 'https://api.pioupiou.fr/v1/live-with-meta/all';
+// Étape 10 (flightwatch), Lot 2 : Open-Meteo, gratuit non-commercial —
+// clause revérifiée le 11/07/2026 (open-meteo.com/en/terms) : palier
+// libre = usages sans abonnement ni pub, ce qui correspond à Balise
+// Watch ("No ads, no tracking", cf. CLAUDE.md). Limites 600/min,
+// 5000/h, 10000/j — très largement suffisant vu le nombre de balises
+// surveillées par l'app. `models=meteofrance_seamless` : AROME MF
+// 1,5 km HD, même modèle que les prévisions client existantes
+// (cohérence de source), avec repli automatique modèle global hors
+// couverture France (comportement "_seamless" documenté Open-Meteo).
+const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 
 // ── Étape 8 (i18n), Lot 3 : dictionnaire de push traduits ──────────
 // Seuls fr (référence) et en (fallback) sont remplis pour l'instant —
@@ -51,6 +61,9 @@ const PUSH_LABELS = {
         title: '🔄 Bascule de brise',
         body: names => `Changement de direction du vent détecté sur plusieurs balises voisines : ${names}`,
       },
+      pressureDrop: {
+        body: (rateAbs, windowH) => `Chute de pression : ${rateAbs} hPa/h (tendance sur ${windowH}h)`,
+      },
     },
   },
   en: {
@@ -63,6 +76,9 @@ const PUSH_LABELS = {
       breezeReversal: {
         title: '🔄 Wind shift',
         body: names => `Wind direction shift detected across nearby beacons: ${names}`,
+      },
+      pressureDrop: {
+        body: (rateAbs, windowH) => `Pressure falling: ${rateAbs} hPa/h (${windowH}h trend)`,
       },
     },
   },
@@ -116,6 +132,8 @@ const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le
 const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
 const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
+const FW_PRESSURE_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md, upgrade v2 SYNOP/METAR) — pas de colonne dédiée au schéma Lot 0 (seul le seuil pressure_drop_hpa_h existe), fenêtre fixée ici
+const FW_PRESSURE_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
 
@@ -178,6 +196,39 @@ function fwClusterByProximity(items, radiusKm) {
     clusters.push(cluster);
   }
   return clusters;
+}
+
+// Tendance barométrique (Lot 2) : UNE requête Open-Meteo par balise
+// distincte (mutualisée entre tous les comptes qui la surveillent — cf.
+// cadrage §5 "une requête par zone/balise, mutualisée"), jamais par
+// compte. `past_days=1` donne l'historique horaire nécessaire pour la
+// dérivée SANS buffer RAM à reconstituer après un redémarrage (contraste
+// avec l'approche vent/brise ci-dessus : Open-Meteo porte déjà l'historique,
+// pas besoin de le repolluer nous-mêmes). Défensif : toute erreur (réseau,
+// hors couverture, réponse inattendue) renvoie null — l'appelant doit alors
+// s'abstenir d'évaluer le signal ce poll-ci plutôt que de risquer un faux
+// reset (cf. §8 garde-fou "informer, pas juger").
+async function fetchPressureTrend(lat, lon) {
+  try {
+    const url = `${OPEN_METEO_URL}?latitude=${lat}&longitude=${lon}&hourly=pressure_msl&past_days=1&forecast_days=1&models=meteofrance_seamless&timezone=UTC`;
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const d = await r.json();
+    const times = d?.hourly?.time;
+    const pressures = d?.hourly?.pressure_msl;
+    if (!Array.isArray(times) || !Array.isArray(pressures) || !times.length) return null;
+
+    const nowMs = Date.now();
+    let idxNow = -1;
+    for (let i = 0; i < times.length; i++) {
+      if (new Date(`${times[i]}Z`).getTime() <= nowMs) idxNow = i; else break;
+    }
+    const idxPast = idxNow - FW_PRESSURE_WINDOW_H;
+    if (idxNow < 0 || idxPast < 0 || pressures[idxNow] == null || pressures[idxPast] == null) return null;
+
+    const rate = (pressures[idxNow] - pressures[idxPast]) / FW_PRESSURE_WINDOW_H; // hPa/h, négatif = chute
+    return { now: pressures[idxNow], past: pressures[idxPast], rate };
+  } catch { return null; }
 }
 
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
@@ -557,6 +608,32 @@ async function pollAndNotify() {
     // avec le signal bascule de brise activé — alimenté dans la boucle
     // ci-dessous, consommé juste après (§ bascule de brise).
     const watchedBeaconsByUser = new Map();
+
+    // ── Lot 2 flightwatch : tendance barométrique (Open-Meteo, mutualisée) ──
+    // UNE requête par balise distincte surveillée par au moins un compte
+    // actif avec sig_pressure_drop activé — jamais par (compte, balise),
+    // même principe que le mutualisme Pioupiou existant. Récupérée AVANT
+    // la boucle principale pour être disponible en lecture pure (Map)
+    // dans la boucle, sans appel réseau par itération.
+    const pressureBeaconIds = new Set();
+    for (const w of watchedRows) {
+      if (!activeByUser.has(w.user_id)) continue;
+      const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
+      if (!prefs.sig_pressure_drop) continue;
+      const rel = releves[String(w.beacon_id)];
+      if (!rel || rel.lat == null || rel.lon == null) continue;
+      pressureBeaconIds.add(String(w.beacon_id));
+    }
+    const pressureByBeacon = new Map();
+    const pressureIdsCapped = [...pressureBeaconIds].slice(0, FW_PRESSURE_MAX_BEACONS_PER_POLL);
+    if (pressureBeaconIds.size > pressureIdsCapped.length) {
+      console.warn(`⚠️ flightwatch pressure_drop : ${pressureBeaconIds.size - pressureIdsCapped.length} balise(s) ignorée(s) (garde-fou FW_PRESSURE_MAX_BEACONS_PER_POLL)`);
+    }
+    for (const id of pressureIdsCapped) {
+      const rel = releves[id];
+      const trend = await fetchPressureTrend(rel.lat, rel.lon);
+      if (trend) pressureByBeacon.set(id, trend);
+    }
 
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
