@@ -64,6 +64,26 @@ const OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast';
 const METEOFRANCE_APP_ID       = process.env.METEOFRANCE_APP_ID;
 const METEOFRANCE_TOKEN_URL    = 'https://portail-api.meteofrance.fr/token';
 const METEOFRANCE_VIGILANCE_URL = 'https://public-api.meteofrance.fr/public/DPVigilance/v1/cartevigilance/encours';
+
+// ── Étape 11 : Données d'observation Météo-France (stations réelles) ───
+// Abonnement séparé de Vigilance (produits "Données d'observation"
+// v1/v2 + "Package Observations" v2, sur portail-api.meteofrance.fr),
+// vérifié en direct le 11/07/2026. Auth par **clé API statique** (type
+// "API Key" du portail, PAS OAuth2) : un JWT généré une fois avec une
+// durée choisie (plafonnée à 3 ans par le portail), envoyé tel quel en
+// header `apikey` sur CHAQUE requête — aucun échange de token, aucun
+// cache/renouvellement nécessaire (contraste avec Vigilance ci-dessus).
+// Couvre les 3 produits abonnés au moment de sa génération.
+const METEOFRANCE_API_KEY = process.env.METEOFRANCE_API_KEY;
+const MF_PAQUET_URL = 'https://public-api.meteofrance.fr/public/DPPaquetObs/v2/paquet/stations/infrahoraire-6m';
+const MF_LISTE_STATIONS_URL = 'https://public-api.meteofrance.fr/public/DPPaquetObs/v2/liste-stations';
+// Cadence native des données (6 min) — inutile de poller plus vite,
+// la source ne se met à jour qu'à ce rythme.
+const MF_OBS_POLL_MS = 6 * 60 * 1000;
+// La liste des stations (id/nom/coordonnées) change rarement — un
+// rafraîchissement quotidien suffit largement (contraste avec le
+// paquet d'observations, qui lui doit suivre la cadence 6 min).
+const MF_STATIONS_LIST_REFRESH_MS = 24 * 60 * 60 * 1000;
 // Vigilance MF RETIRÉE des alertes (demande de Yann, 11/07/2026) : les pilotes
 // connaissent déjà la vigilance orange/rouge officielle. On CONSERVE tout le
 // code Lot 4 (token, fetch, mapping département) mais on ne l'ÉVALUE plus dans
@@ -617,6 +637,91 @@ async function getBeaconDepartment(beaconId, lat, lon) {
   } catch { return null; }
 }
 
+// ── Étape 11 : stations d'observation Météo-France ──────────────────
+// Deux caches RAM séparés, jamais persistés (même philosophie que
+// beaconHistory/mfTokenCache) :
+//  - mfStationsList : métadonnées statiques (id/nom/lat/lon/altitude),
+//    ~2150 stations, rafraîchi une fois par jour (MF_STATIONS_LIST_REFRESH_MS)
+//  - mfObsCache : dernier paquet d'observations (vent/pression), TOUTES
+//    stations en un seul appel national, rafraîchi toutes les 6 min
+//    (MF_OBS_POLL_MS) — mutualisé pour tous les comptes, comme Vigilance.
+// Si METEOFRANCE_API_KEY n'est pas configurée : les deux caches restent
+// vides, /meteofrance-stations renvoie une liste vide, aucun crash
+// (même dégradation silencieuse que le reste du module Météo-France).
+let mfStationsList = []; // [{id, nom, lat, lon, alt}]
+let mfStationsListFetchedAt = 0;
+let mfObsCache = new Map(); // id_station -> {dd, ff, ddraf10, raf10, pres, pmer, validityTime}
+let mfObsCacheFetchedAt = 0;
+
+// Parse minimal d'un CSV ';' avec en-tête — suffisant pour la forme
+// stable de /liste-stations (pas de valeur contenant ';' ou de guillemets
+// dans ce jeu de données, vérifié sur un extrait en direct le 11/07).
+function parseMfStationsCsv(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+  return lines.slice(1).map(line => {
+    const [id, , nom, lat, lon, alt] = line.split(';');
+    return { id, nom, lat: parseFloat(lat), lon: parseFloat(lon), alt: alt ? parseInt(alt, 10) : null };
+  }).filter(s => s.id && Number.isFinite(s.lat) && Number.isFinite(s.lon));
+}
+
+async function refreshMfStationsList() {
+  if (!METEOFRANCE_API_KEY) return;
+  try {
+    const r = await fetch(MF_LISTE_STATIONS_URL, { headers: { apikey: METEOFRANCE_API_KEY } });
+    if (!r.ok) return; // échec ponctuel : on garde l'ancienne liste plutôt que de la vider
+    const text = await r.text();
+    const parsed = parseMfStationsCsv(text);
+    if (parsed.length) { mfStationsList = parsed; mfStationsListFetchedAt = Date.now(); }
+  } catch (e) { console.error('refreshMfStationsList error:', e.message); }
+}
+
+// Date alignée sur un multiple de 6 min avec ~12 min de marge (pipeline
+// MF pas instantané — vérifié en direct : une marge de 6 min pile peut
+// renvoyer un paquet encore incomplet, 12 min est fiable).
+function mfPaquetDateParam() {
+  const now = new Date(Date.now() - 12 * 60 * 1000);
+  const m = Math.floor(now.getUTCMinutes() / 6) * 6;
+  now.setUTCMinutes(m, 0, 0);
+  return now.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+async function refreshMfObs() {
+  if (!METEOFRANCE_API_KEY) return;
+  try {
+    const url = `${MF_PAQUET_URL}?date=${mfPaquetDateParam()}&format=json`;
+    const r = await fetch(url, { headers: { apikey: METEOFRANCE_API_KEY } });
+    if (!r.ok) return; // échec ponctuel : on garde l'ancien paquet plutôt que de le vider
+    const data = await r.json();
+    if (!Array.isArray(data)) return;
+    const next = new Map();
+    for (const s of data) {
+      const id = s?.geo_id_insee;
+      if (!id) continue;
+      // Conversion en unités natives de l'app (km/h, hPa) dès l'ingestion —
+      // le reste du code (comme Pioupiou) travaille déjà dans ces unités.
+      next.set(id, {
+        dd: s.dd ?? null,
+        ff: s.ff != null ? s.ff * 3.6 : null,
+        ddraf10: s.ddraf10 ?? null,
+        raf10: s.raf10 != null ? s.raf10 * 3.6 : null,
+        pres: s.pres != null ? s.pres / 100 : null,
+        pmer: s.pmer != null ? s.pmer / 100 : null,
+        validityTime: s.validity_time ?? null,
+      });
+    }
+    if (next.size) { mfObsCache = next; mfObsCacheFetchedAt = Date.now(); }
+  } catch (e) { console.error('refreshMfObs error:', e.message); }
+}
+
+async function refreshMeteoFranceData() {
+  if (!METEOFRANCE_API_KEY) return;
+  if (!mfStationsList.length || Date.now() - mfStationsListFetchedAt > MF_STATIONS_LIST_REFRESH_MS) {
+    await refreshMfStationsList();
+  }
+  await refreshMfObs();
+}
+
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -684,6 +789,29 @@ async function verifyUser(accessToken) {
 
 app.get('/', (req, res) => res.json({ status:'ok', version:'2.1.0', service:'Balise Watch Push Server' }));
 app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
+
+// ── Étape 11 : stations Météo-France avec vent (lecture seule) ──────
+// Sert le cache mfObsCache/mfStationsList (rafraîchi en tâche de fond,
+// cf. refreshMeteoFranceData) — jamais d'appel Météo-France déclenché
+// par une requête client, jamais la clé API exposée côté client. Ne
+// renvoie que les stations qui ont du vent dans le dernier paquet
+// (pas de baromètre attendu chez le client si null, cf. réflexion
+// pression Pioupiou) — pas d'auth requise, données publiques en lecture.
+app.get('/meteofrance-stations', (req, res) => {
+  const stationsById = new Map(mfStationsList.map(s => [s.id, s]));
+  const out = [];
+  for (const [id, obs] of mfObsCache) {
+    if (obs.ff == null) continue;
+    const meta = stationsById.get(id);
+    if (!meta) continue;
+    out.push({
+      id, nom: meta.nom, lat: meta.lat, lon: meta.lon, alt: meta.alt,
+      dd: obs.dd, ff: obs.ff, raf10: obs.raf10, ddraf10: obs.ddraf10,
+      pres: obs.pres, pmer: obs.pmer, validityTime: obs.validityTime,
+    });
+  }
+  res.json({ stations: out, fetchedAt: mfObsCacheFetchedAt });
+});
 
 // ── /sync : lie l'appareil (endpoint push) au compte + remplace la liste
 //    de surveillance du compte par celle envoyée (upsert + suppression
@@ -1401,4 +1529,6 @@ app.listen(PORT, () => {
   console.log(`🚀 Balise Watch Push Server — port ${PORT}`);
   pollAndNotify();
   setInterval(pollAndNotify, POLL_MS);
+  refreshMeteoFranceData(); // no-op silencieux si METEOFRANCE_API_KEY absente
+  setInterval(refreshMeteoFranceData, MF_OBS_POLL_MS);
 });
