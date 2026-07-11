@@ -224,6 +224,7 @@ const FW_WIND_SURGE_ABS_MIN_KMH = 15; // FIA-1 : plancher absolu sur wind_surge 
 const MF_OBS_MAX_AGE_MS = 30 * 60 * 1000; // DATA-1 : garde-fraîcheur MF — une observation dont validityTime dépasse ce seuil est ignorée dans la fusion (évite d'alerter sur des données figées si l'API MF tombe plusieurs heures)
 const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
 const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
+const FW_BREEZE_REVERSAL_MIN_WIND_KMH = 5; // FIA-2 : plancher de vitesse sur la bascule de brise — par vent quasi nul la direction d'une girouette est aléatoire, ce qui suffirait à déclencher un retournement fictif de 100°+ entre deux balises calmes au lever/coucher
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
 const FW_OM_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
 
@@ -1385,7 +1386,11 @@ async function pollAndNotify() {
         const capeNow = fwWeather.cape.now;
         const capeRise = fwWeather.cape.rate * FW_TREND_WINDOW_H; // hausse totale sur la fenêtre (J/kg), plus lisible qu'un taux/h pour du CAPE
         const developing = capeNow >= FW_CONVECTION_CAPE_MIN_JKG && capeRise >= FW_CONVECTION_CAPE_RISE_MIN_JKG;
-        const cloudLowMid = Math.round((fwWeather.cloudLowNow ?? 0) + (fwWeather.cloudMidNow ?? 0));
+        // FIA-4 : deux couvertures 0-100% indépendantes ne s'additionnent
+        // pas (elles se recouvrent partiellement) — Math.max() donne la
+        // meilleure approximation de la fraction de ciel réellement couverte.
+        // L'addition pouvait afficher "160%" dans le corps du push.
+        const cloudLowMid = Math.round(Math.max(fwWeather.cloudLowNow ?? 0, fwWeather.cloudMidNow ?? 0));
         const freezingRounded = fwWeather.freezingLevelNow != null ? Math.round(fwWeather.freezingLevelNow) : null;
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.convection;
         await evaluateFwSignal({
@@ -1507,8 +1512,13 @@ async function pollAndNotify() {
       if (beacons.length < 2) continue; // pas de "cohérence" possible à 1 seule balise
 
       const reversed = beacons.filter(b => {
+        // FIA-2 : plancher de vitesse aux DEUX extrémités — si le vent est
+        // quasi nul (baseline OU courant), la direction est aléatoire et un
+        // retournement de 100°+ ne signifie rien aérologiquement.
+        if (b.rel.moy == null || b.rel.moy < FW_BREEZE_REVERSAL_MIN_WIND_KMH) return false;
         const baseline = fwBaselineAt(b.beaconId, b.windowMin);
         if (!baseline || baseline.dir == null) return false;
+        if (baseline.moy == null || baseline.moy < FW_BREEZE_REVERSAL_MIN_WIND_KMH) return false;
         const diff = fwAngularDiff(baseline.dir, b.rel.dir);
         return diff !== null && diff >= FW_BREEZE_REVERSAL_MIN_DEG;
       });
