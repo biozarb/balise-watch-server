@@ -64,6 +64,11 @@ const PUSH_LABELS = {
       pressureDrop: {
         body: (rateAbs, windowH) => `Chute de pression : ${rateAbs} hPa/h (tendance sur ${windowH}h)`,
       },
+      convection: {
+        body: (capeNow, cloudPct, freezingM) =>
+          `Risque de développement convectif : CAPE ${capeNow} J/kg en hausse, nébulosité basse/moyenne ${cloudPct}%` +
+          (freezingM != null ? `, iso 0°C ${freezingM} m` : ''),
+      },
     },
   },
   en: {
@@ -79,6 +84,11 @@ const PUSH_LABELS = {
       },
       pressureDrop: {
         body: (rateAbs, windowH) => `Pressure falling: ${rateAbs} hPa/h (${windowH}h trend)`,
+      },
+      convection: {
+        body: (capeNow, cloudPct, freezingM) =>
+          `Convective development risk: CAPE ${capeNow} J/kg rising, low/mid cloud cover ${cloudPct}%` +
+          (freezingM != null ? `, freezing level ${freezingM} m` : ''),
       },
     },
   },
@@ -134,6 +144,31 @@ const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonn
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
 const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md, upgrade v2 SYNOP/METAR) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent
 const FW_OM_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
+
+// ── Étape 10 (flightwatch), Lot 3 : risque de développement convectif ──
+// Combine CAPE (niveau + hausse sur FW_TREND_WINDOW_H) comme déclencheur
+// PRINCIPAL — pas de colonne dédiée au schéma Lot 0 (seul l'interrupteur
+// sig_convection existe), constantes serveur documentées ici, ajustables
+// à l'usage. Choix délibéré (§7.5 cadrage note "pas cracher de faux
+// positifs") : on exige un PLANCHER (de l'instabilité déjà là, valeurs
+// alpines — souvent plus modestes qu'en plaine mais suffisantes pour un
+// orage de relief) ET une HAUSSE sur la fenêtre (déstabilisation ACTIVE,
+// pas un CAPE ambiant stable qui ne raconte rien de neuf) — même logique
+// "dérivée, pas juste un seuil absolu" que wind_surge/pressure_drop. La
+// nébulosité basse/moyenne et l'iso 0°C ne GATENT PAS le déclenchement
+// (deux signaux bruités combinés en ET auraient multiplié les ratés) :
+// elles sont ajoutées en CONTEXTE informatif dans le corps du push,
+// cohérent avec le double rôle de l'iso 0°C au cadrage (§2 point 7 :
+// "exposé comme info ET comme composante du signal convectif").
+const FW_CONVECTION_CAPE_MIN_JKG = 400; // plancher d'instabilité significative (valeurs alpines — un seuil plaine type 1000+ raterait les orages de montagne)
+const FW_CONVECTION_CAPE_RISE_MIN_JKG = 150; // hausse minimale sur la fenêtre (J/kg), signe de déstabilisation en cours
+// sig_freezing_level (interrupteur séparé, défaut OFF, "info pure" au
+// schéma Lot 0) reste HORS scope ici : c'est un signal d'AFFICHAGE passif
+// (§7.5 niveau 1, "passif, consultable"), pas un déclencheur de push —
+// il trouvera sa place naturelle au Lot 6 (UI, affichage épuré) quand il
+// y aura un endroit pour le montrer sans spammer une notification dessus.
+// En attendant, l'iso 0°C n'apparaît qu'en info dans le corps du push
+// convection ci-dessous (cf. commentaire ci-dessus), jamais en push seul.
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir}] trié par t croissant
 
@@ -739,6 +774,37 @@ async function pollAndNotify() {
               url: '/', kind: 'flightwatch', signal: 'pressure_drop', level: 2,
               scope: String(w.beacon_id), voice: false, // niveau 2 = push doux
               value: fwWeather.pressure.rate, unit: 'hPa/h',
+            },
+          }),
+        });
+      }
+
+      // ── Lot 3 flightwatch : risque de développement convectif ───
+      // Déclencheur PRINCIPAL = CAPE (plancher + hausse sur la fenêtre,
+      // cf. constantes FW_CONVECTION_*) ; nébulosité basse/moyenne et
+      // iso 0°C = CONTEXTE informatif dans le corps du push, pas des
+      // conditions supplémentaires (cf. commentaire des constantes plus
+      // haut — éviter de multiplier les signaux bruités en ET). Même
+      // garde-fou "pas de tendance disponible -> pas d'évaluation" que
+      // pressure_drop. Niveau 2 (vigilance, §7.5 : "CAPE qui monte").
+      if (fwPrefsForUser.sig_convection && fwWeather?.cape?.now != null && fwWeather.cape.rate != null) {
+        const capeNow = fwWeather.cape.now;
+        const capeRise = fwWeather.cape.rate * FW_TREND_WINDOW_H; // hausse totale sur la fenêtre (J/kg), plus lisible qu'un taux/h pour du CAPE
+        const developing = capeNow >= FW_CONVECTION_CAPE_MIN_JKG && capeRise >= FW_CONVECTION_CAPE_RISE_MIN_JKG;
+        const cloudLowMid = Math.round((fwWeather.cloudLowNow ?? 0) + (fwWeather.cloudMidNow ?? 0));
+        const freezingRounded = fwWeather.freezingLevelNow != null ? Math.round(fwWeather.freezingLevelNow) : null;
+        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.convection;
+        await evaluateFwSignal({
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'convection', level: 2, active: developing,
+          buildPush: () => ({
+            title: `⛈️ ${rel.nom}`,
+            body: lbl.body(Math.round(capeNow), cloudLowMid, freezingRounded),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-convection-${w.beacon_id}`, requireInteraction: false,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'convection', level: 2,
+              scope: String(w.beacon_id), voice: false, // niveau 2 = push doux
+              value: capeNow, unit: 'J/kg',
             },
           }),
         });
