@@ -417,6 +417,17 @@ function fwLightningSetNeeded(needed) {
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressure}] trié par t croissant
 
+// Débogage 12/07/2026 — cache de la source de pression réellement utilisée
+// pour CHAQUE balise évaluée (capteur embarqué OU modèle AROME de repli),
+// alimenté à chaque poll (cf. pollAndNotify, bloc "chute de pression
+// rapide") et servi tel quel par GET /pressure-signal. Objectif : le
+// client (WatchCard) affiche la MÊME valeur/source que celle utilisée
+// pour décider les alertes, plutôt que de recalculer un repli séparé
+// (et potentiellement divergent) de son côté. beacon_id (string) ->
+// { source: 'sensor'|'model'|null, value: number|null, rate: number|null,
+//   updatedAt: number }.
+const pressureSignalCache = new Map();
+
 function fwRecordHistory(beaconId, sample) {
   const arr = beaconHistory.get(beaconId) || [];
   arr.push(sample);
@@ -814,6 +825,23 @@ async function verifyUser(accessToken) {
 
 app.get('/', (req, res) => res.json({ status:'ok', version:'2.1.0', service:'Balise Watch Push Server' }));
 app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
+
+// ── Débogage 12/07/2026 — source de pression par balise ─────────────
+// Sert pressureSignalCache (alimenté à chaque poll, cf. plus haut) pour
+// que le client affiche exactement la source/valeur utilisée pour les
+// alertes (capteur embarqué en priorité, modèle AROME en repli) au lieu
+// d'un repli client séparé qui pouvait diverger et n'affichait de toute
+// façon aucune valeur (juste le mot "Arome" sans nombre). ?ids=1,2,3 —
+// pas d'auth, même donnée publique en lecture que /meteofrance-stations.
+// Une balise pas encore dans le cache (juste ajoutée, pas encore de
+// poll passé dessus) renvoie null — le client garde alors son propre
+// repli d'affichage ("pas encore de donnée").
+app.get('/pressure-signal', (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  const signals = {};
+  for (const id of ids) signals[id] = pressureSignalCache.get(id) ?? null;
+  res.json({ signals });
+});
 
 // ── Étape 11 : stations Météo-France avec vent (lecture seule) ──────
 // Sert le cache mfObsCache/mfStationsList (rafraîchi en tâche de fond,
@@ -1436,6 +1464,17 @@ async function pollAndNotify() {
       const fwWeather = weatherByBeacon.get(String(w.beacon_id));
       const fwPressureReal = fwRealPressureTrend(String(w.beacon_id), rel.pressure);
       const fwPressure = fwPressureReal ?? fwWeather?.pressure ?? null;
+      // Débogage 12/07/2026 — mémorise la source effectivement retenue
+      // (capteur si dispo, sinon modèle AROME, sinon aucune) pour cette
+      // balise, servie par GET /pressure-signal (voir WatchCard côté
+      // client). Écriture idempotente : plusieurs comptes surveillant la
+      // même balise réécrivent la même valeur, sans coût réel.
+      pressureSignalCache.set(String(w.beacon_id), {
+        source: fwPressureReal ? 'sensor' : fwWeather?.pressure ? 'model' : null,
+        value: fwPressure?.now ?? null,
+        rate: fwPressure?.rate ?? null,
+        updatedAt: Date.now(),
+      });
       if (fwPrefsForUser.sig_pressure_drop && fwPressure?.rate != null) {
         const dropping = fwPressure.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
