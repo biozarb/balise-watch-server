@@ -928,18 +928,31 @@ app.get('/pressure-signal', (req, res) => {
   res.json({ signals });
 });
 
-// ── Étape 11 : stations Météo-France avec vent (lecture seule) ──────
+// ── Étape 11 : stations Météo-France (lecture seule) ─────────────────
 // Sert le cache mfObsCache/mfStationsList (rafraîchi en tâche de fond,
 // cf. refreshMeteoFranceData) — jamais d'appel Météo-France déclenché
-// par une requête client, jamais la clé API exposée côté client. Ne
-// renvoie que les stations qui ont du vent dans le dernier paquet
-// (pas de baromètre attendu chez le client si null, cf. réflexion
-// pression Pioupiou) — pas d'auth requise, données publiques en lecture.
+// par une requête client, jamais la clé API exposée côté client. Pas
+// d'auth requise, données publiques en lecture.
+//
+// Débogage 12/07/2026 — retour Yann : ne renvoyait QUE les stations avec
+// du vent (~780/2151), filtrant silencieusement les ~1400 stations
+// pression-seule alors même que le serveur les enregistre déjà (voir
+// refreshMfObs / mfPersistHistory ci-dessus, utilisées en interne comme
+// repli "station proche" pour la pression des balises Pioupiou sans
+// baromètre). Le filtre `obs.ff == null` est retiré : la route renvoie
+// désormais TOUTES les stations qui ont un relevé (vent OU pression
+// seule) — dd/ff/raf10/ddraf10 restent `null` pour les pression-seule
+// (jamais 0/faux, cf. commentaire refreshMfObs), c'est au client de
+// décider s'il les affiche (nouvelle couche carte "Stations pression",
+// désactivée par défaut — cf. MapView.tsx). Un seul appel national déjà
+// en cache RAM, zéro coût réseau supplémentaire côté serveur ; le
+// payload JSON grossit (~780 → ~2150 stations) mais reste un unique
+// fetch, pas une requête par station.
 app.get('/meteofrance-stations', (req, res) => {
   const stationsById = new Map(mfStationsList.map(s => [s.id, s]));
   const out = [];
   for (const [id, obs] of mfObsCache) {
-    if (obs.ff == null) continue;
+    if (obs.ff == null && obs.pmer == null && obs.pres == null) continue; // aucun relevé exploitable
     const meta = stationsById.get(id);
     if (!meta) continue;
     out.push({
