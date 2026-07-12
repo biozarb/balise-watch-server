@@ -473,6 +473,45 @@ function mfPersistHistory(rows) {
   sbDelete('mf_station_history', `moy=is.null&t=lt.${pressureOnlyCutoff}`)
     .catch(e => console.error('mfPersistHistory purge (pression seule) error:', e.message));
 }
+// Débogage 12/07/2026 (suite 5, retour Yann) — hydrate le buffer RAM
+// beaconHistory depuis la table PERSISTANTE mf_station_history au
+// démarrage du process. Sans ça, la persistance 12h/48h construite au
+// Lot 8 ne servait QUE le graphe client (GET /meteofrance-history/:id) —
+// fwBaselineAt/fwRealPressureTrend (qui décident le repli "station MF
+// proche" pour pressure_drop) ne lisaient QUE le RAM, vidé à chaque
+// redémarrage Render (veille free tier) : une station MF proche déjà
+// connue devait réaccumuler FW_PRESSURE_MIN_SAMPLES_SPAN_MIN (2h30)
+// avant de pouvoir resservir, alors que la donnée existait déjà en base.
+// Bénéfice secondaire : mf_station_history contient aussi les stations
+// MF AVEC vent (moy non NULL, Lot 8) — cette hydratation redonne donc
+// aussi tout de suite un historique wind_surge/breeze_reversal aux
+// stations MF surveillées après un redémarrage, pas seulement la
+// pression. Ne couvre PAS le baromètre propre d'une balise Pioupiou
+// (aucune table persistante équivalente pour ça) — ce cas reste
+// RAM-only comme avant, réaccumulation nécessaire après un redémarrage.
+// Fenêtre bornée à FW_HISTORY_MAX_AGE_MS (3h30) — inutile de charger plus
+// que ce que fwBaselineAt ira jamais lire. Défensif : une erreur ici
+// (Supabase indisponible, etc.) ne doit jamais empêcher le serveur de
+// démarrer — au pire, repli sur la réaccumulation RAM habituelle.
+async function hydrateBeaconHistoryFromSupabase() {
+  try {
+    const cutoff = Date.now() - FW_HISTORY_MAX_AGE_MS;
+    const rows = await sbGet(
+      'mf_station_history',
+      `t=gte.${cutoff}&select=station_id,t,moy,dir,pressure&order=t.asc&limit=200000`
+    );
+    if (!Array.isArray(rows) || !rows.length) return;
+    const stationIds = new Set();
+    for (const r of rows) {
+      fwRecordHistory(String(r.station_id), { t: r.t, moy: r.moy, dir: r.dir, pressure: r.pressure });
+      stationIds.add(r.station_id);
+    }
+    console.log(`🔄 beaconHistory hydraté depuis mf_station_history : ${rows.length} échantillons, ${stationIds.size} stations`);
+  } catch (e) {
+    console.error('hydrateBeaconHistoryFromSupabase error:', e.message);
+  }
+}
+
 // Renvoie l'échantillon le plus RÉCENT qui a au moins `windowMin` minutes
 // (le plus proche possible de cette borne vu la cadence de poll 5 min).
 // null si l'historique n'a pas encore assez de recul (pas de faux positif
@@ -1862,8 +1901,16 @@ async function pollAndNotify() {
   } catch(e) { console.error('pollAndNotify error:', e.message); }
 }
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`🚀 Balise Watch Push Server — port ${PORT}`);
+  // Débogage 12/07/2026 (suite 5) — hydratation AVANT le premier
+  // pollAndNotify, pour que le tout premier cycle après un redémarrage
+  // bénéficie déjà de l'historique persisté (station MF proche
+  // utilisable immédiatement si elle a assez de recul en base) plutôt
+  // que d'attendre le cycle suivant. `await` ici retarde le tout premier
+  // poll de quelques centaines de ms (une requête Supabase) — négligeable
+  // à l'échelle d'une cadence de 5 min, et fait UNE SEULE FOIS au boot.
+  await hydrateBeaconHistoryFromSupabase();
   pollAndNotify();
   setInterval(pollAndNotify, POLL_MS);
   refreshMeteoFranceData(); // no-op silencieux si METEOFRANCE_API_KEY absente
