@@ -777,10 +777,25 @@ async function refreshMfObs() {
       // jusqu'ici enregistrées NULLE PART (invisibles pour l'app) —
       // cf. retour Yann : elles servent désormais de repli "station
       // proche" pour les balises Pioupiou sans baromètre (voir
-      // findNearbyMfStations plus bas). Coût négligeable : ~1400 stations
-      // (2150 - ~780 avec vent), échantillons courts, purgées à 3h30 en
-      // RAM (beaconHistory) comme avant.
+      // findNearbyMfStations plus bas). Coût négligeable, échantillons
+      // courts, purgées à 3h30 en RAM (beaconHistory) comme avant.
       //
+      // Correction 12/07/2026 (suite 3, retour Yann après déploiement de
+      // la couche carte "Stations pression") : le "~1400 stations (2150 -
+      // ~780 avec vent)" ci-dessus était une estimation PAPIER jamais
+      // vérifiée en direct — FAUSSE. mfStationsList (2150) est la liste
+      // de référence de TOUTES les stations MF connues (CSV statique
+      // /liste-stations), mais le paquet d'observations 6 min réellement
+      // utilisé ici (DPPaquetObs infrahoraire-6m, réseau RADOME temps
+      // réel) ne couvre en pratique qu'un sous-ensemble bien plus restreint
+      // (~780 entrées mesuré en direct le 12/07) — et sur ce sous-ensemble,
+      // la quasi-totalité a DÉJÀ un anémomètre. En pratique, très peu de
+      // stations pression-seule apparaissent dans ce flux (ex. observé :
+      // une seule, "CAP BEAR" — station maritime avec baromètre mais sans
+      // anémomètre). Un réseau barométrique plus dense existerait
+      // potentiellement dans un AUTRE produit Météo-France (non
+      // investigué) — pas dans DPPaquetObs infrahoraire-6m tel qu'utilisé
+      // ici.
       // Débogage 12/07/2026 (suite) — EN PLUS du buffer RAM ci-dessus,
       // persistance dans mf_station_history (12h, MF_PRESSURE_ONLY_
       // RETENTION_H, purge différenciée dans mfPersistHistory) : sans ça,
