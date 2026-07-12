@@ -218,7 +218,8 @@ function fwPrefs(row) {
 // rater une détection à en inventer une).
 const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent. Depuis le Lot 2b : sert aussi de fenêtre à la pression RÉELLE mesurée par la balise (beaconHistory), pas seulement au modèle Open-Meteo.
 const FW_HISTORY_MAX_AGE_MS = (FW_TREND_WINDOW_H * 60 + 30) * 60 * 1000; // 3h30 (Lot 2b) : couvre la fenêtre de tendance pression réelle avec marge — large au-dessus des autres fenêtres réglées (vent/brise, défaut 15 min)
-const MF_HISTORY_RETENTION_H = 48; // Lot 8 (12/07) : rétention de la table persistante mf_station_history — INDÉPENDANTE de FW_HISTORY_MAX_AGE_MS/beaconHistory ci-dessus, qui reste à 3h30 pour la veille météo (flightwatch) uniquement
+const MF_HISTORY_RETENTION_H = 48; // Lot 8 (12/07) : rétention de la table persistante mf_station_history pour les stations AVEC vent — INDÉPENDANTE de FW_HISTORY_MAX_AGE_MS/beaconHistory ci-dessus, qui reste à 3h30 pour la veille météo (flightwatch) uniquement
+const MF_PRESSURE_ONLY_RETENTION_H = 12; // Débogage 12/07/2026 (suite) : rétention DÉDIÉE, plus courte, pour les lignes pression-seule (moy IS NULL) de la même table — décidé avec Yann : 12h suffit à voir l'évolution de la pression (pas de graphe vent à afficher pour ces stations, contrairement aux stations MF avec vent qui gardent 48h), coûte nettement moins cher en stockage Supabase
 const FW_PRESSURE_MIN_SAMPLES_SPAN_MIN = 150; // Lot 2b : n'évalue la pression RÉELLE (beaconHistory) qu'avec au moins 2h30 de recul (proche de la fenêtre 3h visée) — sinon repli Open-Meteo, jamais un taux calculé sur un intervalle trop court ou juste après un redémarrage
 const FW_PRESSURE_NEARBY_STATION_MAX_KM = 40; // Débogage 12/07/2026 : rayon de recherche d'une station MF PROCHE (pression uniquement, vent ou pas) comme repli intermédiaire avant le modèle — la pression est un champ spatialement lisse (contrairement au vent), une vraie mesure à 40 km reste plus fiable qu'une valeur de grille modèle interpolée
 const FW_WIND_MIN_BASELINE_KMH = 3; // évite un facteur "x1.8" absurde quand le vent de référence est quasi nul
@@ -446,16 +447,31 @@ function fwRecordHistory(beaconId, sample) {
 // ni casser l'évaluation des alertes flightwatch qui suit dans
 // pollAndNotify — même philosophie défensive que le reste du fichier
 // (§8 cadrage "informer, pas juger" : mieux vaut perdre quelques points
-// d'historique qu'un poll d'alertes entier). Purge (>48h) regroupée ici
-// plutôt que dans un cron séparé : un DELETE indexé sur `t` à chaque
-// poll est trivial pour Postgres, pas besoin de pg_cron.
+// d'historique qu'un poll d'alertes entier). Purge regroupée ici plutôt
+// que dans un cron séparé : un DELETE indexé sur `t` à chaque poll est
+// trivial pour Postgres, pas besoin de pg_cron.
+//
+// Débogage 12/07/2026 (suite) — purge DIFFÉRENCIÉE : les lignes vent
+// (moy non NULL) gardent 48h (MF_HISTORY_RETENTION_H, pensé pour un
+// futur toggle 24h/48h sur les graphes) ; les lignes pression-seule
+// (moy NULL — stations sans anémomètre, cf. refreshMfObs) n'en gardent
+// que 12h (MF_PRESSURE_ONLY_RETENTION_H, décidé avec Yann : suffisant
+// pour voir l'évolution de la pression, nettement moins coûteux en
+// stockage). `moy` sert de discriminant, jamais renseigné autrement que
+// null|number selon le type d'échantillon. Fonction réutilisée par les
+// DEUX call sites (pollAndNotify pour le vent, refreshMfObs pour la
+// pression seule) — chaque appel purge la table ENTIÈRE par âge, pas
+// seulement les lignes du batch en cours (comme avant ce lot).
 function mfPersistHistory(rows) {
   if (!rows.length) return;
   sbUpsert('mf_station_history', rows, 'station_id,t')
     .catch(e => console.error('mfPersistHistory upsert error:', e.message));
-  const cutoff = Date.now() - MF_HISTORY_RETENTION_H * 3600 * 1000;
-  sbDelete('mf_station_history', `t=lt.${cutoff}`)
-    .catch(e => console.error('mfPersistHistory purge error:', e.message));
+  const windCutoff = Date.now() - MF_HISTORY_RETENTION_H * 3600 * 1000;
+  sbDelete('mf_station_history', `moy=not.is.null&t=lt.${windCutoff}`)
+    .catch(e => console.error('mfPersistHistory purge (vent) error:', e.message));
+  const pressureOnlyCutoff = Date.now() - MF_PRESSURE_ONLY_RETENTION_H * 3600 * 1000;
+  sbDelete('mf_station_history', `moy=is.null&t=lt.${pressureOnlyCutoff}`)
+    .catch(e => console.error('mfPersistHistory purge (pression seule) error:', e.message));
 }
 // Renvoie l'échantillon le plus RÉCENT qui a au moins `windowMin` minutes
 // (le plus proche possible de cette borne vu la cadence de poll 5 min).
@@ -750,22 +766,39 @@ async function refreshMfObs() {
     if (next.size) {
       mfObsCache = next;
       mfObsCacheFetchedAt = Date.now();
-      // Débogage 12/07/2026 — historique de pression pour TOUTES les
-      // stations MF qui en mesurent (FIA-3 : pmer seulement, jamais pres
-      // brute — même règle que releves plus bas), PAS SEULEMENT celles
-      // avec du vent. Contrairement à la boucle releves (pollAndNotify,
-      // filtrée sur obs.ff != null), ici on enregistre indépendamment de
-      // tout vent : plusieurs centaines de stations MF n'ont qu'un
-      // baromètre (pas d'anémomètre) et sont jusqu'ici invisibles/inutiles
-      // pour l'app — cf. retour Yann : elles servent désormais de repli
-      // "station proche" pour les balises Pioupiou sans baromètre (voir
-      // findNearbyMfStations plus bas). Coût négligeable : ~2150 stations
-      // max, échantillons courts, purgées à 3h30 comme le reste de
-      // beaconHistory.
+      // Débogage 12/07/2026 — historique de pression pour les stations MF
+      // qui n'ont PAS de vent (obs.ff == null) : les stations AVEC vent
+      // sont déjà enregistrées, avec moy/dir/pressure complets, par la
+      // boucle releves de pollAndNotify (5 min) — les réenregistrer ici
+      // aurait mélangé dans le même buffer deux formes d'échantillons
+      // (avec et sans moy/dir) à deux cadences différentes (6 min ici vs
+      // 5 min là-bas), doublant inutilement la mémoire pour ces stations
+      // sans rien apporter. Les stations SANS vent, elles, n'étaient
+      // jusqu'ici enregistrées NULLE PART (invisibles pour l'app) —
+      // cf. retour Yann : elles servent désormais de repli "station
+      // proche" pour les balises Pioupiou sans baromètre (voir
+      // findNearbyMfStations plus bas). Coût négligeable : ~1400 stations
+      // (2150 - ~780 avec vent), échantillons courts, purgées à 3h30 en
+      // RAM (beaconHistory) comme avant.
+      //
+      // Débogage 12/07/2026 (suite) — EN PLUS du buffer RAM ci-dessus,
+      // persistance dans mf_station_history (12h, MF_PRESSURE_ONLY_
+      // RETENTION_H, purge différenciée dans mfPersistHistory) : sans ça,
+      // un redémarrage du process (Render free tier, veille après
+      // inactivité) reperdait tout jusqu'à ré-accumuler 2h30+ de recul —
+      // même table que les stations vent (Lot 8), lignes distinguées par
+      // moy=NULL. moy/dir volontairement absents (jamais mesurés pour
+      // ces stations) plutôt que 0/faux, pour ne jamais laisser croire à
+      // un vent nul mesuré.
       const t = Date.now();
+      const pressureOnlyRows = [];
       for (const [id, obs] of next) {
-        if (obs.pmer != null) fwRecordHistory(id, { t, pressure: obs.pmer });
+        if (obs.ff == null && obs.pmer != null) {
+          fwRecordHistory(id, { t, pressure: obs.pmer });
+          pressureOnlyRows.push({ station_id: id, t, moy: null, dir: null, pressure: obs.pmer });
+        }
       }
+      mfPersistHistory(pressureOnlyRows); // fire-and-forget — cf. définition, ne bloque/casse jamais la suite
     }
   } catch (e) { console.error('refreshMfObs error:', e.message); }
 }
@@ -1360,15 +1393,22 @@ async function pollAndNotify() {
 
     // ── Lot 2/3 flightwatch : signaux Open-Meteo (mutualisés) ──────────
     // UNE requête par balise distincte surveillée par au moins un compte
-    // actif avec sig_pressure_drop OU sig_convection activé — jamais par
+    // avec sig_pressure_drop OU sig_convection activé — jamais par
     // (compte, balise), même principe que le mutualisme Pioupiou existant.
     // Un seul appel sert les deux signaux (cf. fetchOpenMeteoSignals) :
     // pas de requête séparée pour la convection (cadrage Lot 3). Récupérée
     // AVANT la boucle principale pour être disponible en lecture pure
     // (Map) dans la boucle, sans appel réseau par itération.
+    //
+    // Débogage 12/07/2026 — condition `activeByUser` RETIRÉE ici (elle
+    // restait plus bas, pour les alertes elles-mêmes) : pressureSignalCache
+    // (source+valeur affichée sur WatchCard) doit être alimenté même
+    // surveillance ARRÊTÉE, sinon "en attente" s'affichait en permanence
+    // tant que le pilote n'avait pas démarré la surveillance (retour
+    // Yann) — c'est un affichage informatif, pas un effet de bord des
+    // alertes.
     const weatherBeaconIds = new Set();
     for (const w of watchedRows) {
-      if (!activeByUser.has(w.user_id)) continue;
       const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
       if (!prefs.sig_pressure_drop && !prefs.sig_convection) continue;
       const rel = releves[String(w.beacon_id)];
@@ -1417,6 +1457,39 @@ async function pollAndNotify() {
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
       if (!rel) continue;
+
+      // ── Débogage 12/07/2026 — source/valeur de pression affichée ────
+      // Déplacé ICI (AVANT le garde-fou "surveillance non démarrée"
+      // ci-dessous) : pressureSignalCache alimente un affichage
+      // INFORMATIF sur WatchCard (source + valeur de pression), pas une
+      // alerte — il doit rester à jour même si le pilote n'a pas encore
+      // démarré sa surveillance. Avant ce déplacement, la ligne pression
+      // affichait "en attente" en permanence tant que la surveillance
+      // n'était pas active (retour Yann). Priorité : baromètre embarqué
+      // > station MF proche (cf. findNearbyMfStations) > modèle AROME
+      // (weatherByBeacon, mutualisé plus haut) > aucune donnée.
+      const fwWeather = weatherByBeacon.get(String(w.beacon_id));
+      const fwPressureReal = fwRealPressureTrend(String(w.beacon_id), rel.pressure);
+      let fwPressureNearby = null;
+      let nearbyStationUsed = null;
+      if (!fwPressureReal) {
+        for (const cand of findNearbyMfStations(String(w.beacon_id), rel.lat, rel.lon)) {
+          const obs = mfObsCache.get(cand.id);
+          const trend = fwRealPressureTrend(cand.id, obs?.pmer ?? null);
+          if (trend) { fwPressureNearby = trend; nearbyStationUsed = cand; break; }
+        }
+      }
+      const fwPressure = fwPressureReal ?? fwPressureNearby ?? fwWeather?.pressure ?? null;
+      // Écriture idempotente : plusieurs comptes surveillant la même
+      // balise réécrivent la même valeur, sans coût réel.
+      pressureSignalCache.set(String(w.beacon_id), {
+        source: fwPressureReal ? 'sensor' : fwPressureNearby ? 'sensor_nearby' : fwWeather?.pressure ? 'model' : null,
+        value: fwPressure?.now ?? null,
+        rate: fwPressure?.rate ?? null,
+        stationName: nearbyStationUsed?.nom ?? null,
+        distanceKm: nearbyStationUsed ? Math.round(nearbyStationUsed.distanceKm) : null,
+        updatedAt: Date.now(),
+      });
 
       // Surveillance non démarrée pour ce compte : aucune alerte, ni
       // push ni (indirectement) voix — la voix est déjà bloquée côté
@@ -1505,47 +1578,16 @@ async function pollAndNotify() {
 
       // ── Lot 2/2b flightwatch : chute de pression rapide ────────────
       // Lot 2b : préfère la pression RÉELLE mesurée par le baromètre de la
-      // balise (fwRealPressureTrend, beaconHistory) — repli sur le modèle
-      // Open-Meteo (weatherByBeacon, mutualisé par balise, calculé en amont)
-      // seulement si la balise n'a pas de baromètre ou pas encore assez de
-      // recul dans l'historique (cf. FW_PRESSURE_MIN_SAMPLES_SPAN_MIN). Si
-      // aucune des deux source n'est disponible : on N'ÉVALUE PAS ce
-      // poll-ci — ni alerte ni reset — plutôt que de risquer un faux reset
-      // sur un simple aléa réseau/capteur (§8 garde-fou "informer, pas
-      // juger"). Niveau 2 (vigilance, §7.5 cadrage : "pression qui chute").
-      const fwWeather = weatherByBeacon.get(String(w.beacon_id));
-      const fwPressureReal = fwRealPressureTrend(String(w.beacon_id), rel.pressure);
-      // Débogage 12/07/2026 — repli intermédiaire "station MF proche"
-      // (pression uniquement, avec ou sans vent — cf. findNearbyMfStations)
-      // AVANT le modèle : on essaie les candidates par distance croissante
-      // et on prend la première qui a une tendance calculable (assez de
-      // recul dans son propre historique, cf. FW_PRESSURE_MIN_SAMPLES_SPAN_MIN)
-      // — pas juste la plus proche géographiquement si celle-ci n'a pas
-      // encore assez de recul ou une observation valide à l'instant T.
-      let fwPressureNearby = null;
-      let nearbyStationUsed = null;
-      if (!fwPressureReal) {
-        for (const cand of findNearbyMfStations(String(w.beacon_id), rel.lat, rel.lon)) {
-          const obs = mfObsCache.get(cand.id);
-          const trend = fwRealPressureTrend(cand.id, obs?.pmer ?? null);
-          if (trend) { fwPressureNearby = trend; nearbyStationUsed = cand; break; }
-        }
-      }
-      const fwPressure = fwPressureReal ?? fwPressureNearby ?? fwWeather?.pressure ?? null;
-      // Débogage 12/07/2026 — mémorise la source effectivement retenue
-      // (capteur embarqué > station MF proche > modèle AROME > aucune)
-      // pour cette balise, servie par GET /pressure-signal (voir
-      // WatchCard côté client). Écriture idempotente : plusieurs comptes
-      // surveillant la même balise réécrivent la même valeur, sans coût
-      // réel.
-      pressureSignalCache.set(String(w.beacon_id), {
-        source: fwPressureReal ? 'sensor' : fwPressureNearby ? 'sensor_nearby' : fwWeather?.pressure ? 'model' : null,
-        value: fwPressure?.now ?? null,
-        rate: fwPressure?.rate ?? null,
-        stationName: nearbyStationUsed?.nom ?? null,
-        distanceKm: nearbyStationUsed ? Math.round(nearbyStationUsed.distanceKm) : null,
-        updatedAt: Date.now(),
-      });
+      // balise (fwRealPressureTrend, beaconHistory) — repli sur une station
+      // MF proche puis sur le modèle Open-Meteo (weatherByBeacon) seulement
+      // si rien de mieux n'est disponible (cf. FW_PRESSURE_MIN_SAMPLES_SPAN_MIN).
+      // fwPressure/fwWeather calculés plus haut (AVANT le garde-fou
+      // "surveillance non démarrée", cf. débogage 12/07/2026 — sert aussi
+      // à l'affichage informatif WatchCard, pas seulement à cette alerte).
+      // Si aucune source n'est disponible : on N'ÉVALUE PAS ce poll-ci — ni
+      // alerte ni reset — plutôt que de risquer un faux reset sur un simple
+      // aléa réseau/capteur (§8 garde-fou "informer, pas juger"). Niveau 2
+      // (vigilance, §7.5 cadrage : "pression qui chute").
       if (fwPrefsForUser.sig_pressure_drop && fwPressure?.rate != null) {
         const dropping = fwPressure.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
