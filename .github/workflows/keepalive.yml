@@ -1,0 +1,56 @@
+name: Keep Render Awake (jour uniquement)
+
+# Ping le serveur Render uniquement pendant les heures de vol (lever du
+# soleil -1h -> coucher du soleil +1h) pour éviter la mise en veille
+# (15 min sans trafic) tout en restant loin sous le quota Render gratuit
+# (750h d'instance/mois). Repo public => minutes GitHub Actions illimitées.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping si fenêtre jour (lever -1h / coucher +1h)
+        run: |
+          set -e
+          LAT=45.35
+          LNG=6.5
+          NOW_EPOCH=$(date -u +%s)
+
+          SUN_JSON=$(curl -s --max-time 10 "https://api.sunrise-sunset.org/json?lat=${LAT}&lng=${LNG}&formatted=0" || echo "")
+
+          SHOULD_PING="true"
+
+          if [ -n "$SUN_JSON" ]; then
+            STATUS=$(echo "$SUN_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || echo "")
+            if [ "$STATUS" = "OK" ]; then
+              SUNRISE=$(echo "$SUN_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['results']['sunrise'])")
+              SUNSET=$(echo "$SUN_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin)['results']['sunset'])")
+              SUNRISE_EPOCH=$(date -u -d "$SUNRISE" +%s)
+              SUNSET_EPOCH=$(date -u -d "$SUNSET" +%s)
+              WINDOW_START=$((SUNRISE_EPOCH - 3600))
+              WINDOW_END=$((SUNSET_EPOCH + 3600))
+
+              if [ "$NOW_EPOCH" -ge "$WINDOW_START" ] && [ "$NOW_EPOCH" -le "$WINDOW_END" ]; then
+                SHOULD_PING="true"
+              else
+                SHOULD_PING="false"
+              fi
+              echo "Fenetre jour : $(date -u -d @$WINDOW_START +%H:%M) -> $(date -u -d @$WINDOW_END +%H:%M) UTC | maintenant $(date -u -d @$NOW_EPOCH +%H:%M) UTC | ping=$SHOULD_PING"
+            else
+              echo "Reponse API sunrise-sunset sans status OK -> ping par securite (fail-safe)."
+            fi
+          else
+            echo "API sunrise-sunset injoignable -> ping par securite (fail-safe)."
+          fi
+
+          if [ "$SHOULD_PING" = "true" ]; then
+            echo "Ping du serveur..."
+            curl -s -o /dev/null -w "HTTP %{http_code}\n" --max-time 30 "https://balise-watch-server.onrender.com/" || echo "Ping echoue (reveil en cours ?)"
+          else
+            echo "Nuit -- pas de ping, le serveur peut dormir."
+          fi
