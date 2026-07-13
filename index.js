@@ -197,6 +197,7 @@ const FW_DEFAULTS = {
   sig_convection:        true,
   sig_vigilance:         true,
   sig_lightning:         true,
+  sig_precip:            true, // Lot C : précipitations à proximité (radar RainViewer)
   sig_freezing_level:    false, // info pure, off par défaut (cf. schéma Lot 0)
   lightning_radius_km:   50,
   wind_surge_factor:     1.8,
@@ -1470,7 +1471,7 @@ async function pollAndNotify() {
     const surveillanceRows = await sbGet('user_surveillance',
       // beta_lightning : accès bêta foudre Blitzortung, activé par l'admin par compte
       // (colonne ajoutée par beta_lightning.sql — défaut FALSE, invisible pour les non-bêta)
-      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning');
+      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_precip,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning');
     const activeByUser = new Set(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).filter(s => s.active).map(s => s.user_id)
     );
@@ -1789,7 +1790,7 @@ async function pollAndNotify() {
       // corps du push le dit. Cache vide (kill switch OFF, index KO,
       // démarrage) → false → pas d'alerte, jamais de crash. v1 sans pref
       // par compte : gaté par FW_PRECIP_ENABLED seul (cf. module plus haut).
-      if (FW_PRECIP_ENABLED && rel.lat != null && rel.lon != null) {
+      if (FW_PRECIP_ENABLED && fwPrefsForUser.sig_precip && rel.lat != null && rel.lon != null) {
         const precipNear = fwPrecipNear(rel.lat, rel.lon, FW_PRECIP_RADIUS_KM);
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.precip;
         await evaluateFwSignal({
