@@ -3,6 +3,7 @@ const webpush  = require('web-push');
 const fetch    = require('node-fetch');
 const rateLimit = require('express-rate-limit');
 const WebSocket = require('ws'); // Étape 10 Lot 5 : flux foudre Blitzortung (WebSocket temps réel)
+const { PNG } = require('pngjs'); // Étape 10 Lot C : décodage des tuiles radar RainViewer (détection précip)
 
 const PORT         = process.env.PORT || 3000;
 const VAPID_PUB    = process.env.VAPID_PUBLIC_KEY;
@@ -140,6 +141,10 @@ const PUSH_LABELS = {
         body: (count, radiusKm, windowMin) =>
           `${count} impact${count > 1 ? 's' : ''} de foudre détecté${count > 1 ? 's' : ''} à moins de ${radiusKm} km (${windowMin} dernières min) — donnée indicative Blitzortung, non officielle`,
       },
+      precip: {
+        body: radiusKm =>
+          `Précipitations détectées à moins de ${radiusKm} km de ta balise — donnée radar indicative (RainViewer), non officielle`,
+      },
     },
   },
   en: {
@@ -168,6 +173,10 @@ const PUSH_LABELS = {
       lightning: {
         body: (count, radiusKm, windowMin) =>
           `${count} lightning strike${count > 1 ? 's' : ''} detected within ${radiusKm} km (last ${windowMin} min) — indicative Blitzortung data, unofficial`,
+      },
+      precip: {
+        body: radiusKm =>
+          `Precipitation detected within ${radiusKm} km of your beacon — indicative radar data (RainViewer), unofficial`,
       },
     },
   },
@@ -415,6 +424,113 @@ function fwLightningSetNeeded(needed) {
       console.log('⚡ Blitzortung : plus de besoin, déconnexion');
     }, 2 * POLL_MS);
   }
+}
+
+// ── Étape 10 (flightwatch), Lot C : précipitations observées (radar) ──
+// Alerte "pluie à <= X km d'une balise surveillée", à partir du RADAR
+// RainViewer — la MÊME source que le calque radar affiché sur la carte
+// côté client (cohérence : ce que le pilote voit = ce qui déclenche).
+// Choix d'archi (cf. ETUDE_CONVECTION_SATELLITE.md §6/§11) : l'API MF
+// Données Radar renvoie des rasters lourds (GeoTIFF/BUFR) incompatibles
+// avec un décodage sur Render free tier ; RainViewer sert des tuiles
+// légères, pan-européennes, sans clé → on récupère les quelques tuiles
+// z7 couvrant la France, on les décode (petit PNG) et on cherche un écho
+// de pluie dans le rayon autour de chaque balise. Tout défensif : index
+// KO / tuile KO / kill switch → cache vide → signal non évalué, jamais de
+// crash (même politique que la foudre/vigilance).
+//
+// ⚠️ v1 volontairement simple : gaté par la SEULE variable d'env
+// FW_PRECIP_ENABLED (OPT-IN, OFF par défaut en prod, comme la foudre) +
+// un rayon global FW_PRECIP_RADIUS_KM. PAS de colonne de prefs par compte
+// pour l'instant → aucun changement de schéma Supabase, aucun risque pour
+// le select de la veille. Le toggle par utilisateur + rayon perso
+// (sig_precip / precip_radius_km) sera un lot ultérieur (SQL d'abord).
+// ⚠️ Clause RainViewer : usage "perso/communautaire", pas de SLA,
+// attribution requise → donnée présentée comme INDICATIVE (le push le dit),
+// comme Blitzortung.
+const FW_PRECIP_ENABLED   = process.env.FW_PRECIP_ENABLED === '1';
+const FW_PRECIP_RADIUS_KM = Number(process.env.FW_PRECIP_RADIUS_KM) || 20;
+const FW_PRECIP_INDEX_URL = 'https://api.rainviewer.com/public/weather-maps.json';
+const FW_PRECIP_TILE_Z    = 7;   // zoom MAX des tuiles publiques RainViewer (doc) — au-delà : "Zoom Level Not Supported"
+const FW_PRECIP_TILE_SIZE = 256; // 256 ou 512 (doc RainViewer)
+const FW_PRECIP_COLOR     = 4;   // schéma couleur (sans effet sur la détection, faite sur l'alpha) ; options "0_1" = non lissé + neige comptée comme précip
+const FW_PRECIP_ALPHA_MIN = 40;  // seuil alpha : un pixel réellement peint = écho radar ; ignore le fuzz d'anti-aliasing
+const FW_PRECIP_BBOX      = FW_LIGHTNING_BBOX; // même emprise France métropolitaine + marge (Alpes/Corse), réutilisée
+
+let fwPrecipTiles = new Map();  // "x/y" -> PNG décodé {width, height, data (RGBA)}
+let fwPrecipFrameTime = 0;      // timestamp de la frame radar actuellement en cache
+let fwPrecipRefreshing = false; // garde anti-recouvrement d'appels concurrents
+
+function fwPrecipClear() { if (fwPrecipTiles.size) { fwPrecipTiles = new Map(); fwPrecipFrameTime = 0; } }
+
+// Coordonnées de tuile "slippy map" (standard OSM/Leaflet).
+function fwLon2tileX(lon, z) { return Math.floor((lon + 180) / 360 * Math.pow(2, z)); }
+function fwLat2tileY(lat, z) { const r = lat * Math.PI / 180; return Math.floor((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * Math.pow(2, z)); }
+
+// Récupère (au plus une fois par frame) les tuiles radar z7 couvrant la
+// France et les décode en RAM. Rien n'est persisté (comme le buffer
+// foudre) : un redémarrage vide le cache, re-rempli au poll suivant.
+async function fwPrecipRefresh() {
+  if (!FW_PRECIP_ENABLED || fwPrecipRefreshing) return;
+  fwPrecipRefreshing = true;
+  try {
+    const res = await fetch(FW_PRECIP_INDEX_URL);
+    if (!res.ok) return;
+    const idx = await res.json();
+    const frames = idx?.radar?.past;
+    if (!Array.isArray(frames) || !frames.length || !idx.host) return;
+    const frame = frames[frames.length - 1]; // dernière image observée
+    if (frame.time === fwPrecipFrameTime && fwPrecipTiles.size) return; // déjà à jour
+    const z = FW_PRECIP_TILE_Z, bb = FW_PRECIP_BBOX;
+    const x0 = fwLon2tileX(bb.lonMin, z), x1 = fwLon2tileX(bb.lonMax, z);
+    const y0 = fwLat2tileY(bb.latMax, z), y1 = fwLat2tileY(bb.latMin, z); // latMax → y le plus petit
+    const jobs = [];
+    for (let x = x0; x <= x1; x++) {
+      for (let y = y0; y <= y1; y++) {
+        const url = `${idx.host}${frame.path}/${FW_PRECIP_TILE_SIZE}/${z}/${x}/${y}/${FW_PRECIP_COLOR}/0_1.png`;
+        jobs.push(
+          fetch(url)
+            .then(r => (r.ok ? r.buffer() : null))
+            .then(buf => (buf ? [`${x}/${y}`, PNG.sync.read(buf)] : null))
+            .catch(() => null) // tuile en échec ignorée, jamais de crash
+        );
+      }
+    }
+    const results = await Promise.all(jobs);
+    const next = new Map();
+    for (const r of results) if (r) next.set(r[0], r[1]);
+    if (next.size) { fwPrecipTiles = next; fwPrecipFrameTime = frame.time; }
+  } catch { /* dégradation silencieuse : cache inchangé, signal non évalué */ }
+  finally { fwPrecipRefreshing = false; }
+}
+
+// Y a-t-il un écho de pluie à <= radiusKm du point ? Balayage d'un disque
+// en espace pixel (z7) sur les tuiles décodées : alpha > seuil = pixel
+// réellement peint par le radar = précipitation. Cache vide → false
+// (jamais de fausse alerte, cf. §8 garde-fou "informer, pas juger").
+function fwPrecipNear(lat, lon, radiusKm) {
+  if (!fwPrecipTiles.size || lat == null || lon == null) return false;
+  const z = FW_PRECIP_TILE_Z, size = FW_PRECIP_TILE_SIZE;
+  const world = Math.pow(2, z) * size; // largeur du monde en pixels à ce zoom
+  const gx = (lon + 180) / 360 * world;
+  const r = lat * Math.PI / 180;
+  const gy = (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * world;
+  const mPerPx = 156543.03 * Math.cos(r) / Math.pow(2, z) * (256 / size); // résolution sol (m/px) au point
+  const rp = Math.max(1, Math.ceil((radiusKm * 1000) / mPerPx));
+  const rp2 = rp * rp;
+  for (let dy = -rp; dy <= rp; dy++) {
+    for (let dx = -rp; dx <= rp; dx++) {
+      if (dx * dx + dy * dy > rp2) continue; // disque, pas carré
+      const px = Math.floor(gx + dx), py = Math.floor(gy + dy);
+      const tx = Math.floor(px / size), ty = Math.floor(py / size);
+      const tile = fwPrecipTiles.get(`${tx}/${ty}`);
+      if (!tile) continue;
+      const lx = px - tx * size, ly = py - ty * size;
+      if (lx < 0 || ly < 0 || lx >= tile.width || ly >= tile.height) continue;
+      if (tile.data[(ly * tile.width + lx) * 4 + 3] > FW_PRECIP_ALPHA_MIN) return true;
+    }
+  }
+  return false;
 }
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressure}] trié par t croissant
@@ -1381,6 +1497,14 @@ async function pollAndNotify() {
     fwLightningSetNeeded(anyLightningWanted);
     fwLightningPrune();
 
+    // ── Lot C flightwatch : précipitations observées (radar RainViewer) ──
+    // Rafraîchit le cache des tuiles radar France si au moins un compte a
+    // démarré la surveillance (et kill switch ON) ; sinon vide le cache
+    // pour libérer la RAM. Défensif : refresh KO → cache inchangé/vide →
+    // signal simplement non évalué plus bas, jamais de crash.
+    if (FW_PRECIP_ENABLED && activeByUser.size > 0) await fwPrecipRefresh();
+    else fwPrecipClear();
+
     // Langue par compte (Lot 3) : même lecture batchée par table que
     // surveillanceRows ci-dessus (sbGet sur user_language, jamais
     // l'Admin API Auth — voir supabase_step10_user_language.sql). Repli
@@ -1638,6 +1762,33 @@ async function pollAndNotify() {
               url: '/', kind: 'flightwatch', signal: 'lightning', level: 3,
               scope: String(w.beacon_id), voice: !!fwPrefsForUser.voice_enabled,
               value: strikeCount, unit: 'strikes',
+            },
+          }),
+        });
+      }
+
+      // ── Lot C flightwatch : précipitations à proximité (radar) ──────
+      // Écho de pluie détecté à <= FW_PRECIP_RADIUS_KM de la balise sur la
+      // dernière image radar RainViewer. Niveau 2 (vigilance, §7.5 cadrage
+      // "pression qui chute / convection") — push DOUX, pas de voix.
+      // Donnée INDICATIVE (radar communautaire RainViewer, pas de SLA) : le
+      // corps du push le dit. Cache vide (kill switch OFF, index KO,
+      // démarrage) → false → pas d'alerte, jamais de crash. v1 sans pref
+      // par compte : gaté par FW_PRECIP_ENABLED seul (cf. module plus haut).
+      if (FW_PRECIP_ENABLED && rel.lat != null && rel.lon != null) {
+        const precipNear = fwPrecipNear(rel.lat, rel.lon, FW_PRECIP_RADIUS_KM);
+        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.precip;
+        await evaluateFwSignal({
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'precip', level: 2, active: precipNear,
+          buildPush: () => ({
+            title: `🌧️ ${rel.nom}`,
+            body: lbl.body(FW_PRECIP_RADIUS_KM),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-precip-${w.beacon_id}`, requireInteraction: false,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'precip', level: 2,
+              scope: String(w.beacon_id), voice: false,
+              value: FW_PRECIP_RADIUS_KM, unit: 'km',
             },
           }),
         });
