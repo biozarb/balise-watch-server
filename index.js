@@ -505,12 +505,18 @@ async function fwPrecipRefresh() {
   finally { fwPrecipRefreshing = false; }
 }
 
-// Y a-t-il un écho de pluie à <= radiusKm du point ? Balayage d'un disque
-// en espace pixel (z7) sur les tuiles décodées : alpha > seuil = pixel
-// réellement peint par le radar = précipitation. Cache vide → false
-// (jamais de fausse alerte, cf. §8 garde-fou "informer, pas juger").
+// Y a-t-il un écho de pluie à <= radiusKm du point, et si oui à quelle
+// distance (km) se trouve le plus proche ? Balayage d'un disque en espace
+// pixel (z7) sur les tuiles décodées : alpha > seuil = pixel réellement
+// peint par le radar = précipitation. Cache vide → { near: false,
+// distanceKm: null } (jamais de fausse alerte, cf. §8 garde-fou "informer,
+// pas juger"). Débogage 13/07/2026 (nice-to-have "valeur chiffrée
+// dashboard") — cherchait jusqu'ici juste un booléen (return au 1er hit,
+// peu importe lequel) ; parcourt maintenant TOUT le disque pour garder le
+// pixel peint le plus proche du centre, afin d'exposer une distance réelle
+// à l'affichage (cf. precipSignalCache) plutôt que le seul rayon configuré.
 function fwPrecipNear(lat, lon, radiusKm) {
-  if (!fwPrecipTiles.size || lat == null || lon == null) return false;
+  if (!fwPrecipTiles.size || lat == null || lon == null) return { near: false, distanceKm: null };
   const z = FW_PRECIP_TILE_Z, size = FW_PRECIP_TILE_SIZE;
   const world = Math.pow(2, z) * size; // largeur du monde en pixels à ce zoom
   const gx = (lon + 180) / 360 * world;
@@ -519,19 +525,22 @@ function fwPrecipNear(lat, lon, radiusKm) {
   const mPerPx = 156543.03 * Math.cos(r) / Math.pow(2, z) * (256 / size); // résolution sol (m/px) au point
   const rp = Math.max(1, Math.ceil((radiusKm * 1000) / mPerPx));
   const rp2 = rp * rp;
+  let bestPx2 = Infinity;
   for (let dy = -rp; dy <= rp; dy++) {
     for (let dx = -rp; dx <= rp; dx++) {
-      if (dx * dx + dy * dy > rp2) continue; // disque, pas carré
+      const d2 = dx * dx + dy * dy;
+      if (d2 > rp2 || d2 >= bestPx2) continue; // disque, pas carré ; élague si déjà moins bon que le meilleur trouvé
       const px = Math.floor(gx + dx), py = Math.floor(gy + dy);
       const tx = Math.floor(px / size), ty = Math.floor(py / size);
       const tile = fwPrecipTiles.get(`${tx}/${ty}`);
       if (!tile) continue;
       const lx = px - tx * size, ly = py - ty * size;
       if (lx < 0 || ly < 0 || lx >= tile.width || ly >= tile.height) continue;
-      if (tile.data[(ly * tile.width + lx) * 4 + 3] > FW_PRECIP_ALPHA_MIN) return true;
+      if (tile.data[(ly * tile.width + lx) * 4 + 3] > FW_PRECIP_ALPHA_MIN) bestPx2 = d2;
     }
   }
-  return false;
+  if (bestPx2 === Infinity) return { near: false, distanceKm: null };
+  return { near: true, distanceKm: Math.round((Math.sqrt(bestPx2) * mPerPx) / 100) / 10 };
 }
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressure}] trié par t croissant
@@ -546,6 +555,16 @@ const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressur
 // { source: 'sensor'|'model'|null, value: number|null, rate: number|null,
 //   updatedAt: number }.
 const pressureSignalCache = new Map();
+
+// Débogage 13/07/2026 (nice-to-have "valeur chiffrée dashboard") — même
+// principe que pressureSignalCache ci-dessus, pour les deux signaux qui
+// n'affichaient jusqu'ici qu'un OK/détecté sans nombre : précipitations
+// (distance en km au plus proche écho radar détecté, cf. fwPrecipNear
+// plus haut, désormais renvoyé en plus du booléen) et bascule de brise
+// (angle de retournement en degrés, cf. bloc d'évaluation plus bas).
+// beacon_id (string) -> { detected: boolean, distanceKm|angleDeg: number|null, updatedAt }.
+const precipSignalCache = new Map();
+const breezeSignalCache = new Map();
 
 function fwRecordHistory(beaconId, sample) {
   const arr = beaconHistory.get(beaconId) || [];
@@ -1096,6 +1115,26 @@ app.get('/pressure-signal', (req, res) => {
   const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
   const signals = {};
   for (const id of ids) signals[id] = pressureSignalCache.get(id) ?? null;
+  res.json({ signals });
+});
+
+// Débogage 13/07/2026 (nice-to-have "valeur chiffrée dashboard") — mêmes
+// principe et contrat que /pressure-signal ci-dessus, pour les deux
+// signaux qui n'affichaient jusqu'ici qu'un OK/détecté sans nombre.
+// Routes séparées (plutôt qu'étendre /pressure-signal) pour ne pas
+// toucher un contrat déjà consommé par le client, et parce que les trois
+// caches ont des cycles de vie/formes différents.
+app.get('/precip-signal', (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  const signals = {};
+  for (const id of ids) signals[id] = precipSignalCache.get(id) ?? null;
+  res.json({ signals });
+});
+
+app.get('/breeze-signal', (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  const signals = {};
+  for (const id of ids) signals[id] = breezeSignalCache.get(id) ?? null;
   res.json({ signals });
 });
 
@@ -1791,7 +1830,13 @@ async function pollAndNotify() {
       // démarrage) → false → pas d'alerte, jamais de crash. v1 sans pref
       // par compte : gaté par FW_PRECIP_ENABLED seul (cf. module plus haut).
       if (FW_PRECIP_ENABLED && fwPrefsForUser.sig_precip && rel.lat != null && rel.lon != null) {
-        const precipNear = fwPrecipNear(rel.lat, rel.lon, FW_PRECIP_RADIUS_KM);
+        const { near: precipNear, distanceKm: precipDistanceKm } = fwPrecipNear(rel.lat, rel.lon, FW_PRECIP_RADIUS_KM);
+        // Débogage 13/07/2026 (nice-to-have "valeur chiffrée dashboard") —
+        // alimente precipSignalCache à CHAQUE poll (comme pressureSignalCache),
+        // y compris quand rien n'est détecté (distanceKm repasse à null),
+        // pour que WatchCard affiche la vraie distance à l'écho le plus
+        // proche plutôt que le seul rayon configuré (qui ne bougeait jamais).
+        precipSignalCache.set(String(w.beacon_id), { detected: precipNear, distanceKm: precipDistanceKm, updatedAt: Date.now() });
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.precip;
         await evaluateFwSignal({
           userId: w.user_id, scope: String(w.beacon_id), signal: 'precip', level: 2, active: precipNear, notify,
@@ -1803,7 +1848,7 @@ async function pollAndNotify() {
             data: {
               url: '/', kind: 'flightwatch', signal: 'precip', level: 2,
               scope: String(w.beacon_id), voice: false,
-              value: FW_PRECIP_RADIUS_KM, unit: 'km',
+              value: precipDistanceKm ?? FW_PRECIP_RADIUS_KM, unit: 'km',
             },
           }),
         });
@@ -1988,17 +2033,26 @@ async function pollAndNotify() {
     for (const [userId, beacons] of watchedBeaconsByUser) {
       if (beacons.length < 2) continue; // pas de "cohérence" possible à 1 seule balise
 
-      const reversed = beacons.filter(b => {
-        // FIA-2 : plancher de vitesse aux DEUX extrémités — si le vent est
-        // quasi nul (baseline OU courant), la direction est aléatoire et un
-        // retournement de 100°+ ne signifie rien aérologiquement.
-        if (b.rel.moy == null || b.rel.moy < FW_BREEZE_REVERSAL_MIN_WIND_KMH) return false;
-        const baseline = fwBaselineAt(b.beaconId, b.windowMin);
-        if (!baseline || baseline.dir == null) return false;
-        if (baseline.moy == null || baseline.moy < FW_BREEZE_REVERSAL_MIN_WIND_KMH) return false;
-        const diff = fwAngularDiff(baseline.dir, b.rel.dir);
-        return diff !== null && diff >= FW_BREEZE_REVERSAL_MIN_DEG;
-      });
+      // Débogage 13/07/2026 (nice-to-have "valeur chiffrée dashboard") —
+      // l'angle de retournement (diff) était calculé puis jeté ici même
+      // avant ce changement (juste utilisé pour filtrer) ; il est maintenant
+      // conservé sur chaque balise qualifiée (reversalDeg) pour être exposé
+      // à l'affichage (cf. breezeSignalCache plus bas), au lieu du
+      // `value: null` codé en dur dans le push jusqu'ici.
+      const reversed = beacons
+        .map(b => {
+          // FIA-2 : plancher de vitesse aux DEUX extrémités — si le vent est
+          // quasi nul (baseline OU courant), la direction est aléatoire et un
+          // retournement de 100°+ ne signifie rien aérologiquement.
+          if (b.rel.moy == null || b.rel.moy < FW_BREEZE_REVERSAL_MIN_WIND_KMH) return null;
+          const baseline = fwBaselineAt(b.beaconId, b.windowMin);
+          if (!baseline || baseline.dir == null) return null;
+          if (baseline.moy == null || baseline.moy < FW_BREEZE_REVERSAL_MIN_WIND_KMH) return null;
+          const diff = fwAngularDiff(baseline.dir, b.rel.dir);
+          if (diff === null || diff < FW_BREEZE_REVERSAL_MIN_DEG) return null;
+          return { ...b, reversalDeg: diff };
+        })
+        .filter(Boolean);
       if (reversed.length < 2) continue;
 
       const clusters = fwClusterByProximity(reversed, FW_BREEZE_NEIGHBOR_RADIUS_KM);
@@ -2009,6 +2063,9 @@ async function pollAndNotify() {
         fwBreezeActiveScopes.add(`${userId}|${scope}`);
         const names = cluster.map(b => b.rel.nom).join(', ');
         const lbl = pushLabels(langByUser.get(userId)).flightwatch.breezeReversal;
+        // Angle représentatif du cluster pour le push : le plus marqué des
+        // balises concernées (pire cas, cohérent avec "niveau 2 partout").
+        const clusterAngleDeg = Math.round(Math.max(...cluster.map(b => b.reversalDeg)));
         await evaluateFwSignal({
           userId, scope, signal: 'breeze_reversal', level: 2, active: true, notify: activeByUser.has(userId),
           buildPush: () => ({
@@ -2019,19 +2076,41 @@ async function pollAndNotify() {
             data: {
               url: '/', kind: 'flightwatch', signal: 'breeze_reversal', level: 2,
               scope, voice: false, // niveau 2 = push doux, voix réservée niveau 3 (§7.5)
-              value: null, unit: null,
+              value: clusterAngleDeg, unit: '°',
             },
           }),
         });
+        // Débogage 13/07/2026 — en plus de la ligne ci-dessus (scope
+        // `zone:<ancre>`, seule utilisée pour la notification et
+        // l'anti-répétition), une ligne PAR BALISE du cluster (scope =
+        // beacon_id) est écrite ici, SANS notification (le push est déjà
+        // parti une seule fois au niveau du cluster ci-dessus — en écrire
+        // une par balise spammerait autant de push que de balises
+        // concernées). Cette ligne beacon_id est ce que WatchCard lit
+        // (fwAlerts.filter(a => a.scope === w.id)) : avant cet ajout, le
+        // scope `zone:...` ne matchait JAMAIS un id de balise brut, donc le
+        // chip/point "détecté" de la bascule de brise ne s'allumait sur
+        // AUCUNE carte, quelle que soit la balise — bug préexistant, corrigé
+        // au passage (cf. BUGS.md).
+        for (const b of cluster) {
+          fwBreezeActiveScopes.add(`${userId}|${b.beaconId}`);
+          breezeSignalCache.set(b.beaconId, { detected: true, angleDeg: Math.round(b.reversalDeg), updatedAt: Date.now() });
+          await sbUpsert('user_flightwatch_alerts', {
+            user_id: userId, scope: b.beaconId, signal: 'breeze_reversal', level: 2,
+            alert_active: true, updated_at: new Date().toISOString(),
+          }, 'user_id,scope,signal');
+        }
       }
     }
-    // Réarmement : toute zone `breeze_reversal` active lors d'un poll
+    // Réarmement : toute portée (zone `zone:<ancre>` OU balise individuelle,
+    // cf. ajout 13/07 ci-dessus) `breeze_reversal` active lors d'un poll
     // précédent mais non retrouvée ce poll-ci (le compte n'a pas de bascule
     // à collecter au-dessus, ou le cluster ne s'est pas reformé) est
     // remise à plat — même logique de réarmement silencieux que le reste.
     for (const row of (Array.isArray(fwAlertRows) ? fwAlertRows : [])) {
       if (row.signal !== 'breeze_reversal' || !row.alert_active) continue;
       if (fwBreezeActiveScopes.has(`${row.user_id}|${row.scope}`)) continue;
+      breezeSignalCache.delete(row.scope); // no-op si row.scope est un "zone:..." (jamais une clé de ce cache)
       await evaluateFwSignal({ userId: row.user_id, scope: row.scope, signal: 'breeze_reversal', level: 2, active: false, buildPush: () => ({}) });
     }
 
