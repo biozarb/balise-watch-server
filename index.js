@@ -1502,7 +1502,11 @@ async function pollAndNotify() {
     // démarré la surveillance (et kill switch ON) ; sinon vide le cache
     // pour libérer la RAM. Défensif : refresh KO → cache inchangé/vide →
     // signal simplement non évalué plus bas, jamais de crash.
-    if (FW_PRECIP_ENABLED && activeByUser.size > 0) await fwPrecipRefresh();
+    // Rafraîchit dès qu'AU MOINS UNE balise est surveillée (pas seulement
+    // si un compte a démarré) : l'état précip doit être RÉEL sur toute
+    // balise surveillée/favorite, même veille non démarrée (règle 13/07,
+    // cf. VEILLE_METEO_EXPLICATION §« affichage vs notifications »).
+    if (FW_PRECIP_ENABLED && watchedRows.length > 0) await fwPrecipRefresh();
     else fwPrecipClear();
 
     // Langue par compte (Lot 3) : même lecture batchée par table que
@@ -1532,7 +1536,13 @@ async function pollAndNotify() {
     // `active=false` réarme silencieusement (alert_active=false,
     // acked_at=null) sans envoyer de push, exactement comme le
     // réarmement des seuils vent existants.
-    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush, repeatMs }) {
+    // `notify` (règle produit 13/07) : sépare l'AFFICHAGE de la NOTIFICATION.
+    // L'état d'alerte (alert_active) est TOUJOURS écrit → toute balise
+    // surveillée/favorite montre l'état réel de ses signaux, même veille
+    // non démarrée. Le PUSH n'est envoyé que si notify=true (= surveillance
+    // démarrée). La voix, elle, est déjà bloquée côté client par le même
+    // bouton. `notify` absent → traité comme false (défensif).
+    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush, repeatMs, notify }) {
       const key = `${userId}|${scope}|${signal}`;
       const row = fwAlertMap.get(key);
       const now = Date.now();
@@ -1548,31 +1558,39 @@ async function pollAndNotify() {
         return;
       }
 
-      const lastSent = row?.alert_last_sent ? new Date(row.alert_last_sent).getTime() : 0;
-      const justActivated = !row?.alert_active;
-      const acked = row?.alert_acked_at && new Date(row.alert_acked_at).getTime() >= lastSent;
-      if (acked && !justActivated) return;
-      const repeatWindow = repeatMs || FW_ALERT_REPEAT_MS; // anti-répétition par défaut 15 min, surchargée par signal (ex. foudre 10 min, Lot 5)
-      if (!justActivated && (now - lastSent) < repeatWindow) return;
-
-      const userDevices = devicesByUser[userId] || [];
-      for (const dv of userDevices) {
-        try {
-          await webpush.sendNotification(
-            { endpoint: dv.endpoint, keys: { p256dh: dv.p256dh, auth: dv.auth } },
-            JSON.stringify(buildPush())
-          );
-          console.log(`📲 Push flightwatch → ${signal} (${scope})`);
-        } catch (err) {
-          if (err.statusCode === 410 || err.statusCode === 404) { await sbDelete('user_devices', `endpoint=eq.${encodeURIComponent(dv.endpoint)}`); }
-          else console.warn(`⚠️ Push flightwatch error ${err.statusCode}`);
+      // Signal DÉTECTÉ. Décision d'envoi de push — uniquement si notify.
+      let sent = false;
+      if (notify) {
+        const lastSent = row?.alert_last_sent ? new Date(row.alert_last_sent).getTime() : 0;
+        const justActivated = !row?.alert_active;
+        const acked = row?.alert_acked_at && new Date(row.alert_acked_at).getTime() >= lastSent;
+        const repeatWindow = repeatMs || FW_ALERT_REPEAT_MS; // anti-répétition par défaut 15 min, surchargée par signal (ex. foudre 10 min, Lot 5)
+        const dueForSend = justActivated || (now - lastSent) >= repeatWindow;
+        if (!(acked && !justActivated) && dueForSend) {
+          const userDevices = devicesByUser[userId] || [];
+          for (const dv of userDevices) {
+            try {
+              await webpush.sendNotification(
+                { endpoint: dv.endpoint, keys: { p256dh: dv.p256dh, auth: dv.auth } },
+                JSON.stringify(buildPush())
+              );
+              console.log(`📲 Push flightwatch → ${signal} (${scope})`);
+            } catch (err) {
+              if (err.statusCode === 410 || err.statusCode === 404) { await sbDelete('user_devices', `endpoint=eq.${encodeURIComponent(dv.endpoint)}`); }
+              else console.warn(`⚠️ Push flightwatch error ${err.statusCode}`);
+            }
+          }
+          sent = true;
         }
       }
 
-      await sbUpsert('user_flightwatch_alerts', {
-        user_id: userId, scope, signal, level,
-        alert_active: true, alert_last_sent: new Date(now).toISOString(),
-      }, 'user_id,scope,signal');
+      // État TOUJOURS persisté (affichage temps réel). alert_last_sent n'est
+      // mis à jour QUE si un push vient d'être envoyé — merge-duplicates
+      // conserve les colonnes omises, donc l'horodatage d'un épisode
+      // précédent n'est pas écrasé quand on ne fait que rafraîchir l'état.
+      const patch = { user_id: userId, scope, signal, level, alert_active: true, updated_at: new Date(now).toISOString() };
+      if (sent) patch.alert_last_sent = new Date(now).toISOString();
+      await sbUpsert('user_flightwatch_alerts', patch, 'user_id,scope,signal');
     }
 
     console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s), ${activeByUser.size} avec surveillance démarrée`);
@@ -1682,19 +1700,15 @@ async function pollAndNotify() {
         updatedAt: Date.now(),
       });
 
-      // Surveillance non démarrée pour ce compte : aucune alerte, ni
-      // push ni (indirectement) voix — la voix est déjà bloquée côté
-      // client par le même bouton. On réarme aussi l'état d'alerte tout
-      // de suite plutôt que de le laisser traîner : à la prochaine
-      // activation, un dépassement déjà en cours redéclenche un envoi
-      // immédiat (justActivated ci-dessous), sans devoir attendre un
-      // repeat_interval_min hérité d'une session d'avant l'arrêt.
-      if (!activeByUser.has(w.user_id)) {
-        if (w.alert_active || w.alert_acked_at) {
-          await sbPatch('user_watched', `id=eq.${w.id}`, { alert_active: false, alert_acked_at: null });
-        }
-        continue;
-      }
+      // Règle produit (13/07) : une balise surveillée/favorite affiche
+      // l'ÉTAT RÉEL de ses signaux MÊME si la surveillance n'est pas
+      // démarrée. « Démarrer la surveillance » ne débloque que les
+      // NOTIFICATIONS (push) et la voix — pas l'évaluation. `notify` porte
+      // ce gating : tous les signaux ci-dessous sont évalués quoi qu'il
+      // arrive (l'état est écrit pour l'affichage), mais evaluateFwSignal
+      // n'envoie de push que si notify=true. Le push de SEUIL vent, lui,
+      // reste géré plus bas et gaté par ce même `notify`.
+      const notify = activeByUser.has(w.user_id);
 
       // ── Lot 1 flightwatch : montée soudaine du vent ──────────────
       // Dérivée pure sur la balise déjà surveillée : compare le relevé
@@ -1720,7 +1734,7 @@ async function pollAndNotify() {
         }
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.windSurge;
         await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'wind_surge', level: 3, active: surging,
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'wind_surge', level: 3, active: surging, notify,
           buildPush: () => ({
             title: `💨 ${rel.nom}`,
             body: lbl.body(Math.round(rel.moy), Math.round(baseline.moy), fwPrefsForUser.wind_surge_window_min),
@@ -1751,7 +1765,7 @@ async function pollAndNotify() {
         const strikeCount = fwLightningCountNear(rel.lat, rel.lon, radiusKm, FW_LIGHTNING_WINDOW_MIN);
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.lightning;
         await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'lightning', level: 3, active: strikeCount > 0,
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'lightning', level: 3, active: strikeCount > 0, notify,
           repeatMs: FW_LIGHTNING_REPEAT_MS,
           buildPush: () => ({
             title: `⛈️ ${rel.nom}`,
@@ -1779,7 +1793,7 @@ async function pollAndNotify() {
         const precipNear = fwPrecipNear(rel.lat, rel.lon, FW_PRECIP_RADIUS_KM);
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.precip;
         await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'precip', level: 2, active: precipNear,
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'precip', level: 2, active: precipNear, notify,
           buildPush: () => ({
             title: `🌧️ ${rel.nom}`,
             body: lbl.body(FW_PRECIP_RADIUS_KM),
@@ -1810,7 +1824,7 @@ async function pollAndNotify() {
         const dropping = fwPressure.rate <= -fwPrefsForUser.pressure_drop_hpa_h;
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.pressureDrop;
         await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'pressure_drop', level: 2, active: dropping,
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'pressure_drop', level: 2, active: dropping, notify,
           buildPush: () => ({
             title: `📉 ${rel.nom}`,
             body: lbl.body(Math.abs(fwPressure.rate).toFixed(1), FW_TREND_WINDOW_H),
@@ -1845,7 +1859,7 @@ async function pollAndNotify() {
         const freezingRounded = fwWeather.freezingLevelNow != null ? Math.round(fwWeather.freezingLevelNow) : null;
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.convection;
         await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'convection', level: 2, active: developing,
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'convection', level: 2, active: developing, notify,
           buildPush: () => ({
             title: `⛈️ ${rel.nom}`,
             body: lbl.body(Math.round(capeNow), cloudLowMid, freezingRounded),
@@ -1890,6 +1904,17 @@ async function pollAndNotify() {
       const overM = rel.moy!==null && w.seuil_moy    && rel.moy>=w.seuil_moy;
       const overR = rel.raf!==null && w.seuil_rafale && rel.raf>=w.seuil_rafale;
       const now = Date.now();
+
+      // Push de SEUIL vent : reste lié au DÉMARRAGE de la surveillance
+      // (comme avant ce changement). Surveillance arrêtée (!notify) → pas
+      // de push seuil, on réarme l'état et on passe. L'affichage « seuil
+      // dépassé » est calculé côté client, indépendamment.
+      if (!notify) {
+        if (w.alert_active || w.alert_acked_at) {
+          await sbPatch('user_watched', `id=eq.${w.id}`, { alert_active: false, alert_acked_at: null });
+        }
+        continue;
+      }
 
       if (!overM && !overR) {
         // Repassé sous le seuil : réarme l'alerte pour la prochaine fois
@@ -1984,7 +2009,7 @@ async function pollAndNotify() {
         const names = cluster.map(b => b.rel.nom).join(', ');
         const lbl = pushLabels(langByUser.get(userId)).flightwatch.breezeReversal;
         await evaluateFwSignal({
-          userId, scope, signal: 'breeze_reversal', level: 2, active: true,
+          userId, scope, signal: 'breeze_reversal', level: 2, active: true, notify: activeByUser.has(userId),
           buildPush: () => ({
             title: lbl.title,
             body: lbl.body(names),
@@ -2034,7 +2059,7 @@ async function pollAndNotify() {
         const lbl = pushLabels(langByUser.get(userId)).flightwatch.vigilance;
         const prefs = prefsByUser.get(userId) || fwPrefs(null);
         await evaluateFwSignal({
-          userId, scope, signal: 'vigilance', level, active,
+          userId, scope, signal: 'vigilance', level, active, notify: activeByUser.has(userId),
           buildPush: () => ({
             title: lbl.title(level, dept),
             body: lbl.body(namesList),
