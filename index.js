@@ -565,6 +565,7 @@ const pressureSignalCache = new Map();
 // beacon_id (string) -> { detected: boolean, distanceKm|angleDeg: number|null, updatedAt }.
 const precipSignalCache = new Map();
 const breezeSignalCache = new Map();
+const convectionSignalCache = new Map();
 
 function fwRecordHistory(beaconId, sample) {
   const arr = beaconHistory.get(beaconId) || [];
@@ -1135,6 +1136,15 @@ app.get('/breeze-signal', (req, res) => {
   const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
   const signals = {};
   for (const id of ids) signals[id] = breezeSignalCache.get(id) ?? null;
+  res.json({ signals });
+});
+
+// Débogage 13/07/2026 — re-câblage développement convectif (cf. bloc
+// d'évaluation Lot 3 plus bas). Même contrat que les trois routes ci-dessus.
+app.get('/convection-signal', (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  const signals = {};
+  for (const id of ids) signals[id] = convectionSignalCache.get(id) ?? null;
   res.json({ signals });
 });
 
@@ -1897,6 +1907,14 @@ async function pollAndNotify() {
         const capeNow = fwWeather.cape.now;
         const capeRise = fwWeather.cape.rate * FW_TREND_WINDOW_H; // hausse totale sur la fenêtre (J/kg), plus lisible qu'un taux/h pour du CAPE
         const developing = capeNow >= FW_CONVECTION_CAPE_MIN_JKG && capeRise >= FW_CONVECTION_CAPE_RISE_MIN_JKG;
+        // Débogage 13/07/2026 (nice-to-have "valeur chiffrée dashboard",
+        // re-câblage suite retour Yann : le signal restait détecté/poussé
+        // en push mais n'était plus affiché du tout dans le dashboard
+        // depuis son retrait le 13/07 matin) — alimente convectionSignalCache
+        // à chaque poll où une tendance CAPE est disponible, détecté ou non.
+        convectionSignalCache.set(String(w.beacon_id), {
+          detected: developing, capeJkg: Math.round(capeNow), capeRiseJkg: Math.round(capeRise), updatedAt: Date.now(),
+        });
         // FIA-4 : deux couvertures 0-100% indépendantes ne s'additionnent
         // pas (elles se recouvrent partiellement) — Math.max() donne la
         // meilleure approximation de la fraction de ciel réellement couverte.
