@@ -231,6 +231,7 @@ function fwPrefs(row) {
 const FW_TREND_WINDOW_H = 3; // "tendance barométrique 3h", convention aviation standard (cf. §4 FLIGHTWATCH_LOT0.md) — pas de colonne dédiée au schéma Lot 0, fenêtre fixée ici, partagée pression ET CAPE (Lot 3) pour rester cohérent. Depuis le Lot 2b : sert aussi de fenêtre à la pression RÉELLE mesurée par la balise (beaconHistory), pas seulement au modèle Open-Meteo.
 const FW_HISTORY_MAX_AGE_MS = (FW_TREND_WINDOW_H * 60 + 30) * 60 * 1000; // 3h30 (Lot 2b) : couvre la fenêtre de tendance pression réelle avec marge — large au-dessus des autres fenêtres réglées (vent/brise, défaut 15 min)
 const MF_HISTORY_RETENTION_H = 48; // Lot 8 (12/07) : rétention de la table persistante mf_station_history pour les stations AVEC vent — INDÉPENDANTE de FW_HISTORY_MAX_AGE_MS/beaconHistory ci-dessus, qui reste à 3h30 pour la veille météo (flightwatch) uniquement
+const MF_MINMAX_WINDOW_MIN = 30; // Débogage 17/07 (retour Yann : enregistrer min/max pour les stations MF) — Météo-France ne publie pas de vitesse minimale par relevé (contrairement à Pioupiou, wind_speed_min) : le max est le raf10 natif (déjà récupéré à chaque poll, juste jamais persisté jusqu'ici), le min est calculé nous-mêmes, glissant sur les échantillons `ff` déjà en RAM (beaconHistory) sur cette fenêtre — un min "maison", pas une mesure native. 30 min choisi comme repère "a-t-il molli récemment", volontairement plus court que FW_TREND_WINDOW_H (3h, pensé pour la pression) — à ajuster si besoin.
 const MF_PRESSURE_ONLY_RETENTION_H = 12; // Débogage 12/07/2026 (suite) : rétention DÉDIÉE, plus courte, pour les lignes pression-seule (moy IS NULL) de la même table — décidé avec Yann : 12h suffit à voir l'évolution de la pression (pas de graphe vent à afficher pour ces stations, contrairement aux stations MF avec vent qui gardent 48h), coûte nettement moins cher en stockage Supabase
 const FW_PRESSURE_MIN_SAMPLES_SPAN_MIN = 150; // Lot 2b : n'évalue la pression RÉELLE (beaconHistory) qu'avec au moins 2h30 de recul (proche de la fenêtre 3h visée) — sinon repli Open-Meteo, jamais un taux calculé sur un intervalle trop court ou juste après un redémarrage
 const FW_PRESSURE_NEARBY_STATION_MAX_KM = 40; // Débogage 12/07/2026 : rayon de recherche d'une station MF PROCHE (pression uniquement, vent ou pas) comme repli intermédiaire avant le modèle — la pression est un champ spatialement lisse (contrairement au vent), une vraie mesure à 40 km reste plus fiable qu'une valeur de grille modèle interpolée
@@ -578,6 +579,25 @@ function fwRecordHistory(beaconId, sample) {
   beaconHistory.set(beaconId, arr);
 }
 
+// Débogage 17/07 (retour Yann : min/max pour les stations MF) — minimum
+// glissant de `ff` (vitesse moyenne) sur `windowMin` minutes, calculé à
+// partir du buffer RAM `beaconHistory` DÉJÀ accumulé pour ce beaconId
+// (lu AVANT que le nouvel échantillon n'y soit poussé par fwRecordHistory,
+// donc à appeler avant ce dernier). `newFf` (l'échantillon du poll en
+// cours) est inclus dans le calcul. Retourne null si newFf est null (pas
+// de vent mesuré) — jamais une fausse valeur 0.
+function fwWindowMinFf(beaconId, newFf, windowMin = MF_MINMAX_WINDOW_MIN) {
+  if (newFf == null) return null;
+  const arr = beaconHistory.get(beaconId) || [];
+  const cutoff = Date.now() - windowMin * 60 * 1000;
+  let min = newFf;
+  for (const s of arr) {
+    if (s.t < cutoff || s.moy == null) continue;
+    if (s.moy < min) min = s.moy;
+  }
+  return min;
+}
+
 // Lot 8 (12/07) — persistance 48h de l'historique des stations MF, en
 // complément du buffer RAM ci-dessus (qui reste inchangé, 3h30, pour la
 // veille météo). Table : mf_station_history (cf.
@@ -638,12 +658,12 @@ async function hydrateBeaconHistoryFromSupabase() {
     const cutoff = Date.now() - FW_HISTORY_MAX_AGE_MS;
     const rows = await sbGet(
       'mf_station_history',
-      `t=gte.${cutoff}&select=station_id,t,moy,dir,pressure&order=t.asc&limit=200000`
+      `t=gte.${cutoff}&select=station_id,t,moy,raf,min,dir,pressure&order=t.asc&limit=200000`
     );
     if (!Array.isArray(rows) || !rows.length) return;
     const stationIds = new Set();
     for (const r of rows) {
-      fwRecordHistory(String(r.station_id), { t: r.t, moy: r.moy, dir: r.dir, pressure: r.pressure });
+      fwRecordHistory(String(r.station_id), { t: r.t, moy: r.moy, raf: r.raf ?? null, min: r.min ?? null, dir: r.dir, pressure: r.pressure });
       stationIds.add(r.station_id);
     }
     console.log(`🔄 beaconHistory hydraté depuis mf_station_history : ${rows.length} échantillons, ${stationIds.size} stations`);
@@ -1206,10 +1226,12 @@ app.get('/meteofrance-stations', (req, res) => {
 // `releves` — donc aussi les stations MF avec du vent, fondues dedans
 // depuis le Lot 7 suite. Aucun nouveau cache, aucun appel réseau ajouté.
 // Limites assumées (vs l'archive Pioupiou, hébergée par Pioupiou) :
-// (1) moy/direction/pression SEULEMENT — fwRecordHistory n'enregistre
-// pas la rafale (jamais utilisée par les signaux flightwatch en amont),
-// (2) 3h30 de profondeur MAX (FW_HISTORY_MAX_AGE_MS) pour CE buffer RAM,
-// (3) buffer RAM pur, vidé à chaque redémarrage du process.
+// (1) 3h30 de profondeur MAX (FW_HISTORY_MAX_AGE_MS) pour CE buffer RAM,
+// (2) buffer RAM pur, vidé à chaque redémarrage du process.
+// Débogage 17/07 (retour Yann) — raf (rafale, raf10 natif) et min (min
+// glissant calculé, cf. fwWindowMinFf) sont désormais persistés en plus
+// de moy/direction/pression — l'ancienne limitation "pas de rafale" est
+// levée.
 // Pas d'auth : même donnée publique en lecture que /meteofrance-stations.
 //
 // Lot 8 (12/07) — paramètre optionnel ?hours=N : SANS lui, comportement
@@ -1233,7 +1255,7 @@ app.get('/meteofrance-history/:id', async (req, res) => {
     const cutoff = Date.now() - hours * 3600 * 1000;
     const oldPts = await sbGet(
       'mf_station_history',
-      `station_id=eq.${encodeURIComponent(req.params.id)}&t=gte.${cutoff}&select=t,moy,dir,pressure&order=t.asc`
+      `station_id=eq.${encodeURIComponent(req.params.id)}&t=gte.${cutoff}&select=t,moy,raf,min,dir,pressure&order=t.asc`
     );
     const ramCutoff = ramPts[0]?.t ?? Infinity; // évite les doublons : ne garde du passé persistant que ce qui précède le buffer RAM
     const merged = [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
@@ -1499,11 +1521,14 @@ async function pollAndNotify() {
         pressure: obs.pmer ?? null, // FIA-3 : n'utiliser QUE pmer (pression ramenée au niveau de la mer) — mélanger pmer et pres (pression station, différente de ~50-100 hPa en montagne) produirait une fausse chute de dizaines de hPa/h si le pipeline alterne les champs entre deux polls
         lat: meta.lat, lon: meta.lon, nom: meta.nom,
       };
-      // Lot 8 (12/07) — même échantillon que fwRecordHistory plus bas
-      // (moy/dir/pressure, pas de rafale — jamais enregistrée pour les
-      // stations MF, même limitation assumée), mais destiné à
-      // mf_station_history (persistant 48h) plutôt qu'au buffer RAM.
-      mfHistoryRows.push({ station_id: mfId, t: fwPollT, moy: obs.ff, dir: obs.dd, pressure: obs.pmer ?? null });
+      // Débogage 17/07 (retour Yann : min/max pour les stations MF) — la
+      // limitation "pas de rafale" est levée : obs.raf10 est déjà lu plus
+      // haut (releves[mfId].raf), on le persiste ici aussi. `min` est
+      // calculé (fwWindowMinFf, cf. définition) — pas une donnée native
+      // MF, cf. commentaire de MF_MINMAX_WINDOW_MIN. Appelé AVANT le
+      // fwRecordHistory de la boucle releves ci-dessous : lit encore le
+      // buffer RAM tel qu'à l'issue du poll précédent.
+      mfHistoryRows.push({ station_id: mfId, t: fwPollT, moy: obs.ff, raf: obs.raf10 ?? null, min: fwWindowMinFf(mfId, obs.ff), dir: obs.dd, pressure: obs.pmer ?? null });
     }
     mfPersistHistory(mfHistoryRows); // fire-and-forget — cf. définition, ne bloque/casse jamais la suite du poll
 
@@ -1513,7 +1538,13 @@ async function pollAndNotify() {
     // vent/direction/pression ci-dessous (fwBaselineAt / fwRealPressureTrend).
     // fwPollT hoisté plus haut (avant la boucle MF, Lot 8) — inchangé ici.
     Object.entries(releves).forEach(([id, rel]) => {
-      fwRecordHistory(id, { t: fwPollT, moy: rel.moy, dir: rel.dir, pressure: rel.pressure });
+      // raf/min (débogage 17/07) : ajoutés pour que le buffer RAM (points
+      // les plus récents servis par /meteofrance-history) porte les mêmes
+      // champs que mf_station_history — sinon les points tout juste polled
+      // resteraient sans raf/min tant que la table persistante n'a pas
+      // pris le relais. Sans effet sur les balises Pioupiou (cette route
+      // ne les sert jamais, cf. fetchHistory côté client).
+      fwRecordHistory(id, { t: fwPollT, moy: rel.moy, raf: rel.raf ?? null, min: fwWindowMinFf(id, rel.moy), dir: rel.dir, pressure: rel.pressure });
     });
     const testData = await sbGet('test_beacon', 'id=eq.singleton&select=*');
     const test = testData?.[0];
