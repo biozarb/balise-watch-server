@@ -116,6 +116,7 @@ const GEO_COMMUNES_URL = 'https://geo.api.gouv.fr/communes';
 const PUSH_LABELS = {
   fr: {
     avg: 'Moy.', gust: 'Rafale',
+    dirOut: '🧭 Hors zone :', // Débogage 16/07/2026 (demande Yann) — option orientation par balise
     flightwatch: {
       windSurge: {
         body: (nowKmh, baseKmh, windowMin) =>
@@ -149,6 +150,7 @@ const PUSH_LABELS = {
   },
   en: {
     avg: 'Avg.', gust: 'Gust',
+    dirOut: '🧭 Out of zone:',
     flightwatch: {
       windSurge: {
         body: (nowKmh, baseKmh, windowMin) =>
@@ -238,6 +240,7 @@ const MF_OBS_MAX_AGE_MS = 30 * 60 * 1000; // DATA-1 : garde-fraîcheur MF — un
 const FW_BREEZE_REVERSAL_MIN_DEG = 100; // retournement net de direction, pas une dérive — pas de colonne dédiée au schéma Lot 0, constante serveur documentée ici
 const FW_BREEZE_NEIGHBOR_RADIUS_KM = 20; // "balises voisines" — rayon raisonnable pour la maille de balises Alpes/Maurienne, ajustable à l'usage
 const FW_BREEZE_REVERSAL_MIN_WIND_KMH = 5; // FIA-2 : plancher de vitesse sur la bascule de brise — par vent quasi nul la direction d'une girouette est aléatoire, ce qui suffirait à déclencher un retournement fictif de 100°+ entre deux balises calmes au lever/coucher
+const WATCH_DIR_MIN_WIND_KMH = 5; // Débogage 16/07/2026 (demande Yann, option orientation par balise) : même garde-fou que FW_BREEZE_REVERSAL_MIN_WIND_KMH — par vent quasi nul la direction n'a pas de sens physique, on n'évalue pas "hors secteur" en dessous de ce seuil (évite un faux "hors zone" au lever du jour, vent calme, direction erratique)
 const FW_ALERT_REPEAT_MS = 15 * 60 * 1000; // anti-répétition flightwatch : pas de colonne repeat_interval dédiée (contrairement à user_watched), intervalle fixe raisonnable niveau 2/3
 const FW_OM_MAX_BEACONS_PER_POLL = 200; // garde-fou quota Open-Meteo : coupe court si un jour énormément de balises distinctes étaient surveillées d'un coup (très loin de l'usage actuel), plutôt que de risquer les paliers 600/min ou 5000/h
 
@@ -693,6 +696,19 @@ function fwAngularDiff(a, b) {
   if (d > 180) d = 360 - d;
   return d;
 }
+// Débogage 16/07/2026 (demande Yann, option orientation par balise) —
+// direction (degrés météo) -> secteur le plus proche parmi 8 (0/45/…/315).
+// MIROIR EXACT de degToSector8 (client, src/lib/utils.ts) : les deux
+// bouts doivent s'accorder sur le même découpage, sinon l'affichage
+// (WatchCard, secteur courant surligné) et l'évaluation serveur
+// (déclenchement du push) pourraient diverger sur une direction proche
+// d'une frontière de secteur (ex. 22°, à la limite N/NE).
+function watchDirToSector8(deg) {
+  const idx = ((Math.round(deg / 45) % 8) + 8) % 8;
+  return idx * 45;
+}
+// Même notation française que côté client (SECTOR_8_LABELS, src/lib/utils.ts).
+const WATCH_SECTOR_8_LABELS = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SO', 270: 'O', 315: 'NO' };
 // Distance à vol d'oiseau (km) — formule haversine, précision suffisante
 // pour juger "balises voisines" (pas de calcul géodésique de précision).
 function fwHaversineKm(lat1, lon1, lat2, lon2) {
@@ -1273,6 +1289,13 @@ app.post('/sync', async (req, res) => {
         // MAIS l'onConflict ci-dessous suppose déjà la contrainte à 3
         // colonnes : à activer seulement après exécution du script).
         source: w.source ?? 'pioupiou',
+        // Débogage 16/07/2026 (demande Yann) — option orientation, même
+        // politique défensive que `source` ci-dessus : colonnes pas
+        // encore créées tant que Yann n'a pas exécuté
+        // supabase_watch_orientation.sql, PostgREST les ignore
+        // silencieusement côté insert simple, aucune casse avant.
+        dir_enabled: w.dirEnabled ?? false,
+        dir_sectors: Array.isArray(w.dirSectors) ? w.dirSectors : [],
         updated_at: new Date().toISOString(),
       }));
       await sbUpsert('user_watched', rows, 'user_id,beacon_id,source');
@@ -1967,6 +1990,19 @@ async function pollAndNotify() {
 
       const overM = rel.moy!==null && w.seuil_moy    && rel.moy>=w.seuil_moy;
       const overR = rel.raf!==null && w.seuil_rafale && rel.raf>=w.seuil_rafale;
+      // Débogage 16/07/2026 (demande Yann) — option orientation : "hors
+      // zone" seulement si l'option est active, qu'au moins un secteur
+      // favorable est enregistré (défensif — cf. commentaire WatchModal,
+      // "aucun secteur coché" ne doit jamais spammer), que la direction
+      // est connue, ET que le vent dépasse le plancher WATCH_DIR_MIN_WIND_KMH
+      // (direction non significative par vent quasi nul, même garde-fou
+      // que la bascule de brise). `dir_sectors` absent tant que Yann n'a
+      // pas exécuté supabase_watch_orientation.sql -> Array.isArray
+      // défensif, se comporte comme "option indisponible" (jamais de crash).
+      const sectorNow = rel.dir != null ? watchDirToSector8(rel.dir) : null;
+      const overDir = !!w.dir_enabled && Array.isArray(w.dir_sectors) && w.dir_sectors.length > 0
+        && sectorNow !== null && rel.moy !== null && rel.moy >= WATCH_DIR_MIN_WIND_KMH
+        && !w.dir_sectors.includes(sectorNow);
       const now = Date.now();
 
       // Push de SEUIL vent : reste lié au DÉMARRAGE de la surveillance
@@ -1980,10 +2016,11 @@ async function pollAndNotify() {
         continue;
       }
 
-      if (!overM && !overR) {
-        // Repassé sous le seuil : réarme l'alerte pour la prochaine fois
-        // (alert_active + alert_acked_at remis à zéro). On ne touche pas
-        // alert_last_sent (inutile, et garde une trace pour debug).
+      if (!overM && !overR && !overDir) {
+        // Repassé sous le seuil (et/ou revenu dans un secteur favorable) :
+        // réarme l'alerte pour la prochaine fois (alert_active +
+        // alert_acked_at remis à zéro). On ne touche pas alert_last_sent
+        // (inutile, et garde une trace pour debug).
         if (w.alert_active) {
           await sbPatch('user_watched', `id=eq.${w.id}`,
             { alert_active: false, alert_acked_at: null });
@@ -2015,6 +2052,11 @@ async function pollAndNotify() {
       if (overM) body+=`${lbl.avg} ${Math.round(rel.moy)} km/h`;
       if (overM&&overR) body+=' · ';
       if (overR) body+=`${lbl.gust} ${Math.round(rel.raf)} km/h`;
+      // Débogage 16/07/2026 (demande Yann) — option orientation : ajoute
+      // le secteur courant au corps du push, sur sa propre ligne pour ne
+      // pas se mélanger visuellement avec moy/rafale (des points " · "
+      // en trop rendraient la notif illisible sur un petit écran).
+      if (overDir) body += `${body ? '\n' : ''}${lbl.dirOut} ${WATCH_SECTOR_8_LABELS[sectorNow]}`;
 
       const userDevices = devicesByUser[w.user_id] || [];
       let anySent = false;
