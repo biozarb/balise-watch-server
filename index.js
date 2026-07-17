@@ -1070,6 +1070,148 @@ function findNearbyMfStations(beaconId, lat, lon) {
   return candidates;
 }
 
+// ── Étape 12 (17/07/2026) : stations personnelles Infoclimat (réseau
+// StatIC) ────────────────────────────────────────────────────────────
+// Contrairement aux stations MF (réseau officiel RADOME), ce sont des
+// stations AMATEUR (Netatmo, Davis, WeeWX...) hébergées bénévolement par
+// des particuliers et republiées par l'association Infoclimat sous
+// licence CC BY / CC BY-NC (jamais Etalab plein pour les stations de
+// contributeurs — cf. www.infoclimat.fr/opendata, sondé en direct le
+// 17/07/2026 avec Yann). Deux caches RAM séparés, même philosophie que
+// mfStationsList/mfObsCache ci-dessus :
+//  - infoclimatStationsList / infoclimatStationsById : métadonnées
+//    statiques (id/nom/coords/altitude/licence), ~1200 stations en
+//    France, source = fichier GeoJSON PUBLIC data.gouv.fr (aucune clé
+//    requise pour celui-ci, contrairement au reste), rafraîchi une fois
+//    par jour.
+//  - infoclimatObsCache : dernier relevé par station (vent/direction/
+//    pression/température), rafraîchi par LOTS de INFOCLIMAT_BATCH_SIZE
+//    ids (l'URL deviendrait déraisonnable pour ~1200 stations en un seul
+//    appel) toutes les INFOCLIMAT_OBS_POLL_MS.
+// Si INFOCLIMAT_API_KEY n'est pas configurée : les deux caches restent
+// vides, /infoclimat-stations renvoie une liste vide, aucun crash (même
+// dégradation silencieuse que le reste des modules optionnels).
+const INFOCLIMAT_API_KEY = process.env.INFOCLIMAT_API_KEY;
+// Fichier GeoJSON "Liste des stations en open-data du réseau
+// météorologique Infoclimat (Réseau StatIC)" — mis à jour en continu par
+// Infoclimat, lecture publique sans authentification (vérifié en direct
+// le 17/07/2026 : ~1200 features, dont 1199 source infoclimat.fr).
+const INFOCLIMAT_STATIONS_GEOJSON_URL = 'https://www.data.gouv.fr/api/1/datasets/r/8a9e6a12-03f8-4056-861f-70b84136313e';
+const INFOCLIMAT_OPENDATA_URL = 'https://www.infoclimat.fr/opendata/';
+const INFOCLIMAT_STATIONS_LIST_REFRESH_MS = 24 * 60 * 60 * 1000;
+// Cadence native constatée des relevés StatIC (pas de 15 min sur
+// l'échantillon sondé le 17/07) — inutile de poller plus vite.
+const INFOCLIMAT_OBS_POLL_MS = 15 * 60 * 1000;
+// Taille de lot pour `stations[]=A&stations[]=B&...` — fonctionne en
+// bulk (vérifié en direct le 17/07 avec 2 ids), mais on borne la
+// longueur d'URL/le poids de réponse plutôt que de tenter les ~1200
+// d'un coup. Piste d'optimisation notée mais pas implémentée : ne
+// redemander qu'une fenêtre courte (dernière heure) au lieu de la
+// journée entière à chaque cycle réduirait le volume transféré — laissé
+// simple pour ce premier lot, à revisiter si la bande passante Render
+// devient un problème réel.
+const INFOCLIMAT_BATCH_SIZE = 100;
+
+let infoclimatStationsList = []; // [{id, nom, lat, lon, alt, licenseCode, licenseLabel, licenseUrl}]
+let infoclimatStationsById = new Map();
+let infoclimatStationsListFetchedAt = 0;
+let infoclimatObsCache = new Map(); // id -> {t, moy, raf, dir, pressure, temp}
+let infoclimatObsCacheFetchedAt = 0;
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function refreshInfoclimatStationsList() {
+  try {
+    const r = await fetch(INFOCLIMAT_STATIONS_GEOJSON_URL);
+    if (!r.ok) return; // échec ponctuel : on garde l'ancienne liste plutôt que de la vider
+    const geo = await r.json();
+    const feats = Array.isArray(geo?.features) ? geo.features : [];
+    const parsed = [];
+    for (const f of feats) {
+      const p = f?.properties || {};
+      const coords = f?.geometry?.coordinates;
+      const lon = coords?.[0], lat = coords?.[1];
+      if (!p.id || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      // Ne garder que le réseau Infoclimat (StatIC) — exclut la poignée
+      // d'entrées source 'METEO-FRANCE' présentes dans ce même fichier,
+      // déjà couvertes par /meteofrance-stations : jamais doubler un
+      // même point physique sur la carte.
+      if (p.license?.source !== 'infoclimat.fr') continue;
+      parsed.push({
+        id: p.id, nom: p.name || p.id, lat, lon, alt: p.elevation ?? null,
+        licenseCode: p.license?.code ?? null,
+        licenseLabel: p.license?.license ?? null,
+        licenseUrl: p.license?.url ?? null,
+      });
+    }
+    if (parsed.length) {
+      infoclimatStationsList = parsed;
+      infoclimatStationsById = new Map(parsed.map(s => [s.id, s]));
+      infoclimatStationsListFetchedAt = Date.now();
+    }
+  } catch (e) { console.error('refreshInfoclimatStationsList error:', e.message); }
+}
+
+// Un seul lot (déjà vérifié en direct le 17/07 : `stations[]` répété
+// fonctionne, `hourly` ne contient que les stations avec au moins un
+// point sur la période demandée — pas d'erreur pour les autres).
+async function fetchInfoclimatBatch(ids, startDate, endDate) {
+  const params = new URLSearchParams({
+    method: 'get', format: 'json', start: startDate, end: endDate, token: INFOCLIMAT_API_KEY,
+  });
+  for (const id of ids) params.append('stations[]', id);
+  const r = await fetch(`${INFOCLIMAT_OPENDATA_URL}?${params.toString()}`);
+  if (!r.ok) return null;
+  const data = await r.json();
+  if (data?.status !== 'OK') return null;
+  return data.hourly || {};
+}
+
+function parseInfoclimatPoint(raw) {
+  const num = v => (v != null && v !== '' ? parseFloat(v) : null);
+  return {
+    t: Date.parse(`${raw.dh_utc.replace(' ', 'T')}Z`),
+    moy: num(raw.vent_moyen),
+    raf: num(raw.vent_rafales),
+    dir: num(raw.vent_direction),
+    pressure: num(raw.pression),
+    temp: num(raw.temperature),
+  };
+}
+
+async function refreshInfoclimatObs() {
+  if (!INFOCLIMAT_API_KEY || !infoclimatStationsList.length) return;
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const batches = chunkArray(infoclimatStationsList.map(s => s.id), INFOCLIMAT_BATCH_SIZE);
+    const next = new Map();
+    for (const ids of batches) {
+      const hourly = await fetchInfoclimatBatch(ids, today, today);
+      if (!hourly) continue; // ce lot échoue : on garde les autres plutôt que tout annuler
+      for (const [id, points] of Object.entries(hourly)) {
+        if (!Array.isArray(points) || !points.length) continue;
+        // dh_utc croissant dans la réponse (vérifié en direct le 17/07) →
+        // le dernier élément est le relevé le plus récent.
+        const parsed = parseInfoclimatPoint(points[points.length - 1]);
+        if (Number.isFinite(parsed.t)) next.set(id, parsed);
+      }
+    }
+    if (next.size) { infoclimatObsCache = next; infoclimatObsCacheFetchedAt = Date.now(); }
+  } catch (e) { console.error('refreshInfoclimatObs error:', e.message); }
+}
+
+async function refreshInfoclimatData() {
+  if (!INFOCLIMAT_API_KEY) return;
+  if (!infoclimatStationsList.length || Date.now() - infoclimatStationsListFetchedAt > INFOCLIMAT_STATIONS_LIST_REFRESH_MS) {
+    await refreshInfoclimatStationsList();
+  }
+  await refreshInfoclimatObs();
+}
+
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -1263,6 +1405,64 @@ app.get('/meteofrance-history/:id', async (req, res) => {
   } catch (e) {
     console.error('meteofrance-history (hours) error:', e.message);
     res.json({ points: ramPts }); // dégradation gracieuse : au pire, la profondeur RAM habituelle
+  }
+});
+
+// ── Étape 12 (suite, 17/07) — Stations Infoclimat (lecture seule) ───
+// Sert infoclimatObsCache/infoclimatStationsList (rafraîchi en tâche de
+// fond, cf. refreshInfoclimatData) — jamais d'appel Infoclimat déclenché
+// par une requête client, jamais la clé API exposée côté client. Pas
+// d'auth requise, données déjà publiques (CC BY / CC BY-NC) en lecture.
+// `licenseCode`/`licenseLabel`/`licenseUrl` transmis pour que le client
+// puisse afficher l'attribution requise par la licence (obligatoire pour
+// CC BY, bonne pratique pour CC BY-NC) directement dans la popup carte.
+app.get('/infoclimat-stations', (req, res) => {
+  const out = [];
+  for (const [id, obs] of infoclimatObsCache) {
+    const meta = infoclimatStationsById.get(id);
+    if (!meta) continue;
+    out.push({
+      id, nom: meta.nom, lat: meta.lat, lon: meta.lon, alt: meta.alt,
+      licenseCode: meta.licenseCode, licenseLabel: meta.licenseLabel, licenseUrl: meta.licenseUrl,
+      dd: obs.dir, ff: obs.moy, raf10: obs.raf, pressure: obs.pressure, temp: obs.temp,
+      validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
+    });
+  }
+  res.json({ stations: out, fetchedAt: infoclimatObsCacheFetchedAt });
+});
+
+// ── Étape 12 (suite) — Historique d'une station Infoclimat ──────────
+// Contrairement aux stations MF, Infoclimat expose SA PROPRE archive
+// interrogeable sur n'importe quelle période passée : pas besoin de
+// maintenir notre propre buffer RAM ni table Supabase ici, on relaie
+// simplement la requête (avec la clé serveur, jamais exposée côté
+// client) et on reforme la réponse en HistoryPoint[] (même forme que
+// Pioupiou/MF : {t, min, avg, max, dir, pressure}). `min` toujours null
+// (pas de notion de minimum glissant côté Infoclimat, contrairement à
+// Pioupiou/MF où on le calcule nous-mêmes) ; `max` = rafale native si le
+// modèle de station de l'utilisateur en mesure une (beaucoup de stations
+// amateur n'ont pas d'anémomètre à rafale, cf. vent_rafales souvent null
+// constaté en sondage direct le 17/07 — jamais 0/faux dans ce cas).
+app.get('/infoclimat-history/:id', async (req, res) => {
+  if (!INFOCLIMAT_API_KEY) return res.json({ points: [] });
+  try {
+    const hoursParam = Number(req.query.hours);
+    const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 1), 24 * 14) : 24;
+    const end = new Date();
+    const start = new Date(end.getTime() - hours * 3600 * 1000);
+    const fmt = d => d.toISOString().slice(0, 10);
+    const hourly = await fetchInfoclimatBatch([req.params.id], fmt(start), fmt(end));
+    const raw = hourly?.[req.params.id];
+    if (!Array.isArray(raw)) return res.json({ points: [] });
+    const cutoff = start.getTime();
+    const points = raw.map(p => {
+      const parsed = parseInfoclimatPoint(p);
+      return { t: parsed.t, min: null, avg: parsed.moy, max: parsed.raf, dir: parsed.dir, pressure: parsed.pressure };
+    }).filter(p => Number.isFinite(p.t) && p.t >= cutoff);
+    res.json({ points });
+  } catch (e) {
+    console.error('infoclimat-history error:', e.message);
+    res.json({ points: [] });
   }
 });
 
@@ -2262,4 +2462,6 @@ app.listen(PORT, async () => {
   setInterval(pollAndNotify, POLL_MS);
   refreshMeteoFranceData(); // no-op silencieux si METEOFRANCE_API_KEY absente
   setInterval(refreshMeteoFranceData, MF_OBS_POLL_MS);
+  refreshInfoclimatData(); // no-op silencieux si INFOCLIMAT_API_KEY absente
+  setInterval(refreshInfoclimatData, INFOCLIMAT_OBS_POLL_MS);
 });
