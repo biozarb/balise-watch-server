@@ -533,8 +533,16 @@ async function fwPrecipRefresh() {
 // peu importe lequel) ; parcourt maintenant TOUT le disque pour garder le
 // pixel peint le plus proche du centre, afin d'exposer une distance réelle
 // à l'affichage (cf. precipSignalCache) plutôt que le seul rayon configuré.
-function fwPrecipNear(lat, lon, radiusKm) {
-  if (!fwPrecipTiles.size || lat == null || lon == null) return { near: false, distanceKm: null };
+// Débogage 17/07/2026 (Lot 3 plan de coupe — retour Yann "distance réelle
+// (km)" à la précipitation) — cœur du balayage disque extrait en fonction
+// pure paramétrée par la Map de tuiles décodées, pour être réutilisé par
+// DEUX caches indépendants : fwPrecipTiles (flightwatch, balises
+// surveillées, cf. ci-dessus) ET cutPrecipTiles (plan de coupe, point
+// libre quelconque, cf. plus bas) — même algorithme, même source radar,
+// juste un cache RAM différent selon l'appelant. Comportement de
+// fwPrecipNear strictement inchangé (délègue tel quel).
+function precipNearestInTiles(tiles, lat, lon, radiusKm) {
+  if (!tiles.size || lat == null || lon == null) return { near: false, distanceKm: null };
   const z = FW_PRECIP_TILE_Z, size = FW_PRECIP_TILE_SIZE;
   const world = Math.pow(2, z) * size; // largeur du monde en pixels à ce zoom
   const gx = (lon + 180) / 360 * world;
@@ -550,7 +558,7 @@ function fwPrecipNear(lat, lon, radiusKm) {
       if (d2 > rp2 || d2 >= bestPx2) continue; // disque, pas carré ; élague si déjà moins bon que le meilleur trouvé
       const px = Math.floor(gx + dx), py = Math.floor(gy + dy);
       const tx = Math.floor(px / size), ty = Math.floor(py / size);
-      const tile = fwPrecipTiles.get(`${tx}/${ty}`);
+      const tile = tiles.get(`${tx}/${ty}`);
       if (!tile) continue;
       const lx = px - tx * size, ly = py - ty * size;
       if (lx < 0 || ly < 0 || lx >= tile.width || ly >= tile.height) continue;
@@ -559,6 +567,62 @@ function fwPrecipNear(lat, lon, radiusKm) {
   }
   if (bestPx2 === Infinity) return { near: false, distanceKm: null };
   return { near: true, distanceKm: Math.round((Math.sqrt(bestPx2) * mPerPx) / 100) / 10 };
+}
+function fwPrecipNear(lat, lon, radiusKm) {
+  return precipNearestInTiles(fwPrecipTiles, lat, lon, radiusKm);
+}
+
+// ── Lot 3 plan de coupe (17/07/2026) — distance réelle à la pluie ────
+// Second cache de tuiles radar, INDÉPENDANT de fwPrecipTiles ci-dessus :
+// celui-ci sert un affichage À LA DEMANDE (plan de coupe, point libre
+// quelconque cliqué sur la carte), PAS une alerte flightwatch — donc PAS
+// gaté par FW_PRECIP_ENABLED (feature à part, opt-in réservé au
+// push/bêta) ni par watchedRows.length > 0 (un point libre n'est pas
+// forcément une balise surveillée). Rafraîchi paresseusement (1er appel
+// après CUT_PRECIP_MAX_AGE_MS écoulé), jamais par le poll 5 min.
+// `cutPrecipLastAttempt` (horloge murale, PAS le timestamp de la frame
+// RainViewer) borne la fréquence de re-fetch même en cas d'échec répété,
+// pour ne jamais marteler RainViewer si plusieurs plans de coupe
+// s'ouvrent dans la même minute.
+let cutPrecipTiles = new Map();
+let cutPrecipFrameTime = 0;      // timestamp (s, epoch RainViewer) de la frame en cache
+let cutPrecipLastAttempt = 0;    // horloge murale (ms) de la dernière TENTATIVE de refresh
+let cutPrecipRefreshing = false;
+const CUT_PRECIP_MAX_AGE_MS = 3 * 60 * 1000; // marge confortable sous la cadence de renouvellement RainViewer (~10 min)
+
+async function cutPrecipRefresh() {
+  if (cutPrecipRefreshing) return;
+  cutPrecipRefreshing = true;
+  cutPrecipLastAttempt = Date.now();
+  try {
+    const res = await fetch(FW_PRECIP_INDEX_URL);
+    if (!res.ok) return;
+    const idx = await res.json();
+    const frames = idx?.radar?.past;
+    if (!Array.isArray(frames) || !frames.length || !idx.host) return;
+    const frame = frames[frames.length - 1]; // dernière image observée
+    if (frame.time === cutPrecipFrameTime && cutPrecipTiles.size) return; // déjà à jour
+    const z = FW_PRECIP_TILE_Z, bb = FW_PRECIP_BBOX;
+    const x0 = fwLon2tileX(bb.lonMin, z), x1 = fwLon2tileX(bb.lonMax, z);
+    const y0 = fwLat2tileY(bb.latMax, z), y1 = fwLat2tileY(bb.latMin, z);
+    const jobs = [];
+    for (let x = x0; x <= x1; x++) {
+      for (let y = y0; y <= y1; y++) {
+        const url = `${idx.host}${frame.path}/${FW_PRECIP_TILE_SIZE}/${z}/${x}/${y}/${FW_PRECIP_COLOR}/0_1.png`;
+        jobs.push(
+          fetch(url)
+            .then(r => (r.ok ? r.buffer() : null))
+            .then(buf => (buf ? [`${x}/${y}`, PNG.sync.read(buf)] : null))
+            .catch(() => null) // tuile en échec ignorée, jamais de crash
+        );
+      }
+    }
+    const results = await Promise.all(jobs);
+    const next = new Map();
+    for (const r of results) if (r) next.set(r[0], r[1]);
+    if (next.size) { cutPrecipTiles = next; cutPrecipFrameTime = frame.time; }
+  } catch { /* dégradation silencieuse : cache inchangé, route renvoie near:false */ }
+  finally { cutPrecipRefreshing = false; }
 }
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressure}] trié par t croissant
@@ -1376,6 +1440,37 @@ app.get('/convection-signal', (req, res) => {
   const signals = {};
   for (const id of ids) signals[id] = convectionSignalCache.get(id) ?? null;
   res.json({ signals });
+});
+
+// ── Lot 3 plan de coupe (17/07/2026) — distance réelle (km) à la pluie ──
+// Endpoint À LA DEMANDE (pas de ?ids= en lot comme les 3 routes signal
+// ci-dessus) : le plan de coupe interroge un point libre quelconque, pas
+// une liste de balises surveillées. lat/lon requis ; radiusKm optionnel
+// (borné 5-100 km, défaut 60 — plus large que le rayon d'alerte
+// flightwatch/20 km car ici l'usage est un affichage informatif, pas un
+// seuil de notification). Défensif : tout échec (index RainViewer KO,
+// aucune tuile décodée, kill switch flightwatch OFF — sans rapport, ce
+// cache est indépendant) renvoie simplement { near:false,
+// distanceKm:null }, jamais d'erreur 500. Pas d'auth : donnée radar déjà
+// publique (comme le calque radar affiché sur la carte), même politique
+// que /meteofrance-stations.
+app.get('/precip-distance', async (req, res) => {
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+    return res.status(400).json({ error: 'lat/lon requis' });
+  }
+  const radiusKm = Math.min(Math.max(Number(req.query.radiusKm) || 60, 5), 100);
+  if (!cutPrecipTiles.size || Date.now() - cutPrecipLastAttempt > CUT_PRECIP_MAX_AGE_MS) {
+    await cutPrecipRefresh();
+  }
+  const { near, distanceKm } = precipNearestInTiles(cutPrecipTiles, lat, lon, radiusKm);
+  res.json({
+    near, distanceKm, radiusKm,
+    // Ancienneté (min) de la frame radar utilisée — RainViewer horodate
+    // ses frames en secondes (epoch), d'où le *1000. null si aucune frame
+    // n'a jamais pu être chargée.
+    frameAgeMin: cutPrecipFrameTime ? Math.round((Date.now() - cutPrecipFrameTime * 1000) / 60000) : null,
+  });
 });
 
 // ── Étape 11 : stations Météo-France (lecture seule) ─────────────────
