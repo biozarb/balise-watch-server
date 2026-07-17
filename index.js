@@ -146,6 +146,13 @@ const PUSH_LABELS = {
         body: radiusKm =>
           `Précipitations détectées à moins de ${radiusKm} km de ta balise — donnée radar indicative (RainViewer), non officielle`,
       },
+      foehn: {
+        title: label => `🌀 Foehn — ${label}`,
+        body: (town, signedVal, level, whenStr) =>
+          `Foehn attendu ${whenStr} : Δ ${signedVal} hPa, orienté vers ${town}. ` +
+          (level === 3 ? 'Assez marqué pour déborder en plaine.' : 'Vent fort et turbulent probable dans les vallées.') +
+          ' Danger pour le vol — ne décolle pas en foehn.',
+      },
     },
   },
   en: {
@@ -179,6 +186,13 @@ const PUSH_LABELS = {
       precip: {
         body: radiusKm =>
           `Precipitation detected within ${radiusKm} km of your beacon — indicative radar data (RainViewer), unofficial`,
+      },
+      foehn: {
+        title: label => `🌀 Foehn — ${label}`,
+        body: (town, signedVal, level, whenStr) =>
+          `Foehn expected ${whenStr}: Δ ${signedVal} hPa, toward ${town}. ` +
+          (level === 3 ? 'Strong enough to spill into the plains.' : 'Strong, turbulent wind likely in the valleys.') +
+          ' Dangerous for flying — do not take off in foehn.',
       },
     },
   },
@@ -1731,6 +1745,67 @@ app.post('/translate', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ══════════════════════════════════════════════════════════════════
+//  Alarme foehn (Lot foehn) — différentiel de pression mer par axe
+//
+//  Anticipe le foehn via Δ = pressure_msl(A) − pressure_msl(B) entre deux
+//  villes (table foehn_axes), sur la PRÉVISION : l'alarme regarde le PIC à
+//  venir (~36 h), pas seulement l'instant présent. Modèle gfs_seamless :
+//  couverture totale, cohérent sur des points distants (choix atmosoar) et
+//  le bon niveau pour un gradient MSLP synoptique de ~100+ km. Le client
+//  affiche, lui, le modèle le plus fin de sa cascade — un léger écart
+//  d'affichage vs alarme est donc possible (documenté ROADMAP). Convention
+//  Δ = A − B ; le signe = la direction (l'air redescend chaud/rafaleux côté
+//  basse pression). ⚠️ Le foehn est un DANGER pour le vol — push = non-vol.
+// ══════════════════════════════════════════════════════════════════
+const FOEHN_HPA_VALLEY = 4;   // |Δ| ≥ → foehn dans les vallées (niveau 2, vigilance)
+const FOEHN_HPA_PLAIN  = 8;   // |Δ| ≥ → foehn en plaine (niveau 3, danger)
+const FOEHN_FORECAST_HORIZON_MS = 36 * 3600 * 1000; // fenêtre d'anticipation du pic
+const FOEHN_CACHE_TTL_MS = 30 * 60 * 1000;          // MSLP prévu bouge lentement
+const FOEHN_ALERT_REPEAT_MS = 3 * 3600 * 1000;      // c'est une prévision : rappel espacé, pas minute par minute
+const foehnDiffCache = new Map(); // axisId -> { ts, diff:{ times, diff } }
+
+// Différentiel Δ = pmsl(A) − pmsl(B) prévu (GFS), deux points en une requête.
+// Cache court par axe (mutualisé entre comptes surveillant le même axe).
+async function fetchFoehnDiffServer(axis) {
+  const cached = foehnDiffCache.get(axis.id);
+  if (cached && (Date.now() - cached.ts) < FOEHN_CACHE_TTL_MS) return cached.diff;
+  const url = `${OPEN_METEO_URL}?latitude=${axis.a_lat},${axis.b_lat}` +
+    `&longitude=${axis.a_lon},${axis.b_lon}` +
+    `&hourly=pressure_msl&models=gfs_seamless&forecast_days=2&timezone=UTC`;
+  try {
+    const r = await fetch(url);
+    const j = await r.json();
+    if (!Array.isArray(j) || j.length < 2) return null;
+    const a = j[0], b = j[1];
+    const times = (a?.hourly?.time || []).map(t => new Date(`${t}Z`).getTime());
+    const pa = a?.hourly?.pressure_msl || [];
+    const pb = b?.hourly?.pressure_msl || [];
+    const diff = times.map((_, i) => (pa[i] == null || pb[i] == null) ? null : pa[i] - pb[i]);
+    const out = { times, diff };
+    foehnDiffCache.set(axis.id, { ts: Date.now(), diff: out });
+    return out;
+  } catch { return null; }
+}
+
+// Pic le plus défavorable (|Δ| max) entre maintenant et l'horizon d'anticipation.
+// Renvoie { time, diff, level, direction } ou null. threshold = seuil du compte.
+function foehnServerPeak(d, threshold) {
+  const now = Date.now();
+  const hi = now + FOEHN_FORECAST_HORIZON_MS;
+  let best = null;
+  for (let i = 0; i < d.times.length; i++) {
+    const t = d.times[i], v = d.diff[i];
+    if (v == null || t < now || t > hi) continue;
+    if (best === null || Math.abs(v) > Math.abs(best.diff)) best = { time: t, diff: v };
+  }
+  if (!best) return null;
+  const mag = Math.abs(best.diff);
+  best.level = mag >= FOEHN_HPA_PLAIN ? 3 : mag >= threshold ? 2 : 0;
+  best.direction = mag < threshold ? 'none' : (best.diff < 0 ? 'toA' : 'toB');
+  return best;
+}
+
 async function pollAndNotify() {
   console.log(`[${new Date().toLocaleTimeString('fr-FR')}] Polling...`);
   try {
@@ -1816,8 +1891,15 @@ async function pollAndNotify() {
     const test = testData?.[0];
     if (test?.enabled) releves['__test__'] = { moy:test.wind_avg, raf:test.wind_max, nom:'🧪 '+(test.label||'Balise de test') };
 
-    const watchedRows = await sbGet('user_watched', 'select=*');
-    if (!watchedRows?.length) { console.log('Aucune balise surveillée'); return; }
+    let watchedRows = await sbGet('user_watched', 'select=*');
+    if (!Array.isArray(watchedRows)) watchedRows = [];
+    // Lot foehn : la veille foehn est par AXE (user_foehn_watch), indépendante
+    // des balises surveillées — on ne coupe court que si NI balise NI axe
+    // n'est surveillé, sinon un compte qui ne veille QUE le foehn serait
+    // ignoré (le foehn s'anticipe la veille, sans balise ni départ de veille).
+    const foehnWatchRows = await sbGet('user_foehn_watch', 'select=*');
+    const anyFoehnWatch = Array.isArray(foehnWatchRows) && foehnWatchRows.some(w => w.active);
+    if (!watchedRows.length && !anyFoehnWatch) { console.log('Aucune balise ni axe foehn surveillé'); return; }
 
     const devices = await sbGet('user_devices', 'select=*');
     const devicesByUser = {};
@@ -2508,6 +2590,66 @@ async function pollAndNotify() {
               value: color, unit: 'color_id',
             },
           }),
+        });
+      }
+    }
+    // ── Lot foehn : alarme différentiel de pression par AXE ───────────
+    // Veille par axe (user_foehn_watch, déjà lu en tête pour le garde-fou
+    // d'arrêt), mutualisée : un seul fetch OM par axe distinct surveillé.
+    // Scope 'axis:<id>', réutilise le cycle user_flightwatch_alerts
+    // (signal 'foehn'). L'alarme vise le PIC À VENIR (anticipation), pas
+    // l'instant présent. notify:true car le foehn s'anticipe la veille —
+    // l'opt-in EST la ligne user_foehn_watch, indépendant du "démarrage"
+    // de la veille balises. Push formulé DANGER (non-vol). Défensif :
+    // table/axe absent -> réarmement silencieux, jamais de crash.
+    if (anyFoehnWatch) {
+      const foehnAxesRows = await sbGet('foehn_axes', 'select=*');
+      const foehnAxisById = new Map((Array.isArray(foehnAxesRows) ? foehnAxesRows : []).map(a => [a.id, a]));
+      const wantedAxisIds = [...new Set(foehnWatchRows.filter(w => w.active).map(w => w.axis_id))];
+      const foehnDiffByAxis = new Map();
+      for (const axisId of wantedAxisIds) {
+        const ax = foehnAxisById.get(axisId);
+        if (!ax) continue;
+        const dd = await fetchFoehnDiffServer(ax);
+        if (dd) foehnDiffByAxis.set(axisId, dd);
+      }
+      for (const w of foehnWatchRows) {
+        const scope = `axis:${w.axis_id}`;
+        const ax = foehnAxisById.get(w.axis_id);
+        const dd = foehnDiffByAxis.get(w.axis_id);
+        if (!w.active || !ax || !dd) {
+          // Axe retiré de la veille, ou données indisponibles ce poll-ci :
+          // réarmement silencieux (aucun push), comme les autres signaux.
+          await evaluateFwSignal({ userId: w.user_id, scope, signal: 'foehn', level: 2, active: false, buildPush: () => ({}) });
+          continue;
+        }
+        const threshold = Number(w.threshold_hpa) || FOEHN_HPA_VALLEY;
+        const peak = foehnServerPeak(dd, threshold);
+        const level = peak ? peak.level : 0;
+        const active = level >= 2;
+        const lang = langByUser.get(w.user_id);
+        const lbl = pushLabels(lang).flightwatch.foehn;
+        const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
+        await evaluateFwSignal({
+          userId: w.user_id, scope, signal: 'foehn', level: level || 2, active,
+          notify: true, repeatMs: FOEHN_ALERT_REPEAT_MS,
+          buildPush: () => {
+            const town = peak.direction === 'toA' ? ax.a_name : ax.b_name;
+            const signed = (peak.diff >= 0 ? '+' : '') + peak.diff.toFixed(1);
+            const whenStr = new Date(peak.time).toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-GB',
+              { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+            return {
+              title: lbl.title(ax.label),
+              body: lbl.body(town, signed, peak.level, whenStr),
+              icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+              tag: `fw-foehn-${w.axis_id}`, requireInteraction: peak.level === 3,
+              data: {
+                url: '/', kind: 'flightwatch', signal: 'foehn', level: peak.level,
+                scope, voice: peak.level === 3 ? !!prefs.voice_enabled : false,
+                value: peak.diff, unit: 'hPa',
+              },
+            };
+          },
         });
       }
     }
