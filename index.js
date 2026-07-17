@@ -1117,6 +1117,10 @@ let infoclimatStationsById = new Map();
 let infoclimatStationsListFetchedAt = 0;
 let infoclimatObsCache = new Map(); // id -> {t, moy, raf, dir, pressure, temp}
 let infoclimatObsCacheFetchedAt = 0;
+// Débogage 17/07/2026 — dernière erreur rencontrée par le pipeline
+// Infoclimat (liste stations OU obs), exposée via /infoclimat-stations
+// pour diagnostiquer depuis le client sans accès aux logs Render.
+let infoclimatLastError = null;
 
 function chunkArray(arr, size) {
   const out = [];
@@ -1153,21 +1157,52 @@ async function refreshInfoclimatStationsList() {
       infoclimatStationsById = new Map(parsed.map(s => [s.id, s]));
       infoclimatStationsListFetchedAt = Date.now();
     }
-  } catch (e) { console.error('refreshInfoclimatStationsList error:', e.message); }
+  } catch (e) {
+    console.error('refreshInfoclimatStationsList error:', e.message);
+    infoclimatLastError = `stationsList: ${e.message}`;
+  }
 }
 
 // Un seul lot (déjà vérifié en direct le 17/07 : `stations[]` répété
 // fonctionne, `hourly` ne contient que les stations avec au moins un
 // point sur la période demandée — pas d'erreur pour les autres).
+// Débogage 17/07/2026 — le cache d'observations Infoclimat restait vide
+// en prod (fetchedAt:0) sans jamais lever d'erreur visible. Cause :
+// l'API opendata Infoclimat répond en texte brut (200 OK, PAS du JSON)
+// sur certains rejets ("Wrong ip address", "Could not authenticate
+// request" — vérifié en direct depuis un autre réseau que celui de
+// Yann). L'ancien code faisait `await r.json()` directement, qui lève
+// une SyntaxError sur ce texte brut ; l'erreur était bien catchée plus
+// haut (refreshInfoclimatObs) mais SANS le contenu de la réponse, donc
+// invisible dans les logs. Ici : on lit toujours le texte d'abord, on
+// logge le corps brut (tronqué) sur tout échec de parsing/statut, pour
+// pouvoir diagnostiquer depuis les logs Render sans avoir à reproduire
+// le problème en local.
 async function fetchInfoclimatBatch(ids, startDate, endDate) {
   const params = new URLSearchParams({
     method: 'get', format: 'json', start: startDate, end: endDate, token: INFOCLIMAT_API_KEY,
   });
   for (const id of ids) params.append('stations[]', id);
   const r = await fetch(`${INFOCLIMAT_OPENDATA_URL}?${params.toString()}`);
-  if (!r.ok) return null;
-  const data = await r.json();
-  if (data?.status !== 'OK') return null;
+  const text = await r.text();
+  if (!r.ok) {
+    infoclimatLastError = `HTTP ${r.status} — ${text.slice(0, 300)}`;
+    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
+    return null;
+  }
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    infoclimatLastError = `réponse non-JSON — ${text.slice(0, 300)}`;
+    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
+    return null;
+  }
+  if (data?.status !== 'OK') {
+    infoclimatLastError = `status="${data?.status}" — ${JSON.stringify(data?.errors ?? data).slice(0, 300)}`;
+    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
+    return null;
+  }
   return data.hourly || {};
 }
 
@@ -1201,7 +1236,10 @@ async function refreshInfoclimatObs() {
       }
     }
     if (next.size) { infoclimatObsCache = next; infoclimatObsCacheFetchedAt = Date.now(); }
-  } catch (e) { console.error('refreshInfoclimatObs error:', e.message); }
+  } catch (e) {
+    console.error('refreshInfoclimatObs error:', e.message);
+    infoclimatLastError = `refreshObs: ${e.message}`;
+  }
 }
 
 async function refreshInfoclimatData() {
@@ -1428,7 +1466,16 @@ app.get('/infoclimat-stations', (req, res) => {
       validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
     });
   }
-  res.json({ stations: out, fetchedAt: infoclimatObsCacheFetchedAt });
+  // Débogage 17/07/2026 — `lastError`/`stationsListCount` en clair dans
+  // la réponse (jamais la clé API) pour diagnostiquer à distance un
+  // cache vide (INFOCLIMAT_API_KEY absente, IP Render rejetée par
+  // l'API Infoclimat, etc.) sans avoir besoin des logs Render.
+  res.json({
+    stations: out,
+    fetchedAt: infoclimatObsCacheFetchedAt,
+    stationsListCount: infoclimatStationsList.length,
+    lastError: infoclimatLastError,
+  });
 });
 
 // ── Étape 12 (suite) — Historique d'une station Infoclimat ──────────
