@@ -1790,13 +1790,18 @@ async function fetchFoehnDiffServer(axis) {
 
 // Pic le plus défavorable (|Δ| max) entre maintenant et l'horizon d'anticipation.
 // Renvoie { time, diff, level, direction } ou null. threshold = seuil du compte.
-function foehnServerPeak(d, threshold) {
+// wantDir : sens surveillé par le pilote — 'both' (défaut), 'toA' (Δ négatif,
+// foehn vers A) ou 'toB' (Δ positif, foehn vers B). On ignore le versant
+// qui n'intéresse pas le compte, pour ne pas l'alerter à tort de l'autre côté.
+function foehnServerPeak(d, threshold, wantDir = 'both') {
   const now = Date.now();
   const hi = now + FOEHN_FORECAST_HORIZON_MS;
   let best = null;
   for (let i = 0; i < d.times.length; i++) {
     const t = d.times[i], v = d.diff[i];
     if (v == null || t < now || t > hi) continue;
+    if (wantDir === 'toA' && v >= 0) continue; // toA = Δ négatif seulement
+    if (wantDir === 'toB' && v <= 0) continue; // toB = Δ positif seulement
     if (best === null || Math.abs(v) > Math.abs(best.diff)) best = { time: t, diff: v };
   }
   if (!best) return null;
@@ -2624,7 +2629,8 @@ async function pollAndNotify() {
           continue;
         }
         const threshold = Number(w.threshold_hpa) || FOEHN_HPA_VALLEY;
-        const peak = foehnServerPeak(dd, threshold);
+        const wantDir = w.direction || 'both'; // sens surveillé (step20), défaut both
+        const peak = foehnServerPeak(dd, threshold, wantDir);
         const level = peak ? peak.level : 0;
         const active = level >= 2;
         const lang = langByUser.get(w.user_id);
