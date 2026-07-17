@@ -1490,6 +1490,25 @@ app.get('/infoclimat-stations', (req, res) => {
 // modèle de station de l'utilisateur en mesure une (beaucoup de stations
 // amateur n'ont pas d'anémomètre à rafale, cf. vent_rafales souvent null
 // constaté en sondage direct le 17/07 — jamais 0/faux dans ce cas).
+// Débogage 17/07/2026 — diagnostic temporaire : l'API Infoclimat exige
+// une IPv4 fixe déclarée par clé (`Wrong ip address` sinon), or Render
+// n'a par défaut qu'une PLAGE d'IP de sortie partagée (74.220.51.0/24 +
+// 74.220.59.0/24, 512 adresses possibles), pas une IP unique garantie.
+// Cette route relaie ipify pour voir l'IP RÉELLE utilisée par CE
+// processus à cet instant — si elle reste stable sur plusieurs appels
+// (l'attribution NAT peut être sticky tant que l'instance ne redémarre
+// pas), Yann peut la déclarer directement chez Infoclimat sans payer de
+// proxy IP fixe. À retirer une fois la question tranchée.
+app.get('/whatismyip', async (req, res) => {
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const d = await r.json();
+    res.json({ ip: d.ip, checkedAt: new Date().toISOString() });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/infoclimat-history/:id', async (req, res) => {
   if (!INFOCLIMAT_API_KEY) return res.json({ points: [] });
   try {
