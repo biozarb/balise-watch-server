@@ -1414,31 +1414,35 @@ app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
 // seulement /wind-grid. Bloc entier déplacé ici, après `app` ET après le
 // middleware CORS/rate-limit, comme toutes les autres routes du fichier.
 //
-// Grille FIXE (mêmes points pour tous les pilotes, pas calée sur le
-// pan/zoom de chacun) : permet un cache RAM PARTAGÉ plutôt qu'un appel
-// Open-Meteo par pilote. Emprise choisie pour couvrir Vercors → Écrins →
-// Queyras → Maurienne (zone visible sur la capture de Yann + marge) — à
-// élargir si des balises apparaissent hors de cette zone.
-const WIND_GRID_BBOX = { latMin: 44.0, latMax: 46.0, lonMin: 5.0, lonMax: 7.5 };
-// Pas de grille (degrés) — ~0.15° ≈ 16 km à cette latitude. Avec cette
-// emprise, ça donne environ 14 x 18 ≈ 250 points par requête, sous la
-// limite de 1000 coordonnées/requête documentée par Open-Meteo
-// (openmeteo.substack.com/p/weather-data-for-multiple-locations, trouvé
-// par recherche web le 19/07/2026 — PAS testé en direct dans cette
-// session, le réseau sandboxé de développement bloque l'accès à
-// api.open-meteo.com ; à confirmer au premier vrai appel en prod).
-const WIND_GRID_STEP_DEG = 0.15;
-
-function buildWindGridPoints() {
+// Débogage 19/07/2026 (4e retour Yann — capture Ambert/Puy-de-Dôme, hors
+// de l'ancienne emprise fixe Vercors/Écrins/Queyras/Maurienne) : « je
+// l'utilise pour toute la France ! Et idéalement Espagne / Italie /
+// Suisse / Allemagne ». Une grille FIXE à ~16km/point sur toute cette
+// zone dépasserait largement la limite de 1000 coordonnées/requête
+// Open-Meteo (~20 000 points nécessaires). Décision avec Yann : la
+// grille SUIT LA CARTE — découpée en TUILES de WIND_GRID_TILE_DEG° de
+// côté, chacune un point de cache RAM indépendant ; le client ne
+// demande que les tuiles qui recouvrent la vue actuelle (cf. MapView.tsx,
+// windGridTilesForBounds). Remplace l'ancienne grille fixe (WIND_GRID_BBOX/
+// WIND_GRID_POINTS) entièrement.
+const WIND_GRID_TILE_DEG = 2; // DOIT rester identique à lib/config.ts côté client
+const WIND_GRID_STEP_DEG = 0.15; // ~16 km/point à cette latitude, inchangé
+// Une tuile de 2° à ce pas donne ⌈2/0.15⌉² ≈ 14×14 = 196 points, large
+// marge sous la limite de 1000 coordonnées/requête.
+function buildTilePoints(tileLat, tileLon) {
   const pts = [];
-  for (let lat = WIND_GRID_BBOX.latMin; lat <= WIND_GRID_BBOX.latMax + 1e-9; lat += WIND_GRID_STEP_DEG) {
-    for (let lon = WIND_GRID_BBOX.lonMin; lon <= WIND_GRID_BBOX.lonMax + 1e-9; lon += WIND_GRID_STEP_DEG) {
+  for (let lat = tileLat; lat < tileLat + WIND_GRID_TILE_DEG - 1e-9; lat += WIND_GRID_STEP_DEG) {
+    for (let lon = tileLon; lon < tileLon + WIND_GRID_TILE_DEG - 1e-9; lon += WIND_GRID_STEP_DEG) {
       pts.push({ lat: Math.round(lat * 1000) / 1000, lon: Math.round(lon * 1000) / 1000 });
     }
   }
   return pts;
 }
-const WIND_GRID_POINTS = buildWindGridPoints();
+// Emprise globale acceptée (France + Espagne/Italie/Suisse/Allemagne +
+// marge, demande Yann) — endpoint public sans auth : sert à rejeter
+// toute tuile hors de cette zone plutôt que de laisser n'importe quelle
+// coordonnée du globe être mise en cache ici.
+const WIND_GRID_EXTENT = { latMin: 34, latMax: 56, lonMin: -11, lonMax: 19 };
 
 // Débogage 19/07/2026 (retour Yann, suite) — les hauteurs AGL 10/80/
 // 120/180m (1er essai) sont quasi au ras du sol partout dans les Alpes
@@ -1454,6 +1458,13 @@ const WIND_GRID_POINTS = buildWindGridPoints();
 // qu'une supposition à corriger ici sans vérification.
 const WIND_GRID_LEVELS = [1000, 950, 925, 900, 850, 800, 700, 600, 500];
 const WIND_GRID_MODELS = ['meteofrance_seamless', 'icon_seamless', 'arpege_seamless', 'gfs_seamless'];
+// Débogage 19/07/2026 (3e retour Yann) — demande de séparer le calque en
+// deux options de menu distinctes : "Vent sol" (vent au niveau du sol,
+// PAS un niveau de pression — variable AGL 10m native Open-Meteo, celle
+// affichée par toutes les stations météo/webcams) et "Vent altitude"
+// (grille existante, niveaux de pression WIND_GRID_LEVELS ci-dessus).
+// `kind` distingue les deux ; `level` n'a de sens que pour kind='alt'.
+const WIND_GRID_KINDS = ['sol', 'alt'];
 // Mêmes valeurs que MODEL_FORECAST_DAYS côté client (lib/config.ts, même
 // rationnel détaillé là-bas) — pas de code partagé entre les deux repos,
 // à garder synchronisé si ces valeurs changent d'un côté.
@@ -1461,26 +1472,46 @@ const WIND_GRID_FORECAST_DAYS = {
   meteofrance_seamless: 3, icon_seamless: 3, arpege_seamless: 5, gfs_seamless: 8,
 };
 // Cache jugé périmé au-delà de cette durée -> re-fetch synchrone au
-// prochain GET pour ce modèle+niveau, même politique que /precip-distance
+// prochain GET pour cette tuile, même politique que /precip-distance
 // (cutPrecipLastAttempt/CUT_PRECIP_MAX_AGE_MS) : pas de refresh en tâche
-// de fond aveugle sur les 16 combinaisons modèle×niveau, seules celles
+// de fond aveugle sur toutes les tuiles possibles, seules celles
 // réellement consultées par au moins un pilote déclenchent un appel.
 const WIND_GRID_MAX_AGE_MS = 25 * 60 * 1000;
+// Débogage 19/07/2026 — une grille qui suit la carte peut en théorie
+// accumuler une tuile par recoin de la zone couverte (France + voisins)
+// au fil des sessions de tous les pilotes : éviction simple (pas un vrai
+// LRU, juste la plus ancienne mise à jour) au-delà de ce nombre de tuiles
+// en cache, largement suffisant pour un projet solo/gratuit sur le RAM
+// limité du plan gratuit Render.
+const WIND_GRID_CACHE_MAX_TILES = 400;
 
-// Clé "model|level" -> { fetchedAt, times: string[] (ISO UTC),
+// Clé "model|kind|level|tileLat|tileLon" (level vide pour kind='sol') ->
+// { fetchedAt, times: string[] (ISO UTC),
 // points: [{lat,lon,speed:number[],dir:number[]}] } — speed[i]/dir[i]
-// alignés sur `times` (même longueur pour tous les points).
+// alignés sur `times` (même longueur pour tous les points de LA TUILE).
 const windGridCache = new Map();
 
-async function refreshWindGrid(model, level) {
-  const key = `${model}|${level}`;
-  const lats = WIND_GRID_POINTS.map(p => p.lat).join(',');
-  const lons = WIND_GRID_POINTS.map(p => p.lon).join(',');
+function evictWindGridCacheIfNeeded() {
+  if (windGridCache.size <= WIND_GRID_CACHE_MAX_TILES) return;
+  let oldestKey = null, oldestTs = Infinity;
+  for (const [k, v] of windGridCache) {
+    if (v.fetchedAt < oldestTs) { oldestTs = v.fetchedAt; oldestKey = k; }
+  }
+  if (oldestKey) windGridCache.delete(oldestKey);
+}
+
+async function refreshWindGrid(model, kind, level, tileLat, tileLon) {
+  const key = `${model}|${kind}|${level ?? ''}|${tileLat}|${tileLon}`;
+  const tilePoints = buildTilePoints(tileLat, tileLon);
+  const lats = tilePoints.map(p => p.lat).join(',');
+  const lons = tilePoints.map(p => p.lon).join(',');
   const days = WIND_GRID_FORECAST_DAYS[model] ?? 3;
-  // `level` = niveau de pression (hPa), pas une hauteur AGL — cf.
-  // WIND_GRID_LEVELS ci-dessus (débogage 19/07, suite).
+  // kind='sol' -> variable AGL 10m native (vent au sol, pas un niveau de
+  // pression) ; kind='alt' -> niveau de pression hPa (WIND_GRID_LEVELS).
+  const speedVar = kind === 'sol' ? 'wind_speed_10m' : `wind_speed_${level}hPa`;
+  const dirVar = kind === 'sol' ? 'wind_direction_10m' : `wind_direction_${level}hPa`;
   const url = `${OPEN_METEO_URL}?latitude=${lats}&longitude=${lons}` +
-    `&hourly=wind_speed_${level}hPa,wind_direction_${level}hPa` +
+    `&hourly=${speedVar},${dirVar}` +
     `&models=${model}&wind_speed_unit=kmh&timezone=UTC&forecast_days=${days}`;
   try {
     const r = await fetch(url);
@@ -1497,23 +1528,24 @@ async function refreshWindGrid(model, level) {
     // mono-point (cf. profileUrl côté client, un seul point). Un point
     // isolé en échec (hors domaine fin du modèle, etc.) devient `null`
     // dans ce tableau : ignoré ci-dessous plutôt que de faire échouer
-    // toute la grille pour un seul point.
+    // toute la tuile pour un seul point.
     const arr = Array.isArray(d) ? d : [d];
     const times = arr.find(e => e?.hourly?.time)?.hourly?.time ?? [];
     const points = [];
     arr.forEach((entry, i) => {
       const h = entry?.hourly;
-      const src = WIND_GRID_POINTS[i];
+      const src = tilePoints[i];
       if (!h || !src) return;
-      const speed = h[`wind_speed_${level}hPa`];
-      const dir = h[`wind_direction_${level}hPa`];
+      const speed = h[speedVar];
+      const dir = h[dirVar];
       if (!Array.isArray(speed) || !Array.isArray(dir)) return;
       points.push({ lat: src.lat, lon: src.lon, speed, dir });
     });
     const entryOut = { fetchedAt: Date.now(), times, points };
     windGridCache.set(key, entryOut);
+    evictWindGridCacheIfNeeded();
     if (!points.length) {
-      console.error(`refreshWindGrid ${key}: 0 point exploitable sur ${WIND_GRID_POINTS.length} (times=${times.length})`);
+      console.error(`refreshWindGrid ${key}: 0 point exploitable sur ${tilePoints.length} (times=${times.length})`);
     }
     return entryOut;
   } catch (e) {
@@ -1525,25 +1557,43 @@ async function refreshWindGrid(model, level) {
   }
 }
 
-// GET /wind-grid?model=meteofrance_seamless&level=850 — grille de points
-// vent pour le calque carte (pas une balise précise). `level` = niveau
-// de pression (hPa, cf. WIND_GRID_LEVELS). Pas d'auth : donnée publique
-// dérivée d'Open-Meteo, même politique que les autres routes météo en
-// lecture seule de ce fichier.
+// GET /wind-grid?model=meteofrance_seamless&kind=alt&level=850&tileLat=44&
+// tileLon=6 (ou kind=sol, sans level) — UNE TUILE de la grille de points
+// vent pour le calque carte (pas une balise précise, pas la grille
+// entière). Pas d'auth : donnée publique dérivée d'Open-Meteo, même
+// politique que les autres routes météo en lecture seule de ce fichier.
 app.get('/wind-grid', async (req, res) => {
   const model = String(req.query.model || '');
-  const level = Number(req.query.level);
-  if (!WIND_GRID_MODELS.includes(model) || !WIND_GRID_LEVELS.includes(level)) {
-    return res.status(400).json({ error: 'model/level invalide' });
+  const kind = String(req.query.kind || 'alt');
+  const level = kind === 'alt' ? Number(req.query.level) : null;
+  const tileLatRaw = Number(req.query.tileLat);
+  const tileLonRaw = Number(req.query.tileLon);
+  if (!WIND_GRID_MODELS.includes(model) || !WIND_GRID_KINDS.includes(kind)) {
+    return res.status(400).json({ error: 'model/kind invalide' });
   }
-  const key = `${model}|${level}`;
+  if (kind === 'alt' && !WIND_GRID_LEVELS.includes(level)) {
+    return res.status(400).json({ error: 'level invalide' });
+  }
+  if (
+    !Number.isFinite(tileLatRaw) || !Number.isFinite(tileLonRaw) ||
+    tileLatRaw < WIND_GRID_EXTENT.latMin || tileLatRaw >= WIND_GRID_EXTENT.latMax ||
+    tileLonRaw < WIND_GRID_EXTENT.lonMin || tileLonRaw >= WIND_GRID_EXTENT.lonMax
+  ) {
+    return res.status(400).json({ error: 'tuile hors zone couverte' });
+  }
+  // Tuile normalisée CÔTÉ SERVEUR (pas de confiance dans l'arrondi
+  // client) — évite qu'un bug/arrondi client crée une infinité de clés
+  // de cache décalées d'une fraction de degré pour la même zone réelle.
+  const tileLat = Math.floor(tileLatRaw / WIND_GRID_TILE_DEG) * WIND_GRID_TILE_DEG;
+  const tileLon = Math.floor(tileLonRaw / WIND_GRID_TILE_DEG) * WIND_GRID_TILE_DEG;
+  const key = `${model}|${kind}|${level ?? ''}|${tileLat}|${tileLon}`;
   const cached = windGridCache.get(key);
   if (!cached || Date.now() - cached.fetchedAt > WIND_GRID_MAX_AGE_MS) {
-    await refreshWindGrid(model, level);
+    await refreshWindGrid(model, kind, level, tileLat, tileLon);
   }
   const entry = windGridCache.get(key);
-  if (!entry) return res.json({ model, level, times: [], points: [] });
-  res.json({ model, level, fetchedAt: entry.fetchedAt, times: entry.times, points: entry.points });
+  if (!entry) return res.json({ model, kind, level, tileLat, tileLon, times: [], points: [] });
+  res.json({ model, kind, level, tileLat, tileLon, fetchedAt: entry.fetchedAt, times: entry.times, points: entry.points });
 });
 
 // ── Débogage 12/07/2026 — source de pression par balise ─────────────
