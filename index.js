@@ -1490,6 +1490,24 @@ const WIND_GRID_CACHE_MAX_TILES = 400;
 // points: [{lat,lon,speed:number[],dir:number[]}] } — speed[i]/dir[i]
 // alignés sur `times` (même longueur pour tous les points de LA TUILE).
 const windGridCache = new Map();
+// Débogage 19/07/2026 (5e retour Yann, logs Render collés) — le calque
+// ne renvoyait JAMAIS de flèches : chaque appel loggait `refreshWindGrid
+// ...: HTTP 429` (Open-Meteo, "Too Many Requests"), et ce AVANT ET APRÈS
+// le passage aux tuiles (donc pas introduit par le refactor tuiles :
+// l'ancienne grille fixe tapait déjà le même mur). Cause racine : sans
+// ceci, un échec (429 ou autre) ne mettait JAMAIS `windGridCache` à jour
+// (cf. `refreshWindGrid`, early return sur `!r.ok`) — donc la condition
+// `!cached` restait vraie indéfiniment, et CHAQUE requête suivante (poll
+// 5 min de chaque pilote affichant le calque, x jusqu'à 12 tuiles x 2
+// kinds) retentait aussitôt un appel Open-Meteo, qui se refaisait 429 à
+// son tour : tempête de retries qui ne laissait jamais la fenêtre de
+// rate-limit d'Open-Meteo se libérer. Même classe de bug déjà résolue
+// ailleurs dans ce fichier pour /precip-distance (cf.
+// cutPrecipLastAttempt/CUT_PRECIP_MAX_AGE_MS) : horloge murale de la
+// dernière TENTATIVE (succès ou échec), séparée du cache de données,
+// pour borner la fréquence de retry même en cas d'échec répété.
+const windGridLastAttempt = new Map(); // clé identique à windGridCache -> ms epoch de la dernière tentative
+const WIND_GRID_RETRY_COOLDOWN_MS = 2 * 60 * 1000; // pas de nouvelle tentative avant 2 min après un échec, sur cette tuile
 
 function evictWindGridCacheIfNeeded() {
   if (windGridCache.size <= WIND_GRID_CACHE_MAX_TILES) return;
@@ -1502,6 +1520,11 @@ function evictWindGridCacheIfNeeded() {
 
 async function refreshWindGrid(model, kind, level, tileLat, tileLon) {
   const key = `${model}|${kind}|${level ?? ''}|${tileLat}|${tileLon}`;
+  // Horloge murale de la TENTATIVE, avant même l'appel réseau — posée en
+  // premier (synchrone, avant le premier `await`) pour qu'une requête
+  // concurrente sur la même tuile (autre pilote, même seconde) voie déjà
+  // ce cooldown et ne relance pas un second appel Open-Meteo en double.
+  windGridLastAttempt.set(key, Date.now());
   const tilePoints = buildTilePoints(tileLat, tileLon);
   const lats = tilePoints.map(p => p.lat).join(',');
   const lons = tilePoints.map(p => p.lon).join(',');
@@ -1588,7 +1611,15 @@ app.get('/wind-grid', async (req, res) => {
   const tileLon = Math.floor(tileLonRaw / WIND_GRID_TILE_DEG) * WIND_GRID_TILE_DEG;
   const key = `${model}|${kind}|${level ?? ''}|${tileLat}|${tileLon}`;
   const cached = windGridCache.get(key);
-  if (!cached || Date.now() - cached.fetchedAt > WIND_GRID_MAX_AGE_MS) {
+  const isStale = !cached || Date.now() - cached.fetchedAt > WIND_GRID_MAX_AGE_MS;
+  // Cooldown de retry (cf. windGridLastAttempt plus haut, débogage
+  // 19/07/2026 5e retour Yann) : même si `isStale`, on ne retente PAS un
+  // appel Open-Meteo tant que la dernière tentative (succès ou échec) a
+  // moins de WIND_GRID_RETRY_COOLDOWN_MS — évite la tempête de retries
+  // qui empêchait un 429 de jamais se résorber (chaque requête pilote
+  // relançait aussitôt un nouvel appel qui se refaisait 429 à son tour).
+  const canRetry = Date.now() - (windGridLastAttempt.get(key) ?? 0) > WIND_GRID_RETRY_COOLDOWN_MS;
+  if (isStale && canRetry) {
     await refreshWindGrid(model, kind, level, tileLat, tileLon);
   }
   const entry = windGridCache.get(key);
