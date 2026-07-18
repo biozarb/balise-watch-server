@@ -902,6 +902,137 @@ async function fetchOpenMeteoSignals(lat, lon) {
   } catch { return null; }
 }
 
+// ── Étape 13 (19/07/2026) — Grille de vent (calque carte "champ de vent") ──
+// Retour Yann (capture meteo-parapente.com) : un calque carte avec des
+// flèches de vent partout (pas juste aux balises), un choix d'altitude,
+// et un module bas heures/jours/modèle. meteo-parapente.com fait tourner
+// son PROPRE modèle WRF très haute résolution — hors de portée d'un
+// projet solo/gratuit. On reste ici sur Open-Meteo/AROME-ICON-ARPEGE-GFS
+// déjà utilisés ailleurs dans l'app, à une résolution de grille bien plus
+// grossière (un point tous les ~16 km, pas ~1-2 km).
+//
+// Grille FIXE (mêmes points pour tous les pilotes, pas calée sur le
+// pan/zoom de chacun) : permet un cache RAM PARTAGÉ plutôt qu'un appel
+// Open-Meteo par pilote. Emprise choisie pour couvrir Vercors → Écrins →
+// Queyras → Maurienne (zone visible sur la capture de Yann + marge) — à
+// élargir si des balises apparaissent hors de cette zone.
+const WIND_GRID_BBOX = { latMin: 44.0, latMax: 46.0, lonMin: 5.0, lonMax: 7.5 };
+// Pas de grille (degrés) — ~0.15° ≈ 16 km à cette latitude. Avec cette
+// emprise, ça donne environ 14 x 18 ≈ 250 points par requête, sous la
+// limite de 1000 coordonnées/requête documentée par Open-Meteo
+// (openmeteo.substack.com/p/weather-data-for-multiple-locations, trouvé
+// par recherche web le 19/07/2026 — PAS testé en direct dans cette
+// session, le réseau sandboxé de développement bloque l'accès à
+// api.open-meteo.com ; à confirmer au premier vrai appel en prod).
+const WIND_GRID_STEP_DEG = 0.15;
+
+function buildWindGridPoints() {
+  const pts = [];
+  for (let lat = WIND_GRID_BBOX.latMin; lat <= WIND_GRID_BBOX.latMax + 1e-9; lat += WIND_GRID_STEP_DEG) {
+    for (let lon = WIND_GRID_BBOX.lonMin; lon <= WIND_GRID_BBOX.lonMax + 1e-9; lon += WIND_GRID_STEP_DEG) {
+      pts.push({ lat: Math.round(lat * 1000) / 1000, lon: Math.round(lon * 1000) / 1000 });
+    }
+  }
+  return pts;
+}
+const WIND_GRID_POINTS = buildWindGridPoints();
+
+// Débogage 19/07/2026 (retour Yann, suite) — les hauteurs AGL 10/80/
+// 120/180m (1er essai) sont quasi au ras du sol partout dans les Alpes
+// (le terrain lui-même dépasse souvent 1000-2000m) : inutilisables pour
+// un pilote qui vole à 2000-4000m. Remplacées par les MÊMES NIVEAUX DE
+// PRESSION que la coupe verticale (PROFILE_LEVELS côté client, lib/
+// config.ts), qui couvrent les vraies altitudes de vol — filtrés pour
+// rester ≤ 6000m (demande Yann), donc sans le niveau 400hPa (≈7180m,
+// cf. WIND_GRID_LEVEL_ALT_M plus bas). PAS vérifié en direct pour CHACUN
+// des 4 modèles dans cette session (réseau sandboxé, cf. plus haut) : si
+// un modèle renvoie null sur un niveau une fois en prod, le traiter
+// comme un signal pour restreindre WIND_GRID_LEVELS À CE MODÈLE plutôt
+// qu'une supposition à corriger ici sans vérification.
+const WIND_GRID_LEVELS = [1000, 950, 925, 900, 850, 800, 700, 600, 500];
+const WIND_GRID_MODELS = ['meteofrance_seamless', 'icon_seamless', 'arpege_seamless', 'gfs_seamless'];
+// Mêmes valeurs que MODEL_FORECAST_DAYS côté client (lib/config.ts, même
+// rationnel détaillé là-bas) — pas de code partagé entre les deux repos,
+// à garder synchronisé si ces valeurs changent d'un côté.
+const WIND_GRID_FORECAST_DAYS = {
+  meteofrance_seamless: 3, icon_seamless: 3, arpege_seamless: 5, gfs_seamless: 8,
+};
+// Cache jugé périmé au-delà de cette durée -> re-fetch synchrone au
+// prochain GET pour ce modèle+niveau, même politique que /precip-distance
+// (cutPrecipLastAttempt/CUT_PRECIP_MAX_AGE_MS) : pas de refresh en tâche
+// de fond aveugle sur les 16 combinaisons modèle×niveau, seules celles
+// réellement consultées par au moins un pilote déclenchent un appel.
+const WIND_GRID_MAX_AGE_MS = 25 * 60 * 1000;
+
+// Clé "model|level" -> { fetchedAt, times: string[] (ISO UTC),
+// points: [{lat,lon,speed:number[],dir:number[]}] } — speed[i]/dir[i]
+// alignés sur `times` (même longueur pour tous les points).
+const windGridCache = new Map();
+
+async function refreshWindGrid(model, level) {
+  const key = `${model}|${level}`;
+  const lats = WIND_GRID_POINTS.map(p => p.lat).join(',');
+  const lons = WIND_GRID_POINTS.map(p => p.lon).join(',');
+  const days = WIND_GRID_FORECAST_DAYS[model] ?? 3;
+  // `level` = niveau de pression (hPa), pas une hauteur AGL — cf.
+  // WIND_GRID_LEVELS ci-dessus (débogage 19/07, suite).
+  const url = `${OPEN_METEO_URL}?latitude=${lats}&longitude=${lons}` +
+    `&hourly=wind_speed_${level}hPa,wind_direction_${level}hPa` +
+    `&models=${model}&wind_speed_unit=kmh&timezone=UTC&forecast_days=${days}`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return windGridCache.get(key) ?? null;
+    const d = await r.json();
+    // Open-Meteo renvoie un TABLEAU d'objets (un par coordonnée) dès que
+    // plusieurs lat/lon sont demandés — pas un objet unique comme en
+    // mono-point (cf. profileUrl côté client, un seul point). Un point
+    // isolé en échec (hors domaine fin du modèle, etc.) devient `null`
+    // dans ce tableau : ignoré ci-dessous plutôt que de faire échouer
+    // toute la grille pour un seul point.
+    const arr = Array.isArray(d) ? d : [d];
+    const times = arr.find(e => e?.hourly?.time)?.hourly?.time ?? [];
+    const points = [];
+    arr.forEach((entry, i) => {
+      const h = entry?.hourly;
+      const src = WIND_GRID_POINTS[i];
+      if (!h || !src) return;
+      const speed = h[`wind_speed_${level}hPa`];
+      const dir = h[`wind_direction_${level}hPa`];
+      if (!Array.isArray(speed) || !Array.isArray(dir)) return;
+      points.push({ lat: src.lat, lon: src.lon, speed, dir });
+    });
+    const entryOut = { fetchedAt: Date.now(), times, points };
+    windGridCache.set(key, entryOut);
+    return entryOut;
+  } catch {
+    // Échec réseau/API -> on garde l'ancien cache tel quel (même
+    // politique que refreshMeteoFranceData/cutPrecipRefresh) plutôt que
+    // de vider une donnée encore exploitable.
+    return windGridCache.get(key) ?? null;
+  }
+}
+
+// GET /wind-grid?model=meteofrance_seamless&level=850 — grille de points
+// vent pour le calque carte (pas une balise précise). `level` = niveau
+// de pression (hPa, cf. WIND_GRID_LEVELS). Pas d'auth : donnée publique
+// dérivée d'Open-Meteo, même politique que les autres routes météo en
+// lecture seule de ce fichier.
+app.get('/wind-grid', async (req, res) => {
+  const model = String(req.query.model || '');
+  const level = Number(req.query.level);
+  if (!WIND_GRID_MODELS.includes(model) || !WIND_GRID_LEVELS.includes(level)) {
+    return res.status(400).json({ error: 'model/level invalide' });
+  }
+  const key = `${model}|${level}`;
+  const cached = windGridCache.get(key);
+  if (!cached || Date.now() - cached.fetchedAt > WIND_GRID_MAX_AGE_MS) {
+    await refreshWindGrid(model, level);
+  }
+  const entry = windGridCache.get(key);
+  if (!entry) return res.json({ model, level, times: [], points: [] });
+  res.json({ model, level, fetchedAt: entry.fetchedAt, times: entry.times, points: entry.points });
+});
+
 // ── Vigilance Météo-France (Lot 4) ──────────────────────────────────
 // Token en cache module (RAM, jamais persisté — comme beaconHistory) :
 // obtenu via OAuth2 client_credentials, marge de sécurité 60 s avant
