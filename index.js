@@ -857,13 +857,43 @@ function fwClusterByProximity(items, radiusKm) {
 function fwPick(arr, idx) {
   return (Array.isArray(arr) && idx != null && idx >= 0 && arr[idx] != null) ? arr[idx] : null;
 }
+// Débogage 19/07/2026 — cache RAM sur les signaux Open-Meteo de la veille.
+// AVANT : `fetchOpenMeteoSignals` était rappelé pour CHAQUE balise distincte
+// surveillée à CHAQUE poll (5 min), SANS cache -> nb_balises × 288 appels/j
+// sur l'IP Render partagée, ce qui saturait le quota gratuit Open-Meteo
+// (10 000/j) et faisait échouer en 429 tout le reste (calque vent /wind-grid,
+// et silencieusement la veille elle-même). Un TTL de 20 min ramène ça à
+// nb_balises × 72 appels/j (÷4) : la pression/convection évoluent à l'heure,
+// pas aux 5 min — 20 min de fraîcheur n'a aucun effet sur des dérivées
+// calculées sur FW_TREND_WINDOW_H heures. Clé = coordonnées arrondies (une
+// balise = une position fixe). Pas d'éviction : borné par le nombre de
+// balises distinctes surveillées (même logique que beaconDepartmentCache).
+const fwSignalsCache = new Map(); // `lat,lon` -> { ts, data }
+const FW_SIGNALS_TTL_MS = 20 * 60 * 1000;
 async function fetchOpenMeteoSignals(lat, lon) {
+  const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
+  const cached = fwSignalsCache.get(key);
+  if (cached && Date.now() - cached.ts < FW_SIGNALS_TTL_MS) return cached.data;
+  // Miss/périmé : un seul appel réseau, mis en cache uniquement si succès —
+  // un échec (429, réseau…) renvoie null SANS écraser le cache : la
+  // sémantique d'abstention de l'appelant reste strictement inchangée.
+  const data = await fetchOpenMeteoSignalsNet(lat, lon);
+  if (data) fwSignalsCache.set(key, { ts: Date.now(), data });
+  return data;
+}
+async function fetchOpenMeteoSignalsNet(lat, lon) {
   try {
     const url = `${OPEN_METEO_URL}?latitude=${lat}&longitude=${lon}` +
       `&hourly=pressure_msl,cape,cloud_cover_low,cloud_cover_mid,cloud_cover_high,freezing_level_height` +
       `&past_days=1&forecast_days=1&models=meteofrance_seamless&timezone=UTC`;
     const r = await fetch(url);
-    if (!r.ok) return null;
+    if (!r.ok) {
+      // Log ajouté 19/07 — cet échec était totalement muet jusqu'ici, si
+      // bien qu'un 429 dégradait la veille sans laisser aucune trace (même
+      // symptôme que celui rendu visible côté /wind-grid).
+      console.error(`fetchOpenMeteoSignals ${lat},${lon}: HTTP ${r.status}`);
+      return null;
+    }
     const d = await r.json();
     const h = d?.hourly;
     const times = h?.time;
