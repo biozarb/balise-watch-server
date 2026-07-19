@@ -1316,13 +1316,22 @@ async function fetchInfoclimatBatch(ids, startDate, endDate) {
 
 function parseInfoclimatPoint(raw) {
   const num = v => (v != null && v !== '' ? parseFloat(v) : null);
+  // Débogage 19/07/2026 — `raw.dh_utc` peut manquer sur un relevé
+  // Infoclimat malformé. Avant ce garde-fou, le `.replace` levait
+  // "Cannot read properties of undefined", attrapé par le try/catch qui
+  // entoure TOUTE la boucle de refreshInfoclimatObs : un seul point
+  // pourri annulait donc le rafraîchissement de TOUTES les stations, à
+  // chaque poll (erreur visible en continu dans les logs Render).
+  // `t` non fini -> l'appelant ignore simplement ce point (Number.isFinite).
+  const t = typeof raw?.dh_utc === 'string'
+    ? Date.parse(`${raw.dh_utc.replace(' ', 'T')}Z`) : NaN;
   return {
-    t: Date.parse(`${raw.dh_utc.replace(' ', 'T')}Z`),
-    moy: num(raw.vent_moyen),
-    raf: num(raw.vent_rafales),
-    dir: num(raw.vent_direction),
-    pressure: num(raw.pression),
-    temp: num(raw.temperature),
+    t,
+    moy: num(raw?.vent_moyen),
+    raf: num(raw?.vent_rafales),
+    dir: num(raw?.vent_direction),
+    pressure: num(raw?.pression),
+    temp: num(raw?.temperature),
   };
 }
 
