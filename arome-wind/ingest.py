@@ -140,11 +140,23 @@ def sample_indices(meta, step):
     return pts
 
 def _ms(u, v):
-    """u,v (m/s) -> (vitesse km/h, direction météo = d'où vient le vent)."""
+    """u,v (m/s) -> (vitesse km/h, direction météo = d'où vient le vent).
+
+    Débogage 19/07/2026 — garde-fou ajouté : en échantillonnant au pas
+    NATIF (0,025°) on touche des points que la décimation précédente
+    sautait, dont d'éventuels points manquants du GRIB (NaN, ou la valeur
+    sentinelle 9999 d'eccodes). Un NaN sérialisé par json.dumps donne le
+    littéral `NaN` — du JSON INVALIDE, rejeté à l'écriture. On renvoie
+    None (le client sait déjà ignorer un point null) plutôt que de
+    produire un fichier corrompu."""
     if u is None or v is None:
         return None, None
     spd = math.hypot(u, v) * 3.6
+    if not math.isfinite(spd) or spd > 500:      # 500 km/h : sentinelle/aberration
+        return None, None
     drc = (270 - math.degrees(math.atan2(v, u))) % 360
+    if not math.isfinite(drc):
+        return None, None
     return round(spd, 1), round(drc)
 
 def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg):
@@ -169,18 +181,38 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg):
     return tiles
 
 # ── Upload Supabase Storage ───────────────────────────────────────────
-def sb_upload(path, body):
+def sb_upload(path, body, tries=3):
+    """Téléverse un objet. Débogage 19/07/2026 : la version précédente
+    laissait remonter un `HTTPError: 400` NU, sans le corps de réponse —
+    donc impossible de savoir ce que Supabase reprochait. On journalise
+    désormais le message, et on réessaie (POST puis PUT : selon les
+    versions de storage-api, un upsert refusé remonte un 400 plutôt qu'un
+    409, et PUT passe alors sans ambiguïté)."""
     if DRY_RUN:
         return 0
     url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
-    req = urllib.request.Request(url, data=body, method="POST", headers={
-        "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
-        "Content-Type": "application/json", "x-upsert": "true",
-        # 3 h : la donnée ne change qu'au run suivant (AROME toutes les 3 h).
-        # Avant : 300 s -> on re-téléchargeait la même grille pour rien.
-        "Cache-Control": "max-age=10800"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return r.status
+    last = None
+    for attempt in range(tries):
+        req = urllib.request.Request(
+            url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
+                "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
+                "Content-Type": "application/json", "x-upsert": "true",
+                # 3 h : la donnée ne change qu'au run suivant (AROME / 3 h).
+                "Cache-Control": "max-age=10800"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            try:
+                detail = e.read()[:300].decode("utf-8", "replace")
+            except Exception:
+                detail = ""
+            last = f"HTTP {e.code} — {detail}"
+        except Exception as e:                       # réseau, timeout…
+            last = f"{type(e).__name__}: {e}"
+        print(f"  ⚠️ upload {path} tentative {attempt + 1}/{tries} : {last}")
+        time.sleep(1 + 2 * attempt)
+    raise SystemExit(f"sb_upload {path} : échec après {tries} tentatives — {last}")
 
 def download_tmp(key):
     """Télécharge un objet S3 (gros GRIB) vers un fichier temporaire."""
