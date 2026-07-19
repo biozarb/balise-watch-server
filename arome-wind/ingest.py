@@ -28,13 +28,21 @@ from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
 S3         = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
 MODEL_DIR  = "arome"
 GRID       = "0025"                 # 0,025° : largement suffisant pour un affichage 0,15°
-MAX_HOURS  = 12                     # horizon court (décision Yann) — 1-2 groupes GRIB
+MAX_HOURS  = 48                     # horizon complet AROME (retour Yann 19/07)
 BBOX       = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # France + voisins
-STEP       = 0.05                   # pas de la grille (~5,5 km). AROME natif = 0,025° :
-                                    # 0,05 = 1 point sur 2. Le client décime ensuite à
-                                    # l'écran selon le zoom (WindGridLayer, densité px
-                                    # constante) — abaisser à 0.025 pour le max de détail
-                                    # (fichiers ~4× plus gros / egress Supabase).
+# Résolution DIFFÉRENCIÉE (retour Yann "on reste gros") :
+#  - sol   : 0,025° = maillage AROME NATIF (~2,8 km) — c'est là que le relief
+#            sculpte le vent (vallées), donc là qu'il faut tout le détail.
+#  - alt   : 0,05° — les vents aux niveaux de pression sont des champs lisses
+#            (synoptiques), le terrain n'y crée pas de structure fine : inutile
+#            de payer ×4 le stockage/egress pour du signal qui n'existe pas.
+STEP_SOL   = 0.025
+STEP_ALT   = 0.05
+# Pas de temps : horaire jusqu'à FINE_H, puis 1 échéance sur COARSE_EVERY.
+# 48 h à l'heure = 49 échéances (trop lourd) ; ce profil en donne 25, sans
+# rien perdre d'utile (fin sur la journée de vol, plus lâche au-delà).
+FINE_H       = 12
+COARSE_EVERY = 3
 TILE_DEG   = 2                      # cf. WIND_GRID_TILE_DEG
 LEVELS     = [1000, 950, 925, 900, 850, 800, 700, 600, 500]  # cf. WIND_GRID_LEVELS
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
@@ -95,23 +103,31 @@ def parse_grib(path, want):
                        codes_get(gid, "typeOfLevel"),
                        codes_get(gid, "level"))
             if key is not None:
-                if meta is None:
-                    meta = dict(
-                        Ni=codes_get(gid, "Ni"), Nj=codes_get(gid, "Nj"),
-                        lat0=codes_get(gid, "latitudeOfFirstGridPointInDegrees"),
-                        lon0=_norm_lon(codes_get(gid, "longitudeOfFirstGridPointInDegrees")),
-                        di=codes_get(gid, "iDirectionIncrementInDegrees"),
-                        dj=codes_get(gid, "jDirectionIncrementInDegrees"),
-                        jScan=codes_get(gid, "jScansPositively"))
+                # Filtrer l'échéance AVANT codes_get_values : décoder puis
+                # jeter coûterait ~2× la RAM (49 échéances gardées au lieu
+                # de 25) et autant de temps CPU pour rien.
                 step = codes_get(gid, "step")
-                out.setdefault(key, {})[step] = codes_get_values(gid)
+                if step <= MAX_HOURS and keep_step(step):
+                    if meta is None:
+                        meta = dict(
+                            Ni=codes_get(gid, "Ni"), Nj=codes_get(gid, "Nj"),
+                            lat0=codes_get(gid, "latitudeOfFirstGridPointInDegrees"),
+                            lon0=_norm_lon(codes_get(gid, "longitudeOfFirstGridPointInDegrees")),
+                            di=codes_get(gid, "iDirectionIncrementInDegrees"),
+                            dj=codes_get(gid, "jDirectionIncrementInDegrees"),
+                            jScan=codes_get(gid, "jScansPositively"))
+                    out.setdefault(key, {})[step] = codes_get_values(gid)
             codes_release(gid)
     return out, meta
 
-def sample_indices(meta):
-    """Indices (j, i) + (lat, lon) échantillonnés à STEP dans BBOX, depuis la
-    grille native AROME (décimation entière STEP/di)."""
-    dec = max(1, round(STEP / meta["di"]))
+def keep_step(h):
+    """Profil d'échéances : horaire jusqu'à FINE_H, puis 1 sur COARSE_EVERY."""
+    return h <= FINE_H or h % COARSE_EVERY == 0
+
+def sample_indices(meta, step):
+    """Indices (j, i) + (lat, lon) échantillonnés à `step` dans BBOX, depuis la
+    grille native AROME (décimation entière step/di)."""
+    dec = max(1, round(step / meta["di"]))
     pts = []
     for j in range(0, meta["Nj"], dec):
         lat = meta["lat0"] + (meta["dj"] * j if meta["jScan"] == 1 else -meta["dj"] * j)
@@ -131,10 +147,10 @@ def _ms(u, v):
     drc = (270 - math.degrees(math.atan2(v, u))) % 360
     return round(spd, 1), round(drc)
 
-def build_grids(uv_by_step, meta, steps, times, kind, level):
+def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg):
     """Construit les WindGrid par tuile 2° pour un (kind, level) donné.
     uv_by_step: {step: (U_values, V_values)}. Retourne {(tLat,tLon): dict WindGrid}."""
-    pts = sample_indices(meta)
+    pts = sample_indices(meta, step_deg)
     tiles = {}
     for idx, lat, lon in pts:
         tLat = math.floor(lat / TILE_DEG) * TILE_DEG
@@ -160,7 +176,9 @@ def sb_upload(path, body):
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
         "Content-Type": "application/json", "x-upsert": "true",
-        "Cache-Control": "max-age=300"})
+        # 3 h : la donnée ne change qu'au run suivant (AROME toutes les 3 h).
+        # Avant : 300 s -> on re-téléchargeait la même grille pour rien.
+        "Cache-Control": "max-age=10800"})
     with urllib.request.urlopen(req, timeout=60) as r:
         return r.status
 
@@ -201,7 +219,7 @@ def steps_times(run, *dicts):
         for byhstep in d.values():
             s = set(byhstep.keys())
             common = s if common is None else (common & s)
-    steps = sorted(x for x in (common or set()) if x <= MAX_HOURS)
+    steps = sorted(x for x in (common or set()) if x <= MAX_HOURS and keep_step(x))
     times = [(run + timedelta(hours=s)).strftime("%Y-%m-%dT%H:%M") for s in steps]
     return steps, times
 
@@ -210,7 +228,8 @@ def main():
     print(f"Run AROME : {ref}")
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
                     .strftime("%Y-%m-%dT%H:%M:%SZ"), grid=GRID,
-                    tileDeg=TILE_DEG, step=STEP, levels=[], uploaded=0)
+                    tileDeg=TILE_DEG, stepSol=STEP_SOL, stepAlt=STEP_ALT,
+                    maxHours=MAX_HOURS, levels=[], uploaded=0)
     total = 0
 
     # ── SOL (10 m) : paquet SP1, variables 10u/10v ────────────────────
@@ -221,7 +240,7 @@ def main():
     data = {("u" if k == "10u" else "v"): v for k, v in data.items()}
     steps, times = steps_times(run, data)
     uv = {s: (data["u"][s], data["v"][s]) for s in steps}
-    for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "sol", None).items():
+    for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "sol", None, STEP_SOL).items():
         grid["fetchedAt"] = int(time.time() * 1000)
         sb_upload(f"{MODEL_DIR}/sol/{tLat}_{tLon}.json",
                   json.dumps(grid, separators=(",", ":")).encode())
@@ -241,10 +260,10 @@ def main():
         if ("u", lvl) not in data or ("v", lvl) not in data:
             print(f"  niveau {lvl} hPa absent — ignoré"); continue
         du, dv = data[("u", lvl)], data[("v", lvl)]
-        steps = sorted(s for s in (set(du) & set(dv)) if s <= MAX_HOURS)
+        steps = sorted(s for s in (set(du) & set(dv)) if s <= MAX_HOURS and keep_step(s))
         times = [(run + timedelta(hours=s)).strftime("%Y-%m-%dT%H:%M") for s in steps]
         uv = {s: (du[s], dv[s]) for s in steps}
-        for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "alt", lvl).items():
+        for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "alt", lvl, STEP_ALT).items():
             grid["fetchedAt"] = int(time.time() * 1000)
             sb_upload(f"{MODEL_DIR}/alt/{lvl}/{tLat}_{tLon}.json",
                       json.dumps(grid, separators=(",", ":")).encode())
