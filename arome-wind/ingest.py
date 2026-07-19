@@ -27,16 +27,23 @@ from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
 # ── Config (à garder synchronisé avec web/src/lib/config.ts) ──────────
 S3         = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
 MODEL_DIR  = "arome"
-GRID       = "0025"                 # 0,025° : largement suffisant pour un affichage 0,15°
+# Grilles AROME différenciées (retour Yann 19/07, "épouser le relief") :
+#  - sol : grille 001 = 0,01° (~1,1 km), la HAUTE RÉSOLUTION AROME. C'est
+#          elle qui résout l'écoulement dans les vallées — le 0,025° lissait
+#          justement ce qu'on veut voir.
+#  - alt : grille 0025 uniquement — les niveaux de pression (paquets IP*)
+#          n'existent QUE dans cette grille (vérifié : 001 n'expose que
+#          SP*/HP*, aucun isobare).
+GRID_SOL   = "001"
+GRID_ALT   = "0025"
 MAX_HOURS  = 48                     # horizon complet AROME (retour Yann 19/07)
 BBOX       = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # France + voisins
-# Résolution DIFFÉRENCIÉE (retour Yann "on reste gros") :
-#  - sol   : 0,025° = maillage AROME NATIF (~2,8 km) — c'est là que le relief
-#            sculpte le vent (vallées), donc là qu'il faut tout le détail.
-#  - alt   : 0,05° — les vents aux niveaux de pression sont des champs lisses
-#            (synoptiques), le terrain n'y crée pas de structure fine : inutile
-#            de payer ×4 le stockage/egress pour du signal qui n'existe pas.
-STEP_SOL   = 0.025
+# Pas d'échantillonnage, = maillage NATIF de chaque grille (aucune perte) :
+#  - sol : 0,01°  (grille 001)  -> ~1,1 km, le relief est résolu.
+#  - alt : 0,05°  (grille 0025, 1 point sur 2) -> les vents aux niveaux de
+#          pression sont des champs lisses (synoptiques) : le terrain n'y
+#          crée pas de structure fine, inutile de payer ×4 le stockage.
+STEP_SOL   = 0.01
 STEP_ALT   = 0.05
 # Pas de temps : horaire jusqu'à FINE_H, puis 1 échéance sur COARSE_EVERY.
 # 48 h à l'heure = 49 échéances (trop lourd) ; ce profil en donne 25, sans
@@ -73,18 +80,30 @@ def latest_run():
     for back in range(9):                       # jusqu'à 24 h en arrière
         run = base - timedelta(hours=3 * back)
         ref = run.strftime("%Y-%m-%dT%H:00:00Z")
-        if s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID}/SP1/"):
+        if s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID_SOL}/SP1/"):
             return ref, run
     raise SystemExit("Aucun run AROME SP1 publié sur les 24 dernières heures")
 
-def _range_start(key):
-    m = re.search(r"__(\d+)H(?:\d+H)?__", key)
-    return int(m.group(1)) if m else 999
+def files_for(ref, pkg, grid):
+    """Fichiers du paquet couvrant les échéances retenues.
 
-def files_for(ref, pkg):
-    """Fichiers du paquet couvrant les échéances 0..MAX_HOURS."""
-    keys = s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID}/{pkg}/")
-    return sorted(k for k in keys if _range_start(k) <= MAX_HOURS)
+    Deux nommages coexistent : la grille 0025 groupe les échéances
+    (`__00H06H__`), la grille 001 publie UN FICHIER PAR HEURE (`__06H__`).
+    Pour cette dernière on ne télécharge que les échéances effectivement
+    gardées (keep_step) — sinon on tirerait 49 fichiers de ~23 Mo pour n'en
+    exploiter que 25, soit ~550 Mo de trafic pour rien."""
+    out = []
+    for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{grid}/{pkg}/"):
+        m = re.search(r"__(\d+)H(?:(\d+)H)?__", k)
+        if not m:
+            continue
+        start, end = int(m.group(1)), m.group(2)
+        if start > MAX_HOURS:
+            continue
+        if end is None and not keep_step(start):
+            continue                       # fichier horaire non retenu
+        out.append(k)
+    return sorted(out)
 
 # ── Parsing GRIB (eccodes) ────────────────────────────────────────────
 def _norm_lon(x):
@@ -259,7 +278,7 @@ def main():
     ref, run = latest_run()
     print(f"Run AROME : {ref}")
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
-                    .strftime("%Y-%m-%dT%H:%M:%SZ"), grid=GRID,
+                    .strftime("%Y-%m-%dT%H:%M:%SZ"), gridSol=GRID_SOL, gridAlt=GRID_ALT,
                     tileDeg=TILE_DEG, stepSol=STEP_SOL, stepAlt=STEP_ALT,
                     maxHours=MAX_HOURS, levels=[], uploaded=0)
     total = 0
@@ -268,7 +287,7 @@ def main():
     print("SOL (SP1, 10 m) :")
     sol_want = lambda sn, tol, lvl: sn if (sn in ("10u", "10v")
                                            and tol == "heightAboveGround") else None
-    data, meta = merge_parse(files_for(ref, "SP1"), sol_want)
+    data, meta = merge_parse(files_for(ref, "SP1", GRID_SOL), sol_want)
     data = {("u" if k == "10u" else "v"): v for k, v in data.items()}
     steps, times = steps_times(run, data)
     uv = {s: (data["u"][s], data["v"][s]) for s in steps}
@@ -287,7 +306,7 @@ def main():
     LSET = set(LEVELS)
     alt_want = lambda sn, tol, l: ((sn, l) if (sn in ("u", "v")
                                    and tol == "isobaricInhPa" and l in LSET) else None)
-    data, meta = merge_parse(files_for(ref, "IP1"), alt_want)
+    data, meta = merge_parse(files_for(ref, "IP1", GRID_ALT), alt_want)
     for lvl in LEVELS:
         if ("u", lvl) not in data or ("v", lvl) not in data:
             print(f"  niveau {lvl} hPa absent — ignoré"); continue
