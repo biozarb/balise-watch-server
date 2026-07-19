@@ -1,0 +1,33 @@
+name: AROME wind grid ingestion
+
+# Calque "champ de vent" — ingère les paquets GRIB AROME (SP1 sol + IP1
+# altitude), sous-échantillonne à 0,15° et publie des tuiles WindGrid dans
+# Supabase Storage. Remplace les appels Open-Meteo par tuile/par utilisateur.
+# Runs AROME toutes les 3 h, publiés ~2 h après -> on lance décalé de 2 h.
+
+on:
+  schedule:
+    - cron: "0 2,5,8,11,14,17,20,23 * * *"   # UTC
+  workflow_dispatch: {}                        # déclenchement manuel possible
+
+concurrency:
+  group: arome-wind
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install eccodes
+        run: pip install --quiet eccodes eccodeslib
+      - name: Ingest AROME wind grid
+        working-directory: arome-wind
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingest.py
