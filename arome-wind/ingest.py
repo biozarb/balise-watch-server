@@ -30,7 +30,11 @@ MODEL_DIR  = "arome"
 GRID       = "0025"                 # 0,025° : largement suffisant pour un affichage 0,15°
 MAX_HOURS  = 12                     # horizon court (décision Yann) — 1-2 groupes GRIB
 BBOX       = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # France + voisins
-STEP       = 0.15                   # pas d'affichage (cf. WIND_GRID_STEP_DEG)
+STEP       = 0.05                   # pas de la grille (~5,5 km). AROME natif = 0,025° :
+                                    # 0,05 = 1 point sur 2. Le client décime ensuite à
+                                    # l'écran selon le zoom (WindGridLayer, densité px
+                                    # constante) — abaisser à 0.025 pour le max de détail
+                                    # (fichiers ~4× plus gros / egress Supabase).
 TILE_DEG   = 2                      # cf. WIND_GRID_TILE_DEG
 LEVELS     = [1000, 950, 925, 900, 850, 800, 700, 600, 500]  # cf. WIND_GRID_LEVELS
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
