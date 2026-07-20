@@ -11,3 +11,7 @@ MAIL_*.md
 # Fichiers parasites de sessions/sondes (DIV-1)
 .test_mf_tmp_UNUSED_ignore.js
 newfile_probe.txt
+
+# Python (py_compile / venv de test)
+__pycache__/
+*.pyc

@@ -1,0 +1,45 @@
+name: AROME thermal grid ingestion
+
+# Calque "estimation thermique" (vue 3D) — ingère les paquets GRIB AROME
+# SP2 (blh, t) + SP3 (sshf) en grille 0025, calcule la vitesse verticale
+# convective w* (formule RASP/BLIPMAP) et publie des tuiles dans Supabase
+# Storage sous `wind-grid/arome/thermal/`.
+#
+# Workflow SÉPARÉ de arome-wind.yml volontairement :
+#  - il ne doit jamais faire échouer ni retarder l'ingestion du vent, qui
+#    est la fonctionnalité principale ;
+#  - il ne produit que les échéances de JOUR (cf. DAY_UTC_START/END dans
+#    ingest.py), donc son volume varie selon l'heure du run — le mélanger
+#    au job vent aurait rendu les timings illisibles.
+#
+# Volume mesuré (20/07/2026, run 03Z, horizon 18h) : 3 bundles SP2 (~110 Mo)
+# + 3 bundles SP3 (~170 Mo) en ~22 s de téléchargement. Sur l'horizon 48 h
+# complet, compter ~6 bundles par paquet, soit ~560 Mo et une poignée de
+# minutes — d'où le timeout à 30 min, largement dimensionné.
+
+on:
+  schedule:
+    - cron: "15 2,5,8,11,14,17,20,23 * * *"   # UTC, 15 min après le job vent
+  workflow_dispatch: {}                        # déclenchement manuel possible
+
+concurrency:
+  group: arome-thermal        # groupe distinct : ne bloque pas arome-wind
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install eccodes
+        run: pip install --quiet eccodes eccodeslib
+      - name: Ingest AROME thermal grid
+        working-directory: arome-thermal
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingest.py
