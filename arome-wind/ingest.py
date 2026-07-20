@@ -45,11 +45,30 @@ BBOX       = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # France 
 #          crée pas de structure fine, inutile de payer ×4 le stockage.
 STEP_SOL   = 0.01
 STEP_ALT   = 0.05
-# Pas de temps : horaire jusqu'à FINE_H, puis 1 échéance sur COARSE_EVERY.
-# 48 h à l'heure = 49 échéances (trop lourd) ; ce profil en donne 25, sans
-# rien perdre d'utile (fin sur la journée de vol, plus lâche au-delà).
+# Pas de temps (débogage 20/07/2026, retour Yann sur la Vue vent 3D —
+# "le pas devient de plus en plus grand, on peut garder 1h par 1h sauf la
+# nuit ?") : horaire toute la journée, 1 échéance sur COARSE_EVERY
+# seulement pendant la fenêtre nuit (cf. NIGHT_UTC_START/END + keep_step
+# plus bas). Remplace l'ancien profil à seuil fixe FINE_H=12 (coupait à
+# 12h après le run peu importe l'heure réelle — donc parfois en pleine
+# journée de vol). Coût : ~41 échéances au lieu de 25 sur 48h (deux nuits
+# dans la fenêtre), donc plus de fichiers horaires SOL (grille 001,
+# ~23 Mo/fichier) téléchargés — le volume ALT (IP1, bundles toujours
+# téléchargés en entier) domine déjà le total (~4,4 Go/run, cf.
+# .github/workflows/arome-wind.yml), l'impact reste de l'ordre de +8%,
+# large marge sous le timeout de 60 min. FINE_H/COARSE_EVERY gardés
+# comme filet de sécurité si _RUN_HOUR_UTC n'est pas encore connu (ne
+# devrait pas arriver en usage normal, cf. keep_step).
 FINE_H       = 12
 COARSE_EVERY = 3
+# Fenêtre UTC considérée "nuit" (coarse même si <= FINE_H) — généreuse
+# pour ne jamais rogner une fenêtre de vol matinale/tardive :
+#   été  (France UTC+2) : nuit locale ~22h-06h -> ~20h-04h UTC
+#   hiver (France UTC+1) : nuit locale ~22h-06h -> ~21h-05h UTC
+# Fenêtre retenue 22h-04h UTC (6h) : sous-ensemble commun aux deux
+# saisons, quitte à garder l'horaire un peu tôt/tard aux extrêmes plutôt
+# que de couper une fenêtre de vol. Traverse minuit (22 > 4).
+NIGHT_UTC_START, NIGHT_UTC_END = 22, 4
 TILE_DEG   = 2                      # cf. WIND_GRID_TILE_DEG
 LEVELS     = [1000, 950, 925, 900, 850, 800, 700, 600, 500]  # cf. WIND_GRID_LEVELS
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
@@ -139,9 +158,31 @@ def parse_grib(path, want):
             codes_release(gid)
     return out, meta
 
+# Défini dans main() dès que `run` (heure d'init réelle du run AROME) est
+# connue — keep_step() en a besoin pour savoir quelle heure UTC réelle
+# correspond à chaque échéance `h` (heures écoulées depuis le run).
+_RUN_HOUR_UTC = None
+
+def is_night_utc(hour_of_day):
+    """hour_of_day : 0-23 UTC. Fenêtre [NIGHT_UTC_START, NIGHT_UTC_END[,
+    traverse minuit (22 > 4)."""
+    if NIGHT_UTC_START < NIGHT_UTC_END:
+        return NIGHT_UTC_START <= hour_of_day < NIGHT_UTC_END
+    return hour_of_day >= NIGHT_UTC_START or hour_of_day < NIGHT_UTC_END
+
 def keep_step(h):
-    """Profil d'échéances : horaire jusqu'à FINE_H, puis 1 sur COARSE_EVERY."""
-    return h <= FINE_H or h % COARSE_EVERY == 0
+    """Profil d'échéances (débogage 20/07/2026, retour Yann) : horaire
+    TOUTE la journée, 1 échéance sur COARSE_EVERY seulement pendant la
+    fenêtre nuit (is_night_utc, sur l'heure UTC RÉELLE run+h — pas un
+    seuil fixe d'heures écoulées comme l'ancien FINE_H, qui pouvait
+    tomber en pleine journée de vol selon l'heure du run)."""
+    if h == 0:
+        return True  # état initial toujours gardé, même si le run tombe la nuit
+    if _RUN_HOUR_UTC is None:
+        return h <= FINE_H or h % COARSE_EVERY == 0  # filet de sécurité, ne devrait pas arriver
+    if is_night_utc((_RUN_HOUR_UTC + h) % 24):
+        return h % COARSE_EVERY == 0
+    return True
 
 def sample_indices(meta, step):
     """Indices (j, i) + (lat, lon) échantillonnés à `step` dans BBOX, depuis la
@@ -275,7 +316,9 @@ def steps_times(run, *dicts):
     return steps, times
 
 def main():
+    global _RUN_HOUR_UTC
     ref, run = latest_run()
+    _RUN_HOUR_UTC = run.hour
     print(f"Run AROME : {ref}")
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
                     .strftime("%Y-%m-%dT%H:%M:%SZ"), gridSol=GRID_SOL, gridAlt=GRID_ALT,
