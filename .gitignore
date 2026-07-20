@@ -15,3 +15,9 @@ newfile_probe.txt
 # Python (py_compile / venv de test)
 __pycache__/
 *.pyc
+
+# Cache local de compare_kk7.py — tuiles kk7 (CC-BY-NC-SA) et DEM.
+# NE JAMAIS COMMITTER : republier les tuiles de M. von Känel dans un repo
+# public serait exactement la redistribution que la licence encadre, et
+# que le script prend soin d'éviter.
+arome-thermal/.cache_kk7/
