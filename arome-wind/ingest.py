@@ -73,6 +73,36 @@ TILE_DEG   = 2                      # cf. WIND_GRID_TILE_DEG
 LEVELS     = [1000, 950, 925, 900, 850, 800, 700, 600, 500]  # cf. WIND_GRID_LEVELS
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
 
+# Élévation du sol par nœud de la grille ALT (retour Yann 21/07/2026) —
+# pré-calculée UNE FOIS par build_alt_elevation.py (DEM Copernicus via
+# Open-Meteo), lue ici pour attacher `elev` (m AMSL) à chaque point ALT.
+# Sert au masquage "façon météo-parapente" côté client (une flèche dont le
+# niveau AMSL passe sous `elev` est souterraine, non affichée). STATIQUE :
+# aucun recalcul par run. Absent = points sans `elev`, masquage neutralisé
+# côté client (aucune régression). Uniquement la grille ALT : le vent SOL
+# est à 10 m AGL, jamais souterrain.
+_ELEV_PATH = os.path.join(os.path.dirname(__file__), "alt_elevation.json")
+
+def load_elev_table():
+    try:
+        with open(_ELEV_PATH) as f:
+            t = json.load(f).get("elev", {})
+        print(f"Élévation ALT : {len(t)} nœuds chargés depuis alt_elevation.json")
+        return t
+    except FileNotFoundError:
+        print("Élévation ALT : alt_elevation.json absent — points sans `elev` "
+              "(lancer build_alt_elevation.py pour activer le masquage sous-relief)")
+        return {}
+    except Exception as e:                       # noqa: BLE001
+        print(f"Élévation ALT : lecture impossible ({e}) — points sans `elev`")
+        return {}
+
+def elev_key(lat, lon):
+    """Clé de nœud snappée au pas ALT — IDENTIQUE à build_alt_elevation.py."""
+    la = round(round(lat / STEP_ALT) * STEP_ALT, 2)
+    lo = round(round(lon / STEP_ALT) * STEP_ALT, 2)
+    return f"{la:.2f},{lo:.2f}"
+
 DRY_RUN = os.environ.get("DRY_RUN") == "1"     # tests : parse/tuilage sans upload
 SB_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SB_KEY  = os.environ.get("SUPABASE_SERVICE_KEY", "")
@@ -219,9 +249,11 @@ def _ms(u, v):
         return None, None
     return round(spd, 1), round(drc)
 
-def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg):
+def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, elev_table=None):
     """Construit les WindGrid par tuile 2° pour un (kind, level) donné.
-    uv_by_step: {step: (U_values, V_values)}. Retourne {(tLat,tLon): dict WindGrid}."""
+    uv_by_step: {step: (U_values, V_values)}. Retourne {(tLat,tLon): dict WindGrid}.
+    elev_table (grille ALT uniquement) : {clé snappée -> m AMSL} pour attacher
+    `elev` à chaque point (masquage sous-relief côté client, retour Yann 21/07)."""
     pts = sample_indices(meta, step_deg)
     tiles = {}
     for idx, lat, lon in pts:
@@ -237,7 +269,12 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg):
             U, V = uv_by_step[s]
             sp, dr = _ms(U[idx], V[idx])
             speed.append(sp); dir_.append(dr)
-        g["points"].append(dict(lat=lat, lon=lon, speed=speed, dir=dir_))
+        pt = dict(lat=lat, lon=lon, speed=speed, dir=dir_)
+        if elev_table:
+            e = elev_table.get(elev_key(lat, lon))
+            if e is not None:
+                pt["elev"] = e
+        g["points"].append(pt)
     return tiles
 
 # ── Upload Supabase Storage ───────────────────────────────────────────
@@ -346,6 +383,7 @@ def main():
     # IP1 téléchargé/parsé UNE SEULE fois pour TOUS les niveaux (fichiers
     # ~500 Mo : surtout pas un re-téléchargement par niveau).
     print("ALTITUDE (IP1, niveaux de pression) :")
+    elev_table = load_elev_table()
     LSET = set(LEVELS)
     alt_want = lambda sn, tol, l: ((sn, l) if (sn in ("u", "v")
                                    and tol == "isobaricInhPa" and l in LSET) else None)
@@ -357,7 +395,7 @@ def main():
         steps = sorted(s for s in (set(du) & set(dv)) if s <= MAX_HOURS and keep_step(s))
         times = [(run + timedelta(hours=s)).strftime("%Y-%m-%dT%H:%M") for s in steps]
         uv = {s: (du[s], dv[s]) for s in steps}
-        for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "alt", lvl, STEP_ALT).items():
+        for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "alt", lvl, STEP_ALT, elev_table).items():
             grid["fetchedAt"] = int(time.time() * 1000)
             sb_upload(f"{MODEL_DIR}/alt/{lvl}/{tLat}_{tLon}.json",
                       json.dumps(grid, separators=(",", ":")).encode())
