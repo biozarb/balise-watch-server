@@ -417,13 +417,32 @@ def main():
     print("SP3 (sshf) :")
     fetch_parse(ref, "SP3", {"sshf"}, steps_needed, state)
 
-    missing = [(f, h) for f in ("blh", "t") for h in kept if (f, h) not in state["data"]]
-    missing += [("sshf", h) for h in steps_needed
-                if h >= 1 and ("sshf", h) not in state["data"]]
-    if missing:
-        raise SystemExit(f"Champs manquants après parsing : {missing[:10]} "
-                         f"({len(missing)} au total) — run incomplet, on abandonne "
-                         f"plutôt que de publier des tuiles trouées.")
+    # Échéances RÉELLEMENT exploitables après parsing. Météo-France publie
+    # les bundles SP2/SP3 progressivement, et sur un horizon 48h qui
+    # traverse plusieurs fenêtres de jour (cf. needed_steps), les bundles
+    # les plus lointains (13h+) ne sont pas toujours prêts au moment où la
+    # Action tourne (15 min après le job vent, cf. arome-thermal.yml — ce
+    # timing n'avait jamais été éprouvé en conditions réelles avant les
+    # premiers runs auto). Avant, un seul trou en fin d'horizon faisait
+    # échouer TOUT le run (cf. BUGS.md, "arome-thermal : Champs manquants
+    # blh, run planté 3x"). Ici on publie ce qui est disponible et on
+    # laisse le run suivant (3h plus tard) compléter — le choix déjà fait
+    # par arome-wind/ingest.py::steps_times() pour le même type de trou.
+    kept_avail = [h for h in kept
+                  if ("t", h) in state["data"] and ("blh", h) in state["data"]
+                  and ("sshf", h) in state["data"]
+                  and (h - 1 <= 0 or ("sshf", h - 1) in state["data"])]
+    if not kept_avail:
+        raise SystemExit("Aucune échéance exploitable après parsing (t/blh/sshf "
+                         "tous absents) — run réellement cassé, on abandonne.")
+    if len(kept_avail) < len(kept):
+        holes = sorted(set(kept) - set(kept_avail))
+        print(f"  ⚠️ {len(holes)} échéance(s) pas encore publiée(s) côté Météo-France, "
+              f"écartée(s) : {holes[:10]}{' …' if len(holes) > 10 else ''} — "
+              f"publication des {len(kept_avail)} échéances disponibles, le run "
+              f"suivant complètera.")
+    kept = kept_avail
+    times = [(run + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in kept]
 
     quality_check(state, kept)
 
