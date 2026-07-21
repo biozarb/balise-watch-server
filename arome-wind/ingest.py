@@ -74,34 +74,59 @@ LEVELS     = [1000, 950, 925, 900, 850, 800, 700, 600, 500]  # cf. WIND_GRID_LEV
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
 
 # Élévation du sol par nœud de la grille ALT (retour Yann 21/07/2026) —
-# pré-calculée UNE FOIS par build_alt_elevation.py (DEM Copernicus via
-# Open-Meteo), lue ici pour attacher `elev` (m AMSL) à chaque point ALT.
-# Sert au masquage "façon météo-parapente" côté client (une flèche dont le
-# niveau AMSL passe sous `elev` est souterraine, non affichée). STATIQUE :
-# aucun recalcul par run. Absent = points sans `elev`, masquage neutralisé
-# côté client (aucune régression). Uniquement la grille ALT : le vent SOL
-# est à 10 m AGL, jamais souterrain.
-_ELEV_PATH = os.path.join(os.path.dirname(__file__), "alt_elevation.json")
-
-def load_elev_table():
+# sert au masquage "façon météo-parapente" côté client (une flèche dont le
+# niveau AMSL passe sous l'élévation à ce point est souterraine, non
+# affichée, cf. web WindGridLayer.floorAltM / WindGridPoint.elev).
+#
+# 1re version : appel à l'API élévation Open-Meteo (build_alt_elevation.py,
+# DEM Copernicus). ABANDONNÉE (retour Yann 21/07) — ce projet a DÉJÀ été
+# cassé une fois par le quota Open-Meteo (429, cf. BUGS.md "calque champ de
+# vent : aucune flèche, jamais"), c'est précisément pourquoi ce pipeline
+# existe (téléchargement GRIB direct Météo-France plutôt que /v1/forecast
+# par tuile/utilisateur). Ajouter un NOUVEL appel Open-Meteo — même
+# pré-calculé une fois — allait à l'encontre de cette décision.
+#
+# 2e version (celle-ci) : le champ d'orographie AROME lui-même est déjà
+# public dans le MÊME bucket S3 que le vent (paquet SP3, grille 001 —
+# shortName `h`, "Geometrical height above ground", typeOfLevel "surface",
+# STATIQUE d'une échéance à l'autre). Vérifié en direct (session 21/07,
+# sondage eccodes) : Grenoble 219 m (réel ~215 m), mer 0 m, Mont Blanc
+# 4142 m (lissé par la maille 1 km, cohérent), Bourg-St-Maurice 940 m
+# (réel ~840 m). Gratuit, sans quota, ET plus juste sur le fond que
+# n'importe quelle DEM externe : c'est le relief tel qu'AROME LE VOIT
+# LUI-MÊME, exactement ce qui détermine si un niveau de vent AROME est
+# "sous terre" selon AROME. Un seul petit fichier (~7 Mo, échéance 00H
+# uniquement, le champ ne varie pas) téléchargé en plus par run.
+def load_orography(ref):
+    keys = sorted(k for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID_SOL}/SP3/") if "__00H__" in k)
+    if not keys:
+        print("  ⚠️ orographie (SP3 00H) introuvable — points ALT sans `elev`")
+        return None
+    p = download_tmp(keys[0])
     try:
-        with open(_ELEV_PATH) as f:
-            t = json.load(f).get("elev", {})
-        print(f"Élévation ALT : {len(t)} nœuds chargés depuis alt_elevation.json")
-        return t
-    except FileNotFoundError:
-        print("Élévation ALT : alt_elevation.json absent — points sans `elev` "
-              "(lancer build_alt_elevation.py pour activer le masquage sous-relief)")
-        return {}
-    except Exception as e:                       # noqa: BLE001
-        print(f"Élévation ALT : lecture impossible ({e}) — points sans `elev`")
-        return {}
+        data, meta = parse_grib(p, lambda sn, tol, lvl: "h" if (sn == "h" and tol == "surface") else None)
+    finally:
+        os.unlink(p)
+    if not data.get("h"):
+        print("  ⚠️ champ 'h' absent du paquet SP3 — points ALT sans `elev`")
+        return None
+    values = next(iter(data["h"].values()))   # champ statique : un seul step suffit
+    return dict(values=values, meta=meta)
 
-def elev_key(lat, lon):
-    """Clé de nœud snappée au pas ALT — IDENTIQUE à build_alt_elevation.py."""
-    la = round(round(lat / STEP_ALT) * STEP_ALT, 2)
-    lo = round(round(lon / STEP_ALT) * STEP_ALT, 2)
-    return f"{la:.2f},{lo:.2f}"
+def elev_at(orog, lat, lon):
+    """Élévation (m AMSL) au point (lat, lon) le plus proche dans la grille
+    d'orographie native (0,01°) — même convention lat/lon/scan que
+    `sample_indices` (meta['lon0'] déjà normalisé -180..180 par parse_grib,
+    donc aucun rebouclage 348°→360°→16° à gérer ici)."""
+    if orog is None:
+        return None
+    meta = orog["meta"]
+    i = round((lon - meta["lon0"]) / meta["di"])
+    j = round((meta["lat0"] - lat) / meta["dj"]) if meta["jScan"] != 1 else round((lat - meta["lat0"]) / meta["dj"])
+    if i < 0 or i >= meta["Ni"] or j < 0 or j >= meta["Nj"]:
+        return None
+    v = orog["values"][j * meta["Ni"] + i]
+    return None if v is None else round(float(v))
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"     # tests : parse/tuilage sans upload
 SB_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -249,11 +274,12 @@ def _ms(u, v):
         return None, None
     return round(spd, 1), round(drc)
 
-def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, elev_table=None):
+def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None):
     """Construit les WindGrid par tuile 2° pour un (kind, level) donné.
     uv_by_step: {step: (U_values, V_values)}. Retourne {(tLat,tLon): dict WindGrid}.
-    elev_table (grille ALT uniquement) : {clé snappée -> m AMSL} pour attacher
-    `elev` à chaque point (masquage sous-relief côté client, retour Yann 21/07)."""
+    orog (grille ALT uniquement, cf. load_orography) : grille d'élévation AROME
+    pour attacher `elev` à chaque point (masquage sous-relief côté client,
+    retour Yann 21/07)."""
     pts = sample_indices(meta, step_deg)
     tiles = {}
     for idx, lat, lon in pts:
@@ -270,8 +296,8 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, elev_tabl
             sp, dr = _ms(U[idx], V[idx])
             speed.append(sp); dir_.append(dr)
         pt = dict(lat=lat, lon=lon, speed=speed, dir=dir_)
-        if elev_table:
-            e = elev_table.get(elev_key(lat, lon))
+        if orog is not None:
+            e = elev_at(orog, lat, lon)
             if e is not None:
                 pt["elev"] = e
         g["points"].append(pt)
@@ -383,7 +409,10 @@ def main():
     # IP1 téléchargé/parsé UNE SEULE fois pour TOUS les niveaux (fichiers
     # ~500 Mo : surtout pas un re-téléchargement par niveau).
     print("ALTITUDE (IP1, niveaux de pression) :")
-    elev_table = load_elev_table()
+    print("Orographie (SP3, grille 001, champ 'h') :")
+    orog = load_orography(ref)
+    if orog is not None:
+        print(f"  grille {orog['meta']['Ni']}×{orog['meta']['Nj']} chargée")
     LSET = set(LEVELS)
     alt_want = lambda sn, tol, l: ((sn, l) if (sn in ("u", "v")
                                    and tol == "isobaricInhPa" and l in LSET) else None)
@@ -395,7 +424,7 @@ def main():
         steps = sorted(s for s in (set(du) & set(dv)) if s <= MAX_HOURS and keep_step(s))
         times = [(run + timedelta(hours=s)).strftime("%Y-%m-%dT%H:%M") for s in steps]
         uv = {s: (du[s], dv[s]) for s in steps}
-        for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "alt", lvl, STEP_ALT, elev_table).items():
+        for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "alt", lvl, STEP_ALT, orog).items():
             grid["fetchedAt"] = int(time.time() * 1000)
             sb_upload(f"{MODEL_DIR}/alt/{lvl}/{tLat}_{tLon}.json",
                       json.dumps(grid, separators=(",", ":")).encode())
