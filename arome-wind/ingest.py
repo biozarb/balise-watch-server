@@ -98,19 +98,50 @@ MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
 # "sous terre" selon AROME. Un seul petit fichier (~7 Mo, échéance 00H
 # uniquement, le champ ne varie pas) téléchargé en plus par run.
 def load_orography(ref):
+    """Ne réutilise PAS `parse_grib` (déboguage 21/07, run GitHub cassé en
+    prod) : celui-ci appelle `codes_get(gid, "typeOfLevel")` /
+    `"level"` SANS filet pour CHAQUE message du fichier — or SP3 contient
+    au moins un message dont ces clés n'existent pas (repéré au sondage
+    manuel de session, ex. un champ de type probabilité/seuil sans niveau
+    classique), ce qui levait `KeyValueNotFoundError` et faisait planter
+    tout le script APRÈS le téléchargement SOL, donc SANS publier la
+    moindre tuile ALT du run. `parse_grib` reste tel quel (utilisé par
+    SOL/ALT eux-mêmes, jamais vu ce problème dessus) — on lit ce fichier
+    précis à la main, message par message, en ignorant silencieusement
+    tout message dont les clés attendues manquent."""
     keys = sorted(k for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID_SOL}/SP3/") if "__00H__" in k)
     if not keys:
         print("  ⚠️ orographie (SP3 00H) introuvable — points ALT sans `elev`")
         return None
     p = download_tmp(keys[0])
+    meta, values = None, None
     try:
-        data, meta = parse_grib(p, lambda sn, tol, lvl: "h" if (sn == "h" and tol == "surface") else None)
+        with open(p, "rb") as f:
+            while True:
+                gid = codes_grib_new_from_file(f)
+                if gid is None:
+                    break
+                try:
+                    if (codes_get(gid, "shortName") == "h"
+                            and codes_get(gid, "typeOfLevel") == "surface"):
+                        meta = dict(
+                            Ni=codes_get(gid, "Ni"), Nj=codes_get(gid, "Nj"),
+                            lat0=codes_get(gid, "latitudeOfFirstGridPointInDegrees"),
+                            lon0=_norm_lon(codes_get(gid, "longitudeOfFirstGridPointInDegrees")),
+                            di=codes_get(gid, "iDirectionIncrementInDegrees"),
+                            dj=codes_get(gid, "jDirectionIncrementInDegrees"),
+                            jScan=codes_get(gid, "jScansPositively"))
+                        values = codes_get_values(gid)
+                        codes_release(gid)
+                        break
+                except Exception:
+                    pass   # message sans les clés attendues — on l'ignore et on continue
+                codes_release(gid)
     finally:
         os.unlink(p)
-    if not data.get("h"):
-        print("  ⚠️ champ 'h' absent du paquet SP3 — points ALT sans `elev`")
+    if values is None:
+        print("  ⚠️ champ 'h' (surface) absent du paquet SP3 — points ALT sans `elev`")
         return None
-    values = next(iter(data["h"].values()))   # champ statique : un seul step suffit
     return dict(values=values, meta=meta)
 
 def elev_at(orog, lat, lon):
