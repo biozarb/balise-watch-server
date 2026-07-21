@@ -21,3 +21,9 @@ __pycache__/
 # public serait exactement la redistribution que la licence encadre, et
 # que le script prend soin d'éviter.
 arome-thermal/.cache_kk7/
+
+# Cache local de ingest_decos_pge.py — réponses brutes ParaglidingEarth
+# (ODbL 1.0). Le fichier DÉRIVÉ (PWA/web/public/data/decos.json, juste
+# des lat/lon) est volontairement commité — c'est ce cache-ci, la
+# réponse API brute avec noms/altitudes/etc., qu'on ne republie pas.
+arome-thermal/.cache_pge/
