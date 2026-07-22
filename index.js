@@ -1367,6 +1367,196 @@ async function refreshInfoclimatData() {
   await refreshInfoclimatObs();
 }
 
+// ── AEMET (Espagne) : stations vent+pression, ajout 22/07/2026 ─────
+// Agence météorologique espagnole (AEMET OpenData), réseau OFFICIEL
+// (~850 stations synoptiques/automatiques actives, vérifié en direct le
+// 22/07 avec la vraie clé de Yann), même philosophie que Météo-France
+// ci-dessus — contrairement aux stations amateur Infoclimat. Traitée
+// EXACTEMENT comme MF (demande Yann : « on les traite exactement comme
+// les autres ») : fondue dans `releves` (cf. pollAndNotify), donc
+// surveillable/alertable au même titre qu'une balise Pioupiou ou une
+// station MF — PAS le traitement affichage-seul retenu pour Infoclimat.
+//
+// Architecture de l'API, vérifiée EN DIRECT le 22/07/2026 (contrairement
+// aux notes MF ci-dessus, jamais vérifiées faute de compte à l'époque) :
+//  1. GET .../api/observacion/convencional/todas (header `api_key`)
+//     renvoie une ENVELOPPE {estado, datos:<url>, metadatos:<url>}, PAS
+//     les données elles-mêmes (contrairement à Pioupiou/MF/Infoclimat,
+//     un seul call direct) — il faut un DEUXIÈME fetch sur l'URL `datos`
+//     pour obtenir le tableau réel.
+//  2. `datos` est un tableau PLAT (9716 lignes / 854 stations distinctes
+//     le 22/07, PAS une ligne par station) : chaque station apparaît
+//     PLUSIEURS fois, une ligne par heure, sur une fenêtre glissante
+//     d'environ 12h (12 horodatages distincts observés, cadence horaire
+//     pile). AEMET n'a donc PAS de vrai historique long terme accessible
+//     par l'API — situation intermédiaire entre Pioupiou (archive
+//     complète, propre à Pioupiou) et MF (aucun historique natif,
+//     snapshot instantané) : d'où la même persistance Supabase que MF
+//     (aemet_station_history), qui se remplit ICI d'un coup avec ~12h
+//     dès le premier poll, au lieu de s'accumuler point par point comme
+//     pour MF.
+//  3. PIÈGE (vérifié en direct, réponse HTTP `Content-Type: text/plain;
+//     charset=ISO-8859-15`) : la réponse `datos` n'est PAS en UTF-8 — les
+//     noms de station accentués (ex. "VANDELLÓS", champ `ubi`) seraient
+//     corrompus par un simple `r.json()`/`r.text()` de node-fetch (qui
+//     suppose UTF-8 par défaut). Décodage explicite obligatoire via
+//     TextDecoder('iso-8859-15') sur le buffer brut avant JSON.parse.
+//  4. Champs utiles par ligne (vérifiés en direct) : idema (id station),
+//     ubi (nom), lat/lon/alt, fint (horodatage ISO, UTC), vv (vitesse
+//     moyenne, m/s), vmax (rafale, m/s), dv/dmax (direction moy/rafale,
+//     degrés), pres (pression station, hPa), pres_nmar (pression ramenée
+//     au niveau de la mer, hPa — même champ que pmer côté MF, utilisé
+//     pour la même raison : cohérence avec un baromètre de balise en
+//     fond de vallée/plaine). vv/vmax en m/s → ×3.6 pour rester dans les
+//     unités natives de l'app (km/h), même conversion que MF (s.ff*3.6).
+const AEMET_API_KEY = process.env.AEMET_API_KEY;
+const AEMET_OBS_URL = 'https://opendata.aemet.es/opendata/api/observacion/convencional/todas';
+// Donnée native horaire (12 points/heure vus en direct) : inutile de
+// poller plus vite. Marge de 20 min (comme les 12 min MF) par prudence
+// sur la fraîcheur de publication.
+const AEMET_OBS_POLL_MS = 20 * 60 * 1000;
+// Même politique de rétention différenciée que MF (mfPersistHistory) :
+// vent 48h / pression-seule 12h — voir aemetPersistHistory.
+const AEMET_HISTORY_RETENTION_H = 48;
+const AEMET_PRESSURE_ONLY_RETENTION_H = 12;
+// Garde-fraîcheur, même logique que MF_OBS_MAX_AGE_MS — mais la cadence
+// AEMET étant horaire (pas 6 min), le seuil est proportionnellement plus
+// large (90 min : une heure de cadence + marge), sinon une station serait
+// systématiquement rejetée entre deux rafraîchissements normaux.
+const AEMET_OBS_MAX_AGE_MS = 90 * 60 * 1000;
+
+let aemetObsCache = new Map(); // idema -> {t, moy, raf, dir, dirRaf, pressure, lat, lon, alt, nom}
+let aemetObsCacheFetchedAt = 0;
+let aemetLastError = null; // même principe diagnostic que infoclimatLastError
+
+async function fetchAemetJson(url) {
+  const r = await fetch(url, AEMET_API_KEY ? { headers: { api_key: AEMET_API_KEY } } : undefined);
+  const buf = await r.arrayBuffer();
+  // ISO-8859-15 explicite (cf. note d'archi ci-dessus) — jamais r.text()/
+  // r.json() qui décoderaient en UTF-8 et corrompraient les noms accentués.
+  const text = new TextDecoder('iso-8859-15').decode(buf);
+  if (!r.ok) {
+    aemetLastError = `HTTP ${r.status} — ${text.slice(0, 300)}`;
+    console.error(`fetchAemetJson: ${aemetLastError}`);
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    aemetLastError = `réponse non-JSON — ${text.slice(0, 300)}`;
+    console.error(`fetchAemetJson: ${aemetLastError}`);
+    return null;
+  }
+}
+
+async function refreshAemetObs() {
+  if (!AEMET_API_KEY) return;
+  try {
+    const outer = await fetchAemetJson(AEMET_OBS_URL);
+    if (!outer || outer.estado !== 200 || !outer.datos) {
+      aemetLastError = `estado=${outer?.estado} — ${JSON.stringify(outer ?? {}).slice(0, 300)}`;
+      console.error(`refreshAemetObs: ${aemetLastError}`);
+      return;
+    }
+    const rows = await fetchAemetJson(outer.datos);
+    if (!Array.isArray(rows)) return; // échec du 2e fetch : on garde l'ancien cache plutôt que de le vider
+
+    // Regroupe par station, ne garde QUE la ligne la plus récente (fint
+    // max) pour le cache "état courant" (aemetObsCache, consommé par
+    // pollAndNotify et /aemet-stations) — mais TOUTES les lignes servent
+    // à la persistance d'historique juste après (elles couvrent ~12h en
+    // un seul poll, contrairement à MF qui n'a qu'un point par poll).
+    const latestByStation = new Map();
+    for (const row of rows) {
+      const id = row?.idema;
+      const t = row?.fint ? Date.parse(row.fint) : NaN;
+      if (!id || !Number.isFinite(t)) continue;
+      const prev = latestByStation.get(id);
+      if (!prev || t > prev.t) latestByStation.set(id, { ...row, t });
+    }
+    const next = new Map();
+    for (const [id, row] of latestByStation) {
+      next.set(id, {
+        t: row.t,
+        moy: row.vv != null ? row.vv * 3.6 : null,
+        raf: row.vmax != null ? row.vmax * 3.6 : null,
+        dir: row.dv ?? null,
+        dirRaf: row.dmax ?? null,
+        pressure: row.pres_nmar ?? null,
+        lat: row.lat ?? null, lon: row.lon ?? null, alt: row.alt ?? null,
+        nom: row.ubi || id,
+      });
+    }
+    if (next.size) { aemetObsCache = next; aemetObsCacheFetchedAt = Date.now(); aemetLastError = null; }
+
+    // Persistance Supabase de LA FENÊTRE ENTIÈRE (jusqu'à 12h/station en
+    // un seul poll, cf. note d'archi) — pas juste le point le plus récent
+    // comme mfHistoryRows dans pollAndNotify. Fire-and-forget, même
+    // politique que mfPersistHistory.
+    const historyRows = [];
+    for (const row of rows) {
+      const id = row?.idema;
+      const t = row?.fint ? Date.parse(row.fint) : NaN;
+      if (!id || !Number.isFinite(t)) continue;
+      const moy = row.vv != null ? row.vv * 3.6 : null;
+      const pressure = row.pres_nmar ?? null;
+      if (moy == null && pressure == null) continue; // rien d'exploitable sur cette ligne
+      historyRows.push({
+        station_id: id, t, moy,
+        raf: row.vmax != null ? row.vmax * 3.6 : null,
+        dir: row.dv ?? null, pressure,
+      });
+    }
+    aemetPersistHistory(historyRows);
+  } catch (e) {
+    console.error('refreshAemetObs error:', e.message);
+    aemetLastError = `refreshObs: ${e.message}`;
+  }
+}
+
+// Miroir de mfPersistHistory (même table shape, même politique de purge
+// différenciée vent 48h / pression-seule 12h) — voir
+// supabase_step24_aemet_station_history.sql.
+function aemetPersistHistory(rows) {
+  if (!rows.length) return;
+  sbUpsert('aemet_station_history', rows, 'station_id,t')
+    .catch(e => console.error('aemetPersistHistory upsert error:', e.message));
+  const windCutoff = Date.now() - AEMET_HISTORY_RETENTION_H * 3600 * 1000;
+  sbDelete('aemet_station_history', `moy=not.is.null&t=lt.${windCutoff}`)
+    .catch(e => console.error('aemetPersistHistory purge (vent) error:', e.message));
+  const pressureOnlyCutoff = Date.now() - AEMET_PRESSURE_ONLY_RETENTION_H * 3600 * 1000;
+  sbDelete('aemet_station_history', `moy=is.null&t=lt.${pressureOnlyCutoff}`)
+    .catch(e => console.error('aemetPersistHistory purge (pression seule) error:', e.message));
+}
+
+// Miroir de hydrateBeaconHistoryFromSupabase (MF) — hydrate le buffer RAM
+// beaconHistory depuis aemet_station_history au démarrage, même raison :
+// sans ça, fwWindowMinFf/fwRecordHistory repartiraient de zéro à chaque
+// redémarrage Render alors que l'historique existe déjà en base.
+async function hydrateAemetHistoryFromSupabase() {
+  try {
+    const cutoff = Date.now() - FW_HISTORY_MAX_AGE_MS;
+    const rows = await sbGet(
+      'aemet_station_history',
+      `t=gte.${cutoff}&select=station_id,t,moy,raf,dir,pressure&order=t.asc&limit=200000`
+    );
+    if (!Array.isArray(rows) || !rows.length) return;
+    const stationIds = new Set();
+    for (const r of rows) {
+      fwRecordHistory(String(r.station_id), { t: r.t, moy: r.moy, raf: r.raf ?? null, min: null, dir: r.dir, pressure: r.pressure });
+      stationIds.add(r.station_id);
+    }
+    console.log(`🔄 beaconHistory hydraté depuis aemet_station_history : ${rows.length} échantillons, ${stationIds.size} stations`);
+  } catch (e) {
+    console.error('hydrateAemetHistoryFromSupabase error:', e.message);
+  }
+}
+
+async function refreshAemetData() {
+  if (!AEMET_API_KEY) return;
+  await refreshAemetObs();
+}
+
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -1911,6 +2101,57 @@ app.get('/infoclimat-history/:id', async (req, res) => {
   }
 });
 
+// ── AEMET (Espagne), ajout 22/07/2026 — stations (lecture seule) ────
+// Sert aemetObsCache (rafraîchi en tâche de fond, cf. refreshAemetData)
+// — jamais d'appel AEMET déclenché par une requête client, jamais la clé
+// API exposée côté client. Pas d'auth requise, données publiques en
+// lecture (licence AEMET OpenData). Mêmes noms de champs que
+// /meteofrance-stations (dd/ff/raf10/ddraf10/pres/pmer/validityTime) —
+// délibéré, pour réutiliser telle quelle la même forme côté client
+// plutôt que d'introduire une troisième convention de champs.
+app.get('/aemet-stations', (req, res) => {
+  const out = [];
+  for (const [id, obs] of aemetObsCache) {
+    if (obs.moy == null && obs.pressure == null) continue; // aucun relevé exploitable
+    out.push({
+      id, nom: obs.nom, lat: obs.lat, lon: obs.lon, alt: obs.alt,
+      dd: obs.dir, ff: obs.moy, raf10: obs.raf, ddraf10: obs.dirRaf,
+      pres: null, pmer: obs.pressure,
+      validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
+    });
+  }
+  res.json({ stations: out, fetchedAt: aemetObsCacheFetchedAt, lastError: aemetLastError });
+});
+
+// ── AEMET (Espagne), ajout 22/07/2026 — historique d'une station ────
+// Même contrat que /meteofrance-history/:id : buffer RAM beaconHistory
+// (3h30 max, alimenté à chaque poll pollAndNotify pour toute entrée
+// fondue dans `releves`, donc aussi AEMET depuis la fusion ci-dessus)
+// complété par aemet_station_history (persistance 48h/12h, cf.
+// aemetPersistHistory) au-delà de cette profondeur RAM via ?hours=N. Pas
+// d'auth : donnée publique en lecture, comme les autres endpoints stations.
+app.get('/aemet-history/:id', async (req, res) => {
+  const ramPts = beaconHistory.get(req.params.id) || [];
+  const hoursParam = Number(req.query.hours);
+  const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 0), AEMET_HISTORY_RETENTION_H) : null;
+  if (!hours || hours * 3600 * 1000 <= FW_HISTORY_MAX_AGE_MS) {
+    return res.json({ points: ramPts });
+  }
+  try {
+    const cutoff = Date.now() - hours * 3600 * 1000;
+    const oldPts = await sbGet(
+      'aemet_station_history',
+      `station_id=eq.${encodeURIComponent(req.params.id)}&t=gte.${cutoff}&select=t,moy,raf,dir,pressure&order=t.asc`
+    );
+    const ramCutoff = ramPts[0]?.t ?? Infinity;
+    const merged = [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
+    res.json({ points: merged });
+  } catch (e) {
+    console.error('aemet-history (hours) error:', e.message);
+    res.json({ points: ramPts });
+  }
+});
+
 // ── Lot 5 — Éclairs (public, lecture seule) ──────────────────────────
 // Retourne le buffer RAM lightningStrikes, élagué aux 60 dernières
 // minutes (fwLightningPrune appelé ici en garde-fou). Retourne [] si
@@ -2242,6 +2483,29 @@ async function pollAndNotify() {
       mfHistoryRows.push({ station_id: mfId, t: fwPollT, moy: obs.ff, raf: obs.raf10 ?? null, min: fwWindowMinFf(mfId, obs.ff), dir: obs.dd, pressure: obs.pmer ?? null });
     }
     mfPersistHistory(mfHistoryRows); // fire-and-forget — cf. définition, ne bloque/casse jamais la suite du poll
+
+    // ── AEMET (Espagne), ajout 22/07/2026 : fusion des stations dans
+    // `releves`, même format que Pioupiou/MF ci-dessus (demande Yann :
+    // traiter EXACTEMENT comme les autres — surveillable/alertable, pas
+    // le traitement affichage-seul retenu pour Infoclimat). aemetObsCache
+    // est maintenu indépendamment (cf. refreshAemetData, poll 20 min) —
+    // lecture pure ici, aucun appel réseau ajouté à ce poll. Pas de
+    // persistance Supabase ici (contrairement au bloc MF ci-dessus) :
+    // aemetPersistHistory est déjà appelée dans refreshAemetObs, avec les
+    // VRAIS horodatages AEMET (fint) — écrire une deuxième famille de
+    // lignes ici, à la cadence 5 min de CE poll, dupliquerait des valeurs
+    // qui ne changent en réalité qu'une fois par heure côté source.
+    for (const [aemetId, obs] of aemetObsCache) {
+      if (obs.moy == null) continue; // pas de vent exploitable sur cette station
+      // Garde-fraîcheur, même logique que MF_OBS_MAX_AGE_MS (seuil
+      // proportionnellement plus large ici, cf. AEMET_OBS_MAX_AGE_MS).
+      if (Date.now() - obs.t > AEMET_OBS_MAX_AGE_MS) continue;
+      releves[aemetId] = {
+        moy: obs.moy, raf: obs.raf, dir: obs.dir,
+        pressure: obs.pressure,
+        lat: obs.lat, lon: obs.lon, nom: obs.nom,
+      };
+    }
 
     // Historique flightwatch (Lot 1, +pressure Lot 2b) : un échantillon par
     // balise réelle à chaque poll, AVANT d'ajouter la balise de test
@@ -3037,10 +3301,13 @@ app.listen(PORT, async () => {
   // poll de quelques centaines de ms (une requête Supabase) — négligeable
   // à l'échelle d'une cadence de 5 min, et fait UNE SEULE FOIS au boot.
   await hydrateBeaconHistoryFromSupabase();
+  await hydrateAemetHistoryFromSupabase(); // AEMET, 22/07/2026 — même raison, cf. définition
   pollAndNotify();
   setInterval(pollAndNotify, POLL_MS);
   refreshMeteoFranceData(); // no-op silencieux si METEOFRANCE_API_KEY absente
   setInterval(refreshMeteoFranceData, MF_OBS_POLL_MS);
   refreshInfoclimatData(); // no-op silencieux si INFOCLIMAT_API_KEY absente
   setInterval(refreshInfoclimatData, INFOCLIMAT_OBS_POLL_MS);
+  refreshAemetData(); // no-op silencieux si AEMET_API_KEY absente
+  setInterval(refreshAemetData, AEMET_OBS_POLL_MS);
 });
