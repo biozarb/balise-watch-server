@@ -230,7 +230,15 @@ def find_centers(lon2d, lat2d, pressure):
     return centers
 
 # ── Upload Supabase Storage (mêmes conventions que arome-wind/ingest.py) ─
-def sb_upload(path, body, tries=3):
+def sb_upload(path, body, tries=3, cache_control="max-age=21600"):
+    # Débogage 23/07/2026 : `cache_control` était AVANT figé à 6h pour
+    # TOUT objet uploadé, y compris `manifest.json` — or celui-ci est
+    # réécrit à CHAQUE run et encode `nowIndex` (jalon "maintenant" côté
+    # frontend). Avec un cache de 6h, le navigateur/CDN de Yann continuait
+    # à servir un manifest périmé bien après un nouveau run, donnant
+    # l'impression d'une prévision figée/obsolète. Les géojson par
+    # échéance, eux, SONT immuables une fois écrits (sauf rattrapage
+    # manuel FORCE_REPROCESS_PAST, cas rare) -> gardent le cache long.
     if DRY_RUN:
         return 0
     url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
@@ -240,10 +248,7 @@ def sb_upload(path, body, tries=3):
             url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
                 "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
                 "Content-Type": "application/json", "x-upsert": "true",
-                # passé = immuable (un run ne change jamais rétroactivement),
-                # cache long ; le futur sera de toute façon réécrit au run
-                # suivant (6h) donc ce cache n'a pas besoin d'être plus court.
-                "Cache-Control": "max-age=21600"})
+                "Cache-Control": cache_control})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 return r.status
@@ -362,7 +367,10 @@ def process_grid(key, model):
         # décalait silencieusement `nowIndex`, jusqu'à le faire sortir de
         # la plage valide (observé : -34 pour 33 échéances réelles).
         nowIndex=len(manifest_times) - future_done)  # frontend : jalon "maintenant"
-    sb_upload(f"{key}/manifest.json", json.dumps(manifest).encode())
+    # cache court/no-cache : ce fichier est réécrit à chaque run (cf. note
+    # dans sb_upload) — contrairement aux geojson par échéance ci-dessus.
+    sb_upload(f"{key}/manifest.json", json.dumps(manifest).encode(),
+              cache_control="no-cache, must-revalidate")
     return done
 
 def main():
