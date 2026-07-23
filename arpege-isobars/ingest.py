@@ -78,6 +78,18 @@ BUCKET  = os.environ.get("ISOBARS_BUCKET", "isobars")
 if not DRY_RUN and not (SB_URL and SB_KEY):
     raise SystemExit("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (ou DRY_RUN=1)")
 
+# Débogage 23/07/2026 (bug identifié en session) : `find_centers` a été
+# ajouté le même jour (commit 00434ba) mais le passé déjà téléversé est
+# skippé via `sb_exists` avant même d'être relu -> les 33 échéances passées
+# déjà en storage ne recevront JAMAIS `centers` en fonctionnement normal
+# (le cron ne repasse jamais dessus, le passé est traité comme immuable).
+# Flag explicite, DÉFAUT DÉSACTIVÉ : le cron planifié reste efficace et
+# idempotent (skip-if-exists) ; on l'active manuellement pour CE run de
+# rattrapage ponctuel (`FORCE_REPROCESS_PAST=1 python ingest.py`), puis on
+# revient au comportement normal ensuite. Réutilisable si ce type de bug
+# (nouveau champ dérivé ajouté après coup) se reproduit.
+FORCE_REPROCESS_PAST = os.environ.get("FORCE_REPROCESS_PAST") == "1"
+
 # ── Lecture Open-Meteo (.om) ───────────────────────────────────────────
 def http_get_json(url, timeout=60):
     req = urllib.request.Request(url, headers={"User-Agent": "balise-watch-isobars/1"})
@@ -91,13 +103,33 @@ def latest_json(model):
 
 _BBOX_RE = re.compile(r"BBOX\[([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\]")
 
-def read_pressure(model, dt_utc):
-    """Lit `pressure_msl` (grille complète, hPa) pour un modèle Open-Meteo
-    à un instant (run initial OU échéance de prévision — même fichier
-    `data_spatial/<model>/<run>/<timestamp>.om`, le nommage ne distingue
-    pas les deux). Retourne (lon2d, lat2d, pressure) ou None si absent
-    (fichier purgé / pas encore publié — pas une erreur, cf. appelants)."""
-    run_dir = dt_utc.strftime("%Y/%m/%d/%H00Z")
+def read_pressure(model, dt_utc, reference_time=None):
+    """Lit `pressure_msl` (grille complète, hPa) pour un modèle Open-Meteo.
+
+    Débogage 23/07/2026 (bug confirmé en direct sur le bucket S3 réel) :
+    les fichiers horaires d'un run vivent TOUS sous le dossier de CE run
+    (son heure de référence), ex. `data_spatial/meteofrance_arpege_europe/
+    2026/07/23/0000Z/` contient `2026-07-23T0000.om`, `...T1800.om`, etc.
+    — un seul dossier `<run>Z/` par run, quel que soit le nombre
+    d'échéances horaires qu'il contient. Le nom de FICHIER, lui, porte
+    l'heure de VALIDITÉ (`valid_time`), pas l'heure de référence.
+
+    - Passé (`reference_time=None`) : `dt_utc` EST à la fois le run et sa
+      propre échéance 0 (cf. `past_times` — chaque run passé n'est lu qu'à
+      SA propre heure de référence), donc `run_dir` dérivé de `dt_utc`
+      fonctionne par coïncidence.
+    - Prévision (`reference_time` fourni) : `dt_utc` est l'heure de
+      VALIDITÉ (peut différer de plusieurs heures du run), donc `run_dir`
+      DOIT être dérivé de `reference_time` (le run effectivement utilisé),
+      et seul le nom de fichier varie avec `dt_utc`. Avant ce correctif,
+      `run_dir` était dérivé de `dt_utc` dans les deux cas -> pour la
+      prévision ça pointait vers un dossier `<heure de validité>Z/`
+      inexistant (404 silencieux, prévision jamais ingérée).
+
+    Retourne (lon2d, lat2d, pressure) ou None si absent (fichier purgé /
+    pas encore publié — pas une erreur, cf. appelants)."""
+    run_dt = reference_time if reference_time is not None else dt_utc
+    run_dir = run_dt.strftime("%Y/%m/%d/%H00Z")
     fname = dt_utc.strftime("%Y-%m-%dT%H%M")
     uri = f"s3://{OM_BUCKET}/data_spatial/{model}/{run_dir}/{fname}.om"
     backend = fsspec.open(
@@ -281,15 +313,31 @@ def process_grid(key, model):
     print(f"  run de référence {reference_time.isoformat()} — "
           f"{len(past)} pt passé / {len(future)} pt prévision")
 
-    manifest_times, done = [], 0
+    if FORCE_REPROCESS_PAST:
+        print("  ⚙️ FORCE_REPROCESS_PAST=1 — le passé déjà en storage sera relu/réécrit "
+              "(rattrapage centers, cf. commit du 23/07)")
+
+    manifest_times, done, future_done = [], 0, 0
     for dt in all_times:
         iso = dt.strftime("%Y-%m-%dT%H:%M")
         obj_path = f"{key}/{iso}.json"
         is_past = dt < reference_time
-        if is_past and sb_exists(obj_path):
+        # Débogage 23/07/2026 : `sb_exists` seul traitait TOUT passé déjà
+        # téléversé comme définitivement à jour — or `find_centers` a été
+        # ajouté le même jour (commit 00434ba), donc le passé déjà en
+        # storage AVANT ce commit n'a jamais `centers`, et sans ce garde-
+        # fou ne l'aura JAMAIS (le passé n'est normalement plus jamais
+        # revisité). `FORCE_REPROCESS_PAST` (flag explicite, défaut off,
+        # cf. plus haut) permet de forcer un rattrapage ponctuel sans
+        # dégrader l'efficacité/idempotence du cron normal.
+        if is_past and sb_exists(obj_path) and not FORCE_REPROCESS_PAST:
             manifest_times.append(iso)      # déjà là, immuable, on ne refait rien
             continue
-        result = read_pressure(model, dt)
+        # Débogage 23/07/2026 (S3 réel, cf. read_pressure) : pour la
+        # prévision, `run_dir` doit rester celui du run de référence — on
+        # passe donc `reference_time` explicitement ici (seulement pour le
+        # futur ; le passé garde `reference_time=None`, cf. docstring).
+        result = read_pressure(model, dt, reference_time=None if is_past else reference_time)
         if result is None:
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
@@ -298,13 +346,22 @@ def process_grid(key, model):
         sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
         manifest_times.append(iso)
         done += 1
+        if not is_past:
+            future_done += 1
     print(f"  {done} échéance(s) (re)calculée(s), {len(manifest_times)} au total")
 
     manifest = dict(
         model=model, referenceTime=reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         levelStepHpa=LEVEL_STEP_HPA, times=manifest_times,
-        nowIndex=len(manifest_times) - len(future))  # frontend : jalon "maintenant"
+        # Débogage 23/07/2026 : basé AVANT sur `len(future)` (compte
+        # DEMANDÉ, cf. `future_times`) plutôt que sur ce qui a RÉUSSI à
+        # être téléversé (`future_done`, entrées passées + prévision
+        # effectivement présentes dans `manifest_times`) — tout échec
+        # partiel de la prévision (ex. bug de chemin S3 ci-dessus)
+        # décalait silencieusement `nowIndex`, jusqu'à le faire sortir de
+        # la plage valide (observé : -34 pour 33 échéances réelles).
+        nowIndex=len(manifest_times) - future_done)  # frontend : jalon "maintenant"
     sb_upload(f"{key}/manifest.json", json.dumps(manifest).encode())
     return done
 
