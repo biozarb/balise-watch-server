@@ -1,0 +1,51 @@
+name: ARPEGE thermal grid ingestion (zi)
+
+# Calque "Épaisseur couche convective" — volet ARPEGE (sélecteur de modèle
+# AROME/ARPEGE, session 23/07/2026). Ingère UNIQUEMENT `blh` depuis le
+# paquet SP2 (grille 01, 0,1°) et publie des tuiles dans Supabase Storage
+# sous `wind-grid/arpege/thermal/`. Pas de w* ici (cf. docstring
+# arpege-thermal/ingest.py) — calque distinct de "Estimation thermique",
+# qui reste AROME uniquement pour l'instant.
+#
+# Workflow SÉPARÉ des autres (arome-wind, arome-thermal) :
+#  - cadence différente : ARPEGE ne publie qu'à 00/06/12/18 UTC sur ce
+#    bucket (vérifié en direct le 23/07/2026 — pas 8x/jour comme AROME) ;
+#  - volume bien plus lourd : ~640 Mo pour le seul SP2 sur l'horizon
+#    complet (vs ~560 Mo pour SP2+SP3 cumulés côté AROME sur 51h) ;
+#  - Europe entière (BBOX Yann) -> ~962 tuiles à téléverser par run, contre
+#    ~54 pour le calque AROME (France seule) — plus d'appels Supabase
+#    Storage, timeout large en conséquence.
+#
+# Décalage de +3h30 après chaque run nominal (00/06/12/18Z) : ARPEGE est un
+# modèle global, publication plus tardive qu'AROME (offset +2h15 côté
+# arome-thermal.yml) — valeur prudente, pas mesurée précisément sur ce
+# bucket. `latest_run()` (ingest.py) sonde de toute façon jusqu'à 48h en
+# arrière, donc un déclenchement un peu trop tôt se rattrape au cycle
+# suivant sans casser quoi que ce soit.
+
+on:
+  schedule:
+    - cron: "30 3,9,15,21 * * *"   # UTC, +3h30 après chaque run ARPEGE
+  workflow_dispatch: {}             # déclenchement manuel possible
+
+concurrency:
+  group: arpege-thermal        # groupe distinct : ne bloque ni arome-wind ni arome-thermal
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60          # généreux : ~640 Mo + ~962 tuiles à téléverser
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install eccodes
+        run: pip install --quiet eccodes eccodeslib
+      - name: Ingest ARPEGE thermal grid (zi)
+        working-directory: arpege-thermal
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingest.py
