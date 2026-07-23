@@ -49,6 +49,7 @@ import matplotlib.pyplot as plt
 
 import fsspec
 from omfiles import OmFileReader
+from scipy.ndimage import minimum_filter, maximum_filter
 
 OM_BUCKET = "openmeteo"
 MODELS = {
@@ -61,6 +62,14 @@ FUTURE_COARSE_EVERY = 3
 PAST_STEP_HOURS = 6            # cadence des runs ARPEGE
 PAST_MAX_RUNS = 60             # garde-fou dur (~15 jours) — la vraie limite
                                 # est la 1ère lecture en échec (rétention réelle)
+
+# Centres de pression (L/H), pour l'animation du sens de rotation du vent
+# côté frontend (retour Yann 23/07). Fenêtre glissante simple (pas de scipy) :
+# un point est un centre s'il est le min/max strict de son voisinage.
+CENTER_WINDOW_DEG = 4.0         # rayon de la fenêtre de recherche (°) — assez
+                                 # large pour ignorer le bruit de petite échelle
+CENTER_MIN_SEPARATION_DEG = 6.0 # fusionne les centres détectés trop proches
+MAX_CENTERS_PER_KIND = 6        # évite la surcharge visuelle (surtout grille monde)
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 SB_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -140,6 +149,53 @@ def isobars_geojson(lon2d, lat2d, pressure):
             })
     plt.close(fig)
     return {"type": "FeatureCollection", "features": features}
+
+def find_centers(lon2d, lat2d, pressure):
+    """Repère les centres de basse/haute pression : un point est un centre
+    s'il est le min/max strict de son voisinage (fenêtre CENTER_WINDOW_DEG).
+    Filtre exhaustif (scipy.ndimage min/max_filter, vectorisé) — PAS un
+    sous-échantillonnage : un test naïf par pas de grille a raté le vrai
+    minimum d'une carte (932 hPa non détecté) en ne testant qu'un point sur
+    N, cf. vérif locale 23/07/2026. Fusionne ensuite les détections proches
+    et ne garde que les MAX_CENTERS_PER_KIND plus marqués par type (le plus
+    loin de 1013,25 hPa d'abord). Le sens de rotation du vent (cyclonique/
+    anticyclonique) n'est PAS calculé ici : il ne dépend que du type (L/H)
+    et de l'hémisphère (signe de `lat`), donc c'est le frontend qui
+    l'applique au moment du rendu."""
+    lat1d, lon1d = lat2d[:, 0], lon2d[0, :]
+    nj, ni = pressure.shape
+    dlat = abs(lat1d[0] - lat1d[-1]) / max(nj - 1, 1)
+    dlon = abs(lon1d[0] - lon1d[-1]) / max(ni - 1, 1)
+    hw_j = max(1, round(CENTER_WINDOW_DEG / dlat)) if dlat else 1
+    hw_i = max(1, round(CENTER_WINDOW_DEG / dlon)) if dlon else 1
+    size = (2 * hw_j + 1, 2 * hw_i + 1)
+
+    local_min = minimum_filter(pressure, size=size, mode="nearest")
+    local_max = maximum_filter(pressure, size=size, mode="nearest")
+    is_low = pressure <= local_min
+    is_high = pressure >= local_max
+
+    candidates = {
+        "L": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]))
+              for j, i in zip(*np.where(is_low))],
+        "H": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]))
+              for j, i in zip(*np.where(is_high))],
+    }
+
+    centers = []
+    for kind, pts in candidates.items():
+        pts.sort(key=lambda p: abs(p[2] - 1013.25), reverse=True)  # + extrême d'abord
+        kept = []
+        for lat, lon, hpa in pts:
+            if any(abs(lat - k[0]) < CENTER_MIN_SEPARATION_DEG and
+                   abs(lon - k[1]) < CENTER_MIN_SEPARATION_DEG for k in kept):
+                continue  # trop proche d'un centre déjà retenu (plus marqué)
+            kept.append((lat, lon, hpa))
+            if len(kept) >= MAX_CENTERS_PER_KIND:
+                break
+        centers += [{"kind": kind, "lat": round(lat, 2), "lon": round(lon, 2),
+                     "hpa": round(hpa, 1)} for lat, lon, hpa in kept]
+    return centers
 
 # ── Upload Supabase Storage (mêmes conventions que arome-wind/ingest.py) ─
 def sb_upload(path, body, tries=3):
@@ -238,6 +294,7 @@ def process_grid(key, model):
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
         geo = isobars_geojson(*result)
+        geo["centers"] = find_centers(*result)
         sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
         manifest_times.append(iso)
         done += 1

@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install --quiet omfiles fsspec s3fs numpy matplotlib
+        run: pip install --quiet omfiles fsspec s3fs numpy matplotlib scipy
       - name: Ingest ARPEGE isobars
         working-directory: arpege-isobars
         env:
