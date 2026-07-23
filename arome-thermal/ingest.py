@@ -41,7 +41,15 @@ MODEL_DIR = "arome"
 # donc plafonné à 2,5 km de toute façon, inutile de payer le poids de la
 # grille fine pour les champs qui y sont (CAPE, t).
 GRID      = "0025"
-MAX_HOURS = 48
+# 51h (retour Yann 23/07/2026 : « la faire passer en durée max du modèle
+# arome ») — pas 48 par excès de prudence : NOTES_TECHNIQUES_THERMIQUES_
+# AROME.md (§ Paquets disponibles) constate empiriquement "9 bundles pour
+# couvrir 0-51h" sur SP2/SP3 grille 0025, et ce même chiffre de 51h est
+# confirmé indépendamment dans web/src/lib/config.ts (Meteociel, sondage
+# meta.json Open-Meteo du 16/07 : « Échéance max. : 51h pour tous les
+# runs » sur AROME-HD). 48 laissait donc filer les 3 dernières heures
+# réellement publiées par Météo-France sans raison.
+MAX_HOURS = 51
 BBOX      = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # = arome-wind
 # Pas d'échantillonnage : 0,05° comme le vent ALTITUDE (1 point sur 2 de la
 # grille native 0,025°). w*/zᵢ sont des champs lisses à l'échelle de la
