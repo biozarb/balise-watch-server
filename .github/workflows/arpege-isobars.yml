@@ -1,0 +1,37 @@
+name: ARPEGE isobars ingestion
+
+# Calque "isobares" (Europe + monde, passé -> prévision, cf.
+# PROMPT_REPRISE_ISOBARES.md à la racine du repo web). Source : Open-Meteo
+# AWS Open Data (gratuit, sans clé), PAS le bucket meteofrance-pnt (celui-ci
+# ne contient pas l'ARPEGE, vérifié le 23/07). `latest.json` fait foi pour
+# savoir si un run est réellement complet -> déclenchement à +2h, sans
+# risque si le run n'est pas encore prêt (le script retombera alors sur le
+# run précédent, déjà traité, cf. sb_exists côté passé).
+
+on:
+  schedule:
+    - cron: "0 2,8,14,20 * * *"   # UTC — runs ARPEGE 00/06/12/18Z + 2h
+  workflow_dispatch: {}
+
+concurrency:
+  group: arpege-isobars
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # bien moins volumineux que arome-wind : lecture
+                           # partielle .om (~350 Ko/échéance/grille mesuré)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: pip install --quiet omfiles fsspec s3fs numpy matplotlib
+      - name: Ingest ARPEGE isobars
+        working-directory: arpege-isobars
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingest.py
