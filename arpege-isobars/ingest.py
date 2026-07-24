@@ -29,8 +29,20 @@ vent/thermique existant (retour Yann 23/07 : « on ne touche pas au reste ») :
     (même esprit de dégressivité que arome-wind/ingest.py, sur un horizon
     ARPEGE ~4 jours).
 
-Isobares : contourage tous les 5 hPa (convention météo classique, retour
-Yann 23/07) via matplotlib (backend Agg, pas d'affichage).
+Isobares : contourage tous les 1 hPa (retour Yann 24/07 : « rajouter des
+isobares quand on zoome pour avoir plus de détails »). Les multiples de 5
+restent les lignes « maîtresses » (toujours affichées, bold tous les 20)
+et les lignes intermédiaires 1 hPa ne sont révélées qu'au zoom côté
+frontend (cf. ISOBAR_FINE_LINE_ZOOM, IsobarsLayer.tsx) — la convention 5
+hPa d'origine reste donc la lecture par défaut, le pas fin n'ajoute du
+détail que quand on zoome. Contourage via matplotlib (backend Agg, pas
+d'affichage).
+
+Impact du passage 5 -> 1 hPa : ~5x plus de segments par géojson (fichiers
+plus lourds). Les échéances passées déjà en storage sont immuables
+(skip-if-exists) : elles gardent leur pas de 5 hPa tant qu'on ne relance
+pas un rattrapage `FORCE_REPROCESS_PAST=1 python ingest.py` — les nouveaux
+runs, eux, sortent d'emblée en 1 hPa.
 
 Sortie : GeoJSON (FeatureCollection de LineString, propriété `hpa`) par
 échéance, + un manifest par grille listant les échéances disponibles (même
@@ -56,7 +68,7 @@ MODELS = {
     "arpege_europe": "meteofrance_arpege_europe",
     "arpege_world":  "meteofrance_arpege_world025",
 }
-LEVEL_STEP_HPA = 5
+LEVEL_STEP_HPA = 1   # 24/07/2026 : 5 -> 1 hPa (détail au zoom, cf. docstring)
 FUTURE_HOURLY_UNTIL = 48      # horaire jusque-là, puis coarse
 FUTURE_COARSE_EVERY = 3
 PAST_STEP_HOURS = 6            # cadence des runs ARPEGE
