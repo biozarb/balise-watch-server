@@ -334,7 +334,17 @@ def build_tiles(state, kept, times, run):
     return tiles
 
 # ── Upload Supabase Storage (identique à arome-wind/ingest.py) ────────
-def sb_upload(path, body, tries=3):
+def sb_upload(path, body, tries=3, cache_control="no-cache, must-revalidate"):
+    """Débogage 24/07/2026 : même bug que `arome-wind/ingest.py` (cf.
+    BUGS.md session 24/07, calques vent figés sur certains ordis) — ce
+    bucket n'a que des objets réécrits EN PLACE à chaque run (tuiles
+    `thermal/{lat}_{lon}.json` + `thermal/manifest.json`, même chemin,
+    aucun horodatage dans le nom), donc rien d'"immuable" ici. L'ancien
+    `Cache-Control: max-age=10800` pouvait laisser un navigateur/CDN
+    servir une tuile périmée bien après un nouveau run, sans que le
+    hard-refresh corrige (comportement d'edge CDN, hors de portée du
+    client). `no-cache, must-revalidate` par défaut : revalidation
+    conditionnelle systématique plutôt qu'une fraîcheur supposée 3h."""
     if DRY_RUN:
         return 0
     url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
@@ -344,7 +354,7 @@ def sb_upload(path, body, tries=3):
             url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
                 "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
                 "Content-Type": "application/json", "x-upsert": "true",
-                "Cache-Control": "max-age=10800"})
+                "Cache-Control": cache_control})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 return r.status
