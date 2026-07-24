@@ -335,13 +335,29 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
     return tiles
 
 # ── Upload Supabase Storage ───────────────────────────────────────────
-def sb_upload(path, body, tries=3):
+def sb_upload(path, body, tries=3, cache_control="no-cache, must-revalidate"):
     """Téléverse un objet. Débogage 19/07/2026 : la version précédente
     laissait remonter un `HTTPError: 400` NU, sans le corps de réponse —
     donc impossible de savoir ce que Supabase reprochait. On journalise
     désormais le message, et on réessaie (POST puis PUT : selon les
     versions de storage-api, un upsert refusé remonte un 400 plutôt qu'un
-    409, et PUT passe alors sans ambiguïté)."""
+    409, et PUT passe alors sans ambiguïté).
+
+    Débogage 24/07/2026 (retour Yann : calques vent sol/altitude figés sur
+    certains ordis, données bloquées à échéance passée, hard-refresh sans
+    effet — mobile OK). Root cause : ce bucket n'a QUE des objets réécrits
+    EN PLACE à chaque run (tuiles sol/alt + manifest.json, même chemin) —
+    aucun n'est "immuable" comme les geojson isobares par échéance.
+    L'ancien `Cache-Control: max-age=10800` (calé sur la cadence 3h du
+    run) reproduisait le bug déjà identifié sur le manifest isobares (cf.
+    BUGS.md, session 23-24/07, "leçon générale à retenir" : un objet
+    Storage réécrit doit avoir un cache court/no-cache, jamais un TTL
+    long — un client ayant mis en cache juste avant un nouveau run reste
+    bloqué sur l'ancien jusqu'à expiration du TTL LOCAL, et un edge CDN
+    peut rester figé plus longtemps encore, indépendamment d'un
+    hard-refresh côté client). `no-cache, must-revalidate` par défaut :
+    revalidation systématique (conditionnelle via ETag, pas un aller-
+    retour plein à chaque fois) plutôt qu'une fraîcheur supposée 3h."""
     if DRY_RUN:
         return 0
     url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
@@ -351,8 +367,7 @@ def sb_upload(path, body, tries=3):
             url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
                 "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
                 "Content-Type": "application/json", "x-upsert": "true",
-                # 3 h : la donnée ne change qu'au run suivant (AROME / 3 h).
-                "Cache-Control": "max-age=10800"})
+                "Cache-Control": cache_control})
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 return r.status
