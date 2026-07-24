@@ -1,4 +1,5 @@
 const express  = require('express');
+const compression = require('compression'); // gzip des réponses (audit charge 24/07 : listes de stations servies en clair = ~55% de la bande passante Render)
 const webpush  = require('web-push');
 const fetch    = require('node-fetch');
 const rateLimit = require('express-rate-limit');
@@ -1576,6 +1577,15 @@ const app = express();
 // compteur partagé) au lieu de l'IP réelle de chaque appelant — ou lève
 // une erreur si le header X-Forwarded-For est présent sans ce réglage.
 app.set('trust proxy', 1);
+// ── Compression gzip (audit charge 24/07/2026) ──
+// Premier middleware : compresse TOUTES les réponses JSON. Les listes de
+// stations (/meteofrance-stations ~65 Ko, /aemet-stations, /infoclimat-stations)
+// étaient servies en clair à chaque poll client (6/15/20 min) = poste n°1 de la
+// bande passante Render (HTTP Responses). Le JSON compresse ~8× → ÷8 sur ce
+// poste, sans aucun changement de comportement côté client (décompression
+// transparente par le navigateur). Placé avant express.json/CORS/routes pour
+// envelopper toutes les réponses.
+app.use(compression());
 app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
