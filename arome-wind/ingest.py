@@ -36,7 +36,12 @@ MODEL_DIR  = "arome"
 #          SP*/HP*, aucun isobare).
 GRID_SOL   = "001"
 GRID_ALT   = "0025"
-MAX_HOURS  = 48                     # horizon complet AROME (retour Yann 19/07)
+MAX_HOURS  = 51                     # horizon complet AROME-HD (relevé de 48 à 51
+                                     # le 25/07/2026 — 48 sous-estimait de 3h le
+                                     # vrai plafond, déjà mesuré/documenté dans
+                                     # NOTES_TECHNIQUES_THERMIQUES_AROME.md et
+                                     # web/src/lib/config.ts ; même correctif déjà
+                                     # appliqué à arome-thermal le 23/07)
 BBOX       = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # France + voisins
 # Pas d'échantillonnage, = maillage NATIF de chaque grille (aucune perte) :
 #  - sol : 0,01°  (grille 001)  -> ~1,1 km, le relief est résolu.
@@ -178,16 +183,78 @@ def s3_keys(prefix):
     root = ET.fromstring(http_get(url, 60))
     return [e.text for e in root.iter() if e.tag.split('}')[-1] == "Key"]
 
-def latest_run():
-    """Dernier run AROME (cadence 3 h) dont le paquet SP1 est déjà publié."""
+def covered_steps(ref, pkg, grid, steps_needed):
+    """Sous-ensemble de `steps_needed` réellement couvert par les fichiers
+    DÉJÀ PUBLIÉS du paquet `pkg`/grille `grid` pour ce run. Simple listing
+    S3 (quelques ko), aucun téléchargement — c'est ce qui rend pick_run()
+    abordable (même helper que arome-thermal/ingest.py::pick_run,
+    25/07/2026)."""
+    want = set(steps_needed)
+    covered = set()
+    for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{grid}/{pkg}/"):
+        m = re.search(r"__(\d+)H(?:(\d+)H)?__", k)
+        if not m:
+            continue
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else start
+        covered |= {h for h in want if start <= h <= end}
+    return covered
+
+def pick_run():
+    """Run AROME offrant le PLUS d'échéances réellement publiées, à la fois
+    sur SOL (SP1, grille 001) ET ALTITUDE (IP1, grille 0025).
+
+    ⚠️ Débogage 25/07/2026 (retour Yann : le curseur temporel du calque
+    vent plafonnait à ~6 h après le run — « sam. 23:00 / Run sam. 17:00 »
+    — au lieu des ~48-51 h attendues). Sondage en direct du manifest de
+    prod à ce moment-là : run 15h UTC, SEULEMENT 7 fichiers SP1 publiés
+    (échéances 0-6h) et AUCUN IP1 (`"levels": []`). MÊME cause racine que
+    le bug corrigé le jour même sur arome-thermal/ingest.py (cf. commit
+    `dd666a7`, `pick_run()`) : l'ancienne `latest_run()` prenait le run le
+    plus RÉCENT dès qu'UN SEUL fichier SP1 existait, sans vérifier que les
+    échéances lointaines (et IP1) étaient publiées. Le cron tourne 2 h
+    après le run (`arome-wind.yml`), largement avant que Météo-France ait
+    fini de publier les ~51 fichiers horaires SP1 et les bundles IP1
+    (encore plus lents à démarrer, observé à 0 à 2h). 3 h plus tard, le
+    script suivant saute sur un run encore plus frais, tout aussi
+    incomplet, et RÉÉCRIT la tuile en place (bucket entièrement mutable,
+    cf. sb_upload) — les échéances lointaines n'étaient donc JAMAIS
+    publiées, à aucun run, indéfiniment.
+
+    Nouveau critère, identique dans l'esprit à arome-thermal : parmi les
+    runs candidats (du plus récent au plus ancien, jusqu'à 12 h en
+    arrière), on retient celui qui maximise la couverture SP1 ∩ IP1 sur
+    les échéances utiles (`0..MAX_HOURS`, filtrées par `keep_step`).
+    Sortie immédiate dès qu'un run est complet. SOL et ALT restent ISSUS
+    DU MÊME run (comme avant ce fix) — cohérent avec le reste du script,
+    qui n'a jamais traité les deux indépendamment."""
     base = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     base -= timedelta(hours=base.hour % 3)
-    for back in range(9):                       # jusqu'à 24 h en arrière
+    best = None                                  # (n_usable, ref, run, steps_needed)
+    for back in range(5):                        # 0, 3, 6, 9, 12 h en arrière
         run = base - timedelta(hours=3 * back)
         ref = run.strftime("%Y-%m-%dT%H:00:00Z")
-        if s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID_SOL}/SP1/"):
-            return ref, run
-    raise SystemExit("Aucun run AROME SP1 publié sur les 24 dernières heures")
+        steps_needed = [h for h in range(0, MAX_HOURS + 1) if keep_step(h, run.hour)]
+        if not steps_needed:
+            continue
+        sp1 = covered_steps(ref, "SP1", GRID_SOL, steps_needed)
+        if not sp1:
+            continue                             # run pas (encore) publié du tout
+        ip1 = covered_steps(ref, "IP1", GRID_ALT, steps_needed)
+        cov = sp1 & ip1
+        usable = [h for h in steps_needed if h in cov]
+        print(f"  run {ref} : {len(usable)}/{len(steps_needed)} échéances exploitables "
+              f"({len(sp1)} SP1, {len(ip1)} IP1)")
+        if best is None or len(usable) > best[0]:
+            best = (len(usable), ref, run, steps_needed)
+        if len(usable) == len(steps_needed):
+            break                                # complet : inutile de remonter
+    if best is None or best[0] == 0:
+        raise SystemExit("Aucun run AROME SP1/IP1 exploitable sur les 12 dernières "
+                         "heures — rien à publier.")
+    n, ref, run, steps_needed = best
+    print(f"→ run retenu : {ref} ({n}/{len(steps_needed)} échéances)")
+    return ref, run
 
 def files_for(ref, pkg, grid):
     """Fichiers du paquet couvrant les échéances retenues.
@@ -256,17 +323,23 @@ def is_night_utc(hour_of_day):
         return NIGHT_UTC_START <= hour_of_day < NIGHT_UTC_END
     return hour_of_day >= NIGHT_UTC_START or hour_of_day < NIGHT_UTC_END
 
-def keep_step(h):
+def keep_step(h, run_hour=None):
     """Profil d'échéances (débogage 20/07/2026, retour Yann) : horaire
     TOUTE la journée, 1 échéance sur COARSE_EVERY seulement pendant la
     fenêtre nuit (is_night_utc, sur l'heure UTC RÉELLE run+h — pas un
     seuil fixe d'heures écoulées comme l'ancien FINE_H, qui pouvait
-    tomber en pleine journée de vol selon l'heure du run)."""
+    tomber en pleine journée de vol selon l'heure du run).
+
+    `run_hour` explicite (25/07/2026, ajouté pour pick_run()) : pick_run()
+    doit évaluer la couverture de PLUSIEURS runs candidats avant d'en
+    choisir un, donc avant que `_RUN_HOUR_UTC` (global, fixé dans main())
+    ne soit connu. Défaut inchangé pour tous les appels d'origine."""
     if h == 0:
         return True  # état initial toujours gardé, même si le run tombe la nuit
-    if _RUN_HOUR_UTC is None:
+    rh = _RUN_HOUR_UTC if run_hour is None else run_hour
+    if rh is None:
         return h <= FINE_H or h % COARSE_EVERY == 0  # filet de sécurité, ne devrait pas arriver
-    if is_night_utc((_RUN_HOUR_UTC + h) % 24):
+    if is_night_utc((rh + h) % 24):
         return h % COARSE_EVERY == 0
     return True
 
@@ -426,7 +499,7 @@ def steps_times(run, *dicts):
 
 def main():
     global _RUN_HOUR_UTC
-    ref, run = latest_run()
+    ref, run = pick_run()
     _RUN_HOUR_UTC = run.hour
     print(f"Run AROME : {ref}")
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
