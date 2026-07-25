@@ -99,39 +99,104 @@ def s3_keys(prefix):
     root = ET.fromstring(http_get(url, 60))
     return [e.text for e in root.iter() if e.tag.split('}')[-1] == "Key"]
 
-def latest_run():
-    """Dernier run AROME dont le paquet SP2 (0025) est publié.
+def covered_steps(ref, pkg, steps_needed):
+    """Sous-ensemble de `steps_needed` réellement couvert par les bundles
+    DÉJÀ PUBLIÉS du paquet `pkg` pour ce run. Simple listing S3 (quelques
+    ko), aucun téléchargement — c'est ce qui rend pick_run() abordable."""
+    want = set(steps_needed)
+    covered = set()
+    for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID}/{pkg}/"):
+        m = re.search(r"__(\d+)H(?:(\d+)H)?__", k)
+        if not m:
+            continue
+        start = int(m.group(1))
+        end = int(m.group(2)) if m.group(2) else start
+        covered |= {h for h in want if start <= h <= end}
+    return covered
 
-    On teste SP2 et pas SP1 (contrairement à arome-wind) : les paquets ne
-    sont pas publiés exactement en même temps, et c'est SP2/SP3 qu'il nous
-    faut. Vérifier SP1 pourrait faire croire qu'un run est prêt alors que
-    nos champs ne le sont pas encore."""
+def pick_run():
+    """Run AROME offrant le PLUS d'échéances de jour réellement publiées.
+
+    ⚠️ Débogage 25/07/2026 (retour pilotes : « le facteur W n'affiche rien
+    pour demain », vérifié sur Céret / Col de la Brousse). L'ancienne
+    `latest_run()` prenait le run le plus RÉCENT dont SP2 existait, sans
+    regarder si les bundles lointains étaient publiés. Or Météo-France
+    publie les bundles progressivement sur ~4 h : à 15h18 UTC, le run 12Z
+    n'avait que le bundle 00H06H, soit 6 échéances (13h→18h UTC du jour)
+    sur les 33 attendues. J+1 et J+2 étaient tout simplement absents de la
+    tuile.
+
+    Le commentaire d'origine (« on publie ce qui est disponible et on
+    laisse le run suivant compléter ») décrivait un rattrapage qui n'a
+    JAMAIS eu lieu : 3 h plus tard le script saute sur un run encore plus
+    frais (15Z), lui aussi réduit à son premier bundle, et RÉÉCRIT la
+    tuile — les échéances lointaines ne sont donc jamais publiées, à aucun
+    run. Un manifest amputé toutes les 3 h, sans que rien n'échoue.
+
+    Nouveau critère : parmi les runs candidats (du plus récent au plus
+    ancien), on garde celui qui maximise le nombre d'échéances de jour
+    EXPLOITABLES (h et h−1 tous deux publiés, même règle que `kept_avail`
+    dans main()). À égalité, le plus récent gagne (comparaison stricte,
+    parcours du récent vers l'ancien). Sortie immédiate dès qu'un run est
+    complet, pour ne pas lister inutilement les runs plus anciens.
+
+    Fenêtre de recherche : 12 h (5 candidats à 3 h d'intervalle). Les runs
+    0Z et 12Z sont espacés de 12 h, donc on est certain d'atteindre un run
+    à horizon complet — c'est d'ailleurs exactement ce que fait vélivole,
+    qui n'exploite que « AROME AUTO (0Z, 12Z) ». Au-delà de 12 h la
+    prévision serait trop vieille pour valoir le gain de couverture."""
     base = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     base -= timedelta(hours=base.hour % 3)
-    for back in range(9):                       # jusqu'à 24 h en arrière
+    best = None                                  # (n_usable, ref, run, kept)
+    for back in range(5):                        # 0, 3, 6, 9, 12 h en arrière
         run = base - timedelta(hours=3 * back)
         ref = run.strftime("%Y-%m-%dT%H:00:00Z")
-        if s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID}/SP2/"):
-            return ref, run
-    raise SystemExit("Aucun run AROME SP2 publié sur les 24 dernières heures")
+        steps_needed, kept = needed_steps(run.hour)
+        if not kept:
+            continue
+        sp2 = covered_steps(ref, "SP2", steps_needed)
+        if not sp2:
+            continue                             # run pas (encore) publié
+        sp3 = covered_steps(ref, "SP3", steps_needed)
+        cov = sp2 & sp3
+        usable = [h for h in kept if h in cov and (h - 1 <= 0 or h - 1 in cov)]
+        print(f"  run {ref} : {len(usable)}/{len(kept)} échéances de jour "
+              f"exploitables ({len(sp2)} SP2, {len(sp3)} SP3 sur "
+              f"{len(steps_needed)} nécessaires)")
+        if best is None or len(usable) > best[0]:
+            best = (len(usable), ref, run, kept)
+        if len(usable) == len(kept):
+            break                                # complet : inutile de remonter
+    if best is None or best[0] == 0:
+        raise SystemExit("Aucun run AROME SP2/SP3 exploitable sur les 12 dernières "
+                         "heures — rien à publier.")
+    _, ref, run, kept = best
+    print(f"→ run retenu : {ref} ({best[0]}/{len(kept)} échéances de jour)")
+    return ref, run
 
 def is_day_utc(hour_of_day):
     """Fenêtre [DAY_UTC_START, DAY_UTC_END[ — ne traverse PAS minuit."""
     return DAY_UTC_START <= hour_of_day < DAY_UTC_END
 
-def keep_step(h):
+def keep_step(h, run_hour=None):
     """Échéances RETENUES pour la sortie : heures de jour uniquement.
 
     h == 0 est exclu même en journée : `sshf` est un cumul depuis le début
     du run, donc valant 0 à h=0 — impossible d'en tirer un flux (il faut
-    h et h−1). Cf. needed_steps() qui ajoute les prédécesseurs."""
+    h et h−1). Cf. needed_steps() qui ajoute les prédécesseurs.
+
+    `run_hour` explicite (25/07/2026) : pick_run() doit évaluer la
+    couverture de PLUSIEURS runs candidats avant d'en choisir un, donc
+    avant que `_RUN_HOUR_UTC` ne soit fixé. Défaut inchangé (global) pour
+    tous les appels d'origine."""
     if h <= 0 or h > MAX_HOURS:
         return False
-    if _RUN_HOUR_UTC is None:
+    rh = _RUN_HOUR_UTC if run_hour is None else run_hour
+    if rh is None:
         return True                              # filet, ne devrait pas arriver
-    return is_day_utc((_RUN_HOUR_UTC + h) % 24)
+    return is_day_utc((rh + h) % 24)
 
-def needed_steps():
+def needed_steps(run_hour=None):
     """Échéances à DÉCODER = celles retenues + leur prédécesseur h−1.
 
     Le prédécesseur n'est jamais publié en sortie : il ne sert qu'à
@@ -144,7 +209,7 @@ def needed_steps():
     définition. Découvert par le test du 20/07/2026 sur le run de 03Z, où
     la première échéance de jour est h=1 et réclamait donc un h=0 qui
     n'existe pas. Le zéro est réinjecté implicitement par sshf_at()."""
-    kept = [h for h in range(1, MAX_HOURS + 1) if keep_step(h)]
+    kept = [h for h in range(1, MAX_HOURS + 1) if keep_step(h, run_hour)]
     need = {h for h in kept} | {h - 1 for h in kept}
     return sorted(h for h in need if h >= 1), kept
 
@@ -414,10 +479,57 @@ def quality_check(state, kept):
               f"de la désaccumulation sshf probablement inversée — NE PAS "
               f"PUBLIER ce résultat tel quel, cf. NOTES_TECHNIQUES.")
 
+    # ── Diagnostic `sshf` : cumul depuis le run, ou accumulation horaire ?
+    # Ouvert le 25/07/2026. Comparaison faite au Col de la Brousse (Céret,
+    # 42,455/2,765) contre vélivole, MÊME run 12Z, MÊME jour : zᵢ colle
+    # (rapports 1,00 / 0,81 / 1,03), mais w* est 15 à 85 % plus bas, et le
+    # H0 qu'on peut remonter de nos propres w*/zᵢ est erratique — 317, 222,
+    # 61, 173, 96 puis 0 W/m² d'heure en heure, là où un flux de chaleur
+    # sensible réel décroît régulièrement l'après-midi. La proportion de
+    # points à w*=0 grimpe aussi anormalement au fil de la journée (369 →
+    # 1003 sur 1600 entre 13h et 18h UTC).
+    #
+    # TOUT le calcul repose sur l'hypothèse « `sshf` est un cumul depuis le
+    # début du run » (cf. wstar/sshf_at). Si Météo-France publiait en fait
+    # une accumulation HORAIRE, `sshf_h - sshf_prev` ne serait pas un flux
+    # mais une TENDANCE de flux — négative dès que le soleil décline, donc
+    # rabotée à 0 par le garde-fou `H0 <= 0`, exactement le symptôme
+    # observé. L'hypothèse n'a jamais été vérifiée sur la donnée brute.
+    #
+    # On ne corrige rien ici : on JOURNALISE la série brute, seule façon de
+    # trancher sans deviner. Cumul depuis le run -> |sshf| croît de façon
+    # monotone au fil des échéances. Accumulation horaire -> la valeur
+    # oscille et redescend l'après-midi.
+    # Uniquement des échéances CONSÉCUTIVES d'une même fenêtre de jour : le
+    # cumul remonte légitimement la nuit (sol qui se refroidit, flux vers le
+    # bas), donc comparer h=6 à h=16 par-dessus une nuit produirait une
+    # fausse alerte.
+    land = nearest(*QC_LAND[0])
+    serie = []
+    for h in sorted(kept):
+        if ("sshf", h) not in d:
+            break
+        if serie and h != serie[-1][0] + 1:
+            break
+        serie.append((h, d[("sshf", h)][land]))
+        if len(serie) == 6:
+            break
+    if len(serie) >= 3:
+        print(f"  sshf brut à {QC_LAND[0]} (J/m², attendu : cumul depuis le run, "
+              f"donc stric. décroissant car flux vers le haut = négatif) :")
+        print("    " + "  ".join(f"+{h}h={v/1e6:.2f}M" for h, v in serie))
+        monotone = all(b <= a for (_, a), (_, b) in zip(serie, serie[1:]))
+        if not monotone:
+            print("  ⚠️⚠️ ALERTE : `sshf` n'est PAS monotone sur les échéances "
+                  "successives — ce n'est donc pas un cumul depuis le début du "
+                  "run, et la désaccumulation de wstar() calcule une tendance "
+                  "de flux au lieu d'un flux. Cause probable du facteur W trop "
+                  "bas et des w*=0 de fin de journée (cf. BUGS.md 25/07).")
+
 # ── main ──────────────────────────────────────────────────────────────
 def main():
     global _RUN_HOUR_UTC
-    ref, run = latest_run()
+    ref, run = pick_run()
     _RUN_HOUR_UTC = run.hour
     print(f"Run AROME : {ref} (run à {_RUN_HOUR_UTC}h UTC)")
 
@@ -443,9 +555,15 @@ def main():
     # timing n'avait jamais été éprouvé en conditions réelles avant les
     # premiers runs auto). Avant, un seul trou en fin d'horizon faisait
     # échouer TOUT le run (cf. BUGS.md, "arome-thermal : Champs manquants
-    # blh, run planté 3x"). Ici on publie ce qui est disponible et on
-    # laisse le run suivant (3h plus tard) compléter — le choix déjà fait
-    # par arome-wind/ingest.py::steps_times() pour le même type de trou.
+    # blh, run planté 3x"). Ici on publie ce qui est disponible plutôt que
+    # de tout perdre — le choix déjà fait par arome-wind/ingest.py::
+    # steps_times() pour le même type de trou.
+    # ⚠️ CORRIGÉ le 25/07/2026 : ce filet disait « le run suivant
+    # complètera ». C'était faux, et ça a masqué pendant des semaines
+    # l'absence totale de J+1/J+2 dans les tuiles — le run suivant repartait
+    # d'un run encore plus frais, donc tout aussi incomplet. C'est
+    # maintenant pick_run() qui garantit une couverture correcte EN AMONT ;
+    # ce bloc ne rattrape plus que les trous ponctuels.
     kept_avail = [h for h in kept
                   if ("t", h) in state["data"] and ("blh", h) in state["data"]
                   and ("sshf", h) in state["data"]
@@ -457,10 +575,23 @@ def main():
         holes = sorted(set(kept) - set(kept_avail))
         print(f"  ⚠️ {len(holes)} échéance(s) pas encore publiée(s) côté Météo-France, "
               f"écartée(s) : {holes[:10]}{' …' if len(holes) > 10 else ''} — "
-              f"publication des {len(kept_avail)} échéances disponibles, le run "
-              f"suivant complètera.")
+              f"publication des {len(kept_avail)} échéances disponibles.")
     kept = kept_avail
     times = [(run + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M") for h in kept]
+
+    # Couverture en JOURS — c'est l'unité qui compte pour l'utilisateur : le
+    # plan de coupe propose « aujourd'hui / +1 / +2 » et une tuile qui
+    # n'aurait que l'après-midi du jour même laisse deux onglets vides.
+    # pick_run() est censé rendre ce cas impossible ; l'alerte reste comme
+    # filet, pour qu'une régression se voie dans les logs de l'Action au
+    # lieu de repartir en silence (c'est précisément le silence qui a laissé
+    # passer le bug du 25/07, cf. pick_run).
+    days = sorted({t[:10] for t in times})
+    print(f"  couverture : {len(days)} jour(s) — {', '.join(days)}")
+    if len(days) < 2:
+        print(f"  ⚠️⚠️ ALERTE : une seule journée couverte. Le plan de coupe "
+              f"n'aura AUCUNE valeur de facteur W pour demain. Vérifier la "
+              f"publication des bundles SP2/SP3 lointains côté Météo-France.")
 
     quality_check(state, kept)
 
@@ -474,7 +605,12 @@ def main():
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
                     .strftime("%Y-%m-%dT%H:%M:%SZ"), grid=GRID, tileDeg=TILE_DEG,
                     step=STEP_DEG, maxHours=MAX_HOURS, times=times, uploaded=total,
-                    dayUtc=[DAY_UTC_START, DAY_UTC_END], wstarMin=WSTAR_MIN)
+                    dayUtc=[DAY_UTC_START, DAY_UTC_END], wstarMin=WSTAR_MIN,
+                    # `days` (25/07/2026) : lisible d'un coup d'œil dans le
+                    # manifest, sans avoir à dépiler `times`. C'est le premier
+                    # chiffre à regarder si un pilote resignale « pas de
+                    # facteur W pour demain » (cf. pick_run).
+                    days=days)
     sb_upload(f"{MODEL_DIR}/thermal/manifest.json", json.dumps(manifest).encode())
     print(f"Terminé : {total} tuiles + manifest "
           f"{'(DRY_RUN, rien téléversé)' if DRY_RUN else f'téléversés dans {BUCKET}'}.")
