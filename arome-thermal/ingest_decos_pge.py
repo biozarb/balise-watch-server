@@ -37,12 +37,31 @@
 #  douleur si besoin (juste étendre COUNTRIES).
 #
 #  ── SORTIE ─────────────────────────────────────────────────────────
-#  `PWA/web/public/data/decos.json` — tableau compact `[[lat, lon], ...]`
-#  (4 décimales, ~11 m de précision, largement suffisant pour un
-#  amortissement à l'échelle de quelques centaines de mètres). PAS de
-#  nom/altitude/description : on n'en a pas besoin pour une distance, et
-#  ça garde le fichier petit (chargé une fois par session côté client,
-#  cf. lib/decos.ts).
+#  `PWA/web/public/data/decos.json` — tableau compact de tableaux (pas
+#  d'objets : le gain de poids est réel sur ~3300 entrées) :
+#
+#    [[lat, lon, name, alt, sectors], ...]
+#     45.9058, 5.7614, "Colombier", 1509, "00000020"
+#
+#  - `lat`/`lon` : 4 décimales (~11 m), comme avant.
+#  - `name` : tronqué à 48 caractères.
+#  - `alt` : `takeoff_altitude` en entier, `null` si vide/non numérique
+#    — jamais 0 par défaut, l'absence doit rester visible.
+#  - `sectors` : chaîne de 8 caractères, secteurs N,NE,E,SE,S,SW,W,NW
+#    dans cet ordre, un caractère "0"/"1"/"2" chacun (valeur brute
+#    pgEarth, non interprétée ici — cf. PLAN_KK7_UTILE.md §4.4, le sens
+#    exact 0/1/2 est encore [non vérifié]).
+#
+#  Changement du 25/07/2026 (lot 0, PLAN_KK7_UTILE.md) : cette ligne
+#  disait auparavant « PAS de nom/altitude/description : on n'en a pas
+#  besoin pour une distance » — c'était vrai TANT QUE le seul usage
+#  était l'amortissement kk7 (une distance suffit). Ça cesse de l'être
+#  avec le lot 1 (panneau déco : orientation vs vent du jour), qui a
+#  besoin du nom, de l'altitude et des secteurs. Pas de `takeoff_description`
+#  (poids, pas d'usage identifié) ni des coordonnées de parking/atterro
+#  (idem — à rajouter le jour où un lot en aura besoin, pas « au cas
+#  où »). Poids mesuré sur ce format : 3313 décos, 160 Ko brut / 65 Ko
+#  gzip (contre 56,7 Ko avant, format `[lat, lon]` seul).
 #
 #  ── FRAÎCHEUR ──────────────────────────────────────────────────────
 #  Pas de cron/Action GitHub pour ce fichier : la base de décos évolue
@@ -87,27 +106,61 @@ def fetch(cc: str) -> bytes:
     return data
 
 
+SECTOR_ORDER = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+NAME_MAX_LEN = 48
+
+
+def parse_altitude(raw: str | None) -> int | None:
+    """`takeoff_altitude` pgEarth est une chaîne, parfois vide, parfois non
+    numérique. `None` si absent/invalide — jamais 0 par défaut, l'absence
+    doit rester visible côté client (même règle que nearestDecoDistanceKm)."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return int(round(float(raw)))
+    except ValueError:
+        return None
+
+
+def parse_sectors(props: dict) -> str:
+    """Chaîne de 8 caractères N,NE,E,SE,S,SW,W,NW (ordre fixe), un digit
+    "0"/"1"/"2" par secteur. Valeur brute pgEarth non interprétée ici — cf.
+    PLAN_KK7_UTILE.md §4.4."""
+    out = []
+    for sector in SECTOR_ORDER:
+        v = str(props.get(sector, "0")).strip()
+        out.append(v if v in ("0", "1", "2") else "0")
+    return "".join(out)
+
+
 def main() -> None:
     seen: set[tuple[float, float]] = set()
-    points: list[list[float]] = []
+    points: list[list] = []
     for cc in COUNTRIES:
         raw = fetch(cc)
         d = json.load(io.BytesIO(raw))
         n_before = len(points)
         for feat in d.get("features", []):
-            if feat.get("properties", {}).get("place") != "paragliding takeoff":
+            props = feat.get("properties", {})
+            if props.get("place") != "paragliding takeoff":
                 continue  # garde-fou : on ne veut QUE des décollages
             lon, lat = feat["geometry"]["coordinates"]
             key = (round(lat, 4), round(lon, 4))
             if key in seen:
                 continue  # doublon (site proche frontière listé par 2 pays)
             seen.add(key)
-            points.append([key[0], key[1]])
+            name = str(props.get("name", "")).strip()[:NAME_MAX_LEN]
+            alt = parse_altitude(props.get("takeoff_altitude"))
+            sectors = parse_sectors(props)
+            points.append([key[0], key[1], name, alt, sectors])
         print(f"  {cc}: +{len(points) - n_before} décos", file=sys.stderr)
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
-        json.dump(points, f, separators=(",", ":"))
+        json.dump(points, f, separators=(",", ":"), ensure_ascii=False)
     size_kb = os.path.getsize(OUT) / 1024
     print(f"\n{len(points)} décos écrits dans {OUT} ({size_kb:.0f} Ko)", file=sys.stderr)
 
