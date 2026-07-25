@@ -1873,10 +1873,16 @@ app.get('/wind-grid', async (req, res) => {
 // France (Trappes/Brest/Bordeaux/Nîmes/Ajaccio) — pas hebdomadaire.
 // Complété par les stations frontalières les plus utiles pour les Alpes/
 // zones de vol françaises (Suisse, Allemagne, Italie).
-// ⚠️ id = numéro OMM 5 chiffres (celui qu'attend Wyoming). Les stations
-// allemandes/italiennes ci-dessous sont À CONFIRMER par Yann avant mise
-// en prod (certaines listes les donnent arrêtées/déplacées) — Trappes/
-// Brest/Bordeaux/Nîmes/Ajaccio/Payerne sont sûres.
+// ⚠️ id = numéro OMM 5 chiffres (celui qu'attend Wyoming). Toutes les
+// stations ci-dessous VÉRIFIÉES actives (recherche web 25/07/2026) :
+// - Suisse : Payerne est la SEULE station de radiosondage du pays
+//   (réseau MeteoSwiss à une seule station, historique depuis 1954).
+// - Allemagne : réseau DWD, 11 stations, lâchers ≥2/jour (00Z/12Z) —
+//   Stuttgart-Schnarrenberg et Idar-Oberstein confirmées actives.
+// - Italie : Milano/Linate a fermé en 2021, remplacée par Cameri
+//   (Novara) — corrigé ici. Ajout de Cuneo-Levaldigi (WMO 16117), la
+//   plus proche des Alpes françaises/Maurienne (juste à la frontière
+//   côté Piémont), donc la plus utile pour ce public de pilotes.
 const SOUNDING_STATIONS = [
   { id: '07145', name: 'Trappes', country: 'FR', lat: 48.774, lon: 2.011 },
   { id: '07110', name: 'Brest-Guipavas', country: 'FR', lat: 48.444, lon: -4.412 },
@@ -1886,7 +1892,8 @@ const SOUNDING_STATIONS = [
   { id: '06610', name: 'Payerne', country: 'CH', lat: 46.813, lon: 6.943 },
   { id: '10739', name: 'Stuttgart-Schnarrenberg', country: 'DE', lat: 48.828, lon: 9.2 },
   { id: '10618', name: 'Idar-Oberstein', country: 'DE', lat: 49.7, lon: 7.333 },
-  { id: '16080', name: 'Milano/Linate', country: 'IT', lat: 45.43, lon: 9.28 },
+  { id: '16064', name: 'Cameri (Novara)', country: 'IT', lat: 45.52, lon: 8.65 },
+  { id: '16117', name: 'Cuneo-Levaldigi', country: 'IT', lat: 44.547, lon: 7.623 },
 ];
 // 2 runs/jour (00Z, 12Z) publiés avec un délai (~2-3h après le lâcher) —
 // on ne propose que les runs vraisemblablement déjà publiés au client,
