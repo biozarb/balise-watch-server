@@ -1883,6 +1883,16 @@ app.get('/wind-grid', async (req, res) => {
 //   (Novara) — corrigé ici. Ajout de Cuneo-Levaldigi (WMO 16117), la
 //   plus proche des Alpes françaises/Maurienne (juste à la frontière
 //   côté Piémont), donc la plus utile pour ce public de pilotes.
+// - Espagne (ajout 25/07/2026, demande Yann) : réseau AEMET, lâchers
+//   2/jour (00Z/12Z) confirmés actifs (recherche web 25/07/2026) à
+//   A Coruña, Santander, Zaragoza, Madrid-Barajas, Barcelone, Palma de
+//   Mallorca et Murcia — les 7 retenues telles quelles (pas de tri
+//   supplémentaire par proximité des sites de vol, même logique
+//   "réseau national complet" que pour la France ci-dessus).
+// - Portugal (ajout 25/07/2026) : une seule station confirmée sur le
+//   continent, Lisboa/Gago Coutinho — le réseau des Açores (Lajes/Ponta
+//   Delgada) n'a pas pu être confirmé actif à cette date, exclu par
+//   prudence plutôt que de risquer une station morte dans la liste.
 const SOUNDING_STATIONS = [
   { id: '07145', name: 'Trappes', country: 'FR', lat: 48.774, lon: 2.011 },
   { id: '07110', name: 'Brest-Guipavas', country: 'FR', lat: 48.444, lon: -4.412 },
@@ -1894,6 +1904,14 @@ const SOUNDING_STATIONS = [
   { id: '10618', name: 'Idar-Oberstein', country: 'DE', lat: 49.7, lon: 7.333 },
   { id: '16064', name: 'Cameri (Novara)', country: 'IT', lat: 45.52, lon: 8.65 },
   { id: '16117', name: 'Cuneo-Levaldigi', country: 'IT', lat: 44.547, lon: 7.623 },
+  { id: '08001', name: 'A Coruña', country: 'ES', lat: 43.36, lon: -8.42 },
+  { id: '08023', name: 'Santander', country: 'ES', lat: 43.47, lon: -3.82 },
+  { id: '08160', name: 'Zaragoza', country: 'ES', lat: 41.67, lon: -1.02 },
+  { id: '08181', name: 'Barcelone', country: 'ES', lat: 41.29, lon: 2.07 },
+  { id: '08221', name: 'Madrid-Barajas', country: 'ES', lat: 40.5, lon: -3.58 },
+  { id: '08301', name: 'Palma de Mallorca', country: 'ES', lat: 39.55, lon: 2.61 },
+  { id: '08430', name: 'Murcia', country: 'ES', lat: 38.0, lon: -1.17 },
+  { id: '08579', name: 'Lisbonne (Gago Coutinho)', country: 'PT', lat: 38.77, lon: -9.13 },
 ];
 // 2 runs/jour (00Z, 12Z) publiés avec un délai (~2-3h après le lâcher) —
 // on ne propose que les runs vraisemblablement déjà publiés au client,
