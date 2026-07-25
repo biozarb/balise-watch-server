@@ -1866,6 +1866,145 @@ app.get('/wind-grid', async (req, res) => {
   res.json({ model, kind, level, tileLat, tileLon, fetchedAt: entry.fetchedAt, times: entry.times, points: entry.points });
 });
 
+// ── Sondages réels (radiosondages), 25/07/2026 ───────────────────────
+// Retour pilotes (via Yann) : émagramme modèle ok, mais veulent aussi le
+// VRAI sondage (ballon-sonde) le plus proche, façon Meteociel/Wyoming.
+// Lâchers Météo-France : 2/jour (00Z, 12Z), tous les jours, 5 stations en
+// France (Trappes/Brest/Bordeaux/Nîmes/Ajaccio) — pas hebdomadaire.
+// Complété par les stations frontalières les plus utiles pour les Alpes/
+// zones de vol françaises (Suisse, Allemagne, Italie).
+// ⚠️ id = numéro OMM 5 chiffres (celui qu'attend Wyoming). Les stations
+// allemandes/italiennes ci-dessous sont À CONFIRMER par Yann avant mise
+// en prod (certaines listes les donnent arrêtées/déplacées) — Trappes/
+// Brest/Bordeaux/Nîmes/Ajaccio/Payerne sont sûres.
+const SOUNDING_STATIONS = [
+  { id: '07145', name: 'Trappes', country: 'FR', lat: 48.774, lon: 2.011 },
+  { id: '07110', name: 'Brest-Guipavas', country: 'FR', lat: 48.444, lon: -4.412 },
+  { id: '07510', name: 'Bordeaux-Mérignac', country: 'FR', lat: 44.831, lon: -0.691 },
+  { id: '07645', name: 'Nîmes-Courbessac', country: 'FR', lat: 43.858, lon: 4.407 },
+  { id: '07761', name: 'Ajaccio', country: 'FR', lat: 41.918, lon: 8.793 },
+  { id: '06610', name: 'Payerne', country: 'CH', lat: 46.813, lon: 6.943 },
+  { id: '10739', name: 'Stuttgart-Schnarrenberg', country: 'DE', lat: 48.828, lon: 9.2 },
+  { id: '10618', name: 'Idar-Oberstein', country: 'DE', lat: 49.7, lon: 7.333 },
+  { id: '16080', name: 'Milano/Linate', country: 'IT', lat: 45.43, lon: 9.28 },
+];
+// 2 runs/jour (00Z, 12Z) publiés avec un délai (~2-3h après le lâcher) —
+// on ne propose que les runs vraisemblablement déjà publiés au client,
+// pour éviter une liste pleine de créneaux qui renverront tous "pas de
+// donnée". Profondeur d'historique Wyoming largement > 3j en pratique,
+// mais on borne à 3j (72h) : au-delà, peu d'intérêt pour un pilote qui
+// prépare un vol.
+const SOUNDING_HISTORY_DAYS = 3;
+const SOUNDING_PUBLISH_DELAY_MS = 3 * 60 * 60 * 1000;
+
+// Cache RAM : une fois publié, un run passé ne change plus jamais —
+// TTL long (pas de re-fetch) pour un succès, TTL COURT pour un échec/
+// "pas de donnée" (négatif) afin de ne pas marteler Wyoming si un
+// pilote revient plusieurs fois sur un créneau vide. Même politique que
+// windGridLastAttempt/WIND_GRID_RETRY_COOLDOWN_MS plus haut.
+const soundingCache = new Map(); // clé "stationId|YYYY-MM-DD|HH" -> { fetchedAt, available, levels, stationInfo }
+const SOUNDING_NEG_TTL_MS = 30 * 60 * 1000;
+const SOUNDING_CACHE_MAX = 500;
+
+function evictSoundingCacheIfNeeded() {
+  if (soundingCache.size <= SOUNDING_CACHE_MAX) return;
+  let oldestKey = null, oldestTs = Infinity;
+  for (const [k, v] of soundingCache) {
+    if (v.fetchedAt < oldestTs) { oldestTs = v.fetchedAt; oldestKey = k; }
+  }
+  if (oldestKey) soundingCache.delete(oldestKey);
+}
+
+// Parse le <PRE> de données du HTML Wyoming (type=TEXT:LIST) : colonnes
+// fixes PRES HGHT TEMP DWPT RELH MIXR DRCT SKNT ... — on ignore l'en-tête/
+// séparateur et on split sur les espaces (les valeurs sont toujours
+// numériques, pas de risque de collision avec le format à espaces
+// multiples de ce texte).
+function parseWyomingSounding(html) {
+  const preBlocks = [...html.matchAll(/<PRE>([\s\S]*?)<\/PRE>/gi)].map(m => m[1]);
+  if (!preBlocks.length) return null;
+  const dataBlock = preBlocks[0];
+  const lines = dataBlock.split('\n').map(l => l.trimEnd());
+  const levels = [];
+  for (const line of lines) {
+    const cols = line.trim().split(/\s+/);
+    if (cols.length < 8) continue;
+    const nums = cols.map(Number);
+    if (nums.some(n => Number.isNaN(n))) continue; // saute en-tête/séparateurs (texte)
+    const [pres, hght, temp, dwpt, relh, , drct, sknt] = nums;
+    levels.push({ pressureHpa: pres, heightM: hght, tempC: temp, dewpointC: dwpt, rh: relh, dirDeg: drct, speedKt: sknt });
+  }
+  return levels.length ? levels : null;
+}
+
+async function refreshSounding(stationId, dateStr, hour) {
+  const key = `${stationId}|${dateStr}|${hour}`;
+  const url = `https://weather.uwyo.edu/wsgi/sounding?datetime=${dateStr}%20${hour}:00:00&id=${stationId}&type=TEXT:LIST`;
+  try {
+    const r = await fetch(url);
+    const html = r.ok ? await r.text() : '';
+    const levels = html ? parseWyomingSounding(html) : null;
+    const entry = { fetchedAt: Date.now(), available: !!levels, levels: levels ?? [] };
+    soundingCache.set(key, entry);
+    evictSoundingCacheIfNeeded();
+    return entry;
+  } catch (e) {
+    console.error(`refreshSounding ${key} error:`, e.message);
+    const entry = { fetchedAt: Date.now(), available: false, levels: [] };
+    soundingCache.set(key, entry);
+    return entry;
+  }
+}
+
+// GET /sounding-stations — liste statique, pas de cache nécessaire.
+app.get('/sounding-stations', (req, res) => res.json({ stations: SOUNDING_STATIONS }));
+
+// GET /sounding/runs?station=07510 — créneaux (date+heure) vraisemblablement
+// publiés sur les 72 dernières heures, à proposer côté client dans le
+// picker (pas d'appel Wyoming ici, calcul pur — la disponibilité réelle
+// n'est confirmée qu'au clic, via /sounding).
+app.get('/sounding/runs', (req, res) => {
+  const stationId = String(req.query.station || '');
+  if (!SOUNDING_STATIONS.some(s => s.id === stationId)) {
+    return res.status(400).json({ error: 'station inconnue' });
+  }
+  const runs = [];
+  const now = Date.now();
+  for (let h = 0; h < SOUNDING_HISTORY_DAYS * 24; h += 12) {
+    const t = new Date(now - h * 60 * 60 * 1000);
+    t.setUTCMinutes(0, 0, 0);
+    const runHour = t.getUTCHours() >= 12 ? 12 : 0;
+    t.setUTCHours(runHour, 0, 0, 0);
+    if (now - t.getTime() < SOUNDING_PUBLISH_DELAY_MS) continue; // pas encore publié
+    const dateStr = t.toISOString().slice(0, 10);
+    const hourStr = String(runHour).padStart(2, '0');
+    const runKey = `${dateStr}T${hourStr}`;
+    if (!runs.some(r => r.key === runKey)) runs.push({ key: runKey, date: dateStr, hour: hourStr });
+  }
+  res.json({ station: stationId, runs });
+});
+
+// GET /sounding?station=07510&date=2026-07-25&hour=12
+app.get('/sounding', async (req, res) => {
+  const stationId = String(req.query.station || '');
+  const dateStr = String(req.query.date || '');
+  const hour = String(req.query.hour || '').padStart(2, '0');
+  if (!SOUNDING_STATIONS.some(s => s.id === stationId)) {
+    return res.status(400).json({ error: 'station inconnue' });
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !['00', '12'].includes(hour)) {
+    return res.status(400).json({ error: 'date/hour invalide' });
+  }
+  const key = `${stationId}|${dateStr}|${hour}`;
+  const cached = soundingCache.get(key);
+  const isNegativeStale = cached && !cached.available && Date.now() - cached.fetchedAt > SOUNDING_NEG_TTL_MS;
+  if (!cached || isNegativeStale) {
+    await refreshSounding(stationId, dateStr, hour);
+  }
+  const entry = soundingCache.get(key);
+  res.json({ station: stationId, date: dateStr, hour, available: entry?.available ?? false, levels: entry?.levels ?? [] });
+});
+
 // ── Débogage 12/07/2026 — source de pression par balise ─────────────
 // Sert pressureSignalCache (alimenté à chaque poll, cf. plus haut) pour
 // que le client affiche exactement la source/valeur utilisée pour les
