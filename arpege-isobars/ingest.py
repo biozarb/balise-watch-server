@@ -84,8 +84,17 @@ MODELS = {
 # intégralement à tous les zooms, aucun changement frontend nécessaire.
 LEVEL_STEP_HPA_BY_GRID = {
     "arpege_europe": 1,     # zoom régional atteignable -> le détail sert
-    "arpege_world":  5,     # jamais affichée au-delà du zoom 4
+    "arpege_world": 10,     # jamais affichée au-delà du zoom 4 — cf. ci-dessous
 }
+# 30/07/2026, 2e passe (le compte était encore à ~1,13 Go après la 1re) :
+# grille monde poussée de 5 à 10 hPa, mesurée à 236 Mo en 5 hPa -> ~118 Mo.
+# Toujours sans perte visible, pour la même raison qu'au-dessus :
+# `hpaVisibleAtZoom` (IsobarsLayer.tsx) teste `hpa % 5 === 0`, donc des
+# lignes tous les 10 hPa sont TOUTES multiples de 5 et TOUTES affichées —
+# aucun changement frontend, aucune ligne masquée. Et 10 hPa est la
+# convention des cartes synoptiques de grande échelle : sur une carte du
+# monde sous le zoom 4, c'est au moins aussi lisible que le 5 hPa.
+# La grille Europe reste à 1 hPa (c'est elle qu'on zoome).
 LEVEL_STEP_HPA = 1   # défaut de repli si une grille n'est pas dans la table
 FUTURE_HOURLY_UNTIL = 48      # horaire jusque-là, puis coarse
 FUTURE_COARSE_EVERY = 3
