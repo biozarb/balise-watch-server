@@ -543,7 +543,7 @@ async function fwPrecipRefresh() {
 // juste un cache RAM différent selon l'appelant. Comportement de
 // fwPrecipNear strictement inchangé (délègue tel quel).
 function precipNearestInTiles(tiles, lat, lon, radiusKm) {
-  if (!tiles.size || lat == null || lon == null) return { near: false, distanceKm: null };
+  if (!tiles.size || lat == null || lon == null) return { near: false, distanceKm: null, dxPx: null, dyPx: null, geom: null };
   const z = FW_PRECIP_TILE_Z, size = FW_PRECIP_TILE_SIZE;
   const world = Math.pow(2, z) * size; // largeur du monde en pixels à ce zoom
   const gx = (lon + 180) / 360 * world;
@@ -552,22 +552,58 @@ function precipNearestInTiles(tiles, lat, lon, radiusKm) {
   const mPerPx = 156543.03 * Math.cos(r) / Math.pow(2, z) * (256 / size); // résolution sol (m/px) au point
   const rp = Math.max(1, Math.ceil((radiusKm * 1000) / mPerPx));
   const rp2 = rp * rp;
-  let bestPx2 = Infinity;
+  let bestPx2 = Infinity, bestDx = 0, bestDy = 0;
   for (let dy = -rp; dy <= rp; dy++) {
     for (let dx = -rp; dx <= rp; dx++) {
       const d2 = dx * dx + dy * dy;
       if (d2 > rp2 || d2 >= bestPx2) continue; // disque, pas carré ; élague si déjà moins bon que le meilleur trouvé
-      const px = Math.floor(gx + dx), py = Math.floor(gy + dy);
-      const tx = Math.floor(px / size), ty = Math.floor(py / size);
-      const tile = tiles.get(`${tx}/${ty}`);
-      if (!tile) continue;
-      const lx = px - tx * size, ly = py - ty * size;
-      if (lx < 0 || ly < 0 || lx >= tile.width || ly >= tile.height) continue;
-      if (tile.data[(ly * tile.width + lx) * 4 + 3] > FW_PRECIP_ALPHA_MIN) bestPx2 = d2;
+      if (!precipEchoAt(tiles, Math.floor(gx + dx), Math.floor(gy + dy))) continue;
+      bestPx2 = d2; bestDx = dx; bestDy = dy;
     }
   }
-  if (bestPx2 === Infinity) return { near: false, distanceKm: null };
-  return { near: true, distanceKm: Math.round((Math.sqrt(bestPx2) * mPerPx) / 100) / 10 };
+  // Débogage 30/07/2026 (suivi de cellule, cf. precipTrackInTiles) — le
+  // décalage pixel du meilleur écho ET le repère pixel du point sont
+  // renvoyés EN PLUS des deux champs d'origine. Purement additif :
+  // `fwPrecipNear` (alertes flightwatch) déstructure `{ near, distanceKm }`
+  // et ignore le reste, comportement strictement inchangé.
+  const geom = { gx, gy, mPerPx };
+  if (bestPx2 === Infinity) return { near: false, distanceKm: null, dxPx: null, dyPx: null, geom };
+  return {
+    near: true,
+    distanceKm: Math.round((Math.sqrt(bestPx2) * mPerPx) / 100) / 10,
+    dxPx: bestDx, dyPx: bestDy, geom,
+  };
+}
+
+/** Y a-t-il un écho radar au pixel monde (px, py) ? Accès unifié aux DEUX
+ *  formes de tuile manipulées ici : le PNG décodé par `pngjs` (RGBA, cache
+ *  de la frame courante — on teste l'alpha, cf. FW_PRECIP_ALPHA_MIN) et le
+ *  masque binaire compact d'une frame précédente (`Uint8Array`, 1 octet par
+ *  pixel, cf. precipMaskTiles) — 4x moins de RAM, ce qui compte sur le plan
+ *  gratuit Render puisqu'on garde désormais DEUX frames en mémoire. */
+function precipEchoAt(tiles, px, py) {
+  const size = FW_PRECIP_TILE_SIZE;
+  const tx = Math.floor(px / size), ty = Math.floor(py / size);
+  const tile = tiles.get(`${tx}/${ty}`);
+  if (!tile) return false;
+  const lx = px - tx * size, ly = py - ty * size;
+  if (lx < 0 || ly < 0 || lx >= tile.width || ly >= tile.height) return false;
+  const i = ly * tile.width + lx;
+  return tile.mask ? tile.mask[i] === 1 : tile.data[i * 4 + 3] > FW_PRECIP_ALPHA_MIN;
+}
+
+/** PNG décodés -> masques binaires (1 octet/pixel). Appliqué à la frame
+ *  qui SORT du cache courant pour devenir la frame précédente : on n'a
+ *  plus besoin des couleurs à ce stade, seulement de « écho ou pas ».
+ *  9 Mo de RGBA (36 tuiles France à z7) -> 2,25 Mo. */
+function precipMaskTiles(tiles) {
+  const out = new Map();
+  for (const [k, t] of tiles) {
+    const mask = new Uint8Array(t.width * t.height);
+    for (let i = 0; i < mask.length; i++) mask[i] = t.data[i * 4 + 3] > FW_PRECIP_ALPHA_MIN ? 1 : 0;
+    out.set(k, { width: t.width, height: t.height, mask });
+  }
+  return out;
 }
 function fwPrecipNear(lat, lon, radiusKm) {
   return precipNearestInTiles(fwPrecipTiles, lat, lon, radiusKm);
@@ -591,6 +627,131 @@ let cutPrecipLastAttempt = 0;    // horloge murale (ms) de la dernière TENTATIV
 let cutPrecipRefreshing = false;
 const CUT_PRECIP_MAX_AGE_MS = 3 * 60 * 1000; // marge confortable sous la cadence de renouvellement RainViewer (~10 min)
 
+// ── Suivi de cellule (30/07/2026, retour Yann : « on pourrait avoir la
+// direction et la probabilité qu'il nous atteigne ? ») ────────────────
+// Frame PRÉCÉDENTE, gardée en masque binaire (cf. precipMaskTiles) pour
+// comparer deux images successives et en déduire le déplacement réel des
+// échos. Point clé d'archi : ce n'est PAS un téléchargement de plus. Les
+// frames RainViewer se renouvellent toutes les ~10 min alors qu'on
+// rafraîchit au plus toutes les 3 min : quand une nouvelle frame arrive,
+// celle qui sort du cache EST la frame précédente. On la convertit en
+// masque au lieu de la jeter. Zéro requête réseau supplémentaire en
+// régime établi, +2,25 Mo de RAM (contre +9 Mo si on gardait le RGBA).
+let cutPrecipPrevTiles = new Map();
+let cutPrecipPrevFrameTime = 0;
+// Au-delà, les deux frames sont trop éloignées pour qu'un écho soit
+// encore « le même » : serveur redémarré, longue inactivité (le plan
+// gratuit Render endort l'instance), trou côté RainViewer. On préfère ne
+// rien affirmer plutôt qu'extrapoler sur un intervalle inconnu.
+const CUT_PRECIP_TRACK_MAX_DT_MS = 30 * 60 * 1000;
+// Demi-fenêtre de corrélation autour de l'écho suivi (px). ~13 km de côté
+// à z7 (865 m/px à 45°N) : assez large pour attraper la forme d'une
+// cellule, assez étroit pour ne pas moyenner deux systèmes distincts.
+const CUT_PRECIP_TRACK_WIN_PX = 15;
+// Amplitude de recherche du décalage (px). 24 px sur 10 min ≈ 125 km/h :
+// au-delà, ce n'est plus un déplacement de cellule plausible, c'est un
+// faux appariement avec un autre écho.
+const CUT_PRECIP_TRACK_SEARCH_PX = 24;
+// Sous ce nombre de pixels d'écho dans la fenêtre, l'échantillon est trop
+// maigre pour que la corrélation veuille dire quoi que ce soit.
+const CUT_PRECIP_TRACK_MIN_HITS = 12;
+// Fraction minimale de la fenêtre retrouvée dans la frame précédente. En
+// dessous, l'écho vient d'apparaître (convection naissante) ou a trop
+// changé de forme : pas d'appariement fiable -> pas de verdict.
+const CUT_PRECIP_TRACK_MIN_SCORE = 0.35;
+// 1 px sur 10 min ≈ 5,2 km/h : la quantification pixel À ELLE SEULE peut
+// produire un déplacement apparent. On ne parle de mouvement qu'au-delà
+// de ~1,5 px, sinon c'est « stationnaire » (ce qui n'est PAS rassurant
+// pour autant, cf. la note sur la régénération sur place).
+const CUT_PRECIP_STATIONARY_KMH = 8;
+// Distance de passage au plus près (CPA) au-delà de laquelle on accepte
+// d'écrire « passe à côté ». Calée sur l'incertitude propre de la méthode :
+// ±15° d'erreur d'angle à 20 km de distance, c'est déjà ±5 km d'écart
+// latéral. En dessous de ce seuil on reste sur « se rapproche » — en cas
+// de doute on penche vers l'alerte, jamais vers le rassurant.
+const CUT_PRECIP_CPA_CLEAR_KM = 10;
+
+/**
+ * Déplacement de l'écho le plus proche, par corrélation de la frame
+ * courante avec la précédente (méthode classique de suivi radar, dite
+ * TREC, réduite à une seule fenêtre — on ne cherche pas un champ de
+ * vecteurs sur toute la France, seulement le déplacement de LA cellule
+ * qui nous concerne).
+ *
+ * Choix assumé : on suit une TRANSLATION, pas une croissance. Une cellule
+ * qui grossit vers nous sans que son centre bouge sortira « stationary »
+ * — mot volontairement neutre, jamais présenté comme un feu vert.
+ *
+ * Repère : x vers l'est, y vers le SUD (convention pixel Mercator), d'où
+ * le `-vy` dans les caps.
+ *
+ * @returns null si aucun verdict fiable, sinon
+ *  { trend, moveDirDeg, moveSpeedKmh, etaMin, cpaKm }
+ */
+function precipTrackInTiles(cur, prev, near, dtSec) {
+  if (!cur.size || !prev.size || !near?.near || !near.geom || !(dtSec > 0)) return null;
+  const { gx, gy, mPerPx } = near.geom;
+  // Centre de la fenêtre = l'écho le plus proche lui-même (pas notre
+  // point : si la pluie est à 40 km, une fenêtre centrée sur nous ne
+  // contiendrait que du ciel clair).
+  const ex = Math.floor(gx + near.dxPx), ey = Math.floor(gy + near.dyPx);
+  const W = CUT_PRECIP_TRACK_WIN_PX, S = CUT_PRECIP_TRACK_SEARCH_PX;
+  // Pixels d'écho de la frame COURANTE dans la fenêtre — extraits une
+  // seule fois, puis réutilisés pour chacun des (2S+1)² décalages testés.
+  const pts = [];
+  for (let dy = -W; dy <= W; dy++) {
+    for (let dx = -W; dx <= W; dx++) {
+      if (precipEchoAt(cur, ex + dx, ey + dy)) pts.push(dx, dy);
+    }
+  }
+  const hits = pts.length / 2;
+  if (hits < CUT_PRECIP_TRACK_MIN_HITS) return null;
+  let bestScore = -1, bestVx = 0, bestVy = 0;
+  for (let sy = -S; sy <= S; sy++) {
+    for (let sx = -S; sx <= S; sx++) {
+      let n = 0;
+      for (let i = 0; i < pts.length; i += 2) {
+        if (precipEchoAt(prev, ex + pts[i] - sx, ey + pts[i + 1] - sy)) n++;
+      }
+      // À score égal, on garde le décalage le PLUS PETIT : sans ce
+      // départage, un champ de pluie étendu et uniforme (recouvrement
+      // identique dans toutes les directions) sortirait un vecteur
+      // arbitraire pris dans l'ordre de balayage, donc plein nord-ouest.
+      if (n > bestScore || (n === bestScore && sx * sx + sy * sy < bestVx * bestVx + bestVy * bestVy)) {
+        bestScore = n; bestVx = sx; bestVy = sy;
+      }
+    }
+  }
+  if (bestScore / hits < CUT_PRECIP_TRACK_MIN_SCORE) return null;
+  // px/s -> km/h
+  const kmh = (Math.hypot(bestVx, bestVy) * mPerPx / dtSec) * 3.6;
+  const moveDirDeg = kmh > 0 ? (Math.atan2(bestVx, -bestVy) * 180 / Math.PI + 360) % 360 : null;
+  if (kmh < CUT_PRECIP_STATIONARY_KMH) {
+    return { trend: 'stationary', moveDirDeg, moveSpeedKmh: Math.round(kmh), etaMin: null, cpaKm: null };
+  }
+  // Point de passage au plus près : d = vecteur (nous -> écho),
+  // v = vitesse de l'écho. d·v >= 0 => il s'éloigne déjà.
+  const dx = near.dxPx, dy = near.dyPx;
+  const vx = bestVx / dtSec, vy = bestVy / dtSec; // px/s
+  const dot = dx * vx + dy * vy;
+  if (dot >= 0) {
+    return { trend: 'away', moveDirDeg, moveSpeedKmh: Math.round(kmh), etaMin: null, cpaKm: null };
+  }
+  const v2 = vx * vx + vy * vy;
+  const tCpa = -dot / v2; // secondes
+  const cpaKm = Math.hypot(dx + vx * tCpa, dy + vy * tCpa) * mPerPx / 1000;
+  // Plancher à 1 min : un arrondi à 0 afficherait « dans ~0 min », ce qui
+  // se lit comme une absence de donnée alors que ça veut dire l'inverse.
+  const etaMin = Math.max(1, Math.round(tCpa / 60));
+  return {
+    trend: cpaKm > CUT_PRECIP_CPA_CLEAR_KM ? 'aside' : 'approaching',
+    moveDirDeg,
+    moveSpeedKmh: Math.round(kmh),
+    etaMin,
+    cpaKm: Math.round(cpaKm * 10) / 10,
+  };
+}
+
 async function cutPrecipRefresh() {
   if (cutPrecipRefreshing) return;
   cutPrecipRefreshing = true;
@@ -603,27 +764,56 @@ async function cutPrecipRefresh() {
     if (!Array.isArray(frames) || !frames.length || !idx.host) return;
     const frame = frames[frames.length - 1]; // dernière image observée
     if (frame.time === cutPrecipFrameTime && cutPrecipTiles.size) return; // déjà à jour
-    const z = FW_PRECIP_TILE_Z, bb = FW_PRECIP_BBOX;
-    const x0 = fwLon2tileX(bb.lonMin, z), x1 = fwLon2tileX(bb.lonMax, z);
-    const y0 = fwLat2tileY(bb.latMax, z), y1 = fwLat2tileY(bb.latMin, z);
-    const jobs = [];
-    for (let x = x0; x <= x1; x++) {
-      for (let y = y0; y <= y1; y++) {
-        const url = `${idx.host}${frame.path}/${FW_PRECIP_TILE_SIZE}/${z}/${x}/${y}/${FW_PRECIP_COLOR}/0_1.png`;
-        jobs.push(
-          fetch(url)
-            .then(r => (r.ok ? r.buffer() : null))
-            .then(buf => (buf ? [`${x}/${y}`, PNG.sync.read(buf)] : null))
-            .catch(() => null) // tuile en échec ignorée, jamais de crash
-        );
+    const next = await cutPrecipFetchFrame(idx, frame);
+    if (!next.size) return;
+    // Rotation des frames (30/07/2026, suivi de cellule). En régime
+    // établi la frame qui sort devient la précédente — gratuit. Au
+    // DÉMARRAGE À FROID en revanche il n'y a rien à faire tourner : on
+    // télécharge alors explicitement l'avant-dernière frame, une seule
+    // fois, pour ne pas laisser le suivi muet pendant les ~10 min qu'il
+    // faudrait sinon attendre qu'une frame se renouvelle. Échec de ce
+    // rattrapage = pas de frame précédente = pas de verdict, jamais une
+    // erreur (le reste de la route continue de répondre).
+    if (cutPrecipTiles.size && cutPrecipFrameTime) {
+      cutPrecipPrevTiles = precipMaskTiles(cutPrecipTiles);
+      cutPrecipPrevFrameTime = cutPrecipFrameTime;
+    } else if (frames.length >= 2) {
+      const prevFrame = frames[frames.length - 2];
+      const prevTiles = await cutPrecipFetchFrame(idx, prevFrame);
+      if (prevTiles.size) {
+        cutPrecipPrevTiles = precipMaskTiles(prevTiles);
+        cutPrecipPrevFrameTime = prevFrame.time;
       }
     }
-    const results = await Promise.all(jobs);
-    const next = new Map();
-    for (const r of results) if (r) next.set(r[0], r[1]);
-    if (next.size) { cutPrecipTiles = next; cutPrecipFrameTime = frame.time; }
+    cutPrecipTiles = next;
+    cutPrecipFrameTime = frame.time;
   } catch { /* dégradation silencieuse : cache inchangé, route renvoie near:false */ }
   finally { cutPrecipRefreshing = false; }
+}
+
+/** Télécharge et décode les tuiles France d'UNE frame RainViewer.
+ *  Extrait de `cutPrecipRefresh` (30/07/2026) pour être appelé deux fois :
+ *  frame courante, et frame précédente au démarrage à froid. */
+async function cutPrecipFetchFrame(idx, frame) {
+  const z = FW_PRECIP_TILE_Z, bb = FW_PRECIP_BBOX;
+  const x0 = fwLon2tileX(bb.lonMin, z), x1 = fwLon2tileX(bb.lonMax, z);
+  const y0 = fwLat2tileY(bb.latMax, z), y1 = fwLat2tileY(bb.latMin, z);
+  const jobs = [];
+  for (let x = x0; x <= x1; x++) {
+    for (let y = y0; y <= y1; y++) {
+      const url = `${idx.host}${frame.path}/${FW_PRECIP_TILE_SIZE}/${z}/${x}/${y}/${FW_PRECIP_COLOR}/0_1.png`;
+      jobs.push(
+        fetch(url)
+          .then(r => (r.ok ? r.buffer() : null))
+          .then(buf => (buf ? [`${x}/${y}`, PNG.sync.read(buf)] : null))
+          .catch(() => null) // tuile en échec ignorée, jamais de crash
+      );
+    }
+  }
+  const results = await Promise.all(jobs);
+  const out = new Map();
+  for (const r of results) if (r) out.set(r[0], r[1]);
+  return out;
 }
 
 const beaconHistory = new Map(); // beacon_id (string) -> [{t, moy, dir, pressure}] trié par t croissant
@@ -2097,9 +2287,28 @@ app.get('/precip-distance', async (req, res) => {
   if (!cutPrecipTiles.size || Date.now() - cutPrecipLastAttempt > CUT_PRECIP_MAX_AGE_MS) {
     await cutPrecipRefresh();
   }
-  const { near, distanceKm } = precipNearestInTiles(cutPrecipTiles, lat, lon, radiusKm);
+  const nearest = precipNearestInTiles(cutPrecipTiles, lat, lon, radiusKm);
+  const { near, distanceKm } = nearest;
+  // Cap de l'écho VU DEPUIS le point (0 = nord, 90 = est) — repère pixel
+  // Mercator : x vers l'est, y vers le SUD, d'où le `-dyPx`.
+  const bearingDeg = near
+    ? Math.round((Math.atan2(nearest.dxPx, -nearest.dyPx) * 180 / Math.PI + 360) % 360)
+    : null;
+  // Suivi de cellule (30/07/2026) : seulement si les DEUX frames sont
+  // là et raisonnablement rapprochées, sinon `track` reste null et le
+  // client se rabat sur distance + cap, sans verdict de déplacement.
+  const dtSec = (cutPrecipFrameTime && cutPrecipPrevFrameTime)
+    ? cutPrecipFrameTime - cutPrecipPrevFrameTime : 0;
+  const track = (dtSec > 0 && dtSec * 1000 <= CUT_PRECIP_TRACK_MAX_DT_MS)
+    ? precipTrackInTiles(cutPrecipTiles, cutPrecipPrevTiles, nearest, dtSec)
+    : null;
   res.json({
-    near, distanceKm, radiusKm,
+    near, distanceKm, radiusKm, bearingDeg,
+    trend: track?.trend ?? null,
+    moveDirDeg: track?.moveDirDeg ?? null,
+    moveSpeedKmh: track?.moveSpeedKmh ?? null,
+    etaMin: track?.etaMin ?? null,
+    cpaKm: track?.cpaKm ?? null,
     // Ancienneté (min) de la frame radar utilisée — RainViewer horodate
     // ses frames en secondes (epoch), d'où le *1000. null si aucune frame
     // n'a jamais pu être chargée.
