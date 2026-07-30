@@ -18,7 +18,12 @@ Ce script supprime :
   1. les tuiles `arpege/thermal/` hors de la BBOX courante lue directement
      dans `arpege-thermal/ingest.py` (pas de constante dupliquée ici — si
      la BBOX rebouge, ce script suit tout seul) ;
-  2. le préfixe `test/`, résidu de mise au point repéré à l'audit.
+  2. les tuiles `arome/alt/{niveau}/` dont le niveau de pression n'est plus
+     dans `LEVELS` (arome-wind/ingest.py). Même mécanisme que la BBOX :
+     retirer un niveau ne supprime pas ses tuiles, elles cessent seulement
+     d'être réécrites. Sans cette purge, retirer un niveau ne gagne
+     STRICTEMENT RIEN sur le quota ;
+  3. le préfixe `test/`, résidu de mise au point repéré à l'audit.
 
 `manifest.json` n'est jamais candidat à la suppression, à aucun niveau.
 
@@ -84,6 +89,21 @@ def read_bbox_from_ingest():
     return vals
 
 
+def read_levels_from_ingest():
+    """Lit `LEVELS` dans arome-wind/ingest.py — même principe que la BBOX
+    ci-dessus : jamais de constante dupliquée dans un script qui supprime."""
+    src = (Path(__file__).resolve().parent.parent
+           / "arome-wind" / "ingest.py").read_text(encoding="utf-8")
+    m = re.search(r"^LEVELS\s*=\s*\[([\d,\s]+)\]", src, re.M)
+    if not m:
+        raise SystemExit("LEVELS introuvable dans arome-wind/ingest.py — "
+                         "purge annulée (mieux vaut ne rien supprimer).")
+    lv = {int(x) for x in re.findall(r"\d+", m.group(1))}
+    if not lv:
+        raise SystemExit("LEVELS vide — purge annulée.")
+    return lv
+
+
 def walk(prefix):
     """{nom: taille} récursif sous un préfixe."""
     out, offset = {}, 0
@@ -139,7 +159,33 @@ def main():
     print(f"\n— arpege/thermal : {len(thermal)} objets, "
           f"{inside} tuiles dans la BBOX, {len(doomed)} hors BBOX")
 
-    # ── 2. préfixe test/ ──────────────────────────────────────────────
+    # ── 2. niveaux d'altitude retirés de LEVELS ───────────────────────
+    levels = read_levels_from_ingest()
+    print(f"\nLEVELS lus dans arome-wind/ingest.py : "
+          f"{sorted(levels, reverse=True)}")
+    alt = walk("arome/alt/")
+    dead_levels, kept_alt = {}, 0
+    for name, size in alt.items():
+        if name.endswith("/manifest.json"):
+            continue
+        m = re.match(r"arome/alt/(\d+)/", name)
+        if not m:
+            continue                      # forme inattendue : on ne touche pas
+        if int(m.group(1)) in levels:
+            kept_alt += 1
+        else:
+            dead_levels[name] = size
+    if dead_levels:
+        orphan_lv = sorted({int(re.match(r"arome/alt/(\d+)/", n).group(1))
+                            for n in dead_levels}, reverse=True)
+        print(f"— arome/alt : {kept_alt} tuiles aux niveaux courants, "
+              f"{len(dead_levels)} aux niveaux RETIRÉS {orphan_lv} "
+              f"({human(sum(dead_levels.values()))})")
+        doomed.update(dead_levels)
+    else:
+        print(f"— arome/alt : {kept_alt} tuiles, aucun niveau obsolète")
+
+    # ── 3. préfixe test/ ──────────────────────────────────────────────
     test = walk("test/")
     if test:
         print(f"— test/ : {len(test)} objet(s) résiduel(s) "
