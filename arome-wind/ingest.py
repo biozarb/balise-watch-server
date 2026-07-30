@@ -36,12 +36,23 @@ MODEL_DIR  = "arome"
 #          SP*/HP*, aucun isobare).
 GRID_SOL   = "001"
 GRID_ALT   = "0025"
-MAX_HOURS  = 51                     # horizon complet AROME-HD (relevé de 48 à 51
-                                     # le 25/07/2026 — 48 sous-estimait de 3h le
-                                     # vrai plafond, déjà mesuré/documenté dans
-                                     # NOTES_TECHNIQUES_THERMIQUES_AROME.md et
-                                     # web/src/lib/config.ts ; même correctif déjà
-                                     # appliqué à arome-thermal le 23/07)
+MAX_HOURS  = 36                     # 30/07/2026 : ABAISSÉ de 51 à 36 h pour le
+                                     # quota Storage Supabase (cf. BUGS.md,
+                                     # dépassement du 30/07 — arome/sol + arome/alt
+                                     # pesaient 1,02 Go des 2,1 Go du compte).
+                                     # ⚠️ Ce n'est PAS une correction de l'horizon
+                                     # réel du modèle : AROME-HD publie bien jusqu'à
+                                     # 51 h (relevé de 48 à 51 le 25/07/2026 après
+                                     # mesure, cf. NOTES_TECHNIQUES_THERMIQUES_AROME.md).
+                                     # C'est un arbitrage de coût assumé avec Yann :
+                                     # au-delà de 36 h l'AROME est de toute façon peu
+                                     # exploitable pour décider d'un vol. Remonter
+                                     # cette valeur est sans risque côté modèle, mais
+                                     # regonfle le bucket d'environ 30 Mo par heure
+                                     # d'échéance gardée.
+                                     # Rien à changer côté frontend : le client lit
+                                     # `times` du manifest, aucune constante d'horizon
+                                     # n'est codée en dur dans web/src (vérifié).
 BBOX       = dict(latmin=41.0, latmax=52.0, lonmin=-6.0, lonmax=11.0)  # France + voisins
 # Pas d'échantillonnage, = maillage NATIF de chaque grille (aucune perte) :
 #  - sol : 0,01°  (grille 001)  -> ~1,1 km, le relief est résolu.
