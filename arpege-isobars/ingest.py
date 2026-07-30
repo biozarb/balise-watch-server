@@ -68,12 +68,41 @@ MODELS = {
     "arpege_europe": "meteofrance_arpege_europe",
     "arpege_world":  "meteofrance_arpege_world025",
 }
-LEVEL_STEP_HPA = 1   # 24/07/2026 : 5 -> 1 hPa (détail au zoom, cf. docstring)
+# Pas de contourage, PAR GRILLE (30/07/2026 — dépassement de quota Storage).
+# Le pas fin 1 hPa a été introduit le 24/07 pour « avoir plus de détails quand
+# on zoome » : côté frontend, les lignes non-multiples de 5 ne sont révélées
+# qu'à partir de `ISOBAR_FINE_LINE_ZOOM` = 7 (IsobarsLayer.hpaVisibleAtZoom).
+# Or la grille MONDE n'est jamais chargée au-dessus du zoom 4 (elle ne sert
+# que sous `ISOBARS_EUROPE_MIN_ZOOM`, ou hors `ISOBARS_EUROPE_BBOX`) — ses
+# lignes fines n'ont donc JAMAIS pu s'afficher, tout en pesant ~5x plus cher.
+# Mesuré le 30/07 : arpege_world 840 Mo contre 128 Mo pour arpege_europe, à
+# nombre d'échéances égal, alors que sa maille est 2,5x plus GROSSIÈRE — le
+# surcoût venait entièrement du pas fin sur la surface du globe.
+# Repasser la seule grille monde à 5 hPa est donc un gain sans aucune
+# contrepartie visible. `hpaVisibleAtZoom` teste `hpa % 5`, pas
+# `manifest.levelStepHpa` : un géojson tout-multiples-de-5 s'affiche
+# intégralement à tous les zooms, aucun changement frontend nécessaire.
+LEVEL_STEP_HPA_BY_GRID = {
+    "arpege_europe": 1,     # zoom régional atteignable -> le détail sert
+    "arpege_world":  5,     # jamais affichée au-delà du zoom 4
+}
+LEVEL_STEP_HPA = 1   # défaut de repli si une grille n'est pas dans la table
 FUTURE_HOURLY_UNTIL = 48      # horaire jusque-là, puis coarse
 FUTURE_COARSE_EVERY = 3
 PAST_STEP_HOURS = 6            # cadence des runs ARPEGE
 PAST_MAX_RUNS = 60             # garde-fou dur (~15 jours) — la vraie limite
                                 # est la 1ère lecture en échec (rétention réelle)
+# 30/07/2026 — dépassement du quota Storage Supabase (mail Fair Use Policy,
+# 3,23 Go pour 1 Go inclus, restrictions au 29/08). Le passé isobares était
+# borné par la SEULE rétention Open-Meteo (~9 j), et rien n'était jamais
+# supprimé du bucket : chaque échéance produite y restait à vie, orpheline
+# dès qu'elle sortait de la fenêtre du manifest. Deux corrections :
+#   1. cette borne temporelle explicite (72 h, décidé avec Yann — assez de
+#      recul pour lire une évolution synoptique) ;
+#   2. `purge_stale()`, appelée en fin de `process_grid()`, qui aligne
+#      réellement le contenu du bucket sur le manifest.
+# Un rattrapage de l'existant se fait avec tools/purge_isobars_orphans.py.
+PAST_RETENTION_H = int(os.environ.get("PAST_RETENTION_H", "72"))
 
 # Centres de pression (L/H), pour l'animation du sens de rotation du vent
 # côté frontend (retour Yann 23/07). Fenêtre glissante simple (pas de scipy) :
@@ -164,15 +193,19 @@ def read_pressure(model, dt_utc, reference_time=None):
     return lon2d, lat2d, pressure
 
 # ── Contourage ─────────────────────────────────────────────────────────
-def isobars_geojson(lon2d, lat2d, pressure):
-    """Contourage tous les LEVEL_STEP_HPA hPa -> GeoJSON FeatureCollection
+def isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA):
+    """Contourage tous les `step_hpa` hPa -> GeoJSON FeatureCollection
     de LineString (une feature par segment de contour, propriété `hpa`).
     matplotlib fait le travail numérique (marching squares) ; on ne fait
-    que relire ses segments, rien n'est affiché (backend Agg)."""
+    que relire ses segments, rien n'est affiché (backend Agg).
+
+    30/07/2026 : le pas est désormais un PARAMÈTRE (cf.
+    LEVEL_STEP_HPA_BY_GRID) et non plus une constante globale — la grille
+    monde n'a pas besoin du pas fin."""
     pmin, pmax = float(np.nanmin(pressure)), float(np.nanmax(pressure))
-    lo = np.floor(pmin / LEVEL_STEP_HPA) * LEVEL_STEP_HPA
-    hi = np.ceil(pmax / LEVEL_STEP_HPA) * LEVEL_STEP_HPA + LEVEL_STEP_HPA
-    levels = np.arange(lo, hi, LEVEL_STEP_HPA)
+    lo = np.floor(pmin / step_hpa) * step_hpa
+    hi = np.ceil(pmax / step_hpa) * step_hpa + step_hpa
+    levels = np.arange(lo, hi, step_hpa)
 
     fig, ax = plt.subplots()
     cs = ax.contour(lon2d, lat2d, pressure, levels=levels)
@@ -308,15 +341,89 @@ def past_times(reference_time, model):
     """Remonte de PAST_STEP_HOURS en PAST_STEP_HOURS depuis le run courant,
     tant que le fichier existe encore côté Open-Meteo. Le premier échec de
     lecture EST la limite de rétention réelle (~9 jours observés le
-    23/07/2026) — pas une valeur qu'on fige en dur, elle peut varier."""
+    23/07/2026) — pas une valeur qu'on fige en dur, elle peut varier.
+
+    30/07/2026 (dépassement de quota Storage Supabase) : la fenêtre est
+    désormais bornée AUSSI par PAST_RETENTION_H (72 h, décidé avec Yann)
+    — la rétention Open-Meteo (~9 j) plafonnait seule le passé, et comme
+    rien n'était jamais supprimé du bucket, chaque échéance produite y
+    restait à vie. Le garde-fou temporel remplace l'ancien PAST_MAX_RUNS
+    dans la pratique (celui-ci reste comme filet de sécurité)."""
     out, dt = [], reference_time - timedelta(hours=PAST_STEP_HOURS)
+    horizon = reference_time - timedelta(hours=PAST_RETENTION_H)
     for _ in range(PAST_MAX_RUNS):
+        if dt < horizon:
+            break
         if read_pressure(model, dt) is None:
             break
         out.append(dt)
         dt -= timedelta(hours=PAST_STEP_HOURS)
     out.reverse()
     return out
+
+def purge_stale(key, keep_isos):
+    """Supprime du bucket tout objet `{key}/*.json` dont l'échéance n'est
+    pas dans `keep_isos` (= ce que le manifest de CE run va lister).
+
+    30/07/2026 : c'est le correctif de fond du dépassement de quota. Avant,
+    ce script ne faisait QUE écrire — les geojson nommés par échéance
+    (`{key}/{iso}.json`) étaient traités comme immuables (skip-if-exists) et
+    sortaient de la fenêtre du manifest sans jamais quitter le bucket : plus
+    jamais téléchargés par l'app, toujours facturés. Le manifest lui-même
+    n'est jamais candidat à la suppression (il est réécrit juste après).
+
+    Idempotent et sans effet au premier run propre. Non bloquant : un échec
+    de purge ne doit pas faire échouer un run qui a réussi à produire ses
+    échéances (on journalise et on continue)."""
+    if DRY_RUN:
+        print(f"  (DRY_RUN — purge de '{key}' non exécutée)")
+        return 0
+    keep = {f"{key}/{iso}.json" for iso in keep_isos} | {f"{key}/manifest.json"}
+    doomed, offset = [], 0
+    while True:
+        try:
+            req = urllib.request.Request(
+                f"{SB_URL}/storage/v1/object/list/{BUCKET}",
+                data=json.dumps({"prefix": f"{key}/", "limit": 1000,
+                                 "offset": offset,
+                                 "sortBy": {"column": "name", "order": "asc"}}).encode(),
+                headers={"Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
+                         "Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=90) as r:
+                rows = json.loads(r.read() or b"[]")
+        except Exception as e:
+            print(f"  ⚠️ purge '{key}' : listing impossible ({e}) — purge sautée")
+            return 0
+        if not rows:
+            break
+        for row in rows:
+            if row.get("id") is None:            # pseudo-dossier
+                continue
+            path = f"{key}/{row['name']}"
+            if path not in keep:
+                doomed.append(path)
+        if len(rows) < 1000:
+            break
+        offset += 1000
+
+    if not doomed:
+        print(f"  purge '{key}' : rien à supprimer")
+        return 0
+    removed = 0
+    for i in range(0, len(doomed), 200):
+        lot = doomed[i:i + 200]
+        try:
+            req = urllib.request.Request(
+                f"{SB_URL}/storage/v1/object/{BUCKET}",
+                data=json.dumps({"prefixes": lot}).encode(),
+                headers={"Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
+                         "Content-Type": "application/json"}, method="DELETE")
+            with urllib.request.urlopen(req, timeout=120):
+                removed += len(lot)
+        except Exception as e:
+            print(f"  ⚠️ purge '{key}' : suppression d'un lot en échec ({e})")
+    print(f"  purge '{key}' : {removed}/{len(doomed)} objet(s) obsolète(s) supprimé(s)")
+    return removed
 
 def process_grid(key, model):
     print(f"— {key} ({model}) —")
@@ -333,6 +440,9 @@ def process_grid(key, model):
     if FORCE_REPROCESS_PAST:
         print("  ⚙️ FORCE_REPROCESS_PAST=1 — le passé déjà en storage sera relu/réécrit "
               "(rattrapage centers, cf. commit du 23/07)")
+
+    step_hpa = LEVEL_STEP_HPA_BY_GRID.get(key, LEVEL_STEP_HPA)
+    print(f"  contourage : {step_hpa} hPa")
 
     manifest_times, done, future_done = [], 0, 0
     for dt in all_times:
@@ -358,7 +468,7 @@ def process_grid(key, model):
         if result is None:
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
-        geo = isobars_geojson(*result)
+        geo = isobars_geojson(*result, step_hpa=step_hpa)
         geo["centers"] = find_centers(*result)
         sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
         manifest_times.append(iso)
@@ -370,7 +480,7 @@ def process_grid(key, model):
     manifest = dict(
         model=model, referenceTime=reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        levelStepHpa=LEVEL_STEP_HPA, times=manifest_times,
+        levelStepHpa=step_hpa, times=manifest_times,
         # Débogage 23/07/2026 : basé AVANT sur `len(future)` (compte
         # DEMANDÉ, cf. `future_times`) plutôt que sur ce qui a RÉUSSI à
         # être téléversé (`future_done`, entrées passées + prévision
@@ -383,6 +493,10 @@ def process_grid(key, model):
     # dans sb_upload) — contrairement aux geojson par échéance ci-dessus.
     sb_upload(f"{key}/manifest.json", json.dumps(manifest).encode(),
               cache_control="no-cache, must-revalidate")
+    # 30/07/2026 : APRÈS l'écriture du manifest, jamais avant — si le run
+    # échoue en cours de route, le manifest précédent reste servi et on ne
+    # veut surtout pas avoir déjà supprimé les échéances qu'il liste.
+    purge_stale(key, manifest_times)
     return done
 
 def main():
