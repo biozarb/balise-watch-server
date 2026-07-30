@@ -56,11 +56,27 @@ GRID      = "01"
 # juste un nom de fichier vu une fois, cf. piège découvert sur AROME
 # 48 vs 51 vs 54). Cadence non uniforme au-delà de h48, cf. native_step().
 MAX_HOURS = 102
-# Europe entière (grille source native), choix Yann 23/07/2026 — cf.
-# note ci-dessus sur le volume de tuiles. Bornes = extension réelle de la
-# grille ARPEGE 01 (vérifiée en direct : Ni=741, Nj=521,
-# lat0=72.0, lon0=-32.0(=328°), lat1=20.0, lon1=42.0).
-BBOX      = dict(latmin=20.0, latmax=72.0, lonmin=-32.0, lonmax=42.0)
+# 30/07/2026 — RÉDUITE pour le quota Storage Supabase (cf. BUGS.md).
+# Avant : Europe entière = extension réelle de la grille ARPEGE 01
+# (lat 20-72, lon -32-42, vérifiée en direct : Ni=741, Nj=521), choix Yann
+# du 23/07/2026 — soit 1026 tuiles 2°×2° par run, mesurées à 155 Mo dans
+# le bucket le 30/07.
+#
+# Bornes retenues : Europe de l'Ouest + arc alpin. 228 tuiles (~35 Mo),
+# donc −121 Mo. La BBOX stricte d'AROME (France, 41-52 / -6-11, 63 tuiles)
+# aurait rapporté 25 Mo de plus, mais elle a été ÉCARTÉE volontairement :
+# l'app sert des stations AEMET espagnoles et est traduite en es/it/de/nl/
+# pt/sl — réduire le thermique à la France seule casserait le calque pour
+# ces utilisateurs, et surtout ferait perdre à ARPEGE sa raison d'être
+# (couvrir ce qu'AROME ne couvre pas ; à BBOX égale il ne resterait que
+# l'horizon 102 h). 25 Mo ne valent pas ça.
+#
+# Ce que ces bornes couvrent : Pyrénées, Alpes du Nord et du Sud, Massif
+# central, Vosges, Espagne et Portugal entiers, Italie jusqu'à la Calabre,
+# Suisse, Autriche, Slovénie, Allemagne, Benelux, sud de l'Angleterre.
+# Perdu : Scandinavie, Europe de l'Est au-delà de 25°E, Maghreb, grand
+# large atlantique — aucune balise ni aucun utilisateur connu.
+BBOX      = dict(latmin=35.0, latmax=56.0, lonmin=-12.0, lonmax=25.0)
 # Pas natif, aucune décimation (0,1° déjà 2x plus grossier que le 0,05°
 # d'AROME thermal — la couche limite est un champ lisse, pas besoin de
 # sous-échantillonner davantage).
