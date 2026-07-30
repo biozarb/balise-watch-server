@@ -637,28 +637,53 @@ const CUT_PRECIP_MAX_AGE_MS = 3 * 60 * 1000; // marge confortable sous la cadenc
 // celle qui sort du cache EST la frame précédente. On la convertit en
 // masque au lieu de la jeter. Zéro requête réseau supplémentaire en
 // régime établi, +2,25 Mo de RAM (contre +9 Mo si on gardait le RGBA).
+// ⚠️ TROIS frames, pas deux (débogage 30/07/2026, cf. plus bas) : le
+// verdict n'est publié que si le vecteur mesuré sur (N-2 -> N-1) confirme
+// celui mesuré sur (N-1 -> N). Sans ce recoupement, la corrélation sur une
+// seule paire ne bat "rien ne bouge" que 45 % du temps — mesuré, pas
+// supposé.
 let cutPrecipPrevTiles = new Map();
 let cutPrecipPrevFrameTime = 0;
+let cutPrecipPrev2Tiles = new Map();
+let cutPrecipPrev2FrameTime = 0;
 // Au-delà, les deux frames sont trop éloignées pour qu'un écho soit
 // encore « le même » : serveur redémarré, longue inactivité (le plan
 // gratuit Render endort l'instance), trou côté RainViewer. On préfère ne
 // rien affirmer plutôt qu'extrapoler sur un intervalle inconnu.
 const CUT_PRECIP_TRACK_MAX_DT_MS = 30 * 60 * 1000;
-// Demi-fenêtre de corrélation autour de l'écho suivi (px). ~13 km de côté
-// à z7 (865 m/px à 45°N) : assez large pour attraper la forme d'une
-// cellule, assez étroit pour ne pas moyenner deux systèmes distincts.
-const CUT_PRECIP_TRACK_WIN_PX = 15;
-// Amplitude de recherche du décalage (px). 24 px sur 10 min ≈ 125 km/h :
-// au-delà, ce n'est plus un déplacement de cellule plausible, c'est un
-// faux appariement avec un autre écho.
-const CUT_PRECIP_TRACK_SEARCH_PX = 24;
+// Demi-fenêtre de corrélation (px). 40 px = 81x81, ~70 km de côté.
+// ⚠️ Était à 15 px : une fenêtre à peine plus grande que l'amplitude de
+// recherche compare, aux grands décalages, deux zones qui n'ont presque
+// plus rien en commun -> appariements fantaisistes (vitesses mesurées à
+// 120-170 km/h pour un flux directeur à 20 km/h). La fenêtre doit rester
+// nettement plus large que le décalage cherché.
+const CUT_PRECIP_TRACK_WIN_PX = 40;
+// Amplitude de recherche du décalage (px). 20 px sur 10 min ≈ 104 km/h,
+// ce qui couvre le domaine physique réel des déplacements de cellules.
+const CUT_PRECIP_TRACK_SEARCH_PX = 20;
 // Sous ce nombre de pixels d'écho dans la fenêtre, l'échantillon est trop
 // maigre pour que la corrélation veuille dire quoi que ce soit.
-const CUT_PRECIP_TRACK_MIN_HITS = 12;
-// Fraction minimale de la fenêtre retrouvée dans la frame précédente. En
-// dessous, l'écho vient d'apparaître (convection naissante) ou a trop
-// changé de forme : pas d'appariement fiable -> pas de verdict.
-const CUT_PRECIP_TRACK_MIN_SCORE = 0.35;
+const CUT_PRECIP_TRACK_MIN_HITS = 30;
+// Indice de Jaccard minimal (intersection / union) entre la fenêtre et la
+// frame précédente décalée. ⚠️ Le score était auparavant un simple TAUX DE
+// RECOUVREMENT (fraction des pixels d'écho de la fenêtre retombant sur de
+// l'écho) : il saturait à 100 % dès que la fenêtre glissait vers
+// l'INTÉRIEUR du champ de pluie, sans jamais pénaliser une zone d'arrivée
+// bien plus vaste que la fenêtre. Jaccard pénalise ce cas (l'union
+// gonfle), ce qui est exactement ce qui manquait.
+const CUT_PRECIP_TRACK_MIN_SCORE = 0.45;
+// Écart maximal toléré entre le vecteur de la paire précédente et celui de
+// la paire courante, pour publier un verdict : 3 px, ou la moitié du
+// déplacement courant si celui-ci est plus grand (une cellule rapide a le
+// droit de varier un peu plus en valeur absolue).
+const CUT_PRECIP_TRACK_AGREE_PX = 3;
+// Le suivi coûte ~40 ms de CPU par point (deux corrélations 41x41 décalages
+// sur une fenêtre 81x81). Node étant mono-thread, plusieurs plans de coupe
+// ouverts en même temps se bloqueraient mutuellement. Mémo par frame et par
+// point arrondi à ~100 m : le client resonde toutes les 5 min alors qu'une
+// frame vit ~10 min, donc au moins un sondage sur deux est servi du cache.
+// Vidé à chaque rotation de frame — pas d'éviction à écrire.
+let cutPrecipTrackMemo = new Map();
 // 1 px sur 10 min ≈ 5,2 km/h : la quantification pixel À ELLE SEULE peut
 // produire un déplacement apparent. On ne parle de mouvement qu'au-delà
 // de ~1,5 px, sinon c'est « stationnaire » (ce qui n'est PAS rassurant
@@ -688,57 +713,116 @@ const CUT_PRECIP_CPA_CLEAR_KM = 10;
  * @returns null si aucun verdict fiable, sinon
  *  { trend, moveDirDeg, moveSpeedKmh, etaMin, cpaKm }
  */
-function precipTrackInTiles(cur, prev, near, dtSec) {
-  if (!cur.size || !prev.size || !near?.near || !near.geom || !(dtSec > 0)) return null;
-  const { gx, gy, mPerPx } = near.geom;
-  // Centre de la fenêtre = l'écho le plus proche lui-même (pas notre
-  // point : si la pluie est à 40 km, une fenêtre centrée sur nous ne
-  // contiendrait que du ciel clair).
-  const ex = Math.floor(gx + near.dxPx), ey = Math.floor(gy + near.dyPx);
-  const W = CUT_PRECIP_TRACK_WIN_PX, S = CUT_PRECIP_TRACK_SEARCH_PX;
-  // Pixels d'écho de la frame COURANTE dans la fenêtre — extraits une
-  // seule fois, puis réutilisés pour chacun des (2S+1)² décalages testés.
-  const pts = [];
+function precipPatch(tiles, cx, cy, R) {
+  const w = 2 * R + 1, a = new Uint8Array(w * w);
+  for (let dy = -R; dy <= R; dy++) {
+    for (let dx = -R; dx <= R; dx++) {
+      a[(dy + R) * w + (dx + R)] = precipEchoAt(tiles, cx + dx, cy + dy) ? 1 : 0;
+    }
+  }
+  return a;
+}
+
+/** Indice de Jaccard entre la fenêtre `cur` (demi-taille W) et la fenêtre
+ *  `prev` (demi-taille P >= W) décalée de (sx, sy). Intersection / union :
+ *  contrairement à un simple taux de recouvrement, un décalage qui amène la
+ *  fenêtre sur une zone bien plus pluvieuse est pénalisé (l'union gonfle).
+ *  C'est LE point qui manquait à la première version. */
+function precipJaccard(cur, W, prev, P, sx, sy) {
+  const wc = 2 * W + 1, wp = 2 * P + 1;
+  let inter = 0, uni = 0;
   for (let dy = -W; dy <= W; dy++) {
     for (let dx = -W; dx <= W; dx++) {
-      if (precipEchoAt(cur, ex + dx, ey + dy)) pts.push(dx, dy);
+      const a = cur[(dy + W) * wc + (dx + W)];
+      const px = dx - sx + P, py = dy - sy + P;
+      const b = (px < 0 || py < 0 || px >= wp || py >= wp) ? 0 : prev[py * wp + px];
+      if (a & b) inter++;
+      if (a | b) uni++;
     }
   }
-  const hits = pts.length / 2;
-  if (hits < CUT_PRECIP_TRACK_MIN_HITS) return null;
-  let bestScore = -1, bestVx = 0, bestVy = 0;
+  return uni ? inter / uni : 0;
+}
+
+/** Meilleur décalage (px) de la fenêtre centrée (ex, ey) entre `prev` et
+ *  `cur`, au sens de Jaccard. `null` si le score est trop faible ou si le
+ *  maximum tombe SUR la borne de recherche (signe qu'on n'a pas trouvé de
+ *  vrai maximum, juste le bord du domaine exploré). */
+function precipBestShift(cur, prev, ex, ey) {
+  const W = CUT_PRECIP_TRACK_WIN_PX, S = CUT_PRECIP_TRACK_SEARCH_PX;
+  const pc = precipPatch(cur, ex, ey, W), pp = precipPatch(prev, ex, ey, W + S);
+  let best = -1, bx = 0, by = 0;
   for (let sy = -S; sy <= S; sy++) {
     for (let sx = -S; sx <= S; sx++) {
-      let n = 0;
-      for (let i = 0; i < pts.length; i += 2) {
-        if (precipEchoAt(prev, ex + pts[i] - sx, ey + pts[i + 1] - sy)) n++;
-      }
-      // À score égal, on garde le décalage le PLUS PETIT : sans ce
-      // départage, un champ de pluie étendu et uniforme (recouvrement
-      // identique dans toutes les directions) sortirait un vecteur
-      // arbitraire pris dans l'ordre de balayage, donc plein nord-ouest.
-      if (n > bestScore || (n === bestScore && sx * sx + sy * sy < bestVx * bestVx + bestVy * bestVy)) {
-        bestScore = n; bestVx = sx; bestVy = sy;
-      }
+      const j = precipJaccard(pc, W, pp, W + S, sx, sy);
+      // À score égal on garde le décalage le PLUS PETIT : sans ce
+      // départage, un champ de pluie étendu et uniforme sortirait un
+      // vecteur arbitraire pris dans l'ordre de balayage.
+      if (j > best || (j === best && sx * sx + sy * sy < bx * bx + by * by)) { best = j; bx = sx; by = sy; }
     }
   }
-  if (bestScore / hits < CUT_PRECIP_TRACK_MIN_SCORE) return null;
-  // px/s -> km/h
-  const kmh = (Math.hypot(bestVx, bestVy) * mPerPx / dtSec) * 3.6;
-  const moveDirDeg = kmh > 0 ? (Math.atan2(bestVx, -bestVy) * 180 / Math.PI + 360) % 360 : null;
+  if (best < CUT_PRECIP_TRACK_MIN_SCORE) return null;
+  if (Math.abs(bx) === S || Math.abs(by) === S) return null;
+  return { vx: bx, vy: by, score: best };
+}
+
+function precipTrackInTiles(cur, prev, prev2, near, dtSec, dtSec2) {
+  if (!cur.size || !prev.size || !near?.near || !near.geom || !(dtSec > 0)) return null;
+  // Pluie SUR le point : ni cap ni point de passage au plus près ne sont
+  // définissables (le vecteur nous->écho est nul). On ne dit rien plutôt
+  // que de renvoyer un « s'éloigne » qui n'est qu'un artefact du produit
+  // scalaire nul.
+  if (near.dxPx === 0 && near.dyPx === 0) return null;
+  const { gx, gy, mPerPx } = near.geom;
+  const W = CUT_PRECIP_TRACK_WIN_PX;
+  const nx = Math.floor(gx + near.dxPx), ny = Math.floor(gy + near.dyPx);
+  // ⚠️ Centre de la fenêtre = CENTROÏDE des échos autour du pixel le plus
+  // proche, pas ce pixel lui-même. Le plus proche est par construction sur
+  // le BORD du champ de pluie, celui qui nous fait face : une fenêtre
+  // centrée là est à moitié vide, et l'appariement dérive alors
+  // systématiquement vers l'intérieur du champ — c'est-à-dire toujours
+  // dans le même sens par rapport à nous. C'était la cause du verdict
+  // inversé signalé le 30/07.
+  let sx = 0, sy = 0, n = 0;
+  for (let dy = -W; dy <= W; dy++) {
+    for (let dx = -W; dx <= W; dx++) {
+      if (precipEchoAt(cur, nx + dx, ny + dy)) { sx += dx; sy += dy; n++; }
+    }
+  }
+  if (n < CUT_PRECIP_TRACK_MIN_HITS) return null;
+  const ex = nx + Math.round(sx / n), ey = ny + Math.round(sy / n);
+
+  const m = precipBestShift(cur, prev, ex, ey);
+  if (!m) return null;
+  // Recoupement temporel : le même vecteur doit ressortir de la paire
+  // précédente. Une corrélation isolée ne bat "rien ne bouge" que 45 % du
+  // temps ; filtrée par ce recoupement, 64 % (mesuré sur 4 frames réelles,
+  // cf. le commentaire d'en-tête). Sans deuxième paire disponible
+  // (démarrage, trou de frame), pas de verdict — on n'affirme rien.
+  if (!prev2.size || !(dtSec2 > 0)) return null;
+  const m0 = precipBestShift(prev, prev2, ex, ey);
+  if (!m0) return null;
+  // Vecteurs ramenés à la même durée avant comparaison (les frames
+  // RainViewer sont régulières, mais un trou ne doit pas passer pour une
+  // accélération).
+  const k = dtSec / dtSec2;
+  const dvx = m.vx - m0.vx * k, dvy = m.vy - m0.vy * k;
+  const speedPx = Math.hypot(m.vx, m.vy);
+  if (Math.hypot(dvx, dvy) > Math.max(CUT_PRECIP_TRACK_AGREE_PX, 0.5 * speedPx)) return null;
+
+  const kmh = (speedPx * mPerPx / dtSec) * 3.6;
+  const moveDirDeg = speedPx > 0 ? (Math.atan2(m.vx, -m.vy) * 180 / Math.PI + 360) % 360 : null;
   if (kmh < CUT_PRECIP_STATIONARY_KMH) {
     return { trend: 'stationary', moveDirDeg, moveSpeedKmh: Math.round(kmh), etaMin: null, cpaKm: null };
   }
   // Point de passage au plus près : d = vecteur (nous -> écho),
   // v = vitesse de l'écho. d·v >= 0 => il s'éloigne déjà.
   const dx = near.dxPx, dy = near.dyPx;
-  const vx = bestVx / dtSec, vy = bestVy / dtSec; // px/s
+  const vx = m.vx / dtSec, vy = m.vy / dtSec; // px/s
   const dot = dx * vx + dy * vy;
   if (dot >= 0) {
     return { trend: 'away', moveDirDeg, moveSpeedKmh: Math.round(kmh), etaMin: null, cpaKm: null };
   }
-  const v2 = vx * vx + vy * vy;
-  const tCpa = -dot / v2; // secondes
+  const tCpa = -dot / (vx * vx + vy * vy); // secondes
   const cpaKm = Math.hypot(dx + vx * tCpa, dy + vy * tCpa) * mPerPx / 1000;
   // Plancher à 1 min : un arrondi à 0 afficherait « dans ~0 min », ce qui
   // se lit comme une absence de donnée alors que ça veut dire l'inverse.
@@ -775,18 +859,24 @@ async function cutPrecipRefresh() {
     // rattrapage = pas de frame précédente = pas de verdict, jamais une
     // erreur (le reste de la route continue de répondre).
     if (cutPrecipTiles.size && cutPrecipFrameTime) {
+      cutPrecipPrev2Tiles = cutPrecipPrevTiles;
+      cutPrecipPrev2FrameTime = cutPrecipPrevFrameTime;
       cutPrecipPrevTiles = precipMaskTiles(cutPrecipTiles);
       cutPrecipPrevFrameTime = cutPrecipFrameTime;
-    } else if (frames.length >= 2) {
-      const prevFrame = frames[frames.length - 2];
-      const prevTiles = await cutPrecipFetchFrame(idx, prevFrame);
-      if (prevTiles.size) {
-        cutPrecipPrevTiles = precipMaskTiles(prevTiles);
-        cutPrecipPrevFrameTime = prevFrame.time;
+    } else if (frames.length >= 3) {
+      // Deux frames de rattrapage : le verdict exige DEUX paires
+      // concordantes (cf. precipTrackInTiles), donc trois images.
+      for (const [offset, assign] of [[2, 'prev'], [3, 'prev2']]) {
+        const f = frames[frames.length - offset];
+        const tiles = await cutPrecipFetchFrame(idx, f);
+        if (!tiles.size) continue;
+        if (assign === 'prev') { cutPrecipPrevTiles = precipMaskTiles(tiles); cutPrecipPrevFrameTime = f.time; }
+        else { cutPrecipPrev2Tiles = precipMaskTiles(tiles); cutPrecipPrev2FrameTime = f.time; }
       }
     }
     cutPrecipTiles = next;
     cutPrecipFrameTime = frame.time;
+    cutPrecipTrackMemo = new Map(); // les verdicts mémoïsés portent sur l'ancienne frame
   } catch { /* dégradation silencieuse : cache inchangé, route renvoie near:false */ }
   finally { cutPrecipRefreshing = false; }
 }
@@ -2291,17 +2381,29 @@ app.get('/precip-distance', async (req, res) => {
   const { near, distanceKm } = nearest;
   // Cap de l'écho VU DEPUIS le point (0 = nord, 90 = est) — repère pixel
   // Mercator : x vers l'est, y vers le SUD, d'où le `-dyPx`.
-  const bearingDeg = near
+  // Pluie au pixel même du point : pas de cap définissable (vecteur nul),
+  // on n'en invente pas un.
+  const bearingDeg = (near && (nearest.dxPx !== 0 || nearest.dyPx !== 0))
     ? Math.round((Math.atan2(nearest.dxPx, -nearest.dyPx) * 180 / Math.PI + 360) % 360)
     : null;
-  // Suivi de cellule (30/07/2026) : seulement si les DEUX frames sont
-  // là et raisonnablement rapprochées, sinon `track` reste null et le
-  // client se rabat sur distance + cap, sans verdict de déplacement.
+  // Suivi de cellule (30/07/2026) : seulement si les TROIS frames sont là
+  // et raisonnablement rapprochées, sinon `track` reste null et le client
+  // se rabat sur distance + cap, sans verdict de déplacement.
   const dtSec = (cutPrecipFrameTime && cutPrecipPrevFrameTime)
     ? cutPrecipFrameTime - cutPrecipPrevFrameTime : 0;
-  const track = (dtSec > 0 && dtSec * 1000 <= CUT_PRECIP_TRACK_MAX_DT_MS)
-    ? precipTrackInTiles(cutPrecipTiles, cutPrecipPrevTiles, nearest, dtSec)
-    : null;
+  const dtSec2 = (cutPrecipPrevFrameTime && cutPrecipPrev2FrameTime)
+    ? cutPrecipPrevFrameTime - cutPrecipPrev2FrameTime : 0;
+  let track = null;
+  if (near && dtSec > 0 && dtSec * 1000 <= CUT_PRECIP_TRACK_MAX_DT_MS
+      && dtSec2 > 0 && dtSec2 * 1000 <= CUT_PRECIP_TRACK_MAX_DT_MS) {
+    const memoKey = `${lat.toFixed(3)}_${lon.toFixed(3)}_${radiusKm}`;
+    if (cutPrecipTrackMemo.has(memoKey)) {
+      track = cutPrecipTrackMemo.get(memoKey);
+    } else {
+      track = precipTrackInTiles(cutPrecipTiles, cutPrecipPrevTiles, cutPrecipPrev2Tiles, nearest, dtSec, dtSec2);
+      cutPrecipTrackMemo.set(memoKey, track); // `null` mémoïsé aussi : un refus est aussi cher à recalculer
+    }
+  }
   res.json({
     near, distanceKm, radiusKm, bearingDeg,
     trend: track?.trend ?? null,
