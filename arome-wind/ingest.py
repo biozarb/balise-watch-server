@@ -86,7 +86,16 @@ COARSE_EVERY = 3
 # que de couper une fenêtre de vol. Traverse minuit (22 > 4).
 NIGHT_UTC_START, NIGHT_UTC_END = 22, 4
 TILE_DEG   = 2                      # cf. WIND_GRID_TILE_DEG
-LEVELS     = [1000, 950, 925, 900, 850, 800, 700, 600, 500]  # cf. WIND_GRID_LEVELS
+# 30/07/2026 (quota Storage, 2e passe) : 600 et 500 hPa RETIRÉS — soit
+# ~4 200 et ~5 600 m AMSL, bien au-dessus du plafond parapente (et
+# au-dessus du plafond réglementaire sans oxygène). 9 -> 7 niveaux =
+# −22 % sur arome/alt, mesuré à 209 Mo -> ~163 Mo.
+# ⚠️ Cette liste est DUPLIQUÉE dans web/src/lib/config.ts
+# (`WIND_GRID_LEVELS`), sans code partagé entre les deux repos, et le
+# client ne la lit PAS depuis le manifest : les deux listes doivent bouger
+# ensemble, sinon le sélecteur d'altitude propose des paliers dont les
+# tuiles n'existent plus (404 silencieux, calque vide en haut de gamme).
+LEVELS     = [1000, 950, 925, 900, 850, 800, 700]  # cf. WIND_GRID_LEVELS
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
 
 # Élévation du sol par nœud de la grille ALT (retour Yann 21/07/2026) —
