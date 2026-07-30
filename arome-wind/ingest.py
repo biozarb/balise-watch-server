@@ -396,7 +396,21 @@ def _ms(u, v):
     drc = (270 - math.degrees(math.atan2(v, u))) % 360
     if not math.isfinite(drc):
         return None, None
-    return round(spd, 1), round(drc)
+    # 30/07/2026 (quota Storage, 3e passe) : vitesse arrondie à l'ENTIER,
+    # plus à la décimale. Ce n'est pas un réglage de précision physique mais
+    # de TAILLE DE FICHIER : chaque valeur passe de 4-5 caractères ("12.3")
+    # à 2-3 ("12"), sur des tableaux de ~31 échéances par point et ~600 000
+    # points par run. Mesuré nécessaire parce qu'`arome/sol` fluctue de
+    # ±30 Mo d'un run à l'autre selon qu'il vente ou pas (539 -> 571 Mo
+    # observé sans aucun changement de code) : il fallait une marge sous le
+    # Go, pas s'asseoir pile sur la ligne.
+    # Erreur maximale introduite : 0,5 km/h sur une flèche de carte, alors
+    # que l'échelle de couleurs a ses paliers à 8/16/24/32/40 km/h et que
+    # l'affichage arrondit déjà. `dir` était de toute façon déjà entier.
+    # Seul consommateur client : WindGridLayer.fill(), qui reconvertit
+    # immédiatement en u/v flottants pour l'interpolation — l'entier en
+    # entrée ne change rien à la douceur du champ interpolé.
+    return round(spd), round(drc)
 
 def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None):
     """Construit les WindGrid par tuile 2° pour un (kind, level) donné.
