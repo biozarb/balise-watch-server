@@ -1361,6 +1361,14 @@ async function refreshMfObs() {
         raf10: s.raf10 != null ? s.raf10 * 3.6 : null,
         pres: s.pres != null ? s.pres / 100 : null,
         pmer: s.pmer != null ? s.pmer / 100 : null,
+        // Étape 28 (front de rafales) : la température était déjà dans le
+        // paquet mais jamais lue. Elle sert de signal BONUS au score de
+        // passage (une chute de 3-8 °C accompagne un outflow) — jamais
+        // seule, car par air sec elle peut être faible alors que le front
+        // est bien réel. Kelvin → °C ici, avec les autres conversions :
+        // le §10 de la spec insiste pour que les unités SI de
+        // Météo-France soient converties EN UN SEUL ENDROIT.
+        temp: s.t != null ? s.t - 273.15 : null,
         validityTime: s.validity_time ?? null,
       });
     }
@@ -1415,6 +1423,13 @@ async function refreshMfObs() {
         }
       }
       mfPersistHistory(pressureOnlyRows); // fire-and-forget — cf. définition, ne bloque/casse jamais la suite
+
+      // ── Étape 28 : alimentation du détecteur de front de rafales ────
+      // TOUTES les stations du paquet, pas seulement celles surveillées :
+      // l'intérêt du réseau MF est justement de voir le front ARRIVER,
+      // 200-300 km en amont, là où personne ne surveille de balise.
+      // Historique en RAM (cf. gust-front.js), aucune écriture en base.
+      gfIngest(next, t);
     }
   } catch (e) { console.error('refreshMfObs error:', e.message); }
 }
@@ -1425,6 +1440,413 @@ async function refreshMeteoFranceData() {
     await refreshMfStationsList();
   }
   await refreshMfObs();
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  ÉTAPE 28 — FRONT DE RAFALES (outflow / vague de pression)
+//
+//  Cf. PROMPT_REPRISE_FRONT_RAFALES.md. La détection elle-même vit dans
+//  ./gust-front.js (aucune I/O, rejouable sur archive) ; ce bloc-ci ne
+//  fait que l'ingestion, la persistance et le push.
+//
+//  ⚠️ OPT-IN, comme la chaîne foudre (FW_LIGHTNING_ENABLED) : tout reste
+//  dormant tant que GUST_FRONT_ENABLED=1 n'est pas posé sur Render. Et
+//  même activé, GUST_FRONT_SHADOW=1 (valeur par défaut) fait tourner le
+//  détecteur en écrivant en base SANS envoyer le moindre push — c'est le
+//  shadow mode réclamé par le §8.1 de la spec. Un faux positif coûte
+//  beaucoup plus cher qu'un ratage : après deux fausses alertes, plus
+//  personne ne lit la troisième.
+// ═══════════════════════════════════════════════════════════════════
+const gf = require('./gust-front');
+
+const GUST_FRONT_ENABLED = process.env.GUST_FRONT_ENABLED === '1';
+/** Shadow mode ACTIF par défaut : il faut poser explicitement =0 pour ouvrir les push. */
+const GUST_FRONT_SHADOW = process.env.GUST_FRONT_SHADOW !== '0';
+/** Cadence de détection — calée sur celle du paquet MF, inutile d'aller plus vite. */
+const GUST_FRONT_CYCLE_MS = MF_OBS_POLL_MS;
+/** Un événement sans nouvelle détection au-delà de ce délai est clos. */
+const GF_EVENT_STALE_MS = 30 * 60 * 1000;
+/** Au-delà, un `watch` jamais confirmé est déclaré faux positif. */
+const GF_WATCH_EXPIRY_MS = 2 * 60 * 60 * 1000;
+/** ETA en deçà de laquelle un événement confirmé devient « imminent ». */
+const GF_IMMINENT_MS = 60 * 60 * 1000;
+
+/** Positions des balises Pioupiou, alimentées par pollAndNotify (zéro requête ajoutée). */
+const gfBeaconPositions = new Map(); // id -> { lat, lon, nom }
+
+let gfActiveEvent = null;      // { id, status, lastDetectionAt, createdAt, intensity: [] }
+let gfLastCycleAt = 0;         // dernière tentative
+let gfLastCycleOkAt = 0;       // dernier cycle SANS erreur
+let gfLastReason = null;       // pourquoi aucun front (diagnostic)
+let gfPublicationLatencyMs = 0;
+let gfLastError = null;
+
+/**
+ * Latence de publication Météo-France : écart entre l'heure de MESURE
+ * (validity_time) et l'instant où le paquet nous parvient.
+ *
+ * Elle se soustrait directement du préavis réellement offert au pilote.
+ * L'ignorer reviendrait à annoncer une heure d'arrivée systématiquement
+ * trop tardive — donc à promettre un préavis qu'on n'a pas. Mesurée à
+ * chaque paquet plutôt que devinée (§3.2 : « à mesurer en shadow mode »).
+ */
+function gfMeasureLatency(obsMap, now) {
+  const lats = [];
+  for (const obs of obsMap.values()) {
+    if (!obs.validityTime) continue;
+    const vt = Date.parse(obs.validityTime);
+    if (!Number.isFinite(vt)) continue;
+    const d = now - vt;
+    if (d >= 0 && d < 60 * 60 * 1000) lats.push(d);
+  }
+  if (!lats.length) return;
+  lats.sort((a, b) => a - b);
+  gfPublicationLatencyMs = lats[lats.length >> 1]; // médiane, insensible aux stations en retard
+}
+
+/** Passe le paquet d'observations MF au détecteur. */
+function gfIngest(obsMap, t) {
+  if (!GUST_FRONT_ENABLED) return;
+  try {
+    gfMeasureLatency(obsMap, t);
+    const rows = [];
+    for (const [id, obs] of obsMap) {
+      rows.push({ id, pmer: obs.pmer, ff: obs.ff, raf: obs.raf10, dd: obs.dd, temp: obs.temp });
+    }
+    gf.gfRecordObs(rows, t);
+  } catch (e) { console.error('gfIngest error:', e.message); }
+}
+
+/**
+ * Toutes les positions connues, toutes sources confondues — c'est sur
+ * cette table qu'on calcule les ETA et qu'on décide qui est prévenu.
+ * Les quatre sources sont incluses délibérément : un pilote qui n'a que
+ * des favoris AEMET ou Infoclimat ne doit pas être silencieusement
+ * exclu du ciblage parce que sa source n'est pas Pioupiou.
+ */
+function gfAllPositions() {
+  const out = new Map(); // `${source}:${id}` -> { id, source, lat, lon, nom }
+  for (const [id, p] of gfBeaconPositions) {
+    if (Number.isFinite(p.lat) && Number.isFinite(p.lon)) {
+      out.set(`pioupiou:${id}`, { id, source: 'pioupiou', lat: p.lat, lon: p.lon, nom: p.nom });
+    }
+  }
+  for (const s of mfStationsList) {
+    out.set(`meteofrance:${s.id}`, { id: s.id, source: 'meteofrance', lat: s.lat, lon: s.lon, nom: s.nom });
+  }
+  for (const [id, s] of infoclimatStationsById) {
+    if (Number.isFinite(s.lat) && Number.isFinite(s.lon)) {
+      out.set(`infoclimat:${id}`, { id, source: 'infoclimat', lat: s.lat, lon: s.lon, nom: s.nom });
+    }
+  }
+  for (const [id, s] of aemetObsCache) {
+    if (Number.isFinite(s.lat) && Number.isFinite(s.lon)) {
+      out.set(`aemet:${id}`, { id, source: 'aemet', lat: s.lat, lon: s.lon, nom: s.nom });
+    }
+  }
+  return out;
+}
+
+/** Corps du push, dans l'enveloppe flightwatch déjà gérée par le Service Worker. */
+function gfBuildPush(level, event, etaMs, beaconName) {
+  const hhmm = etaMs
+    ? new Date(etaMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })
+    : null;
+  const gust = event.max_gust_kmh ? `${Math.round(event.max_gust_kmh)} km/h` : null;
+
+  // Ton volontairement factuel et non alarmiste, avec l'incertitude
+  // assumée et une consigne actionnable — gabarit repris du §1 de la
+  // spec. Jamais de formulation qui ressemblerait à une AUTORISATION de
+  // voler, et aucune notion de niveau de pilote (ligne rouge projet).
+  const title = level === 'imminent'
+    ? '🔴 Front de rafales — arrivée imminente'
+    : '⚠️ Front de rafales possible';
+  const parts = [];
+  if (beaconName) parts.push(beaconName);
+  if (hhmm) parts.push(level === 'imminent' ? `arrivée ~${hhmm}` : `arrivée estimée ~${hhmm}`);
+  if (gust) parts.push(`rafales ${gust}`);
+  parts.push('soyez au sol et le matériel rangé avant');
+
+  return {
+    title, body: parts.join(' — '),
+    // Mêmes chemins que tous les autres push du serveur : /icons/icon-192.png
+    // n'existe pas (l'icône est à la racine du public/), et un chemin
+    // d'icône invalide fait tomber la notification sur un rendu générique
+    // sans le moindre message d'erreur.
+    icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+    tag: `fw-gust_front-${event.id}`,
+    requireInteraction: level === 'imminent',
+    data: {
+      kind: 'flightwatch',
+      signal: 'gust_front',
+      level: level === 'imminent' ? 3 : 2,
+      scope: `gust_front:${event.id}`,
+      eventId: event.id,
+      // Pas de voix : la synthèse vocale est réservée aux signaux ancrés
+      // sur une balise surveillée, et un front de rafales concerne un
+      // couloir entier. Le son distinct du niveau 3 suffit.
+      voice: false,
+      value: event.max_gust_kmh ?? null,
+      unit: 'km/h',
+      eta: etaMs ? new Date(etaMs).toISOString() : null,
+    },
+  };
+}
+
+/**
+ * Cycle complet : détecter, persister, cibler, notifier.
+ * Ne jette jamais — une exception ici ne doit pas emporter la boucle MF.
+ */
+async function gustFrontCycle() {
+  if (!GUST_FRONT_ENABLED) return;
+  gfLastCycleAt = Date.now();
+  try {
+    const now = Date.now();
+    const stationMeta = new Map(
+      mfStationsList.map(s => [s.id, { lat: s.lat, lon: s.lon, nom: s.nom }])
+    );
+    const res = gf.gfDetect(stationMeta, now, gfPublicationLatencyMs);
+    gfLastReason = res.front ? null : res.reason;
+
+    if (!res.front) {
+      await gfCloseStaleEvent(now);
+      gfLastCycleOkAt = now;
+      gfLastError = null;
+      return;
+    }
+
+    const f = res.front;
+    const eventPayload = {
+      source: 'mf_network',
+      kind: 'outflow',
+      status: 'confirmed', // détection MESURÉE : confirmé d'emblée (§4.4)
+      axis: { type: 'LineString', coordinates: [
+        [f.line.a.lon, f.line.a.lat], [f.line.b.lon, f.line.b.lat],
+      ] },
+      corridor: { type: 'Polygon', coordinates: [f.corridor] },
+      propagation_bearing: f.bearing,
+      propagation_speed_kmh: f.speedKmh,
+      max_gust_kmh: f.maxGustKmh,
+      max_pressure_jump_hpa: f.maxPressureJumpHpa,
+      confidence: f.confidence,
+      updated_at: new Date(now).toISOString(),
+      raw: {
+        thresholds_version: f.thresholdsVersion,
+        station_count: f.stationCount,
+        r2: f.r2,
+        publication_latency_min: Math.round(f.publicationLatencyMs / 60000),
+        stations_evaluated: res.evaluated,
+        shadow: GUST_FRONT_SHADOW,
+        forecast_lines: f.forecastLines.map(l => ({
+          offset_min: l.offsetMin,
+          coordinates: [[l.line.a.lon, l.line.a.lat], [l.line.b.lon, l.line.b.lat]],
+        })),
+      },
+    };
+
+    // Un front détecté alors qu'un épisode est déjà suivi le raffine ;
+    // il n'en crée pas un second. C'est toute la différence entre une
+    // photo par cycle et un objet suivi (§4.2).
+    const reuse = gfActiveEvent && (now - gfActiveEvent.lastDetectionAt) < GF_EVENT_STALE_MS;
+    let eventId;
+    if (reuse) {
+      eventId = gfActiveEvent.id;
+      await sbPatch('gust_front_events', `id=eq.${eventId}`, eventPayload);
+    } else {
+      const created = await sbInsertReturning('gust_front_events', eventPayload);
+      eventId = created?.id;
+      if (!eventId) { gfLastError = 'insert_failed'; return; }
+      gfActiveEvent = { id: eventId, status: 'confirmed', createdAt: now, intensity: [] };
+      console.log(`🌬️ Front de rafales détecté (${f.stationCount} stations, ${Math.round(f.speedKmh)} km/h au ${Math.round(f.bearing)}°) — événement ${eventId}`);
+    }
+    gfActiveEvent.lastDetectionAt = now;
+    gfActiveEvent.status = eventPayload.status;
+
+    // Essoufflement : trois cycles d'affilée d'intensité décroissante →
+    // on RÉTROGRADE plutôt que de maintenir une alerte pour un front qui
+    // meurt en route. Bandeau atténué, et surtout aucun nouveau push.
+    gfActiveEvent.intensity.push(f.maxGustKmh ?? 0);
+    if (gfActiveEvent.intensity.length > 4) gfActiveEvent.intensity.shift();
+    const ints = gfActiveEvent.intensity;
+    if (ints.length >= 4 && ints[0] > ints[1] && ints[1] > ints[2] && ints[2] > ints[3]) {
+      await sbPatch('gust_front_events', `id=eq.${eventId}`,
+        { status: 'downgraded', updated_at: new Date(now).toISOString() });
+      gfActiveEvent.status = 'downgraded';
+    }
+
+    // Détections élémentaires : remplacées à chaque cycle (l'ajustement
+    // est recalculé en entier, garder les anciennes ferait doublon).
+    await sbDelete('gust_front_detections', `event_id=eq.${eventId}`);
+    await sbInsert('gust_front_detections', res.detections.map(d => ({
+      event_id: eventId,
+      source: 'mf_station',
+      station_id: d.id,
+      station_name: d.nom,
+      lat: d.lat, lon: d.lon,
+      detected_at: new Date(d.t).toISOString(),
+      delta_pressure_hpa: d.deltaPressureHpa,
+      delta_speed_kmh: d.deltaSpeedKmh,
+      delta_heading_deg: d.deltaHeadingDeg,
+      delta_temp_c: d.deltaTempC,
+      gust_kmh: d.gustKmh,
+      score: d.score,
+    })));
+
+    // ETA par balise du couloir.
+    const positions = gfAllPositions();
+    const targets = [];
+    for (const p of positions.values()) {
+      if (!f.contains(p.lat, p.lon)) continue;
+      const eta = f.etaFor(p.lat, p.lon);
+      if (eta < now - 30 * 60 * 1000) continue; // déjà franchie il y a longtemps
+      targets.push({
+        event_id: eventId,
+        station_id: p.id,
+        station_name: p.nom,
+        source: p.source,
+        lat: p.lat, lon: p.lon,
+        eta_at: new Date(eta).toISOString(),
+        // ±15 min tant qu'aucune balise locale n'a confirmé le passage
+        // (§4.2). Resserré à ±5 min par le Lot C, plus tard.
+        eta_window_minutes: 15,
+        expected_gust_kmh: f.maxGustKmh,
+        passed_at: eta <= now ? new Date(eta).toISOString() : null,
+      });
+    }
+    await sbDelete('gust_front_targets', `event_id=eq.${eventId}`);
+    await sbInsert('gust_front_targets', targets);
+
+    // Bornes de la fenêtre annoncée : de la première à la dernière
+    // arrivée encore à venir dans le couloir.
+    const future = targets.filter(t => new Date(t.eta_at).getTime() > now)
+      .map(t => new Date(t.eta_at).getTime()).sort((a, b) => a - b);
+    if (future.length) {
+      await sbPatch('gust_front_events', `id=eq.${eventId}`, {
+        eta_start: new Date(future[0] - 15 * 60000).toISOString(),
+        eta_end: new Date(future[future.length - 1] + 15 * 60000).toISOString(),
+      });
+    }
+
+    await gfNotify(eventId, targets, now);
+
+    gfLastCycleOkAt = now;
+    gfLastError = null;
+  } catch (e) {
+    gfLastError = e.message;
+    console.error('gustFrontCycle error:', e.message);
+  }
+}
+
+/** Clôt l'épisode suivi quand plus rien ne le confirme. */
+async function gfCloseStaleEvent(now) {
+  if (!gfActiveEvent) return;
+  const silent = now - gfActiveEvent.lastDetectionAt;
+  if (silent < GF_EVENT_STALE_MS) return;
+
+  // `passed` = le front a bien traversé et il est sorti du réseau.
+  // `expired` = une veille jamais confirmée, donc un FAUX POSITIF, et
+  // c'est important de le nommer ainsi : c'est cette comptabilité qui
+  // permettra de dire si le détecteur tient l'objectif de ≤ 1 faux
+  // positif par mois de saison avant d'ouvrir aux utilisateurs.
+  const status = gfActiveEvent.status === 'watch' && silent > GF_WATCH_EXPIRY_MS
+    ? 'expired' : 'passed';
+  await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`,
+    { status, updated_at: new Date(now).toISOString() });
+  console.log(`🌬️ Événement ${gfActiveEvent.id} clos (${status})`);
+  gfActiveEvent = null;
+}
+
+/**
+ * Push ciblé. Trois verrous avant qu'un pilote soit notifié :
+ *  1. shadow mode désactivé explicitement ;
+ *  2. le compte est bêta-testeur (ouverture progressive, §8.3) ;
+ *  3. une de ses balises favorites ou surveillées est dans le couloir.
+ * Plus la déduplication en base : au plus UN push `watch` et UN push
+ * `imminent` par événement et par compte.
+ */
+async function gfNotify(eventId, targets, now) {
+  if (GUST_FRONT_SHADOW) return;
+  if (!targets.length) return;
+
+  const etaByStation = new Map(targets.map(t => [t.station_id, t]));
+
+  const [betaRows, watchedRows, favRows, survRows, deviceRows, notifRows] = await Promise.all([
+    sbGet('beta_testers', 'select=user_id'),
+    sbGet('user_watched', 'select=user_id,beacon_id,nom'),
+    sbGet('user_favorites', 'select=user_id,beacon_id,beacon_nom'),
+    sbGet('user_surveillance', 'select=user_id,sig_gust_front'),
+    sbGet('user_devices', 'select=*'),
+    sbGet('gust_front_notifications', `select=user_id,level&event_id=eq.${eventId}`),
+  ]);
+
+  const beta = new Set((Array.isArray(betaRows) ? betaRows : []).map(r => r.user_id));
+  if (!beta.size) return; // fonctionnalité réservée aux bêta-testeurs
+
+  // Pas de ligne = pref absente : on retombe sur le défaut `true` du
+  // schéma, cohérent avec le reste des prefs flightwatch.
+  const optedOut = new Set(
+    (Array.isArray(survRows) ? survRows : [])
+      .filter(r => r.sig_gust_front === false).map(r => r.user_id)
+  );
+
+  const devicesByUser = {};
+  (Array.isArray(deviceRows) ? deviceRows : []).forEach(dv => {
+    (devicesByUser[dv.user_id] ??= []).push(dv);
+  });
+
+  const alreadySent = new Set(
+    (Array.isArray(notifRows) ? notifRows : []).map(r => `${r.user_id}|${r.level}`)
+  );
+
+  // Balise la plus proche dans le temps, par compte.
+  const soonestByUser = new Map();
+  const consider = (userId, beaconId, nom) => {
+    if (!beta.has(userId) || optedOut.has(userId)) return;
+    const tg = etaByStation.get(String(beaconId));
+    if (!tg) return;
+    const eta = new Date(tg.eta_at).getTime();
+    if (eta <= now) return; // déjà passé chez lui : prévenir n'a plus d'objet
+    const cur = soonestByUser.get(userId);
+    if (!cur || eta < cur.eta) soonestByUser.set(userId, { eta, nom: nom || tg.station_name });
+  };
+  (Array.isArray(watchedRows) ? watchedRows : []).forEach(w => consider(w.user_id, w.beacon_id, w.nom));
+  (Array.isArray(favRows) ? favRows : []).forEach(fv => consider(fv.user_id, fv.beacon_id, fv.beacon_nom));
+
+  const eventRow = (await sbGet('gust_front_events', `id=eq.${eventId}&select=*`))?.[0];
+  if (!eventRow) return;
+  // Un front qui s'essouffle ne génère plus de nouveau push (§4.4).
+  if (eventRow.status === 'downgraded') return;
+
+  for (const [userId, info] of soonestByUser) {
+    const level = (info.eta - now) <= GF_IMMINENT_MS ? 'imminent' : 'watch';
+    if (alreadySent.has(`${userId}|${level}`)) continue;
+    const devices = devicesByUser[userId] || [];
+    if (!devices.length) continue;
+
+    const payload = gfBuildPush(level, eventRow, info.eta, info.nom);
+    let ok = false;
+    for (const dv of devices) {
+      try {
+        await webpush.sendNotification(
+          { endpoint: dv.endpoint, keys: { p256dh: dv.p256dh, auth: dv.auth } },
+          JSON.stringify(payload)
+        );
+        ok = true;
+        console.log(`📲 Push front de rafales (${level}) → ${userId}`);
+      } catch (err) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          await sbDelete('user_devices', `endpoint=eq.${encodeURIComponent(dv.endpoint)}`);
+        } else console.warn(`⚠️ Push front de rafales error ${err.statusCode}`);
+      }
+    }
+    // Écrit MÊME en cas d'échec d'envoi : la clé primaire est le garde-fou
+    // anti-doublon, et une tentative ratée ne doit pas rouvrir la porte à
+    // un renvoi en boucle au cycle suivant.
+    await sbUpsert('gust_front_notifications', {
+      event_id: eventId, user_id: userId, level,
+      sent_at: new Date(now).toISOString(), channel: 'webpush', success: ok,
+    }, 'event_id,user_id,level');
+  }
 }
 
 // Débogage 12/07/2026 — stations MF PROCHES d'une balise (pression
@@ -1895,6 +2317,24 @@ async function sbUpsert(table, body, onConflict) { const r = await fetch(`${SB_U
 async function sbDelete(table, query) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'DELETE', headers:SB_HEADERS }); return r.ok; }
 async function sbPatch(table, query, body) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
 async function sbRpc(fn, body) { const r = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, { method:'POST', headers:SB_HEADERS, body:JSON.stringify(body) }); return r.json(); }
+// Étape 28 — insertion pure (sans clé de conflit, contrairement à sbUpsert).
+// Tolère un tableau vide : ne fait alors AUCUNE requête, ce qui évite un
+// 400 PostgREST sur un body `[]` à chaque cycle sans détection.
+async function sbInsert(table, rows) {
+  if (!Array.isArray(rows) || !rows.length) return true;
+  const r = await fetch(`${SB_URL}/rest/v1/${table}`, { method:'POST', headers:{...SB_HEADERS,'Prefer':'return=minimal'}, body:JSON.stringify(rows) });
+  return r.ok;
+}
+// Insertion d'UNE ligne dont on a besoin de l'id généré (événement front
+// de rafales). `return=representation` est indispensable ici : sans lui
+// PostgREST renvoie un corps vide et on perdrait le lien avec les
+// détections/ETA à écrire juste après.
+async function sbInsertReturning(table, row) {
+  const r = await fetch(`${SB_URL}/rest/v1/${table}`, { method:'POST', headers:{...SB_HEADERS,'Prefer':'return=representation'}, body:JSON.stringify(row) });
+  if (!r.ok) return null;
+  const d = await r.json();
+  return Array.isArray(d) ? d[0] : d;
+}
 
 // ── AUTH : vérifie un access_token Supabase et renvoie le user (ou null) ──
 // Le client envoie son access_token de session ; on ne fait JAMAIS confiance
@@ -1912,7 +2352,79 @@ async function verifyUser(accessToken) {
   } catch { return null; }
 }
 
-app.get('/', (req, res) => res.json({ status:'ok', version:'2.1.0', service:'Balise Watch Push Server' }));
+// Health check. Étape 28 — le champ `loops` expose, pour chaque boucle,
+// l'ancienneté du dernier cycle RÉUSSI. Motif : un détecteur silencieux
+// qui est EN PANNE est indiscernable d'un détecteur silencieux qui n'a
+// rien à signaler ; sans cette information, une panne de la chaîne front
+// de rafales ne se verrait jamais. UptimeRobot garde Render éveillé, il
+// ne dit rien de la fraîcheur des données.
+app.get('/', (req, res) => {
+  const now = Date.now();
+  const ageMin = (t) => (t ? Math.round((now - t) / 60000) : null);
+  res.json({
+    status: 'ok', version: '2.2.0', service: 'Balise Watch Push Server',
+    loops: {
+      meteofrance: { lastObsAgeMin: ageMin(mfObsCacheFetchedAt), stations: mfObsCache.size },
+      gustFront: {
+        enabled: GUST_FRONT_ENABLED,
+        shadow: GUST_FRONT_SHADOW,
+        lastCycleAgeMin: ageMin(gfLastCycleAt),
+        lastOkAgeMin: ageMin(gfLastCycleOkAt),
+        lastError: gfLastError,
+      },
+    },
+  });
+});
+
+// ── Étape 28 : front de rafales ────────────────────────────────────
+// Événements vivants + leurs détections et ETA. Lecture publique comme
+// /meteofrance-stations : c'est de la donnée d'observation agrégée, et
+// le gate bêta-testeur se fait côté client sur l'AFFICHAGE du calque —
+// le serveur n'a pas de session ici. Rien de personnel n'est exposé.
+app.get('/gust-front/active', async (req, res) => {
+  try {
+    const events = await sbGet('gust_front_events',
+      'select=*&status=in.(watch,confirmed,downgraded)&order=updated_at.desc&limit=5');
+    if (!Array.isArray(events) || !events.length) return res.json({ events: [] });
+    const ids = events.map(e => `"${e.id}"`).join(',');
+    const [detections, targets] = await Promise.all([
+      sbGet('gust_front_detections', `select=*&event_id=in.(${ids})`),
+      sbGet('gust_front_targets', `select=*&event_id=in.(${ids})`),
+    ]);
+    res.json({
+      events: events.map(e => ({
+        ...e,
+        detections: (Array.isArray(detections) ? detections : []).filter(d => d.event_id === e.id),
+        targets: (Array.isArray(targets) ? targets : []).filter(t => t.event_id === e.id),
+      })),
+      fetchedAt: Date.now(),
+    });
+  } catch (e) {
+    // Couche d'affichage optionnelle : jamais bloquante pour le reste de
+    // la carte. Le client traite une liste vide comme « rien à signaler ».
+    console.error('/gust-front/active error:', e.message);
+    res.json({ events: [], error: 'unavailable' });
+  }
+});
+
+// Supervision détaillée du détecteur (état du buffer, warmup, latence de
+// publication mesurée, raison de non-détection). Sert au panneau du
+// calque en bêta : le pilote doit pouvoir distinguer « rien à signaler »
+// de « le détecteur n'est pas prêt ».
+app.get('/gust-front/health', (req, res) => {
+  const now = Date.now();
+  res.json({
+    enabled: GUST_FRONT_ENABLED,
+    shadow: GUST_FRONT_SHADOW,
+    lastCycleAt: gfLastCycleAt || null,
+    lastOkAt: gfLastCycleOkAt || null,
+    lastReason: gfLastReason,
+    lastError: gfLastError,
+    publicationLatencyMin: Math.round(gfPublicationLatencyMs / 60000),
+    activeEventId: gfActiveEvent?.id ?? null,
+    detector: gf.gfHealth(now),
+  });
+});
 app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
 
 // ── Étape 13 (19/07/2026) — Grille de vent (calque carte "champ de vent") ──
@@ -2922,6 +3434,17 @@ async function pollAndNotify() {
       nom: b.meta?.name || `Balise ${b.id}`,
     }; });
 
+    // Étape 28 — positions des balises Pioupiou pour le ciblage du front
+    // de rafales (couloir d'impact / ETA par balise). Alimentées ici,
+    // depuis une réponse DÉJÀ récupérée : zéro requête réseau ajoutée.
+    // Positions seulement, aucune mesure — ce cache ne sert qu'à de la
+    // géométrie, il n'a pas à vieillir avec la donnée vent.
+    Object.entries(releves).forEach(([id, rel]) => {
+      if (Number.isFinite(rel.lat) && Number.isFinite(rel.lon)) {
+        gfBeaconPositions.set(id, { lat: rel.lat, lon: rel.lon, nom: rel.nom });
+      }
+    });
+
     // Lot 7 (suite, 11/07/2026) — fusion des stations Météo-France
     // surveillées dans `releves`, EXACT même format que les balises
     // Pioupiou ci-dessus. Choix de Yann : une station MF surveillée doit
@@ -3795,4 +4318,12 @@ app.listen(PORT, async () => {
   setInterval(refreshInfoclimatData, INFOCLIMAT_OBS_POLL_MS);
   refreshAemetData(); // no-op silencieux si AEMET_API_KEY absente
   setInterval(refreshAemetData, AEMET_OBS_POLL_MS);
+  // Étape 28 — détecteur de front de rafales. No-op silencieux si
+  // GUST_FRONT_ENABLED n'est pas posé. Décalé d'une minute après le
+  // démarrage des boucles d'observation : détecter avant que le premier
+  // paquet MF soit arrivé ne produirait qu'un cycle vide.
+  setTimeout(() => {
+    gustFrontCycle();
+    setInterval(gustFrontCycle, GUST_FRONT_CYCLE_MS);
+  }, 60 * 1000);
 });
