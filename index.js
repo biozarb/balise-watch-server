@@ -1482,6 +1482,48 @@ let gfPublicationLatencyMs = 0;
 let gfLastError = null;
 
 /**
+ * Cache RAM des événements vivants, servi tel quel par
+ * /gust-front/active. Rafraîchi UNE fois par cycle de détection, donc
+ * le coût Supabase est indépendant du nombre de pilotes connectés (même
+ * philosophie mutualiste que mfObsCache / fwSignalsCache).
+ *
+ * Rafraîchi depuis Supabase et non depuis ce que le cycle vient de
+ * calculer : c'est ce qui fait apparaître les événements créés À LA MAIN
+ * par un admin (RPC admin_create_gust_front_event), que le détecteur ne
+ * connaît pas.
+ */
+let gfActiveCache = { events: [], fetchedAt: 0 };
+
+async function gfRefreshActiveCache() {
+  try {
+    const events = await sbGet('gust_front_events',
+      'select=*&status=in.(watch,confirmed,downgraded)&order=updated_at.desc&limit=5');
+    if (!Array.isArray(events) || !events.length) {
+      gfActiveCache = { events: [], fetchedAt: Date.now() };
+      return;
+    }
+    const ids = events.map(e => `"${e.id}"`).join(',');
+    const [detections, targets] = await Promise.all([
+      sbGet('gust_front_detections', `select=*&event_id=in.(${ids})`),
+      sbGet('gust_front_targets', `select=*&event_id=in.(${ids})`),
+    ]);
+    gfActiveCache = {
+      events: events.map(e => ({
+        ...e,
+        detections: (Array.isArray(detections) ? detections : []).filter(d => d.event_id === e.id),
+        targets: (Array.isArray(targets) ? targets : []).filter(t => t.event_id === e.id),
+      })),
+      fetchedAt: Date.now(),
+    };
+  } catch (e) {
+    // On GARDE l'ancien cache plutôt que de le vider : un incident
+    // Supabase passager ne doit pas faire disparaître de la carte un
+    // front réel en cours de traversée.
+    console.error('gfRefreshActiveCache error:', e.message);
+  }
+}
+
+/**
  * Latence de publication Météo-France : écart entre l'heure de MESURE
  * (validity_time) et l'instant où le paquet nous parvient.
  *
@@ -1610,6 +1652,10 @@ async function gustFrontCycle() {
 
     if (!res.front) {
       await gfCloseStaleEvent(now);
+      // Rafraîchi MÊME sans détection : c'est ce qui fait apparaître un
+      // événement saisi à la main par un admin, et disparaître un
+      // événement qu'on vient de clore.
+      await gfRefreshActiveCache();
       gfLastCycleOkAt = now;
       gfLastError = null;
       return;
@@ -1726,6 +1772,10 @@ async function gustFrontCycle() {
         eta_end: new Date(future[future.length - 1] + 15 * 60000).toISOString(),
       });
     }
+
+    // Cache AVANT le push : si l'envoi échoue, les pilotes doivent
+    // malgré tout voir le front sur la carte.
+    await gfRefreshActiveCache();
 
     await gfNotify(eventId, targets, now);
 
@@ -2381,30 +2431,18 @@ app.get('/', (req, res) => {
 // /meteofrance-stations : c'est de la donnée d'observation agrégée, et
 // le gate bêta-testeur se fait côté client sur l'AFFICHAGE du calque —
 // le serveur n'a pas de session ici. Rien de personnel n'est exposé.
-app.get('/gust-front/active', async (req, res) => {
-  try {
-    const events = await sbGet('gust_front_events',
-      'select=*&status=in.(watch,confirmed,downgraded)&order=updated_at.desc&limit=5');
-    if (!Array.isArray(events) || !events.length) return res.json({ events: [] });
-    const ids = events.map(e => `"${e.id}"`).join(',');
-    const [detections, targets] = await Promise.all([
-      sbGet('gust_front_detections', `select=*&event_id=in.(${ids})`),
-      sbGet('gust_front_targets', `select=*&event_id=in.(${ids})`),
-    ]);
-    res.json({
-      events: events.map(e => ({
-        ...e,
-        detections: (Array.isArray(detections) ? detections : []).filter(d => d.event_id === e.id),
-        targets: (Array.isArray(targets) ? targets : []).filter(t => t.event_id === e.id),
-      })),
-      fetchedAt: Date.now(),
-    });
-  } catch (e) {
-    // Couche d'affichage optionnelle : jamais bloquante pour le reste de
-    // la carte. Le client traite une liste vide comme « rien à signaler ».
-    console.error('/gust-front/active error:', e.message);
-    res.json({ events: [], error: 'unavailable' });
-  }
+//
+// ⚠️ SERVI DEPUIS LA RAM, jamais depuis Supabase à la demande.
+// Première version : 3 requêtes Supabase PAR APPEL. Avec un poll client
+// toutes les 6 min, 50 pilotes = 36 000 requêtes/jour pour une donnée
+// STRICTEMENT IDENTIQUE pour tout le monde et qui ne change qu'une fois
+// par cycle. C'est exactement le piège qui a déjà coûté cher à ce projet
+// sur Open-Meteo (cf. BUGS.md 19/07 : quota saturé, 429 silencieux,
+// « ne pas retirer ce cache »). Le cache est rafraîchi UNE fois par
+// cycle de détection : le coût Supabase devient indépendant du nombre
+// de pilotes.
+app.get('/gust-front/active', (req, res) => {
+  res.json({ events: gfActiveCache.events, fetchedAt: gfActiveCache.fetchedAt });
 });
 
 // Supervision détaillée du détecteur (état du buffer, warmup, latence de
