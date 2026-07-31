@@ -1481,6 +1481,7 @@ let gfLastReason = null;       // pourquoi aucun front (diagnostic)
 let gfPublicationLatencyMs = 0;
 let gfLastError = null;
 let gfModelLastReason = null;  // pourquoi aucun front ANNONCÉ (diagnostic)
+let gfLastPurgeAt = 0;         // purge des épisodes anciens, au plus 1×/h
 
 /**
  * Cache RAM des événements vivants, servi tel quel par
@@ -1705,6 +1706,7 @@ async function gustFrontCycle() {
 
     if (!res.front) {
       await gfCloseStaleEvent(now);
+      await gfSweepOrphans(now);
       // Rafraîchi MÊME sans détection : c'est ce qui fait apparaître un
       // événement saisi à la main par un admin, et disparaître un
       // événement qu'on vient de clore.
@@ -1956,6 +1958,101 @@ async function gfModelCycle(now) {
   }
 }
 
+/**
+ * Balayage des événements ORPHELINS, indépendant de l'état RAM.
+ *
+ * ⚠️ Défaut trouvé le 31/07/2026 en relisant le cycle de vie avant
+ * l'ouverture à tous. `gfActiveEvent` vit en RAM. Or le free tier Render
+ * s'endort et redémarre régulièrement : au réveil, `gfActiveEvent` est
+ * null, le cycle crée donc un NOUVEL événement — pendant que l'ancien
+ * reste `watch` pour toujours, puisque gfCloseStaleEvent ne sait clore
+ * que celui qu'il a en mémoire.
+ *
+ * Conséquence : des bandeaux « front de rafales » figés indéfiniment
+ * chez tous les pilotes, et une accumulation silencieuse en base. C'est
+ * la même classe de bug que les objets orphelins du Storage (cf.
+ * BUGS.md 30/07) — un état vivant qui n'a personne pour le clore.
+ *
+ * D'où ce balayage qui travaille sur la BASE et non sur la RAM : tout
+ * événement vivant non rafraîchi depuis GF_EVENT_STALE_MS est expiré,
+ * que le process qui l'a créé existe encore ou non.
+ */
+async function gfSweepOrphans(now) {
+  try {
+    const cutoff = new Date(now - GF_EVENT_STALE_MS).toISOString();
+    // `is_manual=is.false` est indispensable : un événement saisi par un
+    // admin n'est JAMAIS rafraîchi par le détecteur, ce balayage le
+    // tuerait donc dans la minute.
+    await sbPatch(
+      'gust_front_events',
+      `status=in.(watch,confirmed,downgraded)&updated_at=lt.${cutoff}&is_manual=is.false`,
+      { status: 'expired', updated_at: new Date(now).toISOString() },
+    );
+    // Les événements manuels, eux, s'effacent une heure après la fin de
+    // leur fenêtre annoncée — sinon ils resteraient à l'écran jusqu'à ce
+    // qu'un admin y repense.
+    const past = new Date(now - 60 * 60 * 1000).toISOString();
+    await sbPatch(
+      'gust_front_events',
+      `status=in.(watch,confirmed,downgraded)&is_manual=is.true&eta_end=lt.${past}`,
+      { status: 'passed', updated_at: new Date(now).toISOString() },
+    );
+    // ── Purge des épisodes anciens ────────────────────────────────
+    // Les détections et ETA d'un épisode clos ne sont JAMAIS réécrites :
+    // sans purge, chaque épisode laisse ~575 lignes derrière lui, pour
+    // toujours. C'est exactement le mécanisme d'accumulation silencieuse
+    // qui a rempli le Storage (cf. BUGS.md 30/07) — aucune des chaînes
+    // d'ingestion ne contenait de `delete`.
+    //
+    // 30 jours : assez pour un post-mortem et une campagne de
+    // calibration (§8.2), assez court pour borner la croissance. Les
+    // ÉVÉNEMENTS eux-mêmes sont conservés indéfiniment — ils sont peu
+    // nombreux et constituent l'historique des faux positifs, qui est la
+    // mesure de qualité du détecteur.
+    if (now - gfLastPurgeAt > 60 * 60 * 1000) {
+      gfLastPurgeAt = now;
+      const old = new Date(now - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const stale = await sbGet('gust_front_events',
+        `select=id&updated_at=lt.${old}&status=in.(passed,expired,cancelled)&limit=200`);
+      const ids = (Array.isArray(stale) ? stale : []).map(e => `"${e.id}"`).join(',');
+      if (ids) {
+        await sbDelete('gust_front_detections', `event_id=in.(${ids})`);
+        await sbDelete('gust_front_targets', `event_id=in.(${ids})`);
+      }
+    }
+  } catch (e) {
+    console.error('gfSweepOrphans error:', e.message);
+  }
+}
+
+/**
+ * Au démarrage, reprendre l'épisode en cours plutôt que d'en créer un
+ * doublon. Complément indispensable du balayage ci-dessus : sans lui, un
+ * redémarrage au milieu d'un vrai front couperait le suivi en deux
+ * événements, et le pilote verrait l'ETA se réinitialiser.
+ */
+async function gfAdoptActiveEvent() {
+  if (!GUST_FRONT_ENABLED) return;
+  try {
+    const rows = await sbGet('gust_front_events',
+      'select=id,status,updated_at,max_gust_kmh&status=in.(watch,confirmed,downgraded)&is_manual=is.false&order=updated_at.desc&limit=1');
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row) return;
+    const age = Date.now() - new Date(row.updated_at).getTime();
+    if (age > GF_EVENT_STALE_MS) return;   // le balayage s'en chargera
+    gfActiveEvent = {
+      id: row.id,
+      status: row.status,
+      createdAt: Date.now(),
+      lastDetectionAt: new Date(row.updated_at).getTime(),
+      intensity: [],
+    };
+    console.log(`🌬️ Épisode ${row.id} (${row.status}) repris après redémarrage`);
+  } catch (e) {
+    console.error('gfAdoptActiveEvent error:', e.message);
+  }
+}
+
 /** Clôt l'épisode suivi quand plus rien ne le confirme. */
 async function gfCloseStaleEvent(now) {
   if (!gfActiveEvent) return;
@@ -1976,12 +2073,20 @@ async function gfCloseStaleEvent(now) {
 }
 
 /**
- * Push ciblé. Trois verrous avant qu'un pilote soit notifié :
- *  1. shadow mode désactivé explicitement ;
- *  2. le compte est bêta-testeur (ouverture progressive, §8.3) ;
- *  3. une de ses balises favorites ou surveillées est dans le couloir.
+ * Push ciblé. Deux verrous avant qu'un pilote soit notifié :
+ *  1. shadow mode désactivé explicitement (GUST_FRONT_SHADOW=0) ;
+ *  2. une de ses balises favorites ou surveillées est dans le couloir.
  * Plus la déduplication en base : au plus UN push `watch` et UN push
  * `imminent` par événement et par compte.
+ *
+ * Le filtre `beta_testers` a été RETIRÉ le 31/07/2026 (sortie de bêta,
+ * décision Yann). GUST_FRONT_SHADOW devient donc l'unique interrupteur
+ * maître : tant qu'il vaut 1, le détecteur écrit en base et alimente la
+ * carte mais n'envoie aucun push, pour personne.
+ *
+ * Rappel de ce qui ne pousse JAMAIS, indépendamment de tout ça : une
+ * veille MODÈLE (`status = 'watch'`, source `model`). Seul un front
+ * mesuré déclenche une notification — cf. gfModelCycle.
  */
 async function gfNotify(eventId, targets, now) {
   if (GUST_FRONT_SHADOW) return;
@@ -1989,17 +2094,13 @@ async function gfNotify(eventId, targets, now) {
 
   const etaByStation = new Map(targets.map(t => [t.station_id, t]));
 
-  const [betaRows, watchedRows, favRows, survRows, deviceRows, notifRows] = await Promise.all([
-    sbGet('beta_testers', 'select=user_id'),
+  const [watchedRows, favRows, survRows, deviceRows, notifRows] = await Promise.all([
     sbGet('user_watched', 'select=user_id,beacon_id,nom'),
     sbGet('user_favorites', 'select=user_id,beacon_id,beacon_nom'),
     sbGet('user_surveillance', 'select=user_id,sig_gust_front'),
     sbGet('user_devices', 'select=*'),
     sbGet('gust_front_notifications', `select=user_id,level&event_id=eq.${eventId}`),
   ]);
-
-  const beta = new Set((Array.isArray(betaRows) ? betaRows : []).map(r => r.user_id));
-  if (!beta.size) return; // fonctionnalité réservée aux bêta-testeurs
 
   // Pas de ligne = pref absente : on retombe sur le défaut `true` du
   // schéma, cohérent avec le reste des prefs flightwatch.
@@ -2020,7 +2121,7 @@ async function gfNotify(eventId, targets, now) {
   // Balise la plus proche dans le temps, par compte.
   const soonestByUser = new Map();
   const consider = (userId, beaconId, nom) => {
-    if (!beta.has(userId) || optedOut.has(userId)) return;
+    if (optedOut.has(userId)) return;
     const tg = etaByStation.get(String(beaconId));
     if (!tg) return;
     const eta = new Date(tg.eta_at).getTime();
@@ -4540,7 +4641,10 @@ app.listen(PORT, async () => {
   // GUST_FRONT_ENABLED n'est pas posé. Décalé d'une minute après le
   // démarrage des boucles d'observation : détecter avant que le premier
   // paquet MF soit arrivé ne produirait qu'un cycle vide.
-  setTimeout(() => {
+  setTimeout(async () => {
+    // Reprendre l'épisode en cours AVANT le premier cycle : sinon un
+    // redémarrage au milieu d'un vrai front en créerait un doublon.
+    await gfAdoptActiveEvent();
     gustFrontCycle();
     setInterval(gustFrontCycle, GUST_FRONT_CYCLE_MS);
   }, 60 * 1000);
