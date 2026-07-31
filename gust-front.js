@@ -54,6 +54,11 @@ const GF_DTHETA_DEG = 40;   // bascule de direction
 const GF_DFF_KMH = 20;      // saut de rafale
 const GF_DT_C = -2.0;       // chute de température
 const GF_SCORE_MIN = 65;    // impose AU MOINS deux signaux concordants
+/** Seuil abaissé DANS le couloir d'une veille modèle en cours (Lot A) :
+ *  un saut de pression seul (40) y suffit alors, parce qu'on l'attendait
+ *  précisément là et à peu près à cette heure. Hors couloir, il faut
+ *  toujours deux signaux. */
+const GF_SCORE_MIN_PRIOR = 40;
 const GF_GUST_MIN_KMH = 45; // un front de rafales sans rafale n'existe pas
 
 // ── Garde-fous sur le front reconstruit ────────────────────────────
@@ -291,7 +296,7 @@ function gfScoreAtSample(arr, i) {
  * station sans données n'est PAS une absence de front, et ne doit
  * jamais être compté comme telle.
  */
-function gfStationPassage(id, arr, now) {
+function gfStationPassage(id, arr, now, scoreMin = GF_SCORE_MIN) {
   if (!arr || arr.length < GF_MIN_SAMPLES) return null;
   const newest = arr[arr.length - 1];
   if (now - newest.t > GF_STATION_STALE_MS) return null;
@@ -301,7 +306,11 @@ function gfStationPassage(id, arr, now) {
   for (let i = 0; i < arr.length; i++) {
     if (arr[i].t < from) continue;
     const s = gfScoreAtSample(arr, i);
-    if (!s.passed) continue;
+    // `scoreMin` peut être abaissé dans le couloir d'une veille modèle
+    // (cf. gfDetect) : une signature partielle y est bien moins
+    // susceptible d'être une coïncidence.
+    const passed = s.score >= scoreMin && (s.gustKmh ?? 0) >= GF_GUST_MIN_KMH;
+    if (!passed) continue;
     // Le meilleur score marque le cœur du passage ; à score égal, le
     // plus ancien (le front arrive, il ne repart pas).
     if (!best || s.score > best.score) best = s;
@@ -364,18 +373,30 @@ function fitPlane(points) {
  * comportement par défaut, un faux positif coûtant beaucoup plus cher
  * qu'un ratage (§8).
  */
-function buildFront(stations, now) {
-  if (stations.length < GF_MIN_STATIONS) {
+function buildFront(stations, now, opts = {}) {
+  // `anchor` : 'newest' pour la MESURE (on regarde l'épisode qui vient de
+  // se produire), 'earliest' pour le MODÈLE (on regarde le prochain
+  // épisode annoncé). `clusterWindowMin` : large pour le modèle, où un
+  // front met ~8 h à traverser la France et où toutes ces heures
+  // appartiennent bien au MÊME front — c'est justement ce que le plan
+  // spatio-temporel est fait pour représenter.
+  const {
+    clusterWindowMin = GF_CLUSTER_WINDOW_MIN,
+    anchor = 'newest',
+    minPoints = GF_MIN_STATIONS,
+  } = opts;
+
+  if (stations.length < minPoints) {
     return { front: null, reason: 'not_enough_stations', count: stations.length };
   }
 
-  // Épisode courant seulement : deux fronts distincts dans la journée ne
-  // doivent pas être ajustés ensemble.
-  const newest = Math.max(...stations.map(s => s.t));
-  const used = stations.filter(s => newest - s.t <= GF_CLUSTER_WINDOW_MIN * 60 * 1000);
-  if (used.length < GF_MIN_STATIONS) {
+  const times = stations.map(s => s.t);
+  const ref = anchor === 'earliest' ? Math.min(...times) : Math.max(...times);
+  const used = stations.filter(s => Math.abs(s.t - ref) <= clusterWindowMin * 60 * 1000);
+  if (used.length < minPoints) {
     return { front: null, reason: 'not_enough_in_window', count: used.length };
   }
+  const newest = Math.max(...used.map(s => s.t));
 
   const lat0 = used.reduce((a, s) => a + s.lat, 0) / used.length;
   const lon0 = used.reduce((a, s) => a + s.lon, 0) / used.length;
@@ -390,7 +411,9 @@ function buildFront(stations, now) {
 
   const plane = fitPlane(pts);
   if (!plane) return { front: null, reason: 'degenerate_geometry', count: used.length };
-  if (plane.r2 < GF_MIN_R2) return { front: null, reason: 'poor_fit', r2: plane.r2, count: used.length };
+  if (plane.r2 < (opts.minR2 ?? GF_MIN_R2)) {
+    return { front: null, reason: 'poor_fit', r2: plane.r2, count: used.length };
+  }
 
   // Vecteur de lenteur (min/km) → vitesse et cap de propagation.
   const slowness = Math.hypot(plane.b, plane.c);
@@ -518,9 +541,22 @@ function confidenceOf(front, stationCount) {
  * @param {number} publicationLatencyMs latence de publication MF mesurée
  * @returns {{front:object|null, detections:Array, reason:string|null, evaluated:number}}
  */
-function gfDetect(stationMeta, now, publicationLatencyMs = 0) {
+function gfDetect(stationMeta, now, publicationLatencyMs = 0, opts = {}) {
   const detections = [];
   let evaluated = 0;
+  let loweredCount = 0;
+
+  // `priorCorridor` : le couloir d'une veille modèle en cours. À
+  // l'intérieur, on abaisse le seuil de passage.
+  //
+  // C'est la vraie valeur du Lot A, et elle n'est pas d'« activer » quoi
+  // que ce soit : le réseau est déjà interrogé en continu. Elle est de
+  // fournir un A PRIORI. Dans un couloir et une fenêtre annoncés, deux
+  // signaux concordants sur une station sont bien moins susceptibles
+  // d'être une coïncidence qu'ailleurs — on peut donc y être plus
+  // sensible sans devenir crédule partout.
+  const prior = typeof opts.priorCorridor === 'function' ? opts.priorCorridor : null;
+  const loweredMin = opts.priorScoreMin ?? GF_SCORE_MIN_PRIOR;
 
   for (const [id, arr] of gfHistory) {
     const meta = stationMeta.get(id);
@@ -528,7 +564,9 @@ function gfDetect(stationMeta, now, publicationLatencyMs = 0) {
     // calcul géométrique — écartée, comme le veut le §4.2.
     if (!meta || !Number.isFinite(meta.lat) || !Number.isFinite(meta.lon)) continue;
     evaluated++;
-    const s = gfStationPassage(id, arr, now);
+    let scoreMin = GF_SCORE_MIN;
+    if (prior && prior(meta.lat, meta.lon)) { scoreMin = loweredMin; loweredCount++; }
+    const s = gfStationPassage(id, arr, now, scoreMin);
     if (s) detections.push({ ...s, lat: meta.lat, lon: meta.lon, nom: meta.nom || id });
   }
 
@@ -574,6 +612,186 @@ function gfDetect(stationMeta, now, publicationLatencyMs = 0) {
     detections: f.used,
     reason: null,
     evaluated,
+    loweredCount,
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  LOT A — veille sur le MODÈLE (AROME)
+//
+//  Même charpente que la détection sur mesure, appliquée à une grille de
+//  prévision : on cherche, en chaque point de grille, l'échéance à
+//  laquelle la signature de front apparaît, puis on ajuste le MÊME plan
+//  spatio-temporel. Le modèle et la mesure produisent donc des objets de
+//  même nature, ce qui rend la fusion (§4.4) triviale.
+//
+//  Ce que le Lot A apporte, et qu'il n'apporte PAS. Il apporte du
+//  préavis : 3 à 24 h au lieu de 1 à 3 h. Il n'apporte PAS de certitude —
+//  AROME se trompe couramment d'une à deux heures sur le déclenchement
+//  convectif. C'est pourquoi un événement issu du modèle reste au statut
+//  `watch` et ne déclenche AUCUN push : bandeau in-app seulement. Le push
+//  est réservé au front mesuré.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Seuils modèle (§4.1) — distincts de ceux de la mesure, et pour cause :
+ *  une maille de 28 km lisse les extrêmes, un seuil calé sur une station
+ *  ponctuelle n'y déclencherait jamais. */
+const GF_MODEL_DV_KMH = 15;       // saut de vent moyen
+const GF_MODEL_DTHETA_DEG = 40;   // bascule de direction
+const GF_MODEL_GUST_KMH = 45;     // rafale prévue
+const GF_MODEL_DP_HPA = 0.8;      // bonus : saut de pression horaire
+const GF_MODEL_DT_C = -2.0;       // bonus : chute de température
+/** Une ligne de front sur grille, c'est beaucoup de points — en exiger
+ *  peu ne coûte rien et exclut le bruit isolé. */
+const GF_MODEL_MIN_POINTS = 12;
+/** Un front met ~8 h à traverser la France : la fenêtre de regroupement
+ *  doit couvrir ça, sans quoi on découperait un seul front en morceaux. */
+const GF_MODEL_CLUSTER_MIN = 12 * 60;
+/** Garde-fou convectif (§4.1) : sans instabilité ni pluie, ce n'est pas
+ *  un outflow d'orage mais probablement un front froid synoptique. */
+const GF_MODEL_CAPE_MIN = 300;
+const GF_MODEL_PRECIP_MIN = 1.0;
+/** Au-delà, l'incertitude sur le déclenchement rend l'ETA inexploitable. */
+const GF_MODEL_HORIZON_H = 24;
+
+function med3(a, b, c) {
+  const v = [a, b, c].filter(x => x != null);
+  return v.length ? median(v) : null;
+}
+
+/**
+ * Cherche, pour chaque point de grille, la PREMIÈRE échéance à venir où
+ * la signature de front apparaît.
+ *
+ * @param {{lats:number[],lons:number[],times:string[],vars:object}} grid
+ * @param {number} now epoch ms
+ */
+function gfDetectModel(grid, now) {
+  if (!grid || !Array.isArray(grid.times) || !grid.times.length) {
+    return { front: null, reason: 'no_grid', candidates: [] };
+  }
+  const { lats, lons, times, vars } = grid;
+  const nLon = lons.length;
+  const stepMs = times.map(t => Date.parse(t));
+  const horizon = now + GF_MODEL_HORIZON_H * 3600 * 1000;
+
+  // ⚠️ Correction du BIAIS DE QUANTIFICATION, trouvée à l'auto-test :
+  // sans elle, l'ETA modèle sortait systématiquement ~34 min trop tard.
+  //
+  // Le modèle est horaire. On retient, pour chaque point, la PREMIÈRE
+  // échéance où la signature apparaît — mais le front y est en réalité
+  // passé à un instant quelconque de l'heure PRÉCÉDENTE. Chaque point est
+  // donc en retard d'une demi-heure en moyenne, et comme tous le sont de
+  // la même façon, ça ne se voit pas dans le R² : l'ajustement est
+  // excellent, simplement décalé en bloc.
+  //
+  // C'est un biais, pas du bruit : il se corrige en retranchant une
+  // demi-échéance. Ce qui reste ensuite est de l'incertitude vraie.
+  const stepIntervalMs = stepMs.length > 1 && Number.isFinite(stepMs[1] - stepMs[0])
+    ? stepMs[1] - stepMs[0]
+    : 3600 * 1000;
+  const quantBiasMs = stepIntervalMs / 2;
+
+  const candidates = [];
+  const nPts = lats.length * lons.length;
+
+  for (let k = 0; k < nPts; k++) {
+    for (let s = 3; s < times.length; s++) {
+      const tMs = stepMs[s];
+      // On ne s'intéresse qu'à ce qui est ENCORE À VENIR : une échéance
+      // déjà passée relève de la mesure, qui est plus fiable.
+      if (!Number.isFinite(tMs) || tMs <= now || tMs > horizon) continue;
+
+      const spd = vars.spd[s]?.[k];
+      const dir = vars.dir[s]?.[k];
+      const gust = vars.gust[s]?.[k];
+      if (spd == null || dir == null || gust == null) continue;
+      if (gust < GF_MODEL_GUST_KMH) continue;
+
+      const base = med3(vars.spd[s - 1]?.[k], vars.spd[s - 2]?.[k], vars.spd[s - 3]?.[k]);
+      const prevDir = vars.dir[s - 1]?.[k];
+      if (base == null || prevDir == null) continue;
+
+      const dV = spd - base;
+      const dTheta = angDiff(dir, prevDir);
+      if (dV < GF_MODEL_DV_KMH || Math.abs(dTheta) < GF_MODEL_DTHETA_DEG) continue;
+
+      // Bonus non bloquants — ils ne conditionnent pas la détection, ils
+      // renseignent la confiance et le typage.
+      const p = vars.pres[s]?.[k], pPrev = vars.pres[s - 1]?.[k];
+      const dP = (p != null && pPrev != null) ? p - pPrev : null;
+      const tC = vars.temp[s]?.[k], tPrev = vars.temp[s - 1]?.[k];
+      const dT = (tC != null && tPrev != null) ? tC - tPrev : null;
+
+      // Garde-fou convectif évalué SUR PLACE, dans les 4 h précédentes.
+      let convective = false;
+      for (let b = Math.max(0, s - 4); b <= s; b++) {
+        if ((vars.cape[b]?.[k] ?? 0) >= GF_MODEL_CAPE_MIN) { convective = true; break; }
+        if ((vars.precip[b]?.[k] ?? 0) >= GF_MODEL_PRECIP_MIN) { convective = true; break; }
+      }
+
+      candidates.push({
+        id: `g${k}`,
+        nom: null,
+        lat: lats[Math.floor(k / nLon)],
+        lon: lons[k % nLon],
+        t: tMs - quantBiasMs,   // cf. correction du biais de quantification
+        score: 100,
+        gustKmh: gust,
+        deltaSpeedKmh: dV,
+        deltaHeadingDeg: dTheta,
+        deltaPressureHpa: dP,
+        deltaTempC: dT,
+        convective,
+      });
+      break; // première échéance concernée pour ce point, on passe au suivant
+    }
+  }
+
+  const built = buildFront(candidates, now, {
+    clusterWindowMin: GF_MODEL_CLUSTER_MIN,
+    anchor: 'earliest',
+    minPoints: GF_MODEL_MIN_POINTS,
+  });
+  if (!built.front) {
+    return { front: null, reason: built.reason, candidates, count: built.count };
+  }
+
+  const f = built.front;
+  const maxGust = Math.max(...f.used.map(s => s.gustKmh || 0));
+  const convectiveShare = f.used.filter(s => s.convective).length / f.used.length;
+  // Typage : si la majorité des points franchis n'a ni instabilité ni
+  // pluie en amont, c'est un front froid synoptique — réel, mais plus
+  // lent, annoncé de longue date, et nettement moins piégeux qu'un
+  // outflow. Le libellé et l'urgence en dépendent (§4.1).
+  const kind = convectiveShare >= 0.5 ? 'outflow' : 'synoptique';
+
+  const ring = corridorPolygon(f, now);
+  return {
+    front: {
+      speedKmh: f.speedKmh,
+      bearing: f.bearing,
+      // Confiance plafonnée : c'est une PRÉVISION. Même parfaitement
+      // ajustée, elle ne peut pas prétendre au même crédit qu'une mesure.
+      confidence: Math.min(60, confidenceOf(f, f.used.length)),
+      stationCount: f.used.length,
+      r2: f.r2,
+      kind,
+      maxGustKmh: Number.isFinite(maxGust) ? maxGust : null,
+      maxPressureJumpHpa: null,
+      line: frontLineAt(f, now),
+      corridor: ring,
+      forecastLines: [60, 120, 180].map(min => ({
+        offsetMin: min,
+        line: frontLineAt(f, now + min * 60000),
+      })),
+      thresholdsVersion: GF_THRESHOLDS_VERSION,
+      _internal: f,
+      etaFor: (lat, lon) => etaAt(f, lat, lon, 0),
+      contains: (lat, lon) => pointInRing(lon, lat, ring),
+    },
+    candidates: f.used,
+    reason: null,
   };
 }
 
@@ -607,6 +825,7 @@ function gfReset() {
 module.exports = {
   gfRecordObs,
   gfDetect,
+  gfDetectModel,
   gfHealth,
   gfReset,
   // Exportés pour le rejeu / les tests unitaires de calibration.
