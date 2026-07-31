@@ -1,0 +1,47 @@
+name: AROME gust-front grid ingestion
+
+# Veille modèle « front de rafales » (Lot A) — ingère les paquets GRIB
+# AROME SP1 (10u/10v, 2t, composantes de rafale) et SP2 (pression,
+# CAPE, précipitations) en grille 001, sous-échantillonne à 0,25° et
+# publie UN fichier JSON dans Supabase Storage sous
+# `wind-grid/arome/gustfront/grid.json`.
+#
+# Workflow SÉPARÉ de arome-wind et arome-thermal, pour la même raison
+# qu'eux : il ne doit jamais faire échouer ni retarder l'ingestion du
+# vent, qui est la fonctionnalité principale.
+#
+# Volume mesuré (31/07/2026, run 06Z) : ~4 s par échéance, 24 échéances,
+# sortie ~1,6 Mo. D'où le timeout à 20 min, largement dimensionné.
+#
+# ⚠️ Aucune clé Météo-France ici : le bucket AROME est en accès public.
+# METEOFRANCE_API_KEY ne couvre que les observations et la vigilance.
+
+on:
+  schedule:
+    # UTC, 25 min après le job vent — les paquets SP1/SP2 sont publiés
+    # progressivement, partir trop tôt donne un run tronqué (cf. le
+    # débogage pick_run du 25/07/2026 sur arome-wind).
+    - cron: "25 2,5,8,11,14,17,20,23 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: arome-gustfront
+  cancel-in-progress: true
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install eccodes
+        run: pip install --quiet eccodes eccodeslib
+      - name: Ingest AROME gust-front grid
+        working-directory: arome-gustfront
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: python ingest.py
