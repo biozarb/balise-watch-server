@@ -1480,6 +1480,7 @@ let gfLastCycleOkAt = 0;       // dernier cycle SANS erreur
 let gfLastReason = null;       // pourquoi aucun front (diagnostic)
 let gfPublicationLatencyMs = 0;
 let gfLastError = null;
+let gfModelLastReason = null;  // pourquoi aucun front ANNONCÉ (diagnostic)
 
 /**
  * Cache RAM des événements vivants, servi tel quel par
@@ -1544,6 +1545,47 @@ function gfMeasureLatency(obsMap, now) {
   if (!lats.length) return;
   lats.sort((a, b) => a - b);
   gfPublicationLatencyMs = lats[lats.length >> 1]; // médiane, insensible aux stations en retard
+}
+
+// ── Lot A : grille modèle AROME ────────────────────────────────────
+//  Produite par la GitHub Action arome-gustfront (8×/jour) et déposée
+//  dans Supabase Storage. Le serveur la relit par GET CONDITIONNEL
+//  (If-None-Match) : un 304 ne coûte quasiment rien, et on ne
+//  retélécharge les ~1,6 Mo que quand le run a réellement changé. Sans
+//  ça, une relecture toutes les 30 min ferait 77 Mo/jour d'egress
+//  Storage pour une donnée qui ne bouge que 8 fois par jour.
+const GF_MODEL_URL = `${SB_URL}/storage/v1/object/public/wind-grid/arome/gustfront/grid.json`;
+const GF_MODEL_CHECK_MS = 30 * 60 * 1000;
+
+let gfModelGrid = null;
+let gfModelEtag = null;
+let gfModelCheckedAt = 0;
+let gfModelRun = null;
+
+async function gfLoadModelGrid() {
+  if (Date.now() - gfModelCheckedAt < GF_MODEL_CHECK_MS && gfModelGrid) return;
+  gfModelCheckedAt = Date.now();
+  try {
+    const headers = {};
+    if (gfModelEtag) headers['If-None-Match'] = gfModelEtag;
+    const r = await fetch(GF_MODEL_URL, { headers });
+    if (r.status === 304) return;          // run inchangé, rien à faire
+    if (!r.ok) {
+      // Grille absente = veille modèle simplement indisponible. Ce n'est
+      // pas une erreur bloquante : la détection MESURÉE, qui est la
+      // source principale, continue sans elle.
+      if (r.status !== 404) console.warn(`gfLoadModelGrid: HTTP ${r.status}`);
+      return;
+    }
+    const grid = await r.json();
+    if (!grid || !Array.isArray(grid.times) || !grid.times.length) return;
+    gfModelGrid = grid;
+    gfModelEtag = r.headers.get('etag');
+    gfModelRun = grid.run || null;
+    console.log(`🌬️ Grille modèle chargée — run ${gfModelRun}, ${grid.times.length} échéances`);
+  } catch (e) {
+    console.error('gfLoadModelGrid error:', e.message);
+  }
 }
 
 /** Passe le paquet d'observations MF au détecteur. */
@@ -1644,10 +1686,21 @@ async function gustFrontCycle() {
   gfLastCycleAt = Date.now();
   try {
     const now = Date.now();
+
+    // ── Lot A d'abord : la veille modèle ────────────────────────────
+    // Elle tourne AVANT la détection mesurée pour deux raisons : elle
+    // fournit l'a priori qui rendra la mesure plus sensible dans le
+    // couloir annoncé, et elle crée l'événement `watch` que la mesure
+    // viendra ensuite confirmer plutôt que d'en créer un second.
+    await gfLoadModelGrid();
+    const modelFront = await gfModelCycle(now);
+
     const stationMeta = new Map(
       mfStationsList.map(s => [s.id, { lat: s.lat, lon: s.lon, nom: s.nom }])
     );
-    const res = gf.gfDetect(stationMeta, now, gfPublicationLatencyMs);
+    const res = gf.gfDetect(stationMeta, now, gfPublicationLatencyMs, {
+      priorCorridor: modelFront ? modelFront.contains : null,
+    });
     gfLastReason = res.front ? null : res.reason;
 
     if (!res.front) {
@@ -1693,7 +1746,19 @@ async function gustFrontCycle() {
     // Un front détecté alors qu'un épisode est déjà suivi le raffine ;
     // il n'en crée pas un second. C'est toute la différence entre une
     // photo par cycle et un objet suivi (§4.2).
+    //
+    // Cas particulier §4.4 : si l'épisode suivi est une VEILLE MODÈLE
+    // (`watch`), la mesure ne crée pas un événement concurrent — elle
+    // PROMEUT celui-là en `confirmed`, et ses géométries mesurées
+    // remplacent les géométries prévues. C'est le moment où « il va
+    // peut-être se passer quelque chose » devient « c'est en train
+    // d'arriver, voici où et quand ».
     const reuse = gfActiveEvent && (now - gfActiveEvent.lastDetectionAt) < GF_EVENT_STALE_MS;
+    const promoting = reuse && gfActiveEvent.status === 'watch';
+    if (promoting) {
+      eventPayload.source = 'merged';   // annoncé par le modèle, confirmé par la mesure
+      console.log(`🌬️ Veille modèle ${gfActiveEvent.id} CONFIRMÉE par la mesure`);
+    }
     let eventId;
     if (reuse) {
       eventId = gfActiveEvent.id;
@@ -1784,6 +1849,110 @@ async function gustFrontCycle() {
   } catch (e) {
     gfLastError = e.message;
     console.error('gustFrontCycle error:', e.message);
+  }
+}
+
+/**
+ * Lot A — veille modèle. Crée ou rafraîchit un événement `watch`, et
+ * renvoie le front annoncé pour que la détection mesurée s'en serve
+ * comme a priori.
+ *
+ * ⚠️ AUCUN PUSH ici, jamais. Une veille modèle s'affiche (bandeau
+ * orange, calque en pointillés), elle ne réveille personne. AROME se
+ * trompe couramment d'une à deux heures sur le déclenchement convectif ;
+ * pousser à chaque front annoncé garantirait des fausses alertes
+ * régulières, et après deux d'entre elles plus personne ne lit la
+ * troisième. Le push reste l'apanage du front MESURÉ (§8, décision Yann
+ * du 31/07/2026).
+ */
+async function gfModelCycle(now) {
+  if (!gfModelGrid) return null;
+  try {
+    const res = gf.gfDetectModel(gfModelGrid, now);
+    gfModelLastReason = res.front ? null : res.reason;
+    if (!res.front) return null;
+
+    const m = res.front;
+
+    // Un épisode déjà CONFIRMÉ par la mesure prime : on ne le rétrograde
+    // pas vers une géométrie de prévision, moins précise. On rend quand
+    // même le couloir modèle, il reste utile comme a priori.
+    if (gfActiveEvent && gfActiveEvent.status !== 'watch') return m;
+
+    const payload = {
+      source: 'model',
+      kind: m.kind,
+      status: 'watch',
+      axis: { type: 'LineString', coordinates: [
+        [m.line.a.lon, m.line.a.lat], [m.line.b.lon, m.line.b.lat],
+      ] },
+      corridor: { type: 'Polygon', coordinates: [m.corridor] },
+      propagation_bearing: m.bearing,
+      propagation_speed_kmh: m.speedKmh,
+      max_gust_kmh: m.maxGustKmh,
+      confidence: m.confidence,
+      updated_at: new Date(now).toISOString(),
+      raw: {
+        thresholds_version: m.thresholdsVersion,
+        model_run: gfModelRun,
+        grid_points: m.stationCount,
+        r2: m.r2,
+        shadow: GUST_FRONT_SHADOW,
+        forecast_lines: m.forecastLines.map(l => ({
+          offset_min: l.offsetMin,
+          coordinates: [[l.line.a.lon, l.line.a.lat], [l.line.b.lon, l.line.b.lat]],
+        })),
+      },
+    };
+
+    if (gfActiveEvent) {
+      await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`, payload);
+      gfActiveEvent.lastDetectionAt = now;
+    } else {
+      const created = await sbInsertReturning('gust_front_events', payload);
+      if (!created?.id) return m;
+      gfActiveEvent = {
+        id: created.id, status: 'watch', createdAt: now,
+        lastDetectionAt: now, intensity: [],
+      };
+      console.log(`🌬️ VEILLE MODÈLE — front annoncé (${m.stationCount} points, ${Math.round(m.speedKmh)} km/h au ${Math.round(m.bearing)}°, ${m.kind}) — événement ${created.id}`);
+    }
+
+    // ETA par balise, comme pour la mesure — mais fenêtre BEAUCOUP plus
+    // large : ±45 min contre ±15. Le modèle ne sait pas faire mieux, et
+    // annoncer une précision qu'on n'a pas serait pire que de ne rien
+    // annoncer.
+    const positions = gfAllPositions();
+    const targets = [];
+    for (const p of positions.values()) {
+      if (!m.contains(p.lat, p.lon)) continue;
+      const eta = m.etaFor(p.lat, p.lon);
+      if (eta < now) continue;
+      targets.push({
+        event_id: gfActiveEvent.id,
+        station_id: p.id, station_name: p.nom, source: p.source,
+        lat: p.lat, lon: p.lon,
+        eta_at: new Date(eta).toISOString(),
+        eta_window_minutes: 45,
+        expected_gust_kmh: m.maxGustKmh,
+        passed_at: null,
+      });
+    }
+    await sbDelete('gust_front_targets', `event_id=eq.${gfActiveEvent.id}`);
+    await sbInsert('gust_front_targets', targets);
+
+    const future = targets.map(t => new Date(t.eta_at).getTime()).sort((a, b) => a - b);
+    if (future.length) {
+      await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`, {
+        eta_start: new Date(future[0] - 45 * 60000).toISOString(),
+        eta_end: new Date(future[future.length - 1] + 45 * 60000).toISOString(),
+      });
+    }
+
+    return m;
+  } catch (e) {
+    console.error('gfModelCycle error:', e.message);
+    return null;
   }
 }
 
@@ -2460,7 +2629,18 @@ app.get('/gust-front/health', (req, res) => {
     lastError: gfLastError,
     publicationLatencyMin: Math.round(gfPublicationLatencyMs / 60000),
     activeEventId: gfActiveEvent?.id ?? null,
+    activeEventStatus: gfActiveEvent?.status ?? null,
     detector: gf.gfHealth(now),
+    // Lot A — état de la veille modèle. Distinct du détecteur mesuré :
+    // les deux peuvent tomber en panne indépendamment, et une grille
+    // modèle périmée ne se voit pas autrement.
+    model: {
+      run: gfModelRun,
+      loaded: !!gfModelGrid,
+      steps: gfModelGrid?.times?.length ?? 0,
+      ageMin: gfModelCheckedAt ? Math.round((now - gfModelCheckedAt) / 60000) : null,
+      lastReason: gfModelLastReason,
+    },
   });
 });
 app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
