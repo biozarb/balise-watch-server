@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  app.balisewatch.entretien.plist — run quotidien des packs météo.
+
+  INSTALLATION :
+    1. Adapter le chemin de ProgramArguments ci-dessous si le repo
+       n'est pas sur le Bureau.
+    2. cp app.balisewatch.entretien.plist ~/Library/LaunchAgents/
+    3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.balisewatch.entretien.plist
+    4. launchctl kickstart -p gui/$(id -u)/app.balisewatch.entretien   ← test immédiat
+
+  DÉSINSTALLATION :
+    launchctl bootout gui/$(id -u)/app.balisewatch.entretien
+
+  06:30 locales : l'archive de J-1 est publiée, et c'est avant l'heure
+  où quiconque consulte une fiche déco. Si le Mac dort à cette heure-là,
+  launchd déclenche le job au réveil — un run manqué se rattrape de
+  toute façon tout seul (la fenêtre part de la dernière journée du pack,
+  pas de « hier »).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>app.balisewatch.entretien</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/yann/Desktop/surveillance balise/PWA/balise-watch-server/traces/entretien/entretien.sh</string>
+  </array>
+
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>6</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+
+  <!-- false : au chargement du plist (donc à chaque ouverture de
+       session) on ne veut PAS un run surprise. Le test se fait à la
+       demande avec `launchctl kickstart`. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Le script tient déjà son propre journal ; ces deux-là ne servent
+       qu'à attraper ce qui casserait AVANT lui (bash introuvable,
+       chemin faux). C'est précisément le cas qu'un log applicatif ne
+       peut pas couvrir. -->
+  <key>StandardOutPath</key>
+  <string>/tmp/balisewatch-entretien.out</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/balisewatch-entretien.err</string>
+
+  <!-- Basse priorité disque et CPU : ce travail n'est jamais urgent. -->
+  <key>LowPriorityIO</key>
+  <true/>
+  <key>Nice</key>
+  <integer>5</integer>
+</dict>
+</plist>

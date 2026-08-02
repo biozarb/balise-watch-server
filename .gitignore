@@ -27,3 +27,10 @@ arome-thermal/.cache_kk7/
 # des lat/lon) est volontairement commité — c'est ce cache-ci, la
 # réponse API brute avec noms/altitudes/etc., qu'on ne republie pas.
 arome-thermal/.cache_pge/
+
+# Cache brut des scripts traces/ (fetch_syride.py, fetch_dhvxc.py,
+# day_features.py) — vols et features individuels, jamais republiés
+# tels quels (cf. PLAN_BATAILLE_TRACES_SOURCES.md). Seul le pack agrégé
+# et anonymisé produit par build_site_pack.py (à écrire) sera commité.
+traces/traces_cache/
+traces/*.log
