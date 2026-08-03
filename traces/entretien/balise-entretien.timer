@@ -1,0 +1,28 @@
+# ══════════════════════════════════════════════════════════════════════
+#  balise-entretien.timer — déclencheur quotidien (03/08/2026)
+#
+#  ⚠️ OnCalendar suit le FUSEAU DE LA MACHINE. Un VPS est en UTC par
+#     défaut : sans `timedatectl set-timezone Europe/Paris`, ce 06:30
+#     serait 08:30 en heure d'été française. Vérifier avec
+#     `systemctl list-timers balise-entretien.timer`, qui affiche la
+#     prochaine échéance en heure locale.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Entretien quotidien des packs météo Balise Watch (06:30 locales)
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+
+# Si le VPS était éteint à l'heure dite (reboot, maintenance OVH), le
+# run part au démarrage suivant au lieu d'être perdu. Un jour sauté,
+# c'est un trou dans les packs que seul un backfill rattrape.
+Persistent=true
+
+# Décalage aléatoire de 0 à 10 min. Open-Meteo est une ressource
+# partagée : taper à 06:30:00 pile, tous les jours, à la seconde, est
+# le comportement qui fait ressembler un usage légitime à une charge
+# automatisée agressive. Le coût pour nous est nul.
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

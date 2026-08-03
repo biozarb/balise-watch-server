@@ -1,0 +1,61 @@
+# ══════════════════════════════════════════════════════════════════════
+#  balise-entretien.service — remplace app.balisewatch.entretien.plist
+#  (03/08/2026, bascule du Mac vers le VPS OVH)
+#
+#  Pourquoi ce fichier existe : le launchd macOS ne DÉMARRAIT PAS. Sur
+#  le Mac, le dépôt vit dans ~/Desktop, que macOS interdit aux agents
+#  d'arrière-plan de lire (TCC) — « Operation not permitted », et un
+#  agent ne peut pas demander l'autorisation : il meurt en silence.
+#  Sur un VPS, ni Desktop ni TCC. Le problème disparaît, il n'est pas
+#  contourné.
+#
+#  Installation :
+#    sudo cp balise-entretien.{service,timer} /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now balise-entretien.timer
+#
+#  ⚠️ Type=oneshot et PAS Restart= : un entretien qui échoue ne doit
+#     JAMAIS être relancé automatiquement. Le quota Open-Meteo se compte
+#     par IP et les écritures R2 se facturent — une boucle de réessai
+#     est le scénario qui coûte cher. L'échec est repris au run suivant,
+#     24 h plus tard, et le compteur d'échecs consécutifs d'entretien.sh
+#     déclenche l'alerte au deuxième.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Entretien quotidien des packs météo Balise Watch
+Documentation=file:/home/debian/balise-watch/balise-watch-server/traces/entretien/README.md
+# Le script sort sur Internet dès la première seconde : sans cette
+# dépendance, un démarrage au boot part avant que le réseau soit prêt.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+ExecStart=/home/debian/balise-watch/balise-watch-server/traces/entretien/entretien.sh
+
+# Le chien de garde de entretien.sh est à 180 min ; celui-ci est la
+# ceinture par-dessus la bretelle, au cas où le script lui-même se
+# bloquerait avant d'armer le sien.
+TimeoutStartSec=4h
+
+# ── Cloisonnement ────────────────────────────────────────────────────
+# Ce service ne fait que des appels sortants et écrit dans son propre
+# home. Il n'a besoin de rien d'autre : autant le lui dire.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ... sauf l'état et le journal, qui vivent dans le home.
+ReadWritePaths=/home/debian/.balise-watch-entretien
+ReadWritePaths=/home/debian/balise-watch/balise-watch-server/traces/traces_cache
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
