@@ -1,0 +1,4833 @@
+{
+ "genere_le": "2026-08-03",
+ "rayon_km": 25.0,
+ "avertissement": "Fichier de REVUE, pas source de vérité. Le poller recalcule au démarrage depuis le GeoJSON du jour.",
+ "paliers_min": {
+  "20 et +": 10,
+  "5 à 19": 20,
+  "1 à 4": 40,
+  "0": 60
+ },
+ "stations": {
+  "00002": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "00003": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "00004": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000VQ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00012": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00008": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000J1": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00009": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "00010": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00014": {
+   "decos_25km": 32,
+   "cadence_min": 10
+  },
+  "00015": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00018": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "00001": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00023": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "00025": {
+   "decos_25km": 50,
+   "cadence_min": 10
+  },
+  "00027": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "00029": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00032": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00033": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00034": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "00035": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "00038": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00039": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "00041": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "00042": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00047": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00049": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00051": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00052": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00054": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00057": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "00059": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00053": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00060": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00063": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00061": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00065": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "00067": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00070": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00072": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "00074": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "00075": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "00076": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "00081": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "00080": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00083": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "00086": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00088": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "00089": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00091": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "00092": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "00093": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "00094": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "00095": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "00096": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "00097": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "00098": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "00099": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000A1": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000A3": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000A6": {
+   "decos_25km": 60,
+   "cadence_min": 10
+  },
+  "000A5": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000A9": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000B0": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000B3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000B4": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000B6": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000B5": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000C0": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000C1": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000B9": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000B8": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000C3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000C4": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000C7": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000C5": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000C6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000C9": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000D3": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000D2": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000D5": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000BP": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000F3": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000D8": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000F4": {
+   "decos_25km": 21,
+   "cadence_min": 10
+  },
+  "000F7": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000F8": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000G1": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000G2": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000G3": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000G4": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000G6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000G7": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000G9": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000H0": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000H2": {
+   "decos_25km": 23,
+   "cadence_min": 10
+  },
+  "000H3": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000H4": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000H6": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000H8": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000H9": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000I1": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000I2": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000E0": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000E2": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000K3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000E7": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000E8": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000I4": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000I5": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000I6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000I9": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000J2": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000I7": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000J0": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000J4": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000J6": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000J8": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000J9": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000K0": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000K1": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000K2": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000K4": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000K5": {
+   "decos_25km": 43,
+   "cadence_min": 10
+  },
+  "000K6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000K7": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000L1": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000L2": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000P7": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000Q3": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000L3": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000L4": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000L5": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000L7": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "000L9": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000M2": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000M3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000M4": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000M6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000M7": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000M8": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0383": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000M9": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000Q7": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000N3": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000N4": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000N6": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000N5": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000N9": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000O2": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000O3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000O4": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000O5": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000O7": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000O8": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000O9": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0441": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000P1": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000P2": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000P4": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000P6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000P8": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000P9": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000Q2": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000Q4": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000Q6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000Q8": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000Q9": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000R1": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000R2": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000R3": {
+   "decos_25km": 30,
+   "cadence_min": 10
+  },
+  "000R4": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000R5": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000R6": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "000S0": {
+   "decos_25km": 17,
+   "cadence_min": 20
+  },
+  "000S1": {
+   "decos_25km": 20,
+   "cadence_min": 10
+  },
+  "000S4": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000S2": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000S3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000S6": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000S7": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0313": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000S8": {
+   "decos_25km": 20,
+   "cadence_min": 10
+  },
+  "000S9": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000T0": {
+   "decos_25km": 25,
+   "cadence_min": 10
+  },
+  "000T1": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000T3": {
+   "decos_25km": 20,
+   "cadence_min": 10
+  },
+  "000T5": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000T6": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000T9": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000T8": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000U0": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000U1": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QU": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000U2": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000U3": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000U4": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "000U6": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000U7": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000U8": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000U9": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000V0": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000V2": {
+   "decos_25km": 24,
+   "cadence_min": 10
+  },
+  "000V3": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000V4": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0132": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000V6": {
+   "decos_25km": 27,
+   "cadence_min": 10
+  },
+  "000V8": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000V7": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000W1": {
+   "decos_25km": 20,
+   "cadence_min": 10
+  },
+  "000W2": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000DA": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000W5": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000W6": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000Y4": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000W7": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000W8": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000W9": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000X0": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000X1": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000X2": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000X3": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000X4": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000X5": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000X6": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000X8": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000X9": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000Y1": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000AU": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000VB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000Y3": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000Y5": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000Y9": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000Z0": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000Z1": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000Z2": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000Z4": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000Z6": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000Z7": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000Z8": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000Z9": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "000AA": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000AB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000AC": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000AD": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000AE": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000AF": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000AH": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000AI": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000AJ": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000AK": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000AL": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000AO": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000AR": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000AS": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000AT": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000AV": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000AX": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000AY": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000BA": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000BB": {
+   "decos_25km": 20,
+   "cadence_min": 10
+  },
+  "000BE": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000BQ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000BG": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000BN": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "000BI": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000BL": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000BM": {
+   "decos_25km": 23,
+   "cadence_min": 10
+  },
+  "000BO": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000BR": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000BS": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000BU": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000BV": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000BX": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000BY": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000BZ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000CA": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000CC": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000CD": {
+   "decos_25km": 19,
+   "cadence_min": 20
+  },
+  "000CE": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000CF": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000CI": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000CJ": {
+   "decos_25km": 38,
+   "cadence_min": 10
+  },
+  "000CK": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000CL": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000CM": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000CN": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000CO": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000CP": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000CR": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000CT": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000CU": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000CV": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000CW": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000CX": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000CY": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000CZ": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000DB": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000DC": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000DD": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000DE": {
+   "decos_25km": 47,
+   "cadence_min": 10
+  },
+  "000DF": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000DG": {
+   "decos_25km": 49,
+   "cadence_min": 10
+  },
+  "000DH": {
+   "decos_25km": 30,
+   "cadence_min": 10
+  },
+  "000DI": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000DJ": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000DM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000DN": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000HQ": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000HR": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000DP": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000DQ": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000DR": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000DS": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000DV": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000DX": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000DZ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000EB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000EC": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000ED": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000EE": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000EF": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000EH": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000EG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000EP": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000EI": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000EK": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000II": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000EO": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000EL": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000ET": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000EN": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000EQ": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000EU": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000EV": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000EW": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000EX": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OT": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000FB": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000FC": {
+   "decos_25km": 23,
+   "cadence_min": 10
+  },
+  "000FD": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000FE": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000FG": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000FI": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000FK": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000FL": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000FM": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000FN": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000FO": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000FP": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000FR": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000FS": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000FT": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000FU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000FV": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000GB": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000FW": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000FX": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000FY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000FZ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000GC": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000GM": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000GD": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000GF": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000GG": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000GH": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000GI": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000GJ": {
+   "decos_25km": 19,
+   "cadence_min": 20
+  },
+  "000GK": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000GL": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000GN": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000GO": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000HC": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000GP": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000GQ": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000GR": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000GS": {
+   "decos_25km": 26,
+   "cadence_min": 10
+  },
+  "000GT": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000GU": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000GV": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000GX": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000GY": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000GZ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000HB": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000HD": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000HF": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000HH": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000HJ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000HL": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000HM": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000HN": {
+   "decos_25km": 23,
+   "cadence_min": 10
+  },
+  "000HO": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000HS": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000HT": {
+   "decos_25km": 29,
+   "cadence_min": 10
+  },
+  "000HU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000IA": {
+   "decos_25km": 25,
+   "cadence_min": 10
+  },
+  "000IB": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000IC": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ID": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000IF": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000IK": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000LM": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000LO": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000LP": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000LQ": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000LR": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000LS": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000LT": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000LU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000LV": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000LY": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000LZ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000MA": {
+   "decos_25km": 19,
+   "cadence_min": 20
+  },
+  "000MB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000MD": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000MF": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000MG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000MT": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000MI": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000MJ": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000MK": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000ML": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000MN": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000MO": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "ME014": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000MP": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME001": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME050": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME051": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME003": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "ME004": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME005": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME006": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "ME007": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME008": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME009": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "ME010": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME011": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME012": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME013": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME015": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "ME016": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME017": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME018": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME019": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME020": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "ME021": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME022": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME023": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME024": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME025": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME026": {
+   "decos_25km": 24,
+   "cadence_min": 10
+  },
+  "ME027": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME028": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME029": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME030": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "ME031": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "ME032": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME033": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "ME034": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME035": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME036": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME038": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "ME039": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME040": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME041": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME042": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME043": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME044": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME045": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME046": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME047": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME048": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME049": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME052": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "ME057": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "ME098": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME054": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME101": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME109": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME107": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME102": {
+   "decos_25km": 24,
+   "cadence_min": 10
+  },
+  "ME103": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME104": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "ME105": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "ME110": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME106": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME108": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME112": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME111": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME117": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "ME114": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME116": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME113": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME115": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "ME120": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME129": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME127": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME118": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME119": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "ME124": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME121": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME126": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME123": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "ME125": {
+   "decos_25km": 18,
+   "cadence_min": 20
+  },
+  "ME137": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME128": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME130": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME131": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME132": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "ME134": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME133": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME135": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME136": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000NH": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000MQ": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000MR": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000MS": {
+   "decos_25km": 30,
+   "cadence_min": 10
+  },
+  "000MU": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000MY": {
+   "decos_25km": 48,
+   "cadence_min": 10
+  },
+  "000MV": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000MW": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000MX": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "000MZ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000NB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000NC": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ND": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000NF": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000NG": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000NI": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000NJ": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME138": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000NK": {
+   "decos_25km": 21,
+   "cadence_min": 10
+  },
+  "000NL": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000NM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000NN": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000NP": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000NQ": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000NR": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000NT": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000NU": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000NV": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000NW": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000NX": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000NZ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000OA": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000OB": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "000OE": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000OF": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "ME139": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OH": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OI": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OJ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OK": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "ME140": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OM": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000OW": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000ON": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OO": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000OP": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000OQ": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000OR": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000OS": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "ME141": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME142": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME143": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000OZ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000OX": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000PA": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000PG": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000PH": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PI": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000PJ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000PK": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000PL": {
+   "decos_25km": 44,
+   "cadence_min": 10
+  },
+  "000PX": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000PM": {
+   "decos_25km": 36,
+   "cadence_min": 10
+  },
+  "ME144": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PN": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PO": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000PP": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PQ": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000PS": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PT": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QF": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000PW": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000PY": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000PZ": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000QA": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QB": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000QC": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000QD": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QE": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "000QG": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000QH": {
+   "decos_25km": 31,
+   "cadence_min": 10
+  },
+  "000QI": {
+   "decos_25km": 28,
+   "cadence_min": 10
+  },
+  "000QJ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QM": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000QN": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000QO": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QR": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000QS": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000QT": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000QV": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000QW": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000QX": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000RB": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000QY": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000QZ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000RA": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RC": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RD": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "000RE": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RF": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000RG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000TN": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000SX": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SN": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000TX": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000UD": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000TV": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000UC": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000RH": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000TU": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000RI": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RJ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000RK": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RL": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000RM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RN": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000RO": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000RQ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RS": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RT": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "000RX": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000RY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000RZ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SC": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SD": {
+   "decos_25km": 23,
+   "cadence_min": 10
+  },
+  "000SE": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000SF": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000SG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SH": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SJ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SK": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SL": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000SO": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SP": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SR": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000SS": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000ST": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SV": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SW": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000SY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000SZ": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000TA": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "000TB": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000TC": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000TD": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000TE": {
+   "decos_25km": 22,
+   "cadence_min": 10
+  },
+  "000TG": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000TH": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000TJ": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000TK": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000TL": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000TM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000TO": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000VJ": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000TP": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000TQ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000TR": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000TS": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000TW": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000TY": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000TZ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000UA": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000UB": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000UE": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000UF": {
+   "decos_25km": 22,
+   "cadence_min": 10
+  },
+  "000UH": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000UI": {
+   "decos_25km": 21,
+   "cadence_min": 10
+  },
+  "000UJ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000UK": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000UL": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000UM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000UN": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000UO": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000UQ": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000US": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000UT": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000UU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000UW": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000UX": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000UY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000UZ": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000VA": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000VC": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000VE": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000VF": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000VG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000VI": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000VK": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000VL": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000VM": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000VN": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000VP": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000VT": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000VV": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000VW": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000VX": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000VY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WA": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WD": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ME146": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WE": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000WF": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000WG": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WI": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000WJ": {
+   "decos_25km": 17,
+   "cadence_min": 20
+  },
+  "000WK": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000WL": {
+   "decos_25km": 36,
+   "cadence_min": 10
+  },
+  "000WM": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "000WN": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000WT": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WW": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000WX": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0071": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000YQ": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000XM": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000WY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000WZ": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000XA": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000XB": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "000XD": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000XE": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000YG": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000XF": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000XH": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000XI": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000XJ": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0019": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000XK": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "000XN": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000XO": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000XP": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "000XR": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000XW": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000YX": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000XX": {
+   "decos_25km": 17,
+   "cadence_min": 20
+  },
+  "000XY": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000XZ": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000YB": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000YD": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "000YE": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000YF": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000YH": {
+   "decos_25km": 50,
+   "cadence_min": 10
+  },
+  "000YI": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "000YJ": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000YK": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000YL": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000YM": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000YN": {
+   "decos_25km": 22,
+   "cadence_min": 10
+  },
+  "000YO": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0025": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000YU": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000YW": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000YY": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000YZ": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000ZA": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "000ZB": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ZC": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000ZE": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "STATIC0205": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ZF": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000ZG": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "000ZH": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000ZI": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "000ZK": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000ZJ": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000ZL": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "000ZM": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000ZN": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "000ZO": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0060": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000ZP": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ZQ": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "000ZR": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ZS": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "000ZT": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000ZU": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "000ZV": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "000ZW": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "000ZX": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0001": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0002": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0003": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0005": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0006": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0007": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0008": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0009": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0010": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0072": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0011": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0012": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0014": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0015": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0016": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0018": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0020": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0021": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0022": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0023": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0024": {
+   "decos_25km": 20,
+   "cadence_min": 10
+  },
+  "STATIC0027": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0028": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0029": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0030": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0031": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0032": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "STATIC0033": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0035": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0036": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0037": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0038": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0039": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0041": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0044": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0046": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0047": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0048": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0050": {
+   "decos_25km": 23,
+   "cadence_min": 10
+  },
+  "STATIC0051": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0052": {
+   "decos_25km": 29,
+   "cadence_min": 10
+  },
+  "STATIC0053": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0054": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0055": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0058": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0059": {
+   "decos_25km": 18,
+   "cadence_min": 20
+  },
+  "STATIC0061": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0062": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0063": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0065": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0066": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0067": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0068": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0069": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0070": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0073": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0074": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0075": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0076": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "ENTRAUNES": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0079": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "CAYOLLE": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0082": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0083": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0084": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0085": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0086": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0087": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0090": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0224": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0093": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0091": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0092": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0095": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0096": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0097": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0098": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0099": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0100": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0101": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0102": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0103": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0104": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0105": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0106": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0107": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0108": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0109": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0110": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0111": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0112": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0113": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0114": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0115": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0116": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0117": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0118": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0120": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0122": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0123": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0124": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0125": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0126": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0128": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0129": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0130": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "STATIC0131": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0133": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0134": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0136": {
+   "decos_25km": 30,
+   "cadence_min": 10
+  },
+  "ME151": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0138": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0139": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0141": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0171": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0372": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0307": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0308": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0142": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0144": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0145": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0146": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "ME152": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0147": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0148": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0149": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0150": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0151": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0152": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0153": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0154": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0155": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0156": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0157": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0158": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0159": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0160": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0161": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0162": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0163": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0164": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0165": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "ME153": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0166": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0167": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0169": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0170": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0172": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0174": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0175": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0178": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0249": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0179": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0180": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0181": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0290": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0182": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0183": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0184": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0185": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0186": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0188": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0451": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0189": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0190": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0191": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0192": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "STATIC0193": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0194": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0196": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0198": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "STATIC0200": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0201": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0202": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0203": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0204": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0206": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0207": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0208": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0209": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0211": {
+   "decos_25km": 33,
+   "cadence_min": 10
+  },
+  "STATIC0212": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0213": {
+   "decos_25km": 22,
+   "cadence_min": 10
+  },
+  "STATIC0214": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0215": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0216": {
+   "decos_25km": 26,
+   "cadence_min": 10
+  },
+  "STATIC0217": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0218": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0219": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0220": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0222": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0223": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0225": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0226": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0227": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0228": {
+   "decos_25km": 17,
+   "cadence_min": 20
+  },
+  "STATIC0231": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0233": {
+   "decos_25km": 19,
+   "cadence_min": 20
+  },
+  "STATIC0234": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0235": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "ME154": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0237": {
+   "decos_25km": 31,
+   "cadence_min": 10
+  },
+  "STATIC0238": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0239": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0240": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0241": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0242": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0243": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0244": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0245": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0246": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0247": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "STATIC0248": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0250": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0252": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0253": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0254": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0255": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0256": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0257": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0258": {
+   "decos_25km": 25,
+   "cadence_min": 10
+  },
+  "STATIC0259": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0260": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0261": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0262": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0263": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0264": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0265": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0266": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0267": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0268": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0273": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0274": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0275": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0276": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0278": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0279": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0280": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0281": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0282": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "STATIC0319": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0283": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0284": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0285": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0286": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0287": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "STATIC0288": {
+   "decos_25km": 37,
+   "cadence_min": 10
+  },
+  "ME155": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0292": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0296": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0297": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0298": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0299": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0300": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0302": {
+   "decos_25km": 19,
+   "cadence_min": 20
+  },
+  "STATIC0303": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0304": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0306": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0309": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "STATIC0310": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0311": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0312": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0315": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0316": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0317": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0318": {
+   "decos_25km": 18,
+   "cadence_min": 20
+  },
+  "STATIC0320": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0322": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0323": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0325": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0326": {
+   "decos_25km": 27,
+   "cadence_min": 10
+  },
+  "STATIC0328": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0329": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "STATIC0331": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0332": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0333": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0334": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0335": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0337": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0339": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0340": {
+   "decos_25km": 46,
+   "cadence_min": 10
+  },
+  "STATIC0341": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0397": {
+   "decos_25km": 12,
+   "cadence_min": 20
+  },
+  "STATIC0342": {
+   "decos_25km": 25,
+   "cadence_min": 10
+  },
+  "ME156": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0350": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0351": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0352": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0353": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0354": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0355": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0356": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0357": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0358": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0359": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0360": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0361": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0362": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0363": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0364": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0365": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0366": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0367": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0368": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0370": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0371": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0373": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "STATIC0375": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0376": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0377": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0378": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0381": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0382": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0385": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0386": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0387": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0388": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0389": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0390": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0391": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0392": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0393": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0394": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0395": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0399": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0401": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0402": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0403": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0404": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0405": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0406": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0407": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0408": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0409": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0410": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0411": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0412": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0413": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0414": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0415": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0416": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0417": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0418": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0419": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0420": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0421": {
+   "decos_25km": 14,
+   "cadence_min": 20
+  },
+  "STATIC0422": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0423": {
+   "decos_25km": 9,
+   "cadence_min": 20
+  },
+  "STATIC0424": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0425": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0426": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0427": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0428": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0429": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0430": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0431": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0432": {
+   "decos_25km": 6,
+   "cadence_min": 20
+  },
+  "STATIC0433": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0435": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0436": {
+   "decos_25km": 16,
+   "cadence_min": 20
+  },
+  "STATIC0438": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0439": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0440": {
+   "decos_25km": 8,
+   "cadence_min": 20
+  },
+  "STATIC0442": {
+   "decos_25km": 38,
+   "cadence_min": 10
+  },
+  "STATIC0445": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0446": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0447": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0448": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0449": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0450": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0464": {
+   "decos_25km": 7,
+   "cadence_min": 20
+  },
+  "STATIC0452": {
+   "decos_25km": 5,
+   "cadence_min": 20
+  },
+  "STATIC0453": {
+   "decos_25km": 11,
+   "cadence_min": 20
+  },
+  "STATIC0454": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0455": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0456": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0457": {
+   "decos_25km": 25,
+   "cadence_min": 10
+  },
+  "STATIC0458": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0459": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0460": {
+   "decos_25km": 13,
+   "cadence_min": 20
+  },
+  "STATIC0461": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "STATIC0463": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0465": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0466": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0467": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0468": {
+   "decos_25km": 15,
+   "cadence_min": 20
+  },
+  "STATIC0469": {
+   "decos_25km": 2,
+   "cadence_min": 40
+  },
+  "STATIC0470": {
+   "decos_25km": 10,
+   "cadence_min": 20
+  },
+  "ME159": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "ME161": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0471": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0472": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0474": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0475": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0476": {
+   "decos_25km": 4,
+   "cadence_min": 40
+  },
+  "STATIC0477": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0479": {
+   "decos_25km": 22,
+   "cadence_min": 10
+  },
+  "STATIC0480": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0481": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0482": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0483": {
+   "decos_25km": 3,
+   "cadence_min": 40
+  },
+  "STATIC0484": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  },
+  "STATIC0485": {
+   "decos_25km": 0,
+   "cadence_min": 60
+  },
+  "STATIC0486": {
+   "decos_25km": 1,
+   "cadence_min": 40
+  }
+ }
+}
