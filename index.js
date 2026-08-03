@@ -2232,16 +2232,52 @@ const INFOCLIMAT_OPENDATA_URL = 'https://www.infoclimat.fr/opendata/';
 const INFOCLIMAT_STATIONS_LIST_REFRESH_MS = 24 * 60 * 60 * 1000;
 // Cadence native constatée des relevés StatIC (pas de 15 min sur
 // l'échantillon sondé le 17/07) — inutile de poller plus vite.
+// Re-mesuré station par station le 02/08/2026 : Theys 10,0 min ·
+// Miribel 11,1 · Saint-Christophe 12,4 · Saint-Pancrasse 14,7 ·
+// Lumbin 14,7. Poller plus vite que la station ne mesure ne rend PAS
+// une valeur plus fraîche, il rend la MÊME valeur une deuxième fois.
 const INFOCLIMAT_OBS_POLL_MS = 15 * 60 * 1000;
 // Taille de lot pour `stations[]=A&stations[]=B&...` — fonctionne en
 // bulk (vérifié en direct le 17/07 avec 2 ids), mais on borne la
 // longueur d'URL/le poids de réponse plutôt que de tenter les ~1200
-// d'un coup. Piste d'optimisation notée mais pas implémentée : ne
-// redemander qu'une fenêtre courte (dernière heure) au lieu de la
-// journée entière à chaque cycle réduirait le volume transféré — laissé
-// simple pour ce premier lot, à revisiter si la bande passante Render
-// devient un problème réel.
+// d'un coup. Mesuré le 03/08 depuis le VPS : un lot de 100 produit une
+// URL de 2 409 caractères, très loin de toute limite.
+//
+// ⚠️ 03/08/2026 — LA « FENÊTRE D'UNE HEURE » N'EXISTE PAS. Le
+// commentaire qui vivait ici proposait de ne redemander que la dernière
+// heure au lieu de la journée entière. C'est IMPOSSIBLE, et c'est
+// MESURÉ, pas supposé (`traces/sonde_fenetre_infoclimat.py`, 7 appels
+// depuis le VPS) : `start`/`end` sont des DATES. Tout composant horaire
+// — « J HH:MM:SS », « JTHH:MM:SS », ou sans les secondes — renvoie
+// `status:"OK"`, `errors:[]`, `data:[]` et AUCUNE clé `hourly`.
+// C'est le TROISIÈME échec silencieux de cette API après
+// `Wrong ip address` en HTTP 200 : la requête est refusée en ayant
+// l'air d'avoir réussi. La page opendata le confirme — la période s'y
+// choisit au JOUR (« 7 jours consécutifs maximum »). NE PAS RETENTER.
+//
+// Ce que coûte VRAIMENT un cycle, mesuré au lot de 100 le 03/08 :
+//   sur le fil   2,90 Mo nu · 94 Ko en gzip · 82 Ko en brotli
+//   contenu      6 292 relevés pour 74 stations (85 par station)
+//   utilisés     74 — le dernier de chaque station, soit 1,2 %
+//
+// ⚠️ La bande passante n'est PAS le levier, contrairement à ce qu'on a
+// cru une heure durant : le `fetch` de Node envoie de lui-même
+// `Accept-Encoding: br, gzip, deflate` (vérifié), donc on reçoit déjà
+// 35× moins que le JSON brut. Mais la compression soulage LEUR BANDE
+// PASSANTE, pas LEUR BASE. À 15 min sur ~1200 stations, on leur fait
+// lire ~9,8 MILLIONS de lignes par jour pour en utiliser 115 000.
+// Ce chiffre-là ne baisse qu'en pollant MOINS SOUVENT — d'où la cadence
+// par densité de décos (cf. TODO.md, bloc « 🟢 Piste VPS »). C'est le
+// seul levier qui reste une fois la fenêtre horaire écartée.
 const INFOCLIMAT_BATCH_SIZE = 100;
+// Péremption d'un relevé en cache (03/08/2026). Depuis que le cache est
+// FUSIONNÉ et non plus remplacé (cf. refreshInfoclimatObs), il faut dire
+// explicitement quand une valeur cesse d'être affichable — sinon le
+// dernier relevé d'une station en panne resterait à l'écran pour
+// toujours. 90 min = six fois la cadence native la plus lente mesurée
+// (14,7 min) : une station qui a sauté cinq relevés est en panne, pas
+// en retard.
+const INFOCLIMAT_OBS_MAX_AGE_MS = 90 * 60 * 1000;
 
 let infoclimatStationsList = []; // [{id, nom, lat, lon, alt, licenseCode, licenseLabel, licenseUrl}]
 let infoclimatStationsById = new Map();
@@ -2334,7 +2370,22 @@ async function fetchInfoclimatBatch(ids, startDate, endDate) {
     console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
     return null;
   }
-  return data.hourly || {};
+  // ⚠️ 03/08/2026 — `status:"OK"` NE SUFFIT PAS. Mesuré depuis le VPS :
+  // une requête que l'API refuse sans le dire (typiquement un
+  // `start`/`end` portant une heure — cf. le bloc INFOCLIMAT_BATCH_SIZE)
+  // répond 200 · `status:"OK"` · `errors:[]` · `data:[]`, SANS la clé
+  // `hourly`. L'ancien `return data.hourly || {}` rendait alors `{}`,
+  // strictement indistinguable d'un « aucune de ces stations n'a de
+  // relevé » parfaitement légitime : l'appelant n'écrivait rien, ne
+  // logguait rien, et le calque restait vide sans une ligne d'erreur.
+  // On rend `null` (= lot en échec, l'appelant garde l'existant) et on
+  // laisse une trace exploitable via /infoclimat-stations.
+  if (!data.hourly || typeof data.hourly !== 'object') {
+    infoclimatLastError = `status OK mais pas de clé "hourly" — requête refusée en silence ; clés reçues : ${JSON.stringify(Object.keys(data)).slice(0, 200)}`;
+    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
+    return null;
+  }
+  return data.hourly;
 }
 
 function parseInfoclimatPoint(raw) {
@@ -2361,21 +2412,69 @@ function parseInfoclimatPoint(raw) {
 async function refreshInfoclimatObs() {
   if (!INFOCLIMAT_API_KEY || !infoclimatStationsList.length) return;
   try {
+    // ⚠️ La journée entière, et il n'y a pas d'alternative : `start`/`end`
+    // sont des DATES côté Infoclimat (mesuré le 03/08 — voir le bloc
+    // INFOCLIMAT_BATCH_SIZE). Le minimum indivisible est le jour.
     const today = new Date().toISOString().slice(0, 10);
     const batches = chunkArray(infoclimatStationsList.map(s => s.id), INFOCLIMAT_BATCH_SIZE);
-    const next = new Map();
+    // ⚠️ 03/08/2026 — FUSION, et non plus remplacement. L'ancien code
+    // bâtissait une Map neuve et l'affectait telle quelle : toute station
+    // absente de la réponse du cycle DISPARAISSAIT du calque. Deux
+    // conséquences, dont une qui mordait toutes les nuits :
+    //  · À MINUIT UTC, la fenêtre `today→today` est vide par
+    //    construction. Entre 00:00 et le premier relevé de chaque station
+    //    (10 à 15 min plus tard, cadence native mesurée), le cache se
+    //    vidait presque entièrement et les calques s'éteignaient — sans
+    //    erreur, sans trace, et ils se rallumaient seuls. Exactement le
+    //    genre de panne qu'on ne voit jamais en test de jour.
+    //  · Mesuré le 03/08 : 26 des 100 stations sondées n'avaient AUCUN
+    //    relevé de la journée. Elles n'étaient donc jamais affichées,
+    //    même quand leur dernière valeur connue datait de la veille au
+    //    soir et restait parfaitement lisible.
+    // La fusion règle les deux, et elle est le PRÉREQUIS du chantier de
+    // cadence : dès qu'un cycle ne pollera plus qu'une PARTIE du parc
+    // (paliers 10/20/40/60 min par densité de décos), un remplacement
+    // effacerait tout ce qui n'a pas été interrogé à ce tour.
+    // NE PAS revenir à une affectation directe.
+    const fusion = new Map(infoclimatObsCache);
+    let lotsOk = 0, neufs = 0;
     for (const ids of batches) {
       const hourly = await fetchInfoclimatBatch(ids, today, today);
       if (!hourly) continue; // ce lot échoue : on garde les autres plutôt que tout annuler
+      lotsOk++;
       for (const [id, points] of Object.entries(hourly)) {
         if (!Array.isArray(points) || !points.length) continue;
         // dh_utc croissant dans la réponse (vérifié en direct le 17/07) →
         // le dernier élément est le relevé le plus récent.
         const parsed = parseInfoclimatPoint(points[points.length - 1]);
-        if (Number.isFinite(parsed.t)) next.set(id, parsed);
+        if (!Number.isFinite(parsed.t)) continue;
+        // Ne jamais RECULER : un lot lent ou une réponse partielle ne
+        // doit pas remplacer un relevé plus récent déjà en cache.
+        const connu = fusion.get(id);
+        if (connu && Number.isFinite(connu.t) && connu.t >= parsed.t) continue;
+        fusion.set(id, parsed);
+        neufs++;
       }
     }
-    if (next.size) { infoclimatObsCache = next; infoclimatObsCacheFetchedAt = Date.now(); }
+    // Tous les lots en échec (clé refusée, panne réseau, `Wrong ip
+    // address`) : on garde l'état précédent tel quel plutôt que de
+    // périmer un cache qu'on n'a pas pu rafraîchir.
+    if (!lotsOk) return;
+    // Péremption explicite — la contrepartie obligatoire de la fusion.
+    // Sans elle, le dernier relevé d'une station débranchée resterait à
+    // l'écran indéfiniment, et le calque mentirait au lieu de se taire.
+    const limite = Date.now() - INFOCLIMAT_OBS_MAX_AGE_MS;
+    let perimes = 0;
+    for (const [id, p] of fusion) {
+      if (!(p.t >= limite)) { fusion.delete(id); perimes++; }
+    }
+    infoclimatObsCache = fusion;
+    infoclimatObsCacheFetchedAt = Date.now();
+    // Ce module a passé trois semaines à échouer en silence (cache vide
+    // sans erreur le 17/07, `Wrong ip address` en HTTP 200, `status OK`
+    // sans `hourly` le 03/08). Une ligne par cycle — 96 par jour, rien
+    // du tout — pour qu'un cache qui ne bouge plus se voie dans les logs.
+    console.log(`refreshInfoclimatObs: ${lotsOk}/${batches.length} lots · ${neufs} relevés neufs · ${perimes} périmés · ${infoclimatObsCache.size} stations en cache`);
   } catch (e) {
     console.error('refreshInfoclimatObs error:', e.message);
     infoclimatLastError = `refreshObs: ${e.message}`;
