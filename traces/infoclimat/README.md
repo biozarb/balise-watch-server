@@ -47,7 +47,19 @@ mkdir -p ~/.balise-watch-infoclimat
 grep -q INFOCLIMAT_API_KEY ~/.balise-watch-r2.env || echo "⚠️ clé absente"
 
 # 3. Un check Healthchecks DÉDIÉ — pas celui de l'entretien.
-#    BW_INFOCLIMAT_PING_URL dans ~/.balise-watch-alertes.env
+#    Sur healthchecks.io : nouveau check « poller Infoclimat »,
+#    Period 5 min, Grace 20 min. Copier son URL de ping, puis :
+#      printf 'export BW_INFOCLIMAT_PING_URL="https://hc-ping.com/<UUID>"\n' \
+#        >> ~/.balise-watch-alertes.env
+#      chmod 600 ~/.balise-watch-alertes.env
+#    Vérifier SANS révéler l'UUID :
+#      grep -c BW_INFOCLIMAT_PING_URL ~/.balise-watch-alertes.env   # → 1
+#    Puis forcer un run et voir le check passer au vert :
+#      sudo systemctl start balise-infoclimat.service
+#      tail -n 5 ~/.balise-watch-infoclimat/poller.log
+#    ⚠️ Si le journal dit « PERSONNE NE SURVEILLE CE POLLER », la
+#    variable n'a pas été chargée : `poller.sh` source le fichier
+#    d'alertes AVANT le .env R2, et systemd ne relit rien tout seul.
 
 # 4. Les unités.
 sudo cp balise-infoclimat.{service,timer} /etc/systemd/system/

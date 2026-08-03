@@ -58,19 +58,57 @@ dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG";
 # ── Portabilité GNU / BSD (le Mac reste une cible d'essai) ───────────
 mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
 
+# ⚠️ CORRECTION 03/08/2026 (soir) — les deux canaux étaient MUETS.
+# Cette fonction lisait `BW_PING_FAIL_URL` et `BW_MAIL_TO`, deux noms qui
+# n'existent NULLE PART : ni dans `balise-watch-alertes.env.exemple`, ni
+# dans `entretien.sh`, ni dans aucun `.env` de la machine. Les
+# conventions du projet sont `BW_PING_OK_URL` (dont on dérive `/fail`,
+# cf. entretien.sh ligne ~107) et `BW_ALERTE_MAIL`. Résultat : trois
+# runs consécutifs en échec écrivaient dans le journal et NULLE PART
+# AILLEURS. Le seul défaut invisible du dispositif, c'est celui qui
+# touche le dispositif d'alerte lui-même.
+#
+# ⚠️ ET SURTOUT : l'échec part sur le check DU POLLER, pas sur celui de
+# l'entretien. Réutiliser `BW_PING_OK_URL` ici ferait passer le check
+# « entretien packs » en rouge quand c'est le poller qui souffre — deux
+# jobs, deux cadences, deux checks. C'est la règle posée en tête de
+# fichier, elle vaut aussi pour le canal d'échec.
 alerter() {
   local sujet="$1" corps="$2"
   dire "ALERTE — $sujet : $corps"
-  # ⚠️ Le titre part dans un EN-TÊTE HTTP, qui ne transporte pas d'UTF-8
-  #    (bug corrigé le 03/08 : un simple « é » faisait rejeter la
-  #    requête). Corps en UTF-8, titre translittéré.
-  if [[ -n "${BW_PING_FAIL_URL:-}" ]]; then
-    curl -fsS -m 10 --data-raw "$corps" "$BW_PING_FAIL_URL" >/dev/null 2>&1 || true
+
+  # 1. Signal d'échec vers l'interrupteur d'homme mort DÉDIÉ. Canal à
+  #    privilégier : Healthchecks alerte depuis l'EXTÉRIEUR, donc une
+  #    seule intégration couvre « le run a échoué » ET « le run n'a plus
+  #    lieu du tout » — ce second cas étant celui qu'aucune ligne d'ici
+  #    ne pourrait signaler.
+  if [[ -n "${BW_INFOCLIMAT_PING_URL:-}" ]]; then
+    curl -fsS -m 10 --data-binary "$corps" \
+         "${BW_INFOCLIMAT_PING_URL}/fail" >/dev/null 2>&1 \
+      || dire "⚠️ ping d'échec non parti"
   fi
-  if [[ -n "${BW_MAIL_TO:-}" ]] && command -v msmtp >/dev/null 2>&1; then
-    printf 'Subject: %s\nTo: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n' \
-      "$(printf '%s' "$sujet" | iconv -t ASCII//TRANSLIT 2>/dev/null || echo 'balise-watch poller')" \
-      "$BW_MAIL_TO" "$corps" | msmtp "$BW_MAIL_TO" >/dev/null 2>&1 || true
+
+  # 2. journald — trace système, consultable via
+  #    `journalctl -t balise-infoclimat`. Étiquette distincte de
+  #    `balise-entretien` pour la même raison que les checks.
+  if command -v systemd-cat >/dev/null 2>&1; then
+    printf '%s : %s\n' "$sujet" "$corps" | systemd-cat -t balise-infoclimat -p err 2>/dev/null || true
+  fi
+
+  # 3. E-mail via msmtp. Seul canal qui pose un vrai secret sur la
+  #    machine, d'où son caractère facultatif.
+  #    ⚠️ `Subject:` part dans un en-tête, qui ne transporte pas d'UTF-8
+  #    (bug corrigé le 03/08 : un simple « é » faisait rejeter l'envoi).
+  #    Corps en UTF-8 déclaré, sujet translittéré en ASCII.
+  if [[ -n "${BW_ALERTE_MAIL:-}" ]] && command -v msmtp >/dev/null 2>&1; then
+    sujet_h=$(printf '%s' "$sujet" \
+      | { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; } \
+      | LC_ALL=C tr -cd '\40-\176')
+    [[ -z "$sujet_h" ]] && sujet_h="poller Infoclimat"
+    printf 'To: %s\nSubject: [Balise Watch] %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\nMachine : %s\nJournal : %s\n' \
+      "$BW_ALERTE_MAIL" "$sujet_h" "$corps" "$(hostname)" "$LOG" \
+      | msmtp --read-recipients >/dev/null 2>&1 \
+      || dire "⚠️ e-mail non parti — voir ~/.msmtp.log"
   fi
 }
 
@@ -123,8 +161,18 @@ if (( code == 0 )); then
   # Ping de vie : c'est le SEUL canal capable de signaler que ce script
   # ne tourne PLUS DU TOUT — aucune ligne d'ici ne s'exécuterait pour le
   # dire. Healthchecks alerte depuis l'extérieur, sur le silence.
-  [[ -n "${BW_INFOCLIMAT_PING_URL:-}" ]] && \
-    curl -fsS -m 10 "$BW_INFOCLIMAT_PING_URL" >/dev/null 2>&1 || true
+  #
+  # ⚠️ Le cas « variable absente » est JOURNALISÉ, il ne passe plus en
+  # silence (03/08/2026 au soir). Un poller qui pingue dans le vide a
+  # exactement l'allure d'un poller surveillé : `run OK` toutes les
+  # 5 min, et aucune alerte le jour où il s'arrête. C'est la panne qui
+  # ne se voit qu'aux calques qui se vident, six heures trop tard.
+  if [[ -n "${BW_INFOCLIMAT_PING_URL:-}" ]]; then
+    curl -fsS -m 10 "$BW_INFOCLIMAT_PING_URL" >/dev/null 2>&1 \
+      || dire "⚠️ ping de vie non parti (réseau ?) — le check va passer en retard"
+  else
+    dire "⚠️ BW_INFOCLIMAT_PING_URL absente de $ALERTES_FILE — PERSONNE NE SURVEILLE CE POLLER"
+  fi
   dire "run OK en ${duree}s"
   exit 0
 fi
