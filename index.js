@@ -2764,7 +2764,11 @@ async function refreshMetarObs(hours = METAR_POLL_HOURS) {
       // altim = QNH. Sans lui la ligne n'a aucun intérêt ici.
       if (row.altim == null) continue;
       const tempC = row.temp != null ? Number(row.temp) : null;
-      pressureHistoryPush(metarHistory, id, { t, qnh: Number(row.altim), tempC }, METAR_RETENTION_MS);
+      // `p` + `reduction`, même forme que l'historique SwissMetNet depuis
+      // que celui-ci peut être en repli QNH : deux clés différentes pour
+      // la même grandeur obligeraient chaque lecteur à savoir de quelle
+      // source il vient avant de savoir où regarder.
+      pressureHistoryPush(metarHistory, id, { t, p: Number(row.altim), reduction: 'qnh', tempC }, METAR_RETENTION_MS);
       const prev = latest.get(id);
       if (!prev || t > prev.t) {
         latest.set(id, {
@@ -2959,16 +2963,50 @@ async function refreshSmnObs() {
       const slug = abbr.toLowerCase();
       const text = await smnFetchCsv(`${SMN_BASE}/${slug}/ogd-smn_${slug}_t_now.csv`);
       if (!text) continue; // 304 ou échec : on garde l'existant
+      const rows = smnParseCsv(text);
+      // QFF d'abord, QNH en REPLI — et la décision se prend PAR STATION,
+      // sur l'ensemble du fichier, jamais ligne à ligne.
+      //
+      // Pourquoi ce repli existe : MeteoSuisse ne publie pas `pp0qffs0`
+      // partout. Sur les 131 relevés du 03/08, Visp et St-Gall en avaient
+      // ZÉRO, tout en publiant `pp0qnhs0` ET la température sur les 131.
+      // Ces deux ancres étaient donc écartées en silence — pas au filtre
+      // des métadonnées (leurs baromètres sont bien déclarés, 641 m et
+      // 777 m) mais faute de valeur exploitable ici.
+      //
+      // Visp justifie le repli à elle seule : c'est LA station de la
+      // vallée du Rhône, là où se joue le foehn du Valais, et son QNH est
+      // au dixième d'hPa — dix fois mieux résolu qu'un METAR. La
+      // conversion QNH→QFF côté client (lib/pressure.ts) réclame la
+      // température réelle : elle est là, sur tous les relevés.
+      //
+      // Pourquoi PAR STATION et pas par ligne : Sion a 130 relevés sur
+      // 131 avec QFF, et le DERNIER sans. Un repli ligne à ligne ferait
+      // basculer Sion en QNH sur son relevé le plus récent — donc sur
+      // celui que le panneau affiche — et ferait sauter la convention
+      // d'un point à l'autre de la même courbe. Une station qui publie du
+      // QFF reste en QFF : mieux vaut son QFF vieux de 10 minutes que son
+      // QNH de maintenant.
+      //
+      // ⚠️ Le repli n'est pas gratuit et ne doit jamais être présenté
+      // comme équivalent : une valeur convertie porte une incertitude que
+      // `normalizePressure` calcule et que le panneau doit afficher. D'où
+      // `reduction` transmis par station, et non plus codé en dur à 'qff'
+      // pour toute la source.
+      const aDuQff = rows.some(r => smnNum(r.pp0qffs0) != null);
+      const champ = aDuQff ? 'pp0qffs0' : 'pp0qnhs0';
+      const reduction = aDuQff ? 'qff' : 'qnh';
+
       let latest = null;
-      for (const row of smnParseCsv(text)) {
+      for (const row of rows) {
         const t = smnParseTimestamp(row.reference_timestamp);
-        const qff = smnNum(row.pp0qffs0);
-        if (!Number.isFinite(t) || qff == null) continue;
+        const p = smnNum(row[champ]);
+        if (!Number.isFinite(t) || p == null) continue;
         const tempC = smnNum(row.tre200s0);
-        pressureHistoryPush(smnHistory, abbr, { t, qff, tempC }, SMN_RETENTION_MS);
+        pressureHistoryPush(smnHistory, abbr, { t, p, reduction, tempC }, SMN_RETENTION_MS);
         if (!latest || t > latest.t) {
           latest = {
-            t, qff, tempC,
+            t, p, reduction, tempC,
             // Le vent SMN est en m/s → km/h, comme MF.
             moy: smnNum(row.fkl010z0) != null ? smnNum(row.fkl010z0) * 3.6 : null,
             dir: smnNum(row.dkl010z0),
@@ -3901,8 +3939,16 @@ function pressureStationsPayload() {
     out.push({
       id: `smn:${code}`, source: 'smn', code, nom: o.nom,
       lat: o.lat, lon: o.lon, alt: o.alt,
-      reduction: 'qff', resolutionHpa: 0.1,
-      pressure: o.qff, tempC: o.tempC,
+      // `reduction` vient de la station et non de la source : MeteoSuisse
+      // ne publie pas de QFF partout (Visp, St-Gall), et une valeur en
+      // repli QNH annoncée comme du QFF serait comparée à un vrai QFF
+      // sans conversion — un biais silencieux, corrélé à la température,
+      // donc corrélé au foehn qu'on mesure. Exactement ce que le §3 du
+      // document de conception interdit. La résolution, elle, reste au
+      // dixième dans les deux cas : c'est le pas de publication de
+      // MeteoSuisse, pas une propriété de la convention.
+      reduction: o.reduction, resolutionHpa: 0.1,
+      pressure: o.p, tempC: o.tempC,
       dd: o.dir, ff: o.moy, t: o.t,
     });
   }
@@ -3942,7 +3988,12 @@ app.get('/pressure-history/:id', (req, res) => {
   }
   if (source === 'smn') {
     const pts = (smnHistory.get(code) || []).filter(p => p.t >= cutoff);
-    return res.json({ id: raw, reduction: 'qff', resolutionHpa: 0.1, points: pts });
+    // Comme dans pressureStationsPayload : la convention est celle de la
+    // STATION, pas de la source. Visp et St-Gall sont en repli QNH. Le
+    // `reduction` de chaque point fait foi ; celui-ci n'est que le
+    // résumé de la station, tiré du cache d'observations.
+    const red = smnObsCache.get(code)?.reduction ?? pts[pts.length - 1]?.reduction ?? 'qff';
+    return res.json({ id: raw, reduction: red, resolutionHpa: 0.1, points: pts });
   }
   res.status(400).json({ error: "id attendu sous la forme 'metar:LIMW' ou 'smn:LUG'" });
 });
