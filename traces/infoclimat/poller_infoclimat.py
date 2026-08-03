@@ -193,7 +193,15 @@ LOT = 100                  # URL de 2 409 caractères — loin de toute limite
 MAX_APPELS_JOUR = 500
 MAX_APPELS_RUN = 20        # 1205 / 100 = 13 lots au grand maximum
 HISTORY_INTERVAL_MIN = 30
-HISTORY_HEURES = 24
+# 30 h et pas 24 : le client demande `max(7, heure_locale + 2)` heures
+# pour le graphe de comparaison (ChartModal), soit jusqu'à 25 h en fin de
+# soirée. À 24 h, ce graphe serait tronqué une partie de la journée.
+#
+# ⚠️ Ça ne coûte AUCUN appel de plus. La rétention est un élagage de
+# l'ÉTAT, pas une fenêtre demandée à l'API : les points déjà vus sont
+# conservés d'un run à l'autre. L'API n'en rend que ~24 h au minimum
+# (veille→jour au petit matin), le reste s'accumule tout seul.
+HISTORY_HEURES = 30
 TOLERANCE_S = 90           # jitter du timer : ne pas rater un créneau
 
 ETAT_DIR = os.environ.get("BW_INFOCLIMAT_ETAT",
@@ -295,8 +303,12 @@ def charger_stations(reseau=True):
             "lat": float(g[1]), "lon": float(g[0]),
             "alt": p.get("elevation"),
             # ⚠️ La licence voyage PAR STATION — elle varie dans un rayon
-            # de 20 km, et une mention globale serait fausse pour une
-            # station sur quatre.
+            # de 20 km. Sur les 854 stations servies le 03/08 : 442 en
+            # `NON-COMMERCIAL ONLY: CC BY NC`, 412 en `CC BY`. Une
+            # mention globale serait fausse pour une station sur deux.
+            # Les trois champs sont transportés parce que le client les
+            # attendait déjà tous les trois (licenseCode/Label/Url).
+            "licence_code": lic.get("code"),
             "licence": lic.get("license"),
             "licence_url": lic.get("url"),
         })
@@ -574,8 +586,8 @@ def corps_latest(stations_meta, etat, maintenant):
         # varie d'une station à l'autre dans le même rayon : toute UI
         # doit afficher celle de la station montrée, pas une globale.
         "stations": {s["id"]: {k: s[k] for k in
-                               ("nom", "lat", "lon", "alt", "licence",
-                                "licence_url")}
+                               ("nom", "lat", "lon", "alt", "licence_code",
+                                "licence", "licence_url")}
                      for s in stations_meta if s["id"] in obs},
         "obs": obs,
     }

@@ -2202,290 +2202,224 @@ function findNearbyMfStations(beaconId, lat, lon) {
 }
 
 // ── Étape 12 (17/07/2026) : stations personnelles Infoclimat (réseau
-// StatIC) ────────────────────────────────────────────────────────────
+// StatIC) — RÉÉCRIT LE 03/08/2026 : ce serveur ne parle plus à
+// Infoclimat ─────────────────────────────────────────────────────────
+//
 // Contrairement aux stations MF (réseau officiel RADOME), ce sont des
 // stations AMATEUR (Netatmo, Davis, WeeWX...) hébergées bénévolement par
-// des particuliers et republiées par l'association Infoclimat sous
-// licence CC BY / CC BY-NC (jamais Etalab plein pour les stations de
-// contributeurs — cf. www.infoclimat.fr/opendata, sondé en direct le
-// 17/07/2026 avec Yann). Deux caches RAM séparés, même philosophie que
-// mfStationsList/mfObsCache ci-dessus :
+// des particuliers et republiées par l'association Infoclimat.
+//
+// ┌─ POURQUOI CE BLOC N'APPELLE PLUS INFOCLIMAT ────────────────────┐
+// │ La clé Infoclimat est liée à UNE adresse IP déclarée. Les IP    │
+// │ sortantes de Render sont MULTIPLES (74.220.51.0/24 +            │
+// │ 74.220.59.0/24, 512 adresses possibles) : une clé ne peut pas   │
+// │ les couvrir. Le refus arrive en `Wrong ip address` — EN HTTP    │
+// │ 200 — donc les calques s'affichaient vides, sans une ligne      │
+// │ d'erreur, et on a mis trois semaines à le voir.                 │
+// │                                                                 │
+// │ Depuis le 03/08, un VPS à IPv4 fixe (51.91.102.146) poll et     │
+// │ écrit deux objets dans R2 ; ce serveur les LIT. Le poller vit   │
+// │ dans `traces/infoclimat/` — c'est là, et SEULEMENT là, que se   │
+// │ trouve la connaissance de l'API Infoclimat.                     │
+// │                                                                 │
+// │ ⚠️ NE PAS REMETTRE D'APPEL DIRECT ICI. Il ne peut pas marcher,  │
+// │    et son échec est invisible.                                  │
+// └─────────────────────────────────────────────────────────────────┘
+//
+// Ce qui a disparu avec la réécriture, et pourquoi ce n'est pas une
+// perte : `fetchInfoclimatBatch` (et sa gestion des trois échecs qui
+// arrivent en HTTP 200), `refreshInfoclimatStationsList` (le GeoJSON
+// data.gouv.fr) et le découpage en lots vivent désormais dans
+// `traces/infoclimat/poller_infoclimat.py`, sur la seule machine dont
+// l'IP est acceptée. Rien n'est oublié, tout a déménagé.
+//
+// Trois caches RAM, même philosophie que mfStationsList/mfObsCache :
 //  - infoclimatStationsList / infoclimatStationsById : métadonnées
-//    statiques (id/nom/coords/altitude/licence), ~1200 stations en
-//    France, source = fichier GeoJSON PUBLIC data.gouv.fr (aucune clé
-//    requise pour celui-ci, contrairement au reste), rafraîchi une fois
-//    par jour.
-//  - infoclimatObsCache : dernier relevé par station (vent/direction/
-//    pression/température), rafraîchi par LOTS de INFOCLIMAT_BATCH_SIZE
-//    ids (l'URL deviendrait déraisonnable pour ~1200 stations en un seul
-//    appel) toutes les INFOCLIMAT_OBS_POLL_MS.
-// Si INFOCLIMAT_API_KEY n'est pas configurée : les deux caches restent
-// vides, /infoclimat-stations renvoie une liste vide, aucun crash (même
-// dégradation silencieuse que le reste des modules optionnels).
-const INFOCLIMAT_API_KEY = process.env.INFOCLIMAT_API_KEY;
-// Fichier GeoJSON "Liste des stations en open-data du réseau
-// météorologique Infoclimat (Réseau StatIC)" — mis à jour en continu par
-// Infoclimat, lecture publique sans authentification (vérifié en direct
-// le 17/07/2026 : ~1200 features, dont 1199 source infoclimat.fr).
-const INFOCLIMAT_STATIONS_GEOJSON_URL = 'https://www.data.gouv.fr/api/1/datasets/r/8a9e6a12-03f8-4056-861f-70b84136313e';
-const INFOCLIMAT_OPENDATA_URL = 'https://www.infoclimat.fr/opendata/';
-const INFOCLIMAT_STATIONS_LIST_REFRESH_MS = 24 * 60 * 60 * 1000;
-// Cadence native constatée des relevés StatIC (pas de 15 min sur
-// l'échantillon sondé le 17/07) — inutile de poller plus vite.
-// Re-mesuré station par station le 02/08/2026 : Theys 10,0 min ·
-// Miribel 11,1 · Saint-Christophe 12,4 · Saint-Pancrasse 14,7 ·
-// Lumbin 14,7. Poller plus vite que la station ne mesure ne rend PAS
-// une valeur plus fraîche, il rend la MÊME valeur une deuxième fois.
-const INFOCLIMAT_OBS_POLL_MS = 15 * 60 * 1000;
-// Taille de lot pour `stations[]=A&stations[]=B&...` — fonctionne en
-// bulk (vérifié en direct le 17/07 avec 2 ids), mais on borne la
-// longueur d'URL/le poids de réponse plutôt que de tenter les ~1200
-// d'un coup. Mesuré le 03/08 depuis le VPS : un lot de 100 produit une
-// URL de 2 409 caractères, très loin de toute limite.
+//    (id/nom/coords/altitude/LICENCE), servies par `latest.json` ;
+//  - infoclimatObsCache : dernier relevé par station ;
+//  - infoclimatHistory : jusqu'à 30 h glissantes, relues bien moins
+//    souvent parce que l'objet est 14× plus gros.
 //
-// ⚠️ 03/08/2026 — LA « FENÊTRE D'UNE HEURE » N'EXISTE PAS. Le
-// commentaire qui vivait ici proposait de ne redemander que la dernière
-// heure au lieu de la journée entière. C'est IMPOSSIBLE, et c'est
-// MESURÉ, pas supposé (`traces/sonde_fenetre_infoclimat.py`, 7 appels
-// depuis le VPS) : `start`/`end` sont des DATES. Tout composant horaire
-// — « J HH:MM:SS », « JTHH:MM:SS », ou sans les secondes — renvoie
-// `status:"OK"`, `errors:[]`, `data:[]` et AUCUNE clé `hourly`.
-// C'est le TROISIÈME échec silencieux de cette API après
-// `Wrong ip address` en HTTP 200 : la requête est refusée en ayant
-// l'air d'avoir réussi. La page opendata le confirme — la période s'y
-// choisit au JOUR (« 7 jours consécutifs maximum »). NE PAS RETENTER.
+// ⚠️ LA LICENCE VARIE D'UNE STATION À L'AUTRE, y compris dans un rayon
+//    de 20 km : sur les 854 stations servies le 03/08, 442 en
+//    `NON-COMMERCIAL ONLY: CC BY NC` et 412 en `CC BY`. Elle voyage PAR
+//    STATION jusqu'au client, qui doit afficher celle de la station
+//    MONTRÉE — une mention globale serait fausse une fois sur deux.
 //
-// Ce que coûte VRAIMENT un cycle, mesuré au lot de 100 le 03/08 :
-//   sur le fil   2,90 Mo nu · 94 Ko en gzip · 82 Ko en brotli
-//   contenu      6 292 relevés pour 74 stations (85 par station)
-//   utilisés     74 — le dernier de chaque station, soit 1,2 %
-//
-// ⚠️ La bande passante n'est PAS le levier, contrairement à ce qu'on a
-// cru une heure durant : le `fetch` de Node envoie de lui-même
-// `Accept-Encoding: br, gzip, deflate` (vérifié), donc on reçoit déjà
-// 35× moins que le JSON brut. Mais la compression soulage LEUR BANDE
-// PASSANTE, pas LEUR BASE. À 15 min sur ~1200 stations, on leur fait
-// lire ~9,8 MILLIONS de lignes par jour pour en utiliser 115 000.
-// Ce chiffre-là ne baisse qu'en pollant MOINS SOUVENT — d'où la cadence
-// par densité de décos (cf. TODO.md, bloc « 🟢 Piste VPS »). C'est le
-// seul levier qui reste une fois la fenêtre horaire écartée.
-const INFOCLIMAT_BATCH_SIZE = 100;
-// Péremption d'un relevé en cache (03/08/2026). Depuis que le cache est
-// FUSIONNÉ et non plus remplacé (cf. refreshInfoclimatObs), il faut dire
-// explicitement quand une valeur cesse d'être affichable — sinon le
-// dernier relevé d'une station en panne resterait à l'écran pour
-// toujours. 90 min = six fois la cadence native la plus lente mesurée
-// (14,7 min) : une station qui a sauté cinq relevés est en panne, pas
-// en retard.
+// Si les objets R2 sont absents (poller jamais lancé) : les caches
+// restent vides, /infoclimat-stations renvoie une liste vide, aucun
+// crash — même dégradation silencieuse que le reste des modules
+// optionnels.
+const INFOCLIMAT_R2_BASE = process.env.INFOCLIMAT_R2_BASE
+  || 'https://pub-14b7b6ffdba34729b51280359c8f2c01.r2.dev';
+const INFOCLIMAT_LATEST_URL = `${INFOCLIMAT_R2_BASE}/infoclimat/latest.json`;
+const INFOCLIMAT_HISTORY_URL = `${INFOCLIMAT_R2_BASE}/infoclimat/history.json`;
+// Lecture d'un objet R2 de ~32 Ko, PAS un appel chez Infoclimat : la
+// cadence ici ne coûte rien à l'association. 5 min pour que l'affichage
+// suive de près le palier le plus rapide du poller (10 min).
+const INFOCLIMAT_OBS_POLL_MS = 5 * 60 * 1000;
+// L'historique pèse ~444 Ko compressés — 14× `latest.json`. Le poller ne
+// le réécrit que toutes les 30 min : le relire plus souvent ne
+// rapporterait rien.
+const INFOCLIMAT_HISTORY_POLL_MS = 30 * 60 * 1000;
+// ⚠️ PÉREMPTION CÔTÉ LECTURE, en plus de celle du poller. Le poller
+//    n'écrit que des relevés de moins de 90 min ; mais si le VPS meurt,
+//    `latest.json` se FIGE et ce serveur servirait indéfiniment un vent
+//    d'il y a six heures comme s'il était courant. Pour une app de
+//    sécurité en vol, une donnée périmée présentée comme fraîche est
+//    pire que pas de donnée du tout. On refiltre donc à la lecture : le
+//    cache se vide tout seul dans les 90 min qui suivent une panne du
+//    poller, et le calque disparaît au lieu de mentir.
 const INFOCLIMAT_OBS_MAX_AGE_MS = 90 * 60 * 1000;
 
 let infoclimatStationsList = []; // [{id, nom, lat, lon, alt, licenseCode, licenseLabel, licenseUrl}]
 let infoclimatStationsById = new Map();
-let infoclimatStationsListFetchedAt = 0;
 let infoclimatObsCache = new Map(); // id -> {t, moy, raf, dir, pressure, temp}
 let infoclimatObsCacheFetchedAt = 0;
+let infoclimatHistory = new Map(); // id -> [{t, avg, max, dir, pressure}]
+let infoclimatHistoryFetchedAt = 0;
 // Débogage 17/07/2026 — dernière erreur rencontrée par le pipeline
-// Infoclimat (liste stations OU obs), exposée via /infoclimat-stations
-// pour diagnostiquer depuis le client sans accès aux logs Render.
+// Infoclimat, exposée via /infoclimat-stations pour diagnostiquer depuis
+// le client sans accès aux logs Render. Depuis le 03/08 elle porte aussi
+// « objet périmé », qui est le symptôme d'un poller arrêté sur le VPS.
 let infoclimatLastError = null;
 
-function chunkArray(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-async function refreshInfoclimatStationsList() {
-  try {
-    const r = await fetch(INFOCLIMAT_STATIONS_GEOJSON_URL);
-    if (!r.ok) return; // échec ponctuel : on garde l'ancienne liste plutôt que de la vider
-    const geo = await r.json();
-    const feats = Array.isArray(geo?.features) ? geo.features : [];
-    const parsed = [];
-    for (const f of feats) {
-      const p = f?.properties || {};
-      const coords = f?.geometry?.coordinates;
-      const lon = coords?.[0], lat = coords?.[1];
-      if (!p.id || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-      // Ne garder que le réseau Infoclimat (StatIC) — exclut la poignée
-      // d'entrées source 'METEO-FRANCE' présentes dans ce même fichier,
-      // déjà couvertes par /meteofrance-stations : jamais doubler un
-      // même point physique sur la carte.
-      if (p.license?.source !== 'infoclimat.fr') continue;
-      parsed.push({
-        id: p.id, nom: p.name || p.id, lat, lon, alt: p.elevation ?? null,
-        licenseCode: p.license?.code ?? null,
-        licenseLabel: p.license?.license ?? null,
-        licenseUrl: p.license?.url ?? null,
-      });
-    }
-    if (parsed.length) {
-      infoclimatStationsList = parsed;
-      infoclimatStationsById = new Map(parsed.map(s => [s.id, s]));
-      infoclimatStationsListFetchedAt = Date.now();
-    }
-  } catch (e) {
-    console.error('refreshInfoclimatStationsList error:', e.message);
-    infoclimatLastError = `stationsList: ${e.message}`;
-  }
-}
-
-// Un seul lot (déjà vérifié en direct le 17/07 : `stations[]` répété
-// fonctionne, `hourly` ne contient que les stations avec au moins un
-// point sur la période demandée — pas d'erreur pour les autres).
-// Débogage 17/07/2026 — le cache d'observations Infoclimat restait vide
-// en prod (fetchedAt:0) sans jamais lever d'erreur visible. Cause :
-// l'API opendata Infoclimat répond en texte brut (200 OK, PAS du JSON)
-// sur certains rejets ("Wrong ip address", "Could not authenticate
-// request" — vérifié en direct depuis un autre réseau que celui de
-// Yann). L'ancien code faisait `await r.json()` directement, qui lève
-// une SyntaxError sur ce texte brut ; l'erreur était bien catchée plus
-// haut (refreshInfoclimatObs) mais SANS le contenu de la réponse, donc
-// invisible dans les logs. Ici : on lit toujours le texte d'abord, on
-// logge le corps brut (tronqué) sur tout échec de parsing/statut, pour
-// pouvoir diagnostiquer depuis les logs Render sans avoir à reproduire
-// le problème en local.
-async function fetchInfoclimatBatch(ids, startDate, endDate) {
-  const params = new URLSearchParams({
-    method: 'get', format: 'json', start: startDate, end: endDate, token: INFOCLIMAT_API_KEY,
-  });
-  for (const id of ids) params.append('stations[]', id);
-  const r = await fetch(`${INFOCLIMAT_OPENDATA_URL}?${params.toString()}`);
-  const text = await r.text();
+// Lecture d'un objet JSON écrit par le poller.
+// ⚠️ `fetch` de Node envoie `Accept-Encoding: br, gzip, deflate` de
+//    lui-même et Cloudflare sert du gzip : on lit ~32 Ko au lieu de
+//    218 Ko sans rien avoir à écrire (vérifié en direct le 03/08).
+//    Ne PAS ajouter d'en-tête à la main, et surtout ne pas en retirer.
+async function fetchInfoclimatObjet(url) {
+  const r = await fetch(url, { headers: { 'Cache-Control': 'no-cache' } });
   if (!r.ok) {
-    infoclimatLastError = `HTTP ${r.status} — ${text.slice(0, 300)}`;
-    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
-    return null;
+    // 404 = le poller n'a jamais tourné. Ce n'est pas une panne, c'est
+    // un module optionnel non configuré : on le dit sans crier.
+    throw new Error(r.status === 404
+      ? `objet absent (${url}) — le poller du VPS n'a pas encore écrit`
+      : `HTTP ${r.status} sur ${url}`);
   }
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    infoclimatLastError = `réponse non-JSON — ${text.slice(0, 300)}`;
-    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
-    return null;
-  }
-  if (data?.status !== 'OK') {
-    infoclimatLastError = `status="${data?.status}" — ${JSON.stringify(data?.errors ?? data).slice(0, 300)}`;
-    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
-    return null;
-  }
-  // ⚠️ 03/08/2026 — `status:"OK"` NE SUFFIT PAS. Mesuré depuis le VPS :
-  // une requête que l'API refuse sans le dire (typiquement un
-  // `start`/`end` portant une heure — cf. le bloc INFOCLIMAT_BATCH_SIZE)
-  // répond 200 · `status:"OK"` · `errors:[]` · `data:[]`, SANS la clé
-  // `hourly`. L'ancien `return data.hourly || {}` rendait alors `{}`,
-  // strictement indistinguable d'un « aucune de ces stations n'a de
-  // relevé » parfaitement légitime : l'appelant n'écrivait rien, ne
-  // logguait rien, et le calque restait vide sans une ligne d'erreur.
-  // On rend `null` (= lot en échec, l'appelant garde l'existant) et on
-  // laisse une trace exploitable via /infoclimat-stations.
-  if (!data.hourly || typeof data.hourly !== 'object') {
-    infoclimatLastError = `status OK mais pas de clé "hourly" — requête refusée en silence ; clés reçues : ${JSON.stringify(Object.keys(data)).slice(0, 200)}`;
-    console.error(`fetchInfoclimatBatch: ${infoclimatLastError}`);
-    return null;
-  }
-  return data.hourly;
+  return r.json();
 }
 
-function parseInfoclimatPoint(raw) {
-  const num = v => (v != null && v !== '' ? parseFloat(v) : null);
-  // Débogage 19/07/2026 — `raw.dh_utc` peut manquer sur un relevé
-  // Infoclimat malformé. Avant ce garde-fou, le `.replace` levait
-  // "Cannot read properties of undefined", attrapé par le try/catch qui
-  // entoure TOUTE la boucle de refreshInfoclimatObs : un seul point
-  // pourri annulait donc le rafraîchissement de TOUTES les stations, à
-  // chaque poll (erreur visible en continu dans les logs Render).
-  // `t` non fini -> l'appelant ignore simplement ce point (Number.isFinite).
-  const t = typeof raw?.dh_utc === 'string'
-    ? Date.parse(`${raw.dh_utc.replace(' ', 'T')}Z`) : NaN;
-  return {
-    t,
-    moy: num(raw?.vent_moyen),
-    raf: num(raw?.vent_rafales),
-    dir: num(raw?.vent_direction),
-    pressure: num(raw?.pression),
-    temp: num(raw?.temperature),
-  };
+// Âge de l'objet, en minutes, d'après le `genere_le` que le poller y
+// écrit. C'est le seul moyen de distinguer « le poller tourne et rien
+// n'a bougé » de « le poller est mort depuis trois heures » : les deux
+// donnent le même contenu.
+function infoclimatAgeMin(doc) {
+  const t = Date.parse(doc?.genere_le ?? '');
+  return Number.isFinite(t) ? (Date.now() - t) / 60000 : null;
 }
 
 async function refreshInfoclimatObs() {
-  if (!INFOCLIMAT_API_KEY || !infoclimatStationsList.length) return;
   try {
-    // ⚠️ La journée entière, et il n'y a pas d'alternative : `start`/`end`
-    // sont des DATES côté Infoclimat (mesuré le 03/08 — voir le bloc
-    // INFOCLIMAT_BATCH_SIZE). Le minimum indivisible est le jour.
-    const today = new Date().toISOString().slice(0, 10);
-    const batches = chunkArray(infoclimatStationsList.map(s => s.id), INFOCLIMAT_BATCH_SIZE);
-    // ⚠️ 03/08/2026 — FUSION, et non plus remplacement. L'ancien code
-    // bâtissait une Map neuve et l'affectait telle quelle : toute station
-    // absente de la réponse du cycle DISPARAISSAIT du calque. Deux
-    // conséquences, dont une qui mordait toutes les nuits :
-    //  · À MINUIT UTC, la fenêtre `today→today` est vide par
-    //    construction. Entre 00:00 et le premier relevé de chaque station
-    //    (10 à 15 min plus tard, cadence native mesurée), le cache se
-    //    vidait presque entièrement et les calques s'éteignaient — sans
-    //    erreur, sans trace, et ils se rallumaient seuls. Exactement le
-    //    genre de panne qu'on ne voit jamais en test de jour.
-    //  · Mesuré le 03/08 : 26 des 100 stations sondées n'avaient AUCUN
-    //    relevé de la journée. Elles n'étaient donc jamais affichées,
-    //    même quand leur dernière valeur connue datait de la veille au
-    //    soir et restait parfaitement lisible.
-    // La fusion règle les deux, et elle est le PRÉREQUIS du chantier de
-    // cadence : dès qu'un cycle ne pollera plus qu'une PARTIE du parc
-    // (paliers 10/20/40/60 min par densité de décos), un remplacement
-    // effacerait tout ce qui n'a pas été interrogé à ce tour.
-    // NE PAS revenir à une affectation directe.
-    const fusion = new Map(infoclimatObsCache);
-    let lotsOk = 0, neufs = 0;
-    for (const ids of batches) {
-      const hourly = await fetchInfoclimatBatch(ids, today, today);
-      if (!hourly) continue; // ce lot échoue : on garde les autres plutôt que tout annuler
-      lotsOk++;
-      for (const [id, points] of Object.entries(hourly)) {
-        if (!Array.isArray(points) || !points.length) continue;
-        // dh_utc croissant dans la réponse (vérifié en direct le 17/07) →
-        // le dernier élément est le relevé le plus récent.
-        const parsed = parseInfoclimatPoint(points[points.length - 1]);
-        if (!Number.isFinite(parsed.t)) continue;
-        // Ne jamais RECULER : un lot lent ou une réponse partielle ne
-        // doit pas remplacer un relevé plus récent déjà en cache.
-        const connu = fusion.get(id);
-        if (connu && Number.isFinite(connu.t) && connu.t >= parsed.t) continue;
-        fusion.set(id, parsed);
-        neufs++;
-      }
-    }
-    // Tous les lots en échec (clé refusée, panne réseau, `Wrong ip
-    // address`) : on garde l'état précédent tel quel plutôt que de
-    // périmer un cache qu'on n'a pas pu rafraîchir.
-    if (!lotsOk) return;
-    // Péremption explicite — la contrepartie obligatoire de la fusion.
-    // Sans elle, le dernier relevé d'une station débranchée resterait à
-    // l'écran indéfiniment, et le calque mentirait au lieu de se taire.
+    const doc = await fetchInfoclimatObjet(INFOCLIMAT_LATEST_URL);
+    const meta = doc?.stations || {};
+    const obs = doc?.obs || {};
     const limite = Date.now() - INFOCLIMAT_OBS_MAX_AGE_MS;
-    let perimes = 0;
-    for (const [id, p] of fusion) {
-      if (!(p.t >= limite)) { fusion.delete(id); perimes++; }
+
+    const liste = [];
+    const parId = new Map();
+    const cache = new Map();
+    for (const [id, o] of Object.entries(obs)) {
+      const m = meta[id];
+      if (!m) continue;
+      // ⚠️ Le poller écrit `t` en SECONDES Unix (convention Python) ;
+      //    tout le reste de ce fichier raisonne en MILLISECONDES. La
+      //    conversion se fait ICI, une fois, et pas dans les routes.
+      const t = Number.isFinite(o?.t) ? o.t * 1000 : NaN;
+      if (!Number.isFinite(t) || t < limite) continue; // cf. péremption
+      const s = {
+        id, nom: m.nom, lat: m.lat, lon: m.lon, alt: m.alt ?? null,
+        licenseCode: m.licence_code ?? null,
+        licenseLabel: m.licence ?? null,
+        licenseUrl: m.licence_url ?? null,
+      };
+      liste.push(s);
+      parId.set(id, s);
+      cache.set(id, {
+        t, moy: o.moy ?? null, raf: o.raf ?? null, dir: o.dir ?? null,
+        pressure: o.pres ?? null, temp: o.temp ?? null,
+      });
     }
-    infoclimatObsCache = fusion;
+
+    const age = infoclimatAgeMin(doc);
+    if (age != null && age > INFOCLIMAT_OBS_MAX_AGE_MS / 60000) {
+      infoclimatLastError = `latest.json périmé (${age.toFixed(0)} min) — `
+        + `le poller du VPS ne tourne probablement plus`;
+      console.error(`refreshInfoclimatObs: ${infoclimatLastError}`);
+    } else if (!cache.size) {
+      // Objet frais mais vide : le poller tourne et ne trouve rien. À
+      // dire, parce que c'est indistinguable d'une panne côté client.
+      infoclimatLastError = 'latest.json lu mais aucune station fraîche';
+    } else {
+      infoclimatLastError = null;
+    }
+
+    infoclimatStationsList = liste;
+    infoclimatStationsById = parId;
+    infoclimatObsCache = cache;
     infoclimatObsCacheFetchedAt = Date.now();
-    // Ce module a passé trois semaines à échouer en silence (cache vide
-    // sans erreur le 17/07, `Wrong ip address` en HTTP 200, `status OK`
-    // sans `hourly` le 03/08). Une ligne par cycle — 96 par jour, rien
-    // du tout — pour qu'un cache qui ne bouge plus se voie dans les logs.
-    console.log(`refreshInfoclimatObs: ${lotsOk}/${batches.length} lots · ${neufs} relevés neufs · ${perimes} périmés · ${infoclimatObsCache.size} stations en cache`);
+    console.log(`refreshInfoclimatObs: ${cache.size} stations `
+      + `(objet de ${age == null ? '?' : age.toFixed(0)} min)`);
   } catch (e) {
+    // On garde l'état précédent plutôt que de vider sur un incident
+    // réseau — la péremption ci-dessus s'en chargera si ça dure.
     console.error('refreshInfoclimatObs error:', e.message);
     infoclimatLastError = `refreshObs: ${e.message}`;
   }
 }
 
-async function refreshInfoclimatData() {
-  if (!INFOCLIMAT_API_KEY) return;
-  if (!infoclimatStationsList.length || Date.now() - infoclimatStationsListFetchedAt > INFOCLIMAT_STATIONS_LIST_REFRESH_MS) {
-    await refreshInfoclimatStationsList();
+// Historique — relu sur NOTRE cadence et gardé en RAM, comme mfObsCache.
+// ⚠️ NE PAS le relire à chaque requête client : 444 Ko transiteraient
+//    pour afficher un seul graphe, ce qui déplacerait d'un cran le
+//    gaspillage qu'on vient de retirer chez Infoclimat.
+//
+// Format COLONNAIRE côté objet (tableaux alignés sur `t`, une série
+// absente = entièrement nulle), déplié ici une fois pour toutes en
+// HistoryPoint[] — la même forme que Pioupiou/MF/AEMET, pour ne pas
+// introduire une quatrième convention côté client.
+async function refreshInfoclimatHistory() {
+  try {
+    const doc = await fetchInfoclimatObjet(INFOCLIMAT_HISTORY_URL);
+    const src = doc?.historique || {};
+    const next = new Map();
+    for (const [id, serie] of Object.entries(src)) {
+      const ts = serie?.t;
+      if (!Array.isArray(ts) || !ts.length) continue;
+      const col = nom => (Array.isArray(serie[nom]) ? serie[nom] : null);
+      const moy = col('moy'), raf = col('raf');
+      const dir = col('dir'), pres = col('pres');
+      const pts = [];
+      for (let i = 0; i < ts.length; i++) {
+        // `min` toujours null : Infoclimat n'a pas de notion de minimum
+        // glissant, contrairement à Pioupiou/MF où on le calcule.
+        // `max` = rafale NATIVE quand la station en mesure une —
+        // `vent_rafales` est null sur tout le réseau (limitation connue
+        // et signalée), donc jamais 0 ni faux dans ce cas.
+        pts.push({
+          t: ts[i] * 1000, min: null,
+          avg: moy ? moy[i] ?? null : null,
+          max: raf ? raf[i] ?? null : null,
+          dir: dir ? dir[i] ?? null : null,
+          pressure: pres ? pres[i] ?? null : null,
+        });
+      }
+      next.set(id, pts);
+    }
+    if (next.size) {
+      infoclimatHistory = next;
+      infoclimatHistoryFetchedAt = Date.now();
+    }
+    const age = infoclimatAgeMin(doc);
+    console.log(`refreshInfoclimatHistory: ${next.size} stations `
+      + `(objet de ${age == null ? '?' : age.toFixed(0)} min)`);
+  } catch (e) {
+    console.error('refreshInfoclimatHistory error:', e.message);
+    infoclimatLastError = `refreshHistory: ${e.message}`;
   }
+}
+
+async function refreshInfoclimatData() {
   await refreshInfoclimatObs();
 }
 
@@ -3452,8 +3386,10 @@ app.get('/infoclimat-stations', (req, res) => {
   }
   // Débogage 17/07/2026 — `lastError`/`stationsListCount` en clair dans
   // la réponse (jamais la clé API) pour diagnostiquer à distance un
-  // cache vide (INFOCLIMAT_API_KEY absente, IP Render rejetée par
-  // l'API Infoclimat, etc.) sans avoir besoin des logs Render.
+  // cache vide sans avoir besoin des logs Render. Depuis le 03/08, le
+  // diagnostic le plus probable a changé : ce n'est plus « clé absente »
+  // ni « IP de Render rejetée » (ce serveur n'appelle plus Infoclimat)
+  // mais « objet R2 périmé », c'est-à-dire le poller du VPS arrêté.
   res.json({
     stations: out,
     fetchedAt: infoclimatObsCacheFetchedAt,
@@ -3463,57 +3399,46 @@ app.get('/infoclimat-stations', (req, res) => {
 });
 
 // ── Étape 12 (suite) — Historique d'une station Infoclimat ──────────
-// Contrairement aux stations MF, Infoclimat expose SA PROPRE archive
-// interrogeable sur n'importe quelle période passée : pas besoin de
-// maintenir notre propre buffer RAM ni table Supabase ici, on relaie
-// simplement la requête (avec la clé serveur, jamais exposée côté
-// client) et on reforme la réponse en HistoryPoint[] (même forme que
-// Pioupiou/MF : {t, min, avg, max, dir, pressure}). `min` toujours null
-// (pas de notion de minimum glissant côté Infoclimat, contrairement à
-// Pioupiou/MF où on le calcule nous-mêmes) ; `max` = rafale native si le
-// modèle de station de l'utilisateur en mesure une (beaucoup de stations
-// amateur n'ont pas d'anémomètre à rafale, cf. vent_rafales souvent null
-// constaté en sondage direct le 17/07 — jamais 0/faux dans ce cas).
-// Débogage 17/07/2026 — diagnostic temporaire : l'API Infoclimat exige
-// une IPv4 fixe déclarée par clé (`Wrong ip address` sinon), or Render
-// n'a par défaut qu'une PLAGE d'IP de sortie partagée (74.220.51.0/24 +
-// 74.220.59.0/24, 512 adresses possibles), pas une IP unique garantie.
-// Cette route relaie ipify pour voir l'IP RÉELLE utilisée par CE
-// processus à cet instant — si elle reste stable sur plusieurs appels
-// (l'attribution NAT peut être sticky tant que l'instance ne redémarre
-// pas), Yann peut la déclarer directement chez Infoclimat sans payer de
-// proxy IP fixe. À retirer une fois la question tranchée.
-app.get('/whatismyip', async (req, res) => {
-  try {
-    const r = await fetch('https://api.ipify.org?format=json');
-    const d = await r.json();
-    res.json({ ip: d.ip, checkedAt: new Date().toISOString() });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/infoclimat-history/:id', async (req, res) => {
-  if (!INFOCLIMAT_API_KEY) return res.json({ points: [] });
-  try {
-    const hoursParam = Number(req.query.hours);
-    const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 1), 24 * 14) : 24;
-    const end = new Date();
-    const start = new Date(end.getTime() - hours * 3600 * 1000);
-    const fmt = d => d.toISOString().slice(0, 10);
-    const hourly = await fetchInfoclimatBatch([req.params.id], fmt(start), fmt(end));
-    const raw = hourly?.[req.params.id];
-    if (!Array.isArray(raw)) return res.json({ points: [] });
-    const cutoff = start.getTime();
-    const points = raw.map(p => {
-      const parsed = parseInfoclimatPoint(p);
-      return { t: parsed.t, min: null, avg: parsed.moy, max: parsed.raf, dir: parsed.dir, pressure: parsed.pressure };
-    }).filter(p => Number.isFinite(p.t) && p.t >= cutoff);
-    res.json({ points });
-  } catch (e) {
-    console.error('infoclimat-history error:', e.message);
-    res.json({ points: [] });
-  }
+// RÉÉCRIT LE 03/08/2026, en même temps que le bloc de rafraîchissement.
+//
+// Avant : cette route relayait un appel à Infoclimat, DÉCLENCHÉ PAR UNE
+// REQUÊTE CLIENT, sur une profondeur allant jusqu'à 14 jours. Deux
+// problèmes, dont un de principe :
+//  · elle ne pouvait pas marcher — IP de Render refusée, `Wrong ip
+//    address` en HTTP 200, et le client recevait `{points: []}` sans
+//    savoir pourquoi ;
+//  · un clic de pilote déclenchait un appel chez une association
+//    bénévole. C'est exactement ce que leur page open data demande
+//    d'éviter, et ça ne se plafonne pas.
+//
+// Depuis : servi depuis `infoclimatHistory`, relu de R2 sur NOTRE
+// cadence (cf. refreshInfoclimatHistory). Aucun appel externe déclenché
+// par un client, jamais.
+//
+// ⚠️ PROFONDEUR RAMENÉE À ~30 h. L'archive d'Infoclimat remonte bien
+//    plus loin, mais on ne va plus la chercher à la demande. Le client
+//    ne demande au maximum que `max(7, heure_locale + 2)` heures pour le
+//    graphe de comparaison (ChartModal), soit ~25 h : la profondeur
+//    retenue côté poller (HISTORY_HEURES) couvre ce besoin avec marge.
+//    Si un écran devait un jour demander plusieurs jours, c'est la
+//    rétention du POLLER qu'il faudrait remonter — et son coût est en
+//    octets R2, pas en appels chez eux.
+//
+// Forme de sortie inchangée : HistoryPoint[] {t, min, avg, max, dir,
+// pressure}, identique à Pioupiou/MF/AEMET. `min` toujours null (pas de
+// minimum glissant chez Infoclimat) ; `max` = rafale native quand la
+// station en mesure une — `vent_rafales` est null sur tout le réseau
+// (limitation connue et signalée), jamais 0 ni faux dans ce cas.
+app.get('/infoclimat-history/:id', (req, res) => {
+  const pts = infoclimatHistory.get(req.params.id);
+  if (!pts) return res.json({ points: [], fetchedAt: infoclimatHistoryFetchedAt });
+  const hoursParam = Number(req.query.hours);
+  const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 1), 48) : 24;
+  const cutoff = Date.now() - hours * 3600 * 1000;
+  res.json({
+    points: pts.filter(p => p.t >= cutoff),
+    fetchedAt: infoclimatHistoryFetchedAt,
+  });
 });
 
 // ── AEMET (Espagne), ajout 22/07/2026 — stations (lecture seule) ────
@@ -4732,8 +4657,16 @@ app.listen(PORT, async () => {
   setInterval(pollAndNotify, POLL_MS);
   refreshMeteoFranceData(); // no-op silencieux si METEOFRANCE_API_KEY absente
   setInterval(refreshMeteoFranceData, MF_OBS_POLL_MS);
-  refreshInfoclimatData(); // no-op silencieux si INFOCLIMAT_API_KEY absente
+  // Infoclimat — LECTURE d'objets R2 écrits par le VPS, jamais un appel
+  // chez Infoclimat (cf. le bloc de rafraîchissement). Dégradation
+  // silencieuse si le poller n'a jamais tourné : objets absents, caches
+  // vides, aucun crash.
+  refreshInfoclimatData();
   setInterval(refreshInfoclimatData, INFOCLIMAT_OBS_POLL_MS);
+  // L'historique a sa PROPRE cadence, 6× plus lente : l'objet est 14×
+  // plus gros et le poller ne le réécrit que toutes les 30 min.
+  refreshInfoclimatHistory();
+  setInterval(refreshInfoclimatHistory, INFOCLIMAT_HISTORY_POLL_MS);
   refreshAemetData(); // no-op silencieux si AEMET_API_KEY absente
   setInterval(refreshAemetData, AEMET_OBS_POLL_MS);
   // Étape 28 — détecteur de front de rafales. No-op silencieux si
