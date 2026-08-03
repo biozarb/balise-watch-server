@@ -1,0 +1,60 @@
+# ══════════════════════════════════════════════════════════════════════
+#  balise-infoclimat.service — le poller Infoclimat (03/08/2026)
+#
+#  ⚠️ SERVICE SÉPARÉ DE balise-entretien.service, délibérément.
+#     L'entretien tourne une fois par jour à 06:30 ; celui-ci toutes les
+#     5 minutes. Deux cadences, deux verrous, deux journaux, deux checks
+#     Healthchecks. Les fondre ferait tourner l'un 288 fois par jour ou
+#     l'autre une seule — les deux sont des pannes.
+#
+#  Installation :
+#    sudo cp balise-infoclimat.{service,timer} /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now balise-infoclimat.timer
+#
+#  ⚠️ Type=oneshot et PAS Restart=. Un poll qui échoue ne doit JAMAIS
+#     être relancé automatiquement : la clé Infoclimat est liée à une IP
+#     et l'association est bénévole — une boucle de réessai est
+#     exactement ce que leur page open data demande d'éviter. L'échec est
+#     repris au cycle suivant, 5 minutes plus tard, et poller.sh alerte
+#     au troisième échec consécutif.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Poller Infoclimat Balise Watch (stations StatIC vers R2)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/traces/infoclimat/README.md
+# Le script sort sur Internet dès la première seconde : sans cette
+# dépendance, un démarrage au boot part avant que le réseau soit prêt.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+ExecStart=/home/debian/balise-watch/balise-watch-server/traces/infoclimat/poller.sh
+
+# Le chien de garde de poller.sh est à 8 min ; celui-ci est la ceinture
+# par-dessus la bretelle, au cas où le script se bloquerait avant
+# d'armer le sien. Un run mesuré dure ~30 s au démarrage à froid
+# (13 lots) et quelques secondes en régime.
+TimeoutStartSec=10min
+
+# ── Cloisonnement ────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ⚠️ Le dossier doit EXISTER avant le premier démarrage : un
+#    ReadWritePaths pointant sur un chemin absent fait échouer le
+#    montage, et le service ne démarre pas (piège rencontré le 03/08 sur
+#    l'entretien).
+ReadWritePaths=/home/debian/.balise-watch-infoclimat
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

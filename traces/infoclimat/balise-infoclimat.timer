@@ -1,0 +1,40 @@
+# ══════════════════════════════════════════════════════════════════════
+#  balise-infoclimat.timer — toutes les 5 minutes (03/08/2026)
+#
+#  POURQUOI 5 MIN alors que la cadence la plus rapide est de 10 :
+#  le poller ne poll pas « tout le monde à chaque réveil ». Il regarde
+#  QUI EST DÛ, station par station, d'après l'horodatage de son dernier
+#  poll. Un réveil où rien n'est dû sort sans un seul appel (mesuré :
+#  « rien à poller à ce cycle — sortie sans un appel »).
+#
+#  Se réveiller deux fois plus souvent que le palier le plus rapide
+#  évite qu'une station à 10 min ne dérive à 15 : avec un timer à
+#  10 min, le moindre retard fait rater le créneau et double l'attente.
+#  Le coût d'un réveil à vide est nul ; celui d'un créneau raté se voit
+#  sur la carte.
+#
+#  ⚠️ NE PAS DESCENDRE SOUS 5 MIN « pour être plus réactif » sans
+#     remesurer la cadence NATIVE des stations. Elles mesurent toutes
+#     les 10 à 14,7 min (relevé station par station le 02/08) : poller
+#     plus vite rend la MÊME valeur une deuxième fois, et le poller la
+#     jette. Le plancher est dans le code (PLANCHER_MIN), pas ici.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Déclenche le poller Infoclimat toutes les 5 minutes
+Documentation=file:/home/debian/balise-watch/balise-watch-server/traces/infoclimat/README.md
+
+[Timer]
+OnCalendar=*:0/5
+# Un run manqué (machine éteinte, reboot) ne se rattrape PAS : une
+# observation météo de tout à l'heure n'a aucun intérêt, et la
+# rattraper coûterait un appel chez eux pour rien. C'est l'inverse du
+# choix fait pour l'entretien, où Persistent=true a un sens parce qu'une
+# journée de pack manquante, elle, ne revient jamais.
+Persistent=false
+# Ne pas taper à la seconde pile : un usage légitime ne ressemble pas à
+# un métronome. Coût pour nous, nul.
+RandomizedDelaySec=45
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
