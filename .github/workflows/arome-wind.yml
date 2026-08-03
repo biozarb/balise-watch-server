@@ -45,6 +45,13 @@ jobs:
           # ⚠️ « Re-run jobs » rejoue l'ANCIEN commit : après un push,
           # utiliser « Run workflow », sinon on croit que le patch ne
           # marche pas (piège du 30/07, 798 tuiles recréées).
+          # 03/08/2026 — sans ça, `print()` est bufferisé par blocs de 8 Ko
+          # quand la sortie ne va pas vers un terminal : les logs du run
+          # n'apparaissent qu'À LA FIN, d'un seul coup. Or le garde-fou
+          # n°1 repose sur la lecture du cadre DIMENSIONNEMENT et de la
+          # ligne [compteurs] — les lire APRÈS coup, sur un run qui a
+          # déjà écrit, c'est se priver de la seule occasion de couper.
+          PYTHONUNBUFFERED: "1"
           STORAGE_BACKEND: ${{ vars.STORAGE_BACKEND_WIND }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
