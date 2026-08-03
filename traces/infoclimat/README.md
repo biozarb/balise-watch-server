@@ -116,10 +116,24 @@ côté Render, ça change une constante d'URL, rien d'autre. Il porte les
 métadonnées ET la dernière observation des stations fraîches (< 90 min).
 
 **`history.json`** est au **format colonnaire** : chaque station porte
-des tableaux ALIGNÉS sur `t`. Une série absente = entièrement nulle
-(`raf` l'est partout, limitation connue d'Infoclimat). Un trou = `null`
-à sa position — ne jamais compacter les séries indépendamment, ça
-afficherait un vent à la mauvaise heure.
+des tableaux ALIGNÉS sur `t`. Une série absente = entièrement nulle.
+Un trou = `null` à sa position — ne jamais compacter les séries
+indépendamment, ça afficherait un vent à la mauvaise heure.
+
+> ⚠️ **`raf` n'est PAS null partout.** Ce document l'a écrit jusqu'au
+> 03/08, sur la foi de 8 stations sondées le matin. Mesuré le soir sur
+> l'objet réel : **25 stations sur 865 publient de vraies rafales**,
+> souvent 140 à 178 points sur 30 h, avec un facteur rafale/moyenne
+> allant de **1,1 à 4,1**. C'est justement l'omission des séries nulles
+> qui masquait le fait : chez les 840 autres la clé `raf` DISPARAÎT au
+> lieu d'apparaître pleine de `null`, ce qui ressemble à une absence
+> générale quand on regarde une station au hasard.
+>
+> Conséquence pratique : **ne jamais reconstituer une rafale** à partir
+> de la moyenne pour combler le trou. Le facteur varie du simple au
+> quadruple d'une station à l'autre — une rafale déduite serait fausse,
+> et fausse dans le sens qui la sous-estime. Côté PWA, l'absence est
+> dite (« Rafale non fournie par cette station »), pas comblée.
 
 > ⚠️ **Render doit le relire sur SA cadence et le garder en RAM**, comme
 > `mfObsCache`, puis servir une station à la fois. Le relire à chaque

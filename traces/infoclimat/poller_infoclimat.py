@@ -49,8 +49,17 @@ R2 (03/08/2026).
    aujourd'hui. C'est la seule ligne de ce fichier dont l'oubli ne
    casse rien de visible tout en multipliant la charge par 35.
 
-⚠️ `vent_rafales` est null partout — limitation connue d'Infoclimat,
-   signalée par d'autres réutilisateurs. Pas un bug d'ici.
+⚠️ `vent_rafales` est RARE, pas absent. Il était écrit ici « null
+   partout » jusqu'au 03/08 : c'était faux, et l'erreur venait de
+   l'échantillon de 8 stations sondé ce matin-là. Mesuré le soir sur
+   `history.json` en prod : **25 stations sur 865 publient de vraies
+   rafales**, souvent 140 à 178 points sur 30 h, facteur rafale/moyenne
+   de 1,1 à 4,1. Les 840 autres n'en mesurent pas — anémomètres amateur.
+   Le format colonnaire rendait l'erreur invisible : il OMET les séries
+   entièrement nulles, donc `raf` disparaît chez les 840 au lieu
+   d'apparaître pleine de null. Ne jamais en déduire que le champ est
+   inutile, et ne jamais reconstituer une rafale à partir de la moyenne
+   pour combler le trou : le facteur va de 1,1 à 4,1 selon la station.
 
 ⚠️ LA LICENCE VARIE D'UNE STATION À L'AUTRE, dans un rayon de 20 km :
    `CC BY`, `NON-COMMERCIAL ONLY: CC BY NC`, `Etalab`. Elle voyage donc
@@ -493,7 +502,11 @@ def parse_point(raw):
     return {
         "t": int(t),
         "moy": arrondi(num(raw.get("vent_moyen")), 1),
-        "raf": arrondi(num(raw.get("vent_rafales")), 1),  # null partout
+        # ⚠️ PAS null partout, contrairement à ce qui était écrit ici
+        # jusqu'au 03/08 : 25 stations sur 865 publient de vraies
+        # rafales (mesuré sur history.json en prod). L'erreur venait de
+        # l'échantillon de 8 stations du matin. Ne pas retirer ce champ.
+        "raf": arrondi(num(raw.get("vent_rafales")), 1),
         "dir": arrondi(num(raw.get("vent_direction")), 0),
         "pres": arrondi(num(raw.get("pression")), 1),
         "temp": arrondi(num(raw.get("temperature")), 1),

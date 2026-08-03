@@ -2393,9 +2393,21 @@ async function refreshInfoclimatHistory() {
       for (let i = 0; i < ts.length; i++) {
         // `min` toujours null : Infoclimat n'a pas de notion de minimum
         // glissant, contrairement à Pioupiou/MF où on le calcule.
-        // `max` = rafale NATIVE quand la station en mesure une —
-        // `vent_rafales` est null sur tout le réseau (limitation connue
-        // et signalée), donc jamais 0 ni faux dans ce cas.
+        //
+        // `max` = rafale NATIVE quand la station en mesure une, null
+        // sinon — jamais 0, jamais une valeur reconstituée.
+        //
+        // ⚠️ CORRIGÉ LE 03/08/2026 : il était écrit ici que
+        // `vent_rafales` était « null sur tout le réseau ». C'EST FAUX.
+        // Relevé sur `history.json` en prod : **25 stations sur 865**
+        // publient de vraies rafales, souvent 140 à 178 points sur 30 h,
+        // avec des facteurs rafale/moyenne de 1,1 à 4,1. L'erreur venait
+        // de l'échantillon de 8 stations sondé le matin même, et le
+        // format colonnaire la rendait invisible : il OMET les séries
+        // entièrement nulles, donc la clé `raf` disparaît chez les 840
+        // autres au lieu d'apparaître pleine de null.
+        // Le code ci-dessous était juste — c'est la seule raison pour
+        // laquelle ces 25 stations n'ont jamais rien perdu.
         pts.push({
           t: ts[i] * 1000, min: null,
           avg: moy ? moy[i] ?? null : null,
@@ -3427,8 +3439,10 @@ app.get('/infoclimat-stations', (req, res) => {
 // Forme de sortie inchangée : HistoryPoint[] {t, min, avg, max, dir,
 // pressure}, identique à Pioupiou/MF/AEMET. `min` toujours null (pas de
 // minimum glissant chez Infoclimat) ; `max` = rafale native quand la
-// station en mesure une — `vent_rafales` est null sur tout le réseau
-// (limitation connue et signalée), jamais 0 ni faux dans ce cas.
+// station en mesure une, null sinon — jamais 0 ni reconstitué.
+// ⚠️ 03/08/2026 — il était écrit ici que `vent_rafales` était null sur
+// tout le réseau : FAUX, 25 stations sur 865 en publient. Détail et
+// mesure dans le commentaire du dépliage colonnaire (~ligne 2394).
 app.get('/infoclimat-history/:id', (req, res) => {
   const pts = infoclimatHistory.get(req.params.id);
   if (!pts) return res.json({ points: [], fetchedAt: infoclimatHistoryFetchedAt });
