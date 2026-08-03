@@ -37,12 +37,18 @@ Différences avec arome-thermal/ingest.py :
   - Tuiles publiées sous `wind-grid/arpege/thermal/` (PAS `arome/thermal/`)
     : calque distinct, ne remplace rien.
 
-Variables d'environnement requises (secrets GitHub), identiques à
-arome-thermal/ingest.py :
-  SUPABASE_URL, SUPABASE_SERVICE_KEY   (WIND_GRID_BUCKET optionnel, défaut wind-grid)
-  DRY_RUN=1 pour tester le calcul/tuilage sans téléverser.
+Stockage (03/08/2026) : l'upload passe par `tools/storage.py`, un seul
+module pour les 5 chaînes, avec deux implémentations derrière la même
+signature. La destination se choisit par variable d'environnement :
+
+  STORAGE_BACKEND   supabase (défaut) | r2 | both
+  SUPABASE_URL, SUPABASE_SERVICE_KEY      — requis si backend supabase/both
+  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY, R2_BUCKET         — requis si backend r2/both
+  WIND_GRID_BUCKET optionnel, défaut wind-grid
+  DRY_RUN=1 pour tester le calcul/tuilage sans rien téléverser.
 """
-import os, re, json, math, time, tempfile, urllib.parse, urllib.request, urllib.error
+import os, re, sys, json, math, time, tempfile, urllib.parse, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
@@ -90,11 +96,17 @@ MODEL_KEY = "arpege_seamless"        # cf. types/openmeteo.ts (OpenMeteoModelKey
 DAY_UTC_START, DAY_UTC_END = 4, 19
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
-SB_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SB_KEY  = os.environ.get("SUPABASE_SERVICE_KEY", "")
 BUCKET  = os.environ.get("WIND_GRID_BUCKET", "wind-grid")
-if not DRY_RUN and not (SB_URL and SB_KEY):
-    raise SystemExit("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (ou DRY_RUN=1)")
+# 03/08/2026 — SB_URL/SB_KEY et le garde-fou de démarrage qui étaient ici
+# ont disparu : plus une seule ligne de ce fichier ne parle à Supabase en
+# direct, tout passe par `tools/storage.py`. La vérification des
+# identifiants y a été déplacée (`_Supabase.__init__`), et elle y est
+# devenue BACKEND-AWARE — ce qui était le vrai défaut de la version
+# précédente : elle exigeait des identifiants Supabase même pour un run
+# qui n'écrit QUE dans R2, donc elle aurait fait échouer toutes les
+# chaînes le jour où on retire les secrets Supabase du dépôt.
+# Elle se déclenche toujours AVANT la première écriture : `Storage()` est
+# construit en tête de `main()`, juste après le dimensionnement.
 
 _RUN_HOUR_UTC = None        # défini dans main(), cf. keep_step()
 
@@ -292,49 +304,61 @@ def build_tiles(state, kept, times):
     return tiles
 
 # ── Upload Supabase Storage (identique à arome-thermal/ingest.py) ─────
-def sb_upload(path, body, tries=3, cache_control="no-cache, must-revalidate"):
-    """Débogage 24/07/2026 : même bug que `arome-wind/ingest.py` (cf.
-    BUGS.md session 24/07, calques vent figés sur certains ordis) — ce
-    bucket n'a que des objets réécrits EN PLACE à chaque run (tuiles
-    `thermal/{lat}_{lon}.json` + `thermal/manifest.json`, même chemin,
-    aucun horodatage dans le nom), donc rien d'"immuable" ici. L'ancien
-    `Cache-Control: max-age=10800` pouvait laisser un navigateur/CDN
-    servir une tuile périmée bien après un nouveau run, sans que le
-    hard-refresh corrige (comportement d'edge CDN, hors de portée du
-    client). `no-cache, must-revalidate` par défaut : revalidation
-    conditionnelle systématique plutôt qu'une fraîcheur supposée 3h."""
-    if DRY_RUN:
-        return 0
-    url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
-    last = None
-    for attempt in range(tries):
-        req = urllib.request.Request(
-            url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
-                "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
-                "Content-Type": "application/json", "x-upsert": "true",
-                "Cache-Control": cache_control})
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            try:
-                detail = e.read()[:300].decode("utf-8", "replace")
-            except Exception:
-                detail = ""
-            last = f"HTTP {e.code} — {detail}"
-        except Exception as e:
-            last = f"{type(e).__name__}: {e}"
-        print(f"  ⚠️ upload {path} tentative {attempt + 1}/{tries} : {last}")
-        time.sleep(1 + 2 * attempt)
-    raise SystemExit(f"sb_upload {path} : échec après {tries} tentatives — {last}")
+# ── Upload : adaptateur vers le module partagé ────────────────────────
+# 03/08/2026 — `sb_upload()` existait en CINQ exemplaires quasi
+# identiques (une par chaîne d'ingestion), chacun avec sa propre copie de
+# la leçon Cache-Control des 23-24/07 recopiée en docstring. Même motif
+# de dette que les 4 copies du calcul de features. Le corps est désormais
+# dans `tools/storage.py`, avec DEUX implémentations derrière la même
+# signature (Supabase Storage / Cloudflare R2), choisies par la variable
+# d'environnement `STORAGE_BACKEND` (`supabase` | `r2` | `both`).
+#
+# Ce qui reste ici est un adaptateur : aucun appelant ne change, et la
+# bascule de CETTE chaîne se fait par une variable d'environnement — donc
+# une chaîne à la fois, et un retour en arrière sans toucher au code.
+#
+# ⚠️ Le défaut `CACHE_REECRIT` (= `no-cache, must-revalidate`) reprend à
+# l'identique la politique posée le 24/07/2026, et NE DOIT PAS BOUGER :
+# ce bucket n'a QUE des objets réécrits EN PLACE à chaque run (tuiles +
+# manifest, même chemin, aucun horodatage dans la clé). Un TTL long y
+# laisserait un navigateur — ou un edge CDN, hors de portée du client —
+# servir une grille périmée bien après un nouveau run, hard-refresh sans
+# effet (cf. BUGS.md, session 23-24/07).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "tools"))
+from storage import (Storage, verifier_dimensionnement, Abort,   # noqa: E402
+                     CACHE_REECRIT, CACHE_IMMUABLE)
+
+# Instancié dans main(), APRÈS verifier_dimensionnement() : on chiffre
+# avant d'écrire, jamais l'inverse (garde-fou n°1).
+STORE = None
+
+
+def sb_upload(path, body, cache_control=CACHE_REECRIT):
+    return STORE.put(path, body, cache_control=cache_control)
 
 
 # ── main ──────────────────────────────────────────────────────────────
 def main():
-    global _RUN_HOUR_UTC
+    global _RUN_HOUR_UTC, STORE
     ref, run = latest_run()
     _RUN_HOUR_UTC = run.hour
     print(f"Run ARPEGE : {ref} (run à {_RUN_HOUR_UTC}h UTC)")
+
+    # ── Chiffrer AVANT d'écrire (garde-fou n°1) ───────────────────────
+    # Comptes RÉELS relevés le 03/08/2026 : 229 objets sous
+    # `arpege/thermal/`, 4 runs/jour. ⚠️ Le prompt de reprise du 02/08
+    # projetait 962 tuiles pour cette chaîne (BBOX Europe d'origine) et
+    # en concluait qu'elle pesait 45 % du total des écritures. La BBOX a
+    # été réduite le 30/07 : c'est 229, soit 17 %. L'arbitrage « la
+    # réduire avant de migrer » est sans objet — il est déjà fait.
+    # Ces nombres sont le SEUL garde-fou contre une dérive silencieuse :
+    # relever MAX_HOURS, ajouter un niveau ou élargir la BBOX les fait
+    # bouger, et la ligne journalisée à chaque run le montre au run près
+    # plutôt qu'au relevé mensuel — R2 n'a pas de plafond de dépense.
+    plafond = verifier_dimensionnement("arpege-thermal", objets_par_run=229,
+                                       runs_par_jour=4, mo_par_run=31)
+    STORE = Storage("arpege-thermal", "WIND_GRID_BUCKET", "wind-grid", plafond)
 
     kept = [h for h in range(0, MAX_HOURS + 1) if keep_step(h)]
     if not kept:
@@ -375,6 +399,7 @@ def main():
     sb_upload(f"{MODEL_DIR}/thermal/manifest.json", json.dumps(manifest).encode())
     print(f"Terminé : {total} tuiles + manifest "
           f"{'(DRY_RUN, rien téléversé)' if DRY_RUN else f'téléversés dans {BUCKET}'}.")
+    STORE.bilan()
 
 if __name__ == "__main__":
     main()

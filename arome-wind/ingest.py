@@ -15,10 +15,18 @@ Sortie par (kind, level, tuile), format IDENTIQUE à l'ancienne route
 /wind-grid (cf. web/src/types/openmeteo.ts, interface WindGrid) : côté client,
 seule l'URL source change.
 
-Variables d'environnement requises (secrets GitHub) :
-  SUPABASE_URL, SUPABASE_SERVICE_KEY   (WIND_GRID_BUCKET optionnel, défaut wind-grid)
+Stockage (03/08/2026) : l'upload passe par `tools/storage.py`, un seul
+module pour les 5 chaînes, avec deux implémentations derrière la même
+signature. La destination se choisit par variable d'environnement :
+
+  STORAGE_BACKEND   supabase (défaut) | r2 | both
+  SUPABASE_URL, SUPABASE_SERVICE_KEY      — requis si backend supabase/both
+  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY, R2_BUCKET         — requis si backend r2/both
+  WIND_GRID_BUCKET optionnel, défaut wind-grid
+  DRY_RUN=1 pour tester le calcul/tuilage sans rien téléverser.
 """
-import os, re, json, math, time, tempfile, urllib.parse, urllib.request
+import os, re, sys, json, math, time, tempfile, urllib.parse, urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
@@ -185,11 +193,17 @@ def elev_at(orog, lat, lon):
     return None if v is None else round(float(v))
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"     # tests : parse/tuilage sans upload
-SB_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SB_KEY  = os.environ.get("SUPABASE_SERVICE_KEY", "")
 BUCKET  = os.environ.get("WIND_GRID_BUCKET", "wind-grid")
-if not DRY_RUN and not (SB_URL and SB_KEY):
-    raise SystemExit("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (ou DRY_RUN=1)")
+# 03/08/2026 — SB_URL/SB_KEY et le garde-fou de démarrage qui étaient ici
+# ont disparu : plus une seule ligne de ce fichier ne parle à Supabase en
+# direct, tout passe par `tools/storage.py`. La vérification des
+# identifiants y a été déplacée (`_Supabase.__init__`), et elle y est
+# devenue BACKEND-AWARE — ce qui était le vrai défaut de la version
+# précédente : elle exigeait des identifiants Supabase même pour un run
+# qui n'écrit QUE dans R2, donc elle aurait fait échouer toutes les
+# chaînes le jour où on retire les secrets Supabase du dépôt.
+# Elle se déclenche toujours AVANT la première écriture : `Storage()` est
+# construit en tête de `main()`, juste après le dimensionnement.
 
 # ── HTTP / S3 helpers ─────────────────────────────────────────────────
 def http_get(url, timeout=180):
@@ -442,53 +456,38 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
     return tiles
 
 # ── Upload Supabase Storage ───────────────────────────────────────────
-def sb_upload(path, body, tries=3, cache_control="no-cache, must-revalidate"):
-    """Téléverse un objet. Débogage 19/07/2026 : la version précédente
-    laissait remonter un `HTTPError: 400` NU, sans le corps de réponse —
-    donc impossible de savoir ce que Supabase reprochait. On journalise
-    désormais le message, et on réessaie (POST puis PUT : selon les
-    versions de storage-api, un upsert refusé remonte un 400 plutôt qu'un
-    409, et PUT passe alors sans ambiguïté).
+# ── Upload : adaptateur vers le module partagé ────────────────────────
+# 03/08/2026 — `sb_upload()` existait en CINQ exemplaires quasi
+# identiques (une par chaîne d'ingestion), chacun avec sa propre copie de
+# la leçon Cache-Control des 23-24/07 recopiée en docstring. Même motif
+# de dette que les 4 copies du calcul de features. Le corps est désormais
+# dans `tools/storage.py`, avec DEUX implémentations derrière la même
+# signature (Supabase Storage / Cloudflare R2), choisies par la variable
+# d'environnement `STORAGE_BACKEND` (`supabase` | `r2` | `both`).
+#
+# Ce qui reste ici est un adaptateur : aucun appelant ne change, et la
+# bascule de CETTE chaîne se fait par une variable d'environnement — donc
+# une chaîne à la fois, et un retour en arrière sans toucher au code.
+#
+# ⚠️ Le défaut `CACHE_REECRIT` (= `no-cache, must-revalidate`) reprend à
+# l'identique la politique posée le 24/07/2026, et NE DOIT PAS BOUGER :
+# ce bucket n'a QUE des objets réécrits EN PLACE à chaque run (tuiles +
+# manifest, même chemin, aucun horodatage dans la clé). Un TTL long y
+# laisserait un navigateur — ou un edge CDN, hors de portée du client —
+# servir une grille périmée bien après un nouveau run, hard-refresh sans
+# effet (cf. BUGS.md, session 23-24/07).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "tools"))
+from storage import (Storage, verifier_dimensionnement, Abort,   # noqa: E402
+                     CACHE_REECRIT, CACHE_IMMUABLE)
 
-    Débogage 24/07/2026 (retour Yann : calques vent sol/altitude figés sur
-    certains ordis, données bloquées à échéance passée, hard-refresh sans
-    effet — mobile OK). Root cause : ce bucket n'a QUE des objets réécrits
-    EN PLACE à chaque run (tuiles sol/alt + manifest.json, même chemin) —
-    aucun n'est "immuable" comme les geojson isobares par échéance.
-    L'ancien `Cache-Control: max-age=10800` (calé sur la cadence 3h du
-    run) reproduisait le bug déjà identifié sur le manifest isobares (cf.
-    BUGS.md, session 23-24/07, "leçon générale à retenir" : un objet
-    Storage réécrit doit avoir un cache court/no-cache, jamais un TTL
-    long — un client ayant mis en cache juste avant un nouveau run reste
-    bloqué sur l'ancien jusqu'à expiration du TTL LOCAL, et un edge CDN
-    peut rester figé plus longtemps encore, indépendamment d'un
-    hard-refresh côté client). `no-cache, must-revalidate` par défaut :
-    revalidation systématique (conditionnelle via ETag, pas un aller-
-    retour plein à chaque fois) plutôt qu'une fraîcheur supposée 3h."""
-    if DRY_RUN:
-        return 0
-    url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
-    last = None
-    for attempt in range(tries):
-        req = urllib.request.Request(
-            url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
-                "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
-                "Content-Type": "application/json", "x-upsert": "true",
-                "Cache-Control": cache_control})
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            try:
-                detail = e.read()[:300].decode("utf-8", "replace")
-            except Exception:
-                detail = ""
-            last = f"HTTP {e.code} — {detail}"
-        except Exception as e:                       # réseau, timeout…
-            last = f"{type(e).__name__}: {e}"
-        print(f"  ⚠️ upload {path} tentative {attempt + 1}/{tries} : {last}")
-        time.sleep(1 + 2 * attempt)
-    raise SystemExit(f"sb_upload {path} : échec après {tries} tentatives — {last}")
+# Instancié dans main(), APRÈS verifier_dimensionnement() : on chiffre
+# avant d'écrire, jamais l'inverse (garde-fou n°1).
+STORE = None
+
+
+def sb_upload(path, body, cache_control=CACHE_REECRIT):
+    return STORE.put(path, body, cache_control=cache_control)
 
 def download_tmp(key):
     """Télécharge un objet S3 (gros GRIB) vers un fichier temporaire."""
@@ -532,10 +531,23 @@ def steps_times(run, *dicts):
     return steps, times
 
 def main():
-    global _RUN_HOUR_UTC
+    global _RUN_HOUR_UTC, STORE
     ref, run = pick_run()
     _RUN_HOUR_UTC = run.hour
     print(f"Run AROME : {ref}")
+
+    # ── Chiffrer AVANT d'écrire (garde-fou n°1) ───────────────────────
+    # Comptes RÉELS du bucket relevés le 03/08/2026 par
+    # `tools/audit_storage.py` : 63 tuiles sol + 441 tuiles altitude
+    # (63 × 7 niveaux) + 1 manifest = 505/run, 8 runs/jour, 588 Mo.
+    # Ces nombres sont le SEUL garde-fou contre une dérive silencieuse :
+    # relever MAX_HOURS, ajouter un niveau ou élargir la BBOX les fait
+    # bouger, et la ligne journalisée à chaque run le montre au run près
+    # plutôt qu'au relevé mensuel — R2 n'a pas de plafond de dépense.
+    plafond = verifier_dimensionnement("arome-wind", objets_par_run=505,
+                                       runs_par_jour=8, mo_par_run=588)
+    STORE = Storage("arome-wind", "WIND_GRID_BUCKET", "wind-grid", plafond)
+
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
                     .strftime("%Y-%m-%dT%H:%M:%SZ"), gridSol=GRID_SOL, gridAlt=GRID_ALT,
                     tileDeg=TILE_DEG, stepSol=STEP_SOL, stepAlt=STEP_ALT,
@@ -588,6 +600,7 @@ def main():
     manifest["uploaded"] = total
     sb_upload(f"{MODEL_DIR}/manifest.json", json.dumps(manifest).encode())
     print(f"Terminé : {total} tuiles + manifest téléversés dans '{BUCKET}'.")
+    STORE.bilan()
 
 if __name__ == "__main__":
     main()

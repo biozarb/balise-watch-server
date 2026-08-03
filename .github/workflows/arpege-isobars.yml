@@ -34,4 +34,26 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-        run: python ingest.py
+          # ── Bascule Supabase → R2, une chaîne à la fois (03/08/2026) ──
+          # `STORAGE_BACKEND` est une VARIABLE de dépôt (Settings →
+          # Variables), pas un secret : elle n'a rien de confidentiel et
+          # on veut la voir dans l'interface. Valeurs : `supabase`
+          # (défaut si vide, comportement d'avant), `r2`, ou `both`
+          # (double écriture — utile seulement pour les clés horodatées
+          # des isobares, cf. tools/storage.py §3).
+          # Basculer CETTE chaîne = changer cette variable, rien d'autre.
+          # Revenir en arrière aussi. Aucun code à toucher.
+          #
+          # ⚠️ Le jeton R2 doit être restreint AU SEUL bucket, en portée
+          # « lecture/écriture objet » — jamais « administrateur ».
+          # ⚠️ « Re-run jobs » rejoue l'ANCIEN commit : après un push,
+          # utiliser « Run workflow », sinon on croit que le patch ne
+          # marche pas (piège du 30/07, 798 tuiles recréées).
+          STORAGE_BACKEND: ${{ vars.STORAGE_BACKEND_ISOBARS }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET_ISOBARS }}
+        run: |
+          pip install --quiet boto3
+          python ingest.py

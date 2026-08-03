@@ -85,7 +85,16 @@ KK7_URL = "https://thermal.kk7.ch/tiles/wmts/{style}/{z}/{x}/{y}.png?src={src}"
 KK7_MAX_Z = 12          # zoom natif max de la couche thermals
 DEM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png"
 SB_URL = "https://dfufrvpoezglxxtunjni.supabase.co"
-THERMAL_TILE_URL = SB_URL + "/storage/v1/object/public/wind-grid/arome/thermal/{lat}_{lon}.json"
+# 03/08/2026 — surchargeable pour suivre la migration vers R2 sans
+# retoucher ce script (`export WIND_GRID_BASE_URL=https://pub-….r2.dev`).
+# Défaut = Supabase, donc rien ne change tant qu'on ne définit rien.
+# Miroir de `WIND_GRID_BASE_URL` dans web/src/lib/config.ts : ce script
+# lit EXACTEMENT les mêmes tuiles que le client, et c'est tout son
+# intérêt — le jour où les deux divergent, la comparaison avec kk7 ne
+# valide plus ce que voient les pilotes.
+WIND_GRID_BASE_URL = os.environ.get(
+    "WIND_GRID_BASE_URL") or SB_URL + "/storage/v1/object/public/wind-grid"
+THERMAL_TILE_URL = WIND_GRID_BASE_URL + "/arome/thermal/{lat}_{lon}.json"
 TILE_DEG = 2            # WIND_GRID_TILE_DEG côté client
 TILE_PX = 256
 

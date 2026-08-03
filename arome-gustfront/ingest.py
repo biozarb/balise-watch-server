@@ -61,13 +61,19 @@ MAX_HOURS = 24        # préavis visé 3 h à 24 h (§0). Au-delà, l'incertitud
 LAT_MIN, LAT_MAX = 41.0, 51.6
 LON_MIN, LON_MAX = -5.5, 10.0
 
-SB_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SB_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 BUCKET = os.environ.get("WIND_GRID_BUCKET", "wind-grid")
 OUT_KEY = f"{MODEL_DIR}/gustfront/grid.json"
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
-if not DRY_RUN and not (SB_URL and SB_KEY):
-    raise SystemExit("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (ou DRY_RUN=1)")
+# 03/08/2026 — SB_URL/SB_KEY et le garde-fou de démarrage qui étaient ici
+# ont disparu : plus une seule ligne de ce fichier ne parle à Supabase en
+# direct, tout passe par `tools/storage.py`. La vérification des
+# identifiants y a été déplacée (`_Supabase.__init__`), et elle y est
+# devenue BACKEND-AWARE — ce qui était le vrai défaut de la version
+# précédente : elle exigeait des identifiants Supabase même pour un run
+# qui n'écrit QUE dans R2, donc elle aurait fait échouer toutes les
+# chaînes le jour où on retire les secrets Supabase du dépôt.
+# Elle se déclenche toujours AVANT la première écriture : `Storage()` est
+# construit en tête de `main()`, juste après le dimensionnement.
 
 MISSING_SENTINEL = 9999.0   # valeur manquante encodée par eccodes (pas NaN)
 
@@ -229,39 +235,38 @@ def pick(values, k, field):
     return v
 
 
-def sb_upload(path, body, tries=3):
-    """Même politique de cache que arome-wind : `no-cache, must-revalidate`.
+# ── Upload : adaptateur vers le module partagé ────────────────────────
+# 03/08/2026 — `sb_upload()` existait en CINQ exemplaires quasi
+# identiques (une par chaîne d'ingestion), chacun avec sa propre copie de
+# la leçon Cache-Control des 23-24/07 recopiée en docstring. Même motif
+# de dette que les 4 copies du calcul de features. Le corps est désormais
+# dans `tools/storage.py`, avec DEUX implémentations derrière la même
+# signature (Supabase Storage / Cloudflare R2), choisies par la variable
+# d'environnement `STORAGE_BACKEND` (`supabase` | `r2` | `both`).
+#
+# Ce qui reste ici est un adaptateur : aucun appelant ne change, et la
+# bascule de CETTE chaîne se fait par une variable d'environnement — donc
+# une chaîne à la fois, et un retour en arrière sans toucher au code.
+#
+# ⚠️ Le défaut `CACHE_REECRIT` (= `no-cache, must-revalidate`) reprend à
+# l'identique la politique posée le 24/07/2026, et NE DOIT PAS BOUGER :
+# ce bucket n'a QUE des objets réécrits EN PLACE à chaque run (tuiles +
+# manifest, même chemin, aucun horodatage dans la clé). Un TTL long y
+# laisserait un navigateur — ou un edge CDN, hors de portée du client —
+# servir une grille périmée bien après un nouveau run, hard-refresh sans
+# effet (cf. BUGS.md, session 23-24/07).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "tools"))
+from storage import (Storage, verifier_dimensionnement, Abort,   # noqa: E402
+                     CACHE_REECRIT, CACHE_IMMUABLE)
 
-    Cet objet est RÉÉCRIT EN PLACE à chaque run. Un TTL long y
-    reproduirait le bug documenté dans BUGS.md (23-24/07) : un client
-    ayant mis l'objet en cache juste avant un nouveau run reste bloqué
-    sur l'ancien, hard-refresh sans effet.
-    """
-    url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
-    headers = {
-        "Authorization": f"Bearer {SB_KEY}",
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache, must-revalidate",
-        "x-upsert": "true",
-    }
-    last = None
-    for attempt in range(tries):
-        for method in ("POST", "PUT"):
-            req = urllib.request.Request(url, data=body, headers=headers, method=method)
-            try:
-                with urllib.request.urlopen(req, timeout=300) as r:
-                    return r.status
-            except Exception as e:
-                last = e
-                detail = ""
-                if hasattr(e, "read"):
-                    try:
-                        detail = e.read().decode()[:300]
-                    except Exception:
-                        pass
-                print(f"  upload {method} échec ({e}) {detail}", file=sys.stderr)
-        time.sleep(2 * (attempt + 1))
-    raise SystemExit(f"Téléversement impossible : {last}")
+# Instancié dans main(), APRÈS verifier_dimensionnement() : on chiffre
+# avant d'écrire, jamais l'inverse (garde-fou n°1).
+STORE = None
+
+
+def sb_upload(path, body, cache_control=CACHE_REECRIT):
+    return STORE.put(path, body, cache_control=cache_control)
 
 
 def main():
@@ -269,6 +274,19 @@ def main():
     if not steps:
         raise SystemExit("Run trouvé mais aucune échéance exploitable")
     print(f"Run {ref} — {len(steps)} échéances (1..{max(steps)} h)")
+
+    # ── Chiffrer AVANT d'écrire (garde-fou n°1) ───────────────────────
+    # Une seule clé, réécrite en place à chaque run (8/jour). La chaîne
+    # la moins coûteuse des cinq — elle passe par le même garde-fou
+    # quand même : c'est l'uniformité qui rend la vérification fiable.
+    # Ces nombres sont le SEUL garde-fou contre une dérive silencieuse :
+    # relever MAX_HOURS, ajouter un niveau ou élargir la BBOX les fait
+    # bouger, et la ligne journalisée à chaque run le montre au run près
+    # plutôt qu'au relevé mensuel — R2 n'a pas de plafond de dépense.
+    global STORE
+    plafond = verifier_dimensionnement("arome-gustfront", objets_par_run=1,
+                                       runs_par_jour=8, mo_par_run=2)
+    STORE = Storage("arome-gustfront", "WIND_GRID_BUCKET", "wind-grid", plafond)
 
     run_dt = datetime.strptime(ref, "%Y-%m-%dT%H:00:00Z").replace(tzinfo=timezone.utc)
     sp1_keys = {step_of(k): k for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{GRID}/SP1/")}
@@ -345,9 +363,11 @@ def main():
 
     if DRY_RUN:
         print("DRY_RUN — pas de téléversement")
+        STORE.bilan()
         return 0
     sb_upload(OUT_KEY, body)
     print(f"Téléversé → {BUCKET}/{OUT_KEY}")
+    STORE.bilan()
     return 0
 
 

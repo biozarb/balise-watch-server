@@ -48,10 +48,18 @@ Sortie : GeoJSON (FeatureCollection de LineString, propriété `hpa`) par
 échéance, + un manifest par grille listant les échéances disponibles (même
 esprit que arome-wind/ingest.py) — Supabase Storage, bucket `isobars`.
 
-Variables d'environnement requises (secrets GitHub) :
-  SUPABASE_URL, SUPABASE_SERVICE_KEY   (ISOBARS_BUCKET optionnel, défaut isobars)
+Stockage (03/08/2026) : l'upload passe par `tools/storage.py`, un seul
+module pour les 5 chaînes, avec deux implémentations derrière la même
+signature. La destination se choisit par variable d'environnement :
+
+  STORAGE_BACKEND   supabase (défaut) | r2 | both
+  SUPABASE_URL, SUPABASE_SERVICE_KEY      — requis si backend supabase/both
+  R2_ACCOUNT_ID, R2_ACCESS_KEY_ID,
+  R2_SECRET_ACCESS_KEY, R2_BUCKET         — requis si backend r2/both
+  ISOBARS_BUCKET optionnel, défaut isobars
+  DRY_RUN=1 pour tester le calcul/tuilage sans rien téléverser.
 """
-import os, json, time, re, urllib.parse, urllib.request
+import os, sys, json, time, re, urllib.parse, urllib.request
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -122,11 +130,17 @@ CENTER_MIN_SEPARATION_DEG = 6.0 # fusionne les centres détectés trop proches
 MAX_CENTERS_PER_KIND = 6        # évite la surcharge visuelle (surtout grille monde)
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
-SB_URL  = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SB_KEY  = os.environ.get("SUPABASE_SERVICE_KEY", "")
 BUCKET  = os.environ.get("ISOBARS_BUCKET", "isobars")
-if not DRY_RUN and not (SB_URL and SB_KEY):
-    raise SystemExit("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (ou DRY_RUN=1)")
+# 03/08/2026 — SB_URL/SB_KEY et le garde-fou de démarrage qui étaient ici
+# ont disparu : plus une seule ligne de ce fichier ne parle à Supabase en
+# direct, tout passe par `tools/storage.py`. La vérification des
+# identifiants y a été déplacée (`_Supabase.__init__`), et elle y est
+# devenue BACKEND-AWARE — ce qui était le vrai défaut de la version
+# précédente : elle exigeait des identifiants Supabase même pour un run
+# qui n'écrit QUE dans R2, donc elle aurait fait échouer toutes les
+# chaînes le jour où on retire les secrets Supabase du dépôt.
+# Elle se déclenche toujours AVANT la première écriture : `Storage()` est
+# construit en tête de `main()`, juste après le dimensionnement.
 
 # Débogage 23/07/2026 (bug identifié en session) : `find_centers` a été
 # ajouté le même jour (commit 00434ba) mais le passé déjà téléversé est
@@ -284,54 +298,89 @@ def find_centers(lon2d, lat2d, pressure):
     return centers
 
 # ── Upload Supabase Storage (mêmes conventions que arome-wind/ingest.py) ─
-def sb_upload(path, body, tries=3, cache_control="max-age=21600"):
-    # Débogage 23/07/2026 : `cache_control` était AVANT figé à 6h pour
-    # TOUT objet uploadé, y compris `manifest.json` — or celui-ci est
-    # réécrit à CHAQUE run et encode `nowIndex` (jalon "maintenant" côté
-    # frontend). Avec un cache de 6h, le navigateur/CDN de Yann continuait
-    # à servir un manifest périmé bien après un nouveau run, donnant
-    # l'impression d'une prévision figée/obsolète. Les géojson par
-    # échéance, eux, SONT immuables une fois écrits (sauf rattrapage
-    # manuel FORCE_REPROCESS_PAST, cas rare) -> gardent le cache long.
-    if DRY_RUN:
-        return 0
-    url = f"{SB_URL}/storage/v1/object/{BUCKET}/{path}"
-    last = None
-    for attempt in range(tries):
-        req = urllib.request.Request(
-            url, data=body, method=("POST" if attempt == 0 else "PUT"), headers={
-                "Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
-                "Content-Type": "application/json", "x-upsert": "true",
-                "Cache-Control": cache_control})
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            try:
-                detail = e.read()[:300].decode("utf-8", "replace")
-            except Exception:
-                detail = ""
-            last = f"HTTP {e.code} — {detail}"
-        except Exception as e:
-            last = f"{type(e).__name__}: {e}"
-        print(f"  ⚠️ upload {path} tentative {attempt + 1}/{tries} : {last}")
-        time.sleep(1 + 2 * attempt)
-    raise SystemExit(f"sb_upload {path} : échec après {tries} tentatives — {last}")
+# ── Upload : adaptateur vers le module partagé ────────────────────────
+# 03/08/2026 — `sb_upload()` existait en CINQ exemplaires quasi
+# identiques (une par chaîne d'ingestion), chacun avec sa propre copie de
+# la leçon Cache-Control des 23-24/07 recopiée en docstring. Même motif
+# de dette que les 4 copies du calcul de features. Le corps est désormais
+# dans `tools/storage.py`, avec DEUX implémentations derrière la même
+# signature (Supabase Storage / Cloudflare R2), choisies par la variable
+# d'environnement `STORAGE_BACKEND` (`supabase` | `r2` | `both`).
+#
+# Ce qui reste ici est un adaptateur : aucun appelant ne change, et la
+# bascule de CETTE chaîne se fait par une variable d'environnement — donc
+# une chaîne à la fois, et un retour en arrière sans toucher au code.
+#
+# ⚠️ Cette chaîne est la SEULE à clés horodatées, donc la seule où le
+# cache long se justifie — et donc la seule qui DOIT purger. Les deux
+# moitiés de cet arbitrage sont indissociables : c'est l'absence de purge
+# sur des clés immuables qui a fait grossir ce bucket jusqu'à 2,1 Go et
+# déclenché le mail Fair Use du 30/07. `CACHE_IMMUABLE` pour les géojson
+# par échéance, `CACHE_REECRIT` explicite pour le manifest (réécrit à
+# chaque run, et il encode `nowIndex` — débogage du 23/07).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "tools"))
+from storage import (Storage, verifier_dimensionnement, Abort,   # noqa: E402
+                     CACHE_REECRIT, CACHE_IMMUABLE)
 
-def sb_exists(path):
-    """Évite de recontourer un passé déjà téléversé (immuable) — un simple
-    HEAD, pas de retry : une erreur réseau ici doit juste faire retenter
-    l'upload, pas planter le run."""
-    if DRY_RUN:
-        return False
-    req = urllib.request.Request(
-        f"{SB_URL}/storage/v1/object/info/{BUCKET}/{path}",
-        headers={"Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY})
-    try:
-        urllib.request.urlopen(req, timeout=15)
-        return True
-    except Exception:
-        return False
+# Instancié dans main(), APRÈS verifier_dimensionnement() : on chiffre
+# avant d'écrire, jamais l'inverse (garde-fou n°1).
+STORE = None
+
+
+def sb_upload(path, body, cache_control=CACHE_IMMUABLE):
+    return STORE.put(path, body, cache_control=cache_control)
+
+def echeances_publiees(key):
+    """Les échéances DÉJÀ dans le bucket, lues dans le manifest du run
+    précédent. Renvoie `(set d'ISO, manifest_lu)`.
+
+    03/08/2026 — remplace `sb_exists()` (un `HEAD` par échéance) ET le
+    `ListObjects` paginé de `purge_stale()`. Les deux étaient gratuits
+    chez Supabase et sont facturés **Class A** chez R2 : ~90 HEAD + un
+    listing par run et par grille, pour le plus souvent ne rien écrire.
+    Ici : **un seul `GetObject` sur une clé connue**, facturé Class B
+    (10 M/mois) — 8 par jour, soit 0,002 % du palier.
+
+    ┌─ POURQUOI LE MANIFEST FAIT AUTORITÉ SUR LE CONTENU DU BUCKET ─────┐
+    │ Depuis le correctif du 30/07, `purge_stale()` aligne le bucket    │
+    │ sur le manifest à la fin de CHAQUE run. `times` est donc la liste │
+    │ de ce qui existe. C'est aussi, et depuis toujours, la seule liste │
+    │ que le frontend lit : un objet absent du manifest n'est plus      │
+    │ jamais téléchargé, qu'il existe encore ou non.                    │
+    └───────────────────────────────────────────────────────────────────┘
+
+    ⚠️ ET SI LE MANIFEST MENT ? Les deux dérives possibles sont sans
+    danger, et c'est ce qui rend le remplacement acceptable :
+      · un objet écrit puis absent du manifest (run interrompu entre les
+        deux) → on le réécrit au run suivant. Quelques Class A, aucune
+        perte : l'écriture est idempotente, la clé est la même.
+      · une échéance listée dont l'objet a échoué à être supprimé → on ne
+        la recalcule pas et elle reste servie. Elle est dans le manifest,
+        donc le frontend sait la lire. Pas de trou.
+    Aucune des deux ne peut faire disparaître une donnée que l'app
+    affiche — contrairement à un `ListObjects` qui échoue et qu'on
+    interpréterait comme « le bucket est vide ».
+
+    ⚠️ MANIFEST ILLISIBLE → ON NE SUPPRIME RIEN, et on recalcule tout.
+    Même règle que `tools/purge_isobars_orphans.py` : sans état fiable,
+    on ne détruit pas. Le `manifest_lu` renvoyé sert exactement à ça —
+    `purge_stale()` refuse de tourner quand il vaut False. Le coût d'un
+    manifest illisible est donc une fenêtre recalculée (borné par le
+    plafond dur du run), jamais une suppression à l'aveugle.
+
+    ⚠️ AU PREMIER RUN SUR UN BUCKET NEUF (bascule R2), il n'y a pas de
+    manifest : on renvoie l'ensemble vide et tout est produit. C'est le
+    comportement voulu — c'est même toute la raison du mode `both`, qui
+    laisse le nouveau bucket se remplir pendant que l'ancien sert."""
+    brut = STORE.get_json(f"{key}/manifest.json")
+    if not isinstance(brut, dict) or not isinstance(brut.get("times"), list):
+        print(f"  manifest '{key}' absent ou illisible — "
+              f"aucune purge, tout sera recalculé")
+        return set(), False
+    times = {t for t in brut["times"] if isinstance(t, str)}
+    print(f"  manifest précédent : {len(times)} échéance(s) déjà publiée(s)")
+    return times, True
 
 # ── Construction de la série temporelle (passé + prévision) ────────────
 def future_times(reference_time, valid_times):
@@ -370,68 +419,57 @@ def past_times(reference_time, model):
     out.reverse()
     return out
 
-def purge_stale(key, keep_isos):
-    """Supprime du bucket tout objet `{key}/*.json` dont l'échéance n'est
-    pas dans `keep_isos` (= ce que le manifest de CE run va lister).
+def purge_stale(key, publiees, keep_isos, manifest_lu):
+    """Supprime les échéances qui étaient dans le manifest PRÉCÉDENT et
+    ne sont plus dans celui de CE run. Aucun listing.
 
     30/07/2026 : c'est le correctif de fond du dépassement de quota. Avant,
     ce script ne faisait QUE écrire — les geojson nommés par échéance
     (`{key}/{iso}.json`) étaient traités comme immuables (skip-if-exists) et
     sortaient de la fenêtre du manifest sans jamais quitter le bucket : plus
-    jamais téléchargés par l'app, toujours facturés. Le manifest lui-même
-    n'est jamais candidat à la suppression (il est réécrit juste après).
+    jamais téléchargés par l'app, toujours facturés.
 
-    Idempotent et sans effet au premier run propre. Non bloquant : un échec
-    de purge ne doit pas faire échouer un run qui a réussi à produire ses
-    échéances (on journalise et on continue)."""
-    if DRY_RUN:
-        print(f"  (DRY_RUN — purge de '{key}' non exécutée)")
+    03/08/2026 : le `ListObjects` paginé qui établissait la liste des
+    condamnés est remplacé par une **différence de deux manifests**
+    (`publiees - keep_isos`). Motif repris du worker de packs : ne jamais
+    demander au stockage ce qu'on peut savoir autrement. Chez R2 un
+    listing est facturé **Class A** et c'est nommément ce que le garde-fou
+    n°1 proscrit ; `DeleteObject`, elle, est **gratuite**, des deux côtés.
+    Ce n'est donc pas le coût de la purge qu'on optimise — c'est celui de
+    savoir quoi purger.
+
+    ⚠️ `manifest_lu=False` (manifest absent ou illisible) → **on ne
+    supprime RIEN**. Sans état fiable on ne détruit pas : même règle que
+    `tools/purge_isobars_orphans.py`, qui saute toute grille dont le
+    manifest est illisible. Ne PAS interpréter un manifest manquant comme
+    « le bucket est vide ».
+
+    ⚠️ Le manifest lui-même n'est jamais candidat : il n'apparaît pas dans
+    `times`, donc jamais dans la différence.
+
+    Idempotent, sans effet au premier run propre, et **non bloquant** : un
+    échec de purge ne doit pas faire échouer un run qui a réussi à
+    produire ses échéances (on journalise et on continue).
+
+    ⚠️ Les orphelins ANTÉRIEURS au premier manifest ne sont pas vus par
+    cette différence — par construction, ils n'ont jamais été listés. Le
+    rattrapage de l'existant reste le rôle de
+    `tools/purge_isobars_orphans.py`, et il a déjà été passé le 30/07
+    (0 orphelin au relevé du 03/08)."""
+    if not manifest_lu:
+        print(f"  purge '{key}' : sautée (pas d'état fiable du run précédent)")
         return 0
-    keep = {f"{key}/{iso}.json" for iso in keep_isos} | {f"{key}/manifest.json"}
-    doomed, offset = [], 0
-    while True:
-        try:
-            req = urllib.request.Request(
-                f"{SB_URL}/storage/v1/object/list/{BUCKET}",
-                data=json.dumps({"prefix": f"{key}/", "limit": 1000,
-                                 "offset": offset,
-                                 "sortBy": {"column": "name", "order": "asc"}}).encode(),
-                headers={"Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
-                         "Content-Type": "application/json"}, method="POST")
-            with urllib.request.urlopen(req, timeout=90) as r:
-                rows = json.loads(r.read() or b"[]")
-        except Exception as e:
-            print(f"  ⚠️ purge '{key}' : listing impossible ({e}) — purge sautée")
-            return 0
-        if not rows:
-            break
-        for row in rows:
-            if row.get("id") is None:            # pseudo-dossier
-                continue
-            path = f"{key}/{row['name']}"
-            if path not in keep:
-                doomed.append(path)
-        if len(rows) < 1000:
-            break
-        offset += 1000
-
+    doomed = sorted(set(publiees) - set(keep_isos))
     if not doomed:
         print(f"  purge '{key}' : rien à supprimer")
         return 0
-    removed = 0
-    for i in range(0, len(doomed), 200):
-        lot = doomed[i:i + 200]
-        try:
-            req = urllib.request.Request(
-                f"{SB_URL}/storage/v1/object/{BUCKET}",
-                data=json.dumps({"prefixes": lot}).encode(),
-                headers={"Authorization": f"Bearer {SB_KEY}", "apikey": SB_KEY,
-                         "Content-Type": "application/json"}, method="DELETE")
-            with urllib.request.urlopen(req, timeout=120):
-                removed += len(lot)
-        except Exception as e:
-            print(f"  ⚠️ purge '{key}' : suppression d'un lot en échec ({e})")
-    print(f"  purge '{key}' : {removed}/{len(doomed)} objet(s) obsolète(s) supprimé(s)")
+    if DRY_RUN:
+        print(f"  (DRY_RUN — purge de '{key}' non exécutée : "
+              f"{len(doomed)} échéance(s) auraient été supprimées)")
+        return 0
+    removed = sum(1 for iso in doomed if STORE.delete(f"{key}/{iso}.json"))
+    print(f"  purge '{key}' : {removed}/{len(doomed)} échéance(s) "
+          f"obsolète(s) supprimée(s)")
     return removed
 
 def process_grid(key, model):
@@ -453,6 +491,11 @@ def process_grid(key, model):
     step_hpa = LEVEL_STEP_HPA_BY_GRID.get(key, LEVEL_STEP_HPA)
     print(f"  contourage : {step_hpa} hPa")
 
+    # UNE lecture (Class B) qui remplace ~90 HeadObject + un ListObjects
+    # (Class A) — cf. `echeances_publiees`. Elle sert deux fois : au
+    # skip-if-exists ci-dessous, et à la purge en fin de fonction.
+    publiees, manifest_lu = echeances_publiees(key)
+
     manifest_times, done, future_done = [], 0, 0
     for dt in all_times:
         iso = dt.strftime("%Y-%m-%dT%H:%M")
@@ -466,7 +509,7 @@ def process_grid(key, model):
         # revisité). `FORCE_REPROCESS_PAST` (flag explicite, défaut off,
         # cf. plus haut) permet de forcer un rattrapage ponctuel sans
         # dégrader l'efficacité/idempotence du cron normal.
-        if is_past and sb_exists(obj_path) and not FORCE_REPROCESS_PAST:
+        if is_past and iso in publiees and not FORCE_REPROCESS_PAST:
             manifest_times.append(iso)      # déjà là, immuable, on ne refait rien
             continue
         # Débogage 23/07/2026 (S3 réel, cf. read_pressure) : pour la
@@ -501,18 +544,65 @@ def process_grid(key, model):
     # cache court/no-cache : ce fichier est réécrit à chaque run (cf. note
     # dans sb_upload) — contrairement aux geojson par échéance ci-dessus.
     sb_upload(f"{key}/manifest.json", json.dumps(manifest).encode(),
-              cache_control="no-cache, must-revalidate")
+              cache_control=CACHE_REECRIT)
     # 30/07/2026 : APRÈS l'écriture du manifest, jamais avant — si le run
     # échoue en cours de route, le manifest précédent reste servi et on ne
     # veut surtout pas avoir déjà supprimé les échéances qu'il liste.
-    purge_stale(key, manifest_times)
+    purge_stale(key, publiees, manifest_times, manifest_lu)
     return done
 
 def main():
+    global STORE
+
+    # ── Chiffrer AVANT d'écrire (garde-fou n°1) ───────────────────────
+    # Comptes RÉELS relevés le 03/08/2026 (`tools/audit_storage.py`) :
+    # 80 objets par grille × 2 grilles = 160, pour 188 Mo. En régime
+    # établi le skip-if-exists ne fait écrire que les nouvelles échéances
+    # (~16/run) ; les 200 ci-dessous sont un MAJORANT de démarrage à
+    # froid (bucket vide → toute la fenêtre est produite d'un coup), pas
+    # une projection. C'est bien ce majorant qu'il faut donner au
+    # plafond : il doit tenir le pire run, pas le run moyen.
+    plafond = verifier_dimensionnement("arpege-isobars", objets_par_run=200,
+                                       runs_par_jour=4, mo_par_run=188)
+
+    # 03/08/2026 — les deux dépendances Class A sont levées : le
+    # skip-if-exists (avant : ~90 `HeadObject`) et purge_stale (avant :
+    # un `ListObjects` paginé) lisent maintenant TOUS DEUX le manifest du
+    # run précédent, soit **1 seul `GetObject` par grille**, facturé
+    # Class B. Cette chaîne peut donc tourner en `r2`.
+    #
+    # ⚠️ MAIS PAS DIRECTEMENT. Les clés isobares sont HORODATÉES : au
+    # moment de la bascule, le bucket R2 est vide et le manifest du run
+    # précédent liste des échéances qui n'existent que dans l'ancien. Le
+    # passage par `both` n'est pas une précaution de confort, c'est ce
+    # qui rend la bascule sans coupure :
+    #   · pendant `both`, l'autorité de lecture reste Supabase, donc le
+    #     skip continue de porter sur l'état réel de ce que sert l'app ;
+    #   · chaque échéance FUTURE est écrite des deux côtés ; en 72 h
+    #     (= PAST_RETENTION_H, 12 runs ARPEGE) toute la fenêtre passée
+    #     a été produite alors qu'elle était encore future, donc R2 la
+    #     possède ;
+    #   · les échéances passées héritées de l'ancien bucket sortent de la
+    #     fenêtre dans le même délai et sont purgées des deux côtés.
+    # Au bout de 72 h, R2 contient exactement la fenêtre — et c'est SEULEMENT
+    # là qu'on bascule la lecture du client.
+    # ⚠️ Pendant ces 72 h, le manifest écrit dans R2 liste des échéances
+    # que R2 n'a pas encore. C'est sans conséquence tant que personne ne
+    # lit R2 — mais c'est la raison pour laquelle on ne bascule pas le
+    # client « pour voir ». Vérifier avant : toutes les échéances du
+    # manifest R2 doivent répondre 200.
+    #
+    # Les buckets à clés STABLES (`wind-grid`) n'ont rien de tout ça :
+    # 8 runs les repeuplent entièrement, soit une journée, et `both` y est
+    # inutile.
+
+    STORE = Storage("arpege-isobars", "ISOBARS_BUCKET", "isobars", plafond)
+
     total = 0
     for key, model in MODELS.items():
         total += process_grid(key, model)
     print(f"Terminé : {total} échéance(s) (re)calculée(s) au total dans '{BUCKET}'.")
+    STORE.bilan()
 
 if __name__ == "__main__":
     main()
