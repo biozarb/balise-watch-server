@@ -2625,6 +2625,364 @@ async function refreshAemetData() {
   await refreshAemetObs();
 }
 
+// ════════════════════════════════════════════════════════════════════
+// BALISES DE PRESSION — METAR + MeteoSuisse (foehn v2, lot 0, 03/08/2026)
+// ════════════════════════════════════════════════════════════════════
+// Cf. PWA/web/PROMPT_REPRISE_FOEHN_V2.md §2. Contexte en une phrase :
+// le module foehn n'avait AUCUNE balise de pression hors de France, donc
+// aucun de ses 8 axes présets ne pouvait afficher de courbe réelle —
+// l'extrémité italienne ou espagnole n'était jamais appariée.
+//
+// Enquête du 03/08/2026, vérifiée par API et non supposée : les réseaux
+// régionaux italiens NE PUBLIENT PAS de pression. ARPA Lombardia expose
+// exactement 8 types de capteurs (neige, vent, hydrométrie, pluie,
+// radiation, température, humidité, direction) et aucun baromètre ;
+// l'API météo de la province de Bolzano expose LT/N/Q/SD/W/WR, idem ;
+// ARPA Piemonte demande une inscription par e-mail pour le temps réel.
+// Le METAR est donc la SEULE source libre de pression réduite au niveau
+// de la mer côté italien. Écrire ce constat ici évite de refaire
+// l'enquête dans six mois.
+//
+// ⚠️ CES STATIONS NE SONT PAS DES BALISES. Décision explicite de Yann :
+// elles alimentent les phénomènes de gradient, point. Pas de marqueur
+// carte, pas de favori, pas de surveillance, pas de fusion dans
+// `releves`. Un METAR est une donnée d'aérodrome (10 m, piste dégagée),
+// peu représentative d'un site de vol — et 45 marqueurs d'aéroports en
+// plus sur la carte sans demande pilote seraient une régression.
+// C'est pourquoi la route dédiée /pressure-stations n'a PAS la forme de
+// /meteofrance-stations : lui donner la même forme inviterait
+// précisément à les traiter comme des balises.
+//
+// ⚠️ AUCUNE CONVERSION N'EST FAITE ICI. Le serveur publie la valeur
+// BRUTE, sa convention de réduction, la température et l'altitude ; la
+// conversion QNH → QFF vit dans PWA/web/src/lib/pressure.ts, vérifiée
+// par scripts/verify-pressure.mjs. Une formule barométrique dupliquée
+// dans deux dépôts, c'est deux sources de vérité dont une seule sera
+// corrigée le jour où il y aura un bug. Quand la veille serveur en aura
+// besoin (lot 7), on extraira le module — on ne le recopiera pas.
+
+// ── METAR (aviationweather.gov / NOAA) ────────────────────────────
+// API publique, SANS CLÉ, mondiale, 100 requêtes/minute. Un seul appel
+// ramène toutes les ancres. Champs utiles (vérifiés en direct le
+// 03/08) : icaoId, obsTime (epoch s), lat, lon, elev (m), temp (°C),
+// dewp, wdir, wspd (nœuds), altim (QNH en hPa, ARRONDI À L'ENTIER),
+// name.
+//
+// ⚠️ `altim` est du QNH — réduction en atmosphère STANDARD — alors que
+// Météo-France (`pmer`), AEMET (`pres_nmar`) et MeteoSuisse
+// (`pp0qffs0`) publient du QFF, réduit avec la température réelle. Les
+// mélanger dans un même Δ fabrique un biais corrélé au foehn mesuré :
+// 2,4 hPa entre deux stations de même altitude séparées par 15 K. D'où
+// le champ `reduction` transmis au client, et `tempC` sans lequel la
+// conversion est impossible (le client refuse alors le point plutôt que
+// de mentir).
+const METAR_URL = 'https://aviationweather.gov/api/data/metar';
+// Cadence : les METAR sortent à :20 et :50 sur les grands terrains, à
+// l'heure ronde ailleurs. 20 min garantit de ne jamais rater plus d'un
+// cycle — 72 appels/jour sur une limite de 100/MINUTE, très large.
+const METAR_POLL_MS = 20 * 60 * 1000;
+// Profondeur d'historique demandée en régime établi (recouvrement large
+// pour absorber un poll manqué) et au démarrage.
+const METAR_POLL_HOURS = 3;
+const METAR_BOOT_HOURS = 30;
+// Rétention du buffer RAM. Pas de table Supabase, CONTRAIREMENT à MF et
+// AEMET : l'API METAR sert elle-même son propre historique via `hours`,
+// donc un redémarrage Render se rattrape tout seul au premier poll.
+// C'est une vraie différence de nature — MF n'expose qu'un instantané,
+// d'où sa table de persistance ; ici la persistance serait un doublon.
+const METAR_RETENTION_MS = 36 * 3600 * 1000;
+
+// Ancres METAR curées. Volontairement une LISTE EXPLICITE plutôt qu'un
+// bbox : sur un outil de sécurité on veut savoir exactement ce qu'on
+// ingère, et un bbox ramènerait des dizaines de terrains sans rapport.
+// Un identifiant inconnu ou muet ne casse rien — il n'apparaît
+// simplement pas dans la réponse.
+// Priorité aux zones SANS meilleure source : l'Italie n'a que ça, la
+// France a déjà Météo-France (QFF, 6 min) et l'Espagne AEMET — les
+// quelques terrains français/espagnols ci-dessous servent de recoupement
+// et de repli.
+const METAR_ANCHORS = [
+  // Italie — plaine du Pô, Val d'Aoste, Piémont, Dolomites.
+  'LIMW', 'LIMF', 'LIMZ', 'LIMC', 'LIML', 'LIME', 'LIMN', 'LIPO',
+  'LIPX', 'LIPB', 'LIMJ', 'LIMP', 'LIPE', 'LIQW',
+  // Suisse — doublées par MeteoSuisse (meilleur), gardées en repli.
+  'LSGG', 'LSGS', 'LSZA', 'LSZL', 'LSZH', 'LSZB', 'LSMP', 'LSZR',
+  // Autriche — Brenner (Innsbruck) et arc oriental.
+  'LOWI', 'LOWS', 'LOWK',
+  // France — recoupement, et couloirs de plaine (Rhône, Lauragais).
+  'LFLB', 'LFLP', 'LFLS', 'LFLL', 'LFLU', 'LFML', 'LFMN', 'LFBO',
+  'LFMP', 'LFMT', 'LFBP', 'LFSB',
+  // Espagne — versant sud pyrénéen (doublé par AEMET).
+  'LEZG', 'LEDA', 'LEHC', 'LEPP', 'LEGE',
+  // Allemagne — lac de Constance, pour la bise.
+  'EDNY',
+];
+
+let metarObsCache = new Map();   // icaoId -> dernier relevé
+let metarHistory = new Map();    // icaoId -> [{t, qnh, tempC}] croissant
+let metarFetchedAt = 0;
+let metarLastError = null;
+
+// Insère un point dans un buffer d'historique trié par t, sans doublon
+// (l'API renvoie des fenêtres qui se recouvrent d'un poll à l'autre) et
+// en élaguant au-delà de la rétention. Partagé METAR ↔ MeteoSuisse.
+function pressureHistoryPush(map, id, point, retentionMs) {
+  let arr = map.get(id);
+  if (!arr) { arr = []; map.set(id, arr); }
+  // Cas courant : le point est le plus récent → push direct.
+  const last = arr[arr.length - 1];
+  if (!last || point.t > last.t) arr.push(point);
+  else {
+    const i = arr.findIndex(p => p.t >= point.t);
+    if (i >= 0 && arr[i].t === point.t) { arr[i] = point; }
+    else if (i < 0) arr.push(point);
+    else arr.splice(i, 0, point);
+  }
+  const cutoff = Date.now() - retentionMs;
+  while (arr.length && arr[0].t < cutoff) arr.shift();
+}
+
+async function refreshMetarObs(hours = METAR_POLL_HOURS) {
+  try {
+    const url = `${METAR_URL}?ids=${METAR_ANCHORS.join(',')}&format=json&hours=${hours}`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      metarLastError = `HTTP ${r.status}`;
+      console.error(`refreshMetarObs: ${metarLastError}`);
+      return;
+    }
+    const rows = await r.json();
+    // Échec de parsing ou réponse vide : on GARDE l'ancien cache plutôt
+    // que de le vider (même politique que refreshAemetObs).
+    if (!Array.isArray(rows) || !rows.length) return;
+
+    const latest = new Map();
+    for (const row of rows) {
+      const id = row?.icaoId;
+      const t = Number(row?.obsTime) * 1000;
+      if (!id || !Number.isFinite(t)) continue;
+      // altim = QNH. Sans lui la ligne n'a aucun intérêt ici.
+      if (row.altim == null) continue;
+      const tempC = row.temp != null ? Number(row.temp) : null;
+      pressureHistoryPush(metarHistory, id, { t, qnh: Number(row.altim), tempC }, METAR_RETENTION_MS);
+      const prev = latest.get(id);
+      if (!prev || t > prev.t) {
+        latest.set(id, {
+          t,
+          qnh: Number(row.altim),
+          tempC,
+          lat: row.lat ?? null, lon: row.lon ?? null, alt: row.elev ?? null,
+          nom: row.name || id,
+          // Vent transmis à titre informatif seulement (ces stations ne
+          // sont pas des balises) — nœuds → km/h, comme MF fait m/s → km/h.
+          dir: typeof row.wdir === 'number' ? row.wdir : null,
+          moy: row.wspd != null ? Number(row.wspd) * 1.852 : null,
+        });
+      }
+    }
+    if (latest.size) {
+      // Fusion et non remplacement : un terrain fermé la nuit disparaît
+      // de la réponse, son dernier relevé connu doit survivre (le client
+      // décide de sa fraîcheur, cf. `t` transmis).
+      for (const [id, obs] of latest) metarObsCache.set(id, obs);
+      metarFetchedAt = Date.now();
+      metarLastError = null;
+    }
+  } catch (e) {
+    metarLastError = `refreshMetarObs: ${e.message}`;
+    console.error(metarLastError);
+  }
+}
+
+// ── MeteoSuisse — SwissMetNet (OGD, data.geo.admin.ch) ─────────────
+// ~160 stations automatiques, SANS CLÉ, cadence 10 MINUTES, pression
+// incluse. Nettement meilleur que le METAR côté suisse : QFF natif au
+// dixième de hPa, contre du QNH arrondi à l'entier.
+//
+// ⚠️ IL N'Y A PAS DE FICHIER « TOUTES STATIONS ». Vérifié le 03/08 :
+// l'API STAC de la collection ch.meteoschweiz.ogd-smn ne liste que des
+// assets PAR STATION (ogd-smn_<abbr>_t_now.csv), et l'URL agrégée que
+// laissait espérer la documentation renvoie du vide. D'où une liste
+// d'ancres curée et un fetch par station — surtout pas les 160.
+//
+// Format du CSV (vérifié en direct sur LUG) : séparateur `;`, décimale
+// `.`, encodage Windows-1252, horodatage `dd.mm.yyyy HH:MM` en UTC, une
+// ligne toutes les 10 min depuis hier 12 UTC. Colonnes lues par NOM
+// (jamais par position — l'ordre peut changer sans préavis) :
+//   station_abbr, reference_timestamp,
+//   tre200s0  température 2 m (°C)
+//   prestas0  pression station (hPa)
+//   pp0qnhs0  QNH (hPa)
+//   pp0qffs0  QFF (hPa)          ← c'est celle qu'on utilise
+//   fkl010z0  vent moyen 10 min (m/s)
+//   dkl010z0  direction (°)
+//
+// Bonus inattendu et précieux : ce fichier publie QNH ET QFF côte à
+// côte. Il sert donc de VALIDATION INDÉPENDANTE de la conversion du
+// client — confrontée aux valeurs officielles de Lugano le 03/08, la
+// chaîne QNH → QFF de lib/pressure.ts tombe à 0,20 hPa près (cf.
+// scripts/verify-pressure.mjs, section 7).
+//
+// Licence : usage libre, MENTION OBLIGATOIRE « Source : MeteoSuisse »
+// partout où la donnée est affichée (même traitement que l'attribution
+// Infoclimat).
+const SMN_BASE = 'https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn';
+const SMN_META_URL = `${SMN_BASE}/ogd-smn_meta_stations.csv`;
+// Donnée 10 min, cache serveur de 10 s côté Confédération : 15 min est
+// large, et l'ETag évite de retélécharger un fichier inchangé.
+const SMN_POLL_MS = 15 * 60 * 1000;
+const SMN_META_POLL_MS = 24 * 3600 * 1000;
+const SMN_RETENTION_MS = 36 * 3600 * 1000;
+
+// Ancres SwissMetNet. Sigles à trois lettres. Toute entrée absente des
+// métadonnées officielles est ignorée avec un log unique au démarrage —
+// une faute de frappe dégrade, elle ne boucle pas sur des 404.
+// Les stations de haute montagne (Samedan 1708 m, Grand-Saint-Bernard
+// 2472 m, Davos, Jungfraujoch) sont VOLONTAIREMENT absentes : au-delà
+// de ~1000 m aucune réduction au niveau de la mer n'est exploitable —
+// Samedan annonçait Q1025 le 03/08 quand toute la Suisse était entre
+// Q1013 et Q1018.
+const SMN_ANCHORS = [
+  'GVE', 'SIO', 'PAY', 'NEU', 'BER', 'BAS', 'LUZ', 'ALT',
+  'SMA', 'KLO', 'STG', 'GUT', 'CHU', 'GLA', 'VIS', 'MAG',
+  'LUG', 'OTL', 'INT', 'MER',
+];
+
+let smnMeta = new Map();       // abbr -> {nom, lat, lon, alt}
+let smnMetaFetchedAt = 0;
+let smnObsCache = new Map();   // abbr -> dernier relevé
+let smnHistory = new Map();    // abbr -> [{t, qff, tempC}] croissant
+let smnFetchedAt = 0;
+let smnLastError = null;
+const smnEtags = new Map();    // url -> ETag du dernier téléchargement
+
+// Télécharge un CSV MeteoSuisse en respectant l'ETag. Renvoie null si
+// rien n'a changé (304) ou en cas d'échec — l'appelant garde alors ses
+// données précédentes.
+async function smnFetchCsv(url) {
+  const prev = smnEtags.get(url);
+  const r = await fetch(url, prev ? { headers: { 'If-None-Match': prev } } : undefined);
+  if (r.status === 304) return null;
+  if (!r.ok) { smnLastError = `HTTP ${r.status} sur ${url}`; return null; }
+  const etag = r.headers.get('etag');
+  if (etag) smnEtags.set(url, etag);
+  const buf = await r.arrayBuffer();
+  // Windows-1252 explicite : les noms de station accentués (Genève,
+  // Zürich) seraient corrompus par un r.text() qui suppose UTF-8. Même
+  // piège qu'AEMET en ISO-8859-15, même parade.
+  return new TextDecoder('windows-1252').decode(buf);
+}
+
+// Découpe une ligne CSV `;` et renvoie un objet indexé par en-tête.
+// Lire par NOM de colonne est le point important : les fichiers OGD ont
+// 33 colonnes dont l'ordre n'est garanti par rien.
+function smnParseCsv(text) {
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length);
+  if (lines.length < 2) return [];
+  const head = lines[0].split(';').map(h => h.trim());
+  return lines.slice(1).map(line => {
+    const cells = line.split(';');
+    const o = {};
+    head.forEach((h, i) => { o[h] = (cells[i] ?? '').trim(); });
+    return o;
+  });
+}
+
+/** `dd.mm.yyyy HH:MM` UTC → ms epoch. NaN si illisible. */
+function smnParseTimestamp(s) {
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2})$/.exec(s || '');
+  if (!m) return NaN;
+  return Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4], +m[5]);
+}
+
+/** Nombre ou null (cellule vide = mesure manquante, pas zéro). */
+function smnNum(v) {
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Métadonnées : nom, coordonnées et surtout ALTITUDE.
+// ⚠️ L'altitude doit venir d'ici et JAMAIS d'une valeur devinée ou
+// reprise d'un aérodrome voisin : la réduction au niveau de la mer en
+// dépend directement. Vérifié le 03/08 sur Lugano — la station SMN est
+// à ~300 m, pas aux 276 m de l'aérodrome LSZA, et se tromper de 28 m
+// décalait la pression station de 3,3 hPa.
+//
+// Et ce n'est pas `station_height_masl` qu'il faut lire mais
+// `station_height_barometer_masl` : l'altitude du BAROMÈTRE, qui diffère
+// de celle du sol de un à deux mètres, et c'est elle qui entre dans la
+// réduction. Bénéfice secondaire, plus important que la précision : une
+// colonne `station_height_barometer_masl` VIDE signale une station SANS
+// baromètre — filtre exact, plutôt que de découvrir des `pp0qffs0`
+// systématiquement vides à l'usage.
+// Colonnes vérifiées en direct le 03/08 sur l'en-tête réel du fichier.
+async function refreshSmnMeta() {
+  try {
+    const text = await smnFetchCsv(SMN_META_URL);
+    if (!text) return;
+    const rows = smnParseCsv(text);
+    const next = new Map();
+    for (const row of rows) {
+      const abbr = (row.station_abbr || '').toUpperCase();
+      if (!abbr) continue;
+      const lat = smnNum(row.station_coordinates_wgs84_lat);
+      const lon = smnNum(row.station_coordinates_wgs84_lon);
+      const alt = smnNum(row.station_height_barometer_masl);
+      // alt null = pas de baromètre sur cette station : inutile ici.
+      if (lat == null || lon == null || alt == null) continue;
+      next.set(abbr, { nom: row.station_name || abbr, lat, lon, alt });
+    }
+    if (next.size) {
+      smnMeta = next;
+      smnMetaFetchedAt = Date.now();
+      const manquantes = SMN_ANCHORS.filter(a => !smnMeta.has(a));
+      if (manquantes.length) {
+        console.warn(`⚠️  Ancres SwissMetNet inconnues du référentiel, ignorées : ${manquantes.join(', ')}`);
+      }
+      console.log(`📇 Métadonnées SwissMetNet : ${smnMeta.size} stations, ${SMN_ANCHORS.length - manquantes.length} ancres résolues`);
+    }
+  } catch (e) {
+    smnLastError = `refreshSmnMeta: ${e.message}`;
+    console.error(smnLastError);
+  }
+}
+
+async function refreshSmnObs() {
+  if (!smnMeta.size) await refreshSmnMeta();
+  if (!smnMeta.size) return;
+  let ok = 0;
+  for (const abbr of SMN_ANCHORS) {
+    const meta = smnMeta.get(abbr);
+    if (!meta) continue;
+    try {
+      const slug = abbr.toLowerCase();
+      const text = await smnFetchCsv(`${SMN_BASE}/${slug}/ogd-smn_${slug}_t_now.csv`);
+      if (!text) continue; // 304 ou échec : on garde l'existant
+      let latest = null;
+      for (const row of smnParseCsv(text)) {
+        const t = smnParseTimestamp(row.reference_timestamp);
+        const qff = smnNum(row.pp0qffs0);
+        if (!Number.isFinite(t) || qff == null) continue;
+        const tempC = smnNum(row.tre200s0);
+        pressureHistoryPush(smnHistory, abbr, { t, qff, tempC }, SMN_RETENTION_MS);
+        if (!latest || t > latest.t) {
+          latest = {
+            t, qff, tempC,
+            // Le vent SMN est en m/s → km/h, comme MF.
+            moy: smnNum(row.fkl010z0) != null ? smnNum(row.fkl010z0) * 3.6 : null,
+            dir: smnNum(row.dkl010z0),
+          };
+        }
+      }
+      if (latest) { smnObsCache.set(abbr, { ...latest, ...meta }); ok++; }
+    } catch (e) {
+      console.error(`refreshSmnObs ${abbr}: ${e.message}`);
+    }
+  }
+  if (ok) { smnFetchedAt = Date.now(); smnLastError = null; }
+}
+
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
 // Nos codes langue (i18next, sans région) → codes cible Azure.
 // Seul cas particulier : Azure fait de 'pt' nu un défaut vers le
@@ -3504,6 +3862,89 @@ app.get('/aemet-history/:id', async (req, res) => {
     console.error('aemet-history (hours) error:', e.message);
     res.json({ points: ramPts });
   }
+});
+
+// ── Balises de pression (foehn v2, lot 0, 03/08/2026) ──────────────
+// Sert metarObsCache + smnObsCache, tous deux rafraîchis en tâche de
+// fond. Jamais d'appel externe déclenché par une requête client.
+//
+// Forme DÉLIBÉRÉMENT DIFFÉRENTE de /meteofrance-stations et
+// /aemet-stations : ces stations ne sont pas des balises (cf. le grand
+// commentaire à la définition des polls), et leur donner la même forme
+// inviterait à les traiter comme telles.
+//
+// Le contrat tient en trois champs :
+//   reduction  'qff' | 'qnh'  — la convention de la valeur brute
+//   pressure   la valeur BRUTE, jamais convertie ici
+//   tempC      indispensable pour convertir un 'qnh' en QFF
+// Le client (lib/pressure.ts) normalise et refuse le point s'il ne peut
+// pas. Voir PROMPT_REPRISE_FOEHN_V2.md §3 pour pourquoi mélanger les
+// deux conventions fabrique un biais corrélé au foehn mesuré.
+//
+// `id` est préfixé par la source ('metar:LIMW', 'smn:LUG') : trois
+// espaces d'identifiants cohabitent déjà côté balises (Pioupiou, MF,
+// AEMET) et la collision y est seulement improbable — ici elle est
+// impossible par construction.
+function pressureStationsPayload() {
+  const out = [];
+  for (const [code, o] of metarObsCache) {
+    if (o.lat == null || o.lon == null || o.alt == null) continue;
+    out.push({
+      id: `metar:${code}`, source: 'metar', code, nom: o.nom,
+      lat: o.lat, lon: o.lon, alt: o.alt,
+      reduction: 'qnh', resolutionHpa: 1,
+      pressure: o.qnh, tempC: o.tempC,
+      dd: o.dir, ff: o.moy, t: o.t,
+    });
+  }
+  for (const [code, o] of smnObsCache) {
+    out.push({
+      id: `smn:${code}`, source: 'smn', code, nom: o.nom,
+      lat: o.lat, lon: o.lon, alt: o.alt,
+      reduction: 'qff', resolutionHpa: 0.1,
+      pressure: o.qff, tempC: o.tempC,
+      dd: o.dir, ff: o.moy, t: o.t,
+    });
+  }
+  return out;
+}
+
+app.get('/pressure-stations', (req, res) => {
+  res.json({
+    stations: pressureStationsPayload(),
+    fetchedAt: Math.max(metarFetchedAt, smnFetchedAt),
+    metarFetchedAt, smnFetchedAt,
+    lastError: metarLastError || smnLastError || null,
+    // Obligation de licence MeteoSuisse — le client doit pouvoir
+    // afficher l'attribution sans la coder en dur de son côté.
+    attribution: 'Source : MeteoSuisse ; METAR : NOAA/aviationweather.gov',
+  });
+});
+
+// Historique d'une balise de pression, `id` préfixé comme ci-dessus.
+// Pas de table Supabase derrière, contrairement à /meteofrance-history
+// et /aemet-history : les deux sources servent elles-mêmes leur propre
+// historique (METAR via `hours`, MeteoSuisse via un fichier `now` qui
+// couvre ~36 h), donc le buffer RAM se reconstitue seul après un
+// redémarrage Render. Une table ici serait un doublon.
+app.get('/pressure-history/:id', (req, res) => {
+  const raw = String(req.params.id || '');
+  const sep = raw.indexOf(':');
+  const source = sep > 0 ? raw.slice(0, sep) : '';
+  const code = sep > 0 ? raw.slice(sep + 1) : '';
+  const hoursParam = Number(req.query.hours);
+  const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 0), 36) : 36;
+  const cutoff = Date.now() - hours * 3600 * 1000;
+
+  if (source === 'metar') {
+    const pts = (metarHistory.get(code) || []).filter(p => p.t >= cutoff);
+    return res.json({ id: raw, reduction: 'qnh', resolutionHpa: 1, points: pts });
+  }
+  if (source === 'smn') {
+    const pts = (smnHistory.get(code) || []).filter(p => p.t >= cutoff);
+    return res.json({ id: raw, reduction: 'qff', resolutionHpa: 0.1, points: pts });
+  }
+  res.status(400).json({ error: "id attendu sous la forme 'metar:LIMW' ou 'smn:LUG'" });
 });
 
 // ── Lot 5 — Éclairs (public, lecture seule) ──────────────────────────
@@ -4683,6 +5124,21 @@ app.listen(PORT, async () => {
   setInterval(refreshInfoclimatHistory, INFOCLIMAT_HISTORY_POLL_MS);
   refreshAemetData(); // no-op silencieux si AEMET_API_KEY absente
   setInterval(refreshAemetData, AEMET_OBS_POLL_MS);
+  // Balises de pression (foehn v2, lot 0) — aucune clé requise, donc
+  // aucun garde d'environnement : les deux sources sont publiques.
+  // Le PREMIER poll METAR demande METAR_BOOT_HOURS d'un coup, les
+  // suivants METAR_POLL_HOURS : c'est ce qui remplace la table de
+  // persistance que MF et AEMET ont dû se payer. Un redémarrage Render
+  // ne perd rien, il redemande.
+  refreshMetarObs(METAR_BOOT_HOURS);
+  setInterval(() => refreshMetarObs(), METAR_POLL_MS);
+  // MeteoSuisse : les métadonnées d'abord (altitude du baromètre —
+  // indispensable à la réduction, cf. refreshSmnMeta), les relevés
+  // ensuite. refreshSmnObs les recharge de lui-même si elles manquent,
+  // l'ordre ici n'est qu'une optimisation du démarrage.
+  refreshSmnMeta().then(() => refreshSmnObs());
+  setInterval(refreshSmnObs, SMN_POLL_MS);
+  setInterval(refreshSmnMeta, SMN_META_POLL_MS);
   // Étape 28 — détecteur de front de rafales. No-op silencieux si
   // GUST_FRONT_ENABLED n'est pas posé. Décalé d'une minute après le
   // démarrage des boucles d'observation : détecter avant que le premier
