@@ -7,6 +7,19 @@ const WebSocket = require('ws'); // Étape 10 Lot 5 : flux foudre Blitzortung (W
 const { PNG } = require('pngjs'); // Étape 10 Lot C : décodage des tuiles radar RainViewer (détection précip)
 
 const PORT         = process.env.PORT || 3000;
+// ── Marqueur de build ──────────────────────────────────────────────
+// Ajouté le 04/08/2026. `version` est une constante du source : elle ne
+// distingue PAS un build déployé du précédent, et le 03/08 comme le
+// 04/08 on a cru à un bug de veille alors que le correctif n'était tout
+// simplement pas en ligne. Render injecte le SHA du commit déployé dans
+// l'environnement — le lire ici rend le déploiement CONSTATABLE depuis
+// l'extérieur, au lieu d'être supposé.
+// Variables fournies par Render : RENDER_GIT_COMMIT, RENDER_GIT_BRANCH,
+// RENDER_INSTANCE_ID (cf. render.com/docs/environment-variables).
+// Repli 'inconnu' hors Render (poste local), jamais une valeur fausse.
+const GIT_COMMIT   = process.env.RENDER_GIT_COMMIT || null;
+const GIT_BRANCH   = process.env.RENDER_GIT_BRANCH || null;
+const BOOT_AT      = Date.now();
 const VAPID_PUB    = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIV   = process.env.VAPID_PRIVATE_KEY;
 const VAPID_EMAIL  = process.env.VAPID_EMAIL || 'mailto:admin@balise-watch.fr';
@@ -3364,6 +3377,17 @@ app.get('/', (req, res) => {
   const ageMin = (t) => (t ? Math.round((now - t) / 60000) : null);
   res.json({
     status: 'ok', version: '2.2.0', service: 'Balise Watch Push Server',
+    // `version` dit ce que le SOURCE prétend être ; `build` dit ce qui
+    // TOURNE. Les deux ne se recoupent pas : seul `build.commit` permet
+    // d'affirmer qu'un correctif est en ligne.
+    //   curl -s https://balise-watch-server.onrender.com/ | grep -o '"commit":"[^"]*"'
+    build: {
+      commit: GIT_COMMIT,                 // null hors Render
+      short: GIT_COMMIT ? GIT_COMMIT.slice(0, 7) : null,
+      branch: GIT_BRANCH,
+      bootAt: new Date(BOOT_AT).toISOString(),
+      uptimeMin: Math.round((now - BOOT_AT) / 60000),
+    },
     loops: {
       meteofrance: { lastObsAgeMin: ageMin(mfObsCacheFetchedAt), stations: mfObsCache.size },
       gustFront: {
@@ -5526,6 +5550,9 @@ async function pollAndNotify() {
 
 app.listen(PORT, async () => {
   console.log(`🚀 Balise Watch Push Server — port ${PORT}`);
+  // Première ligne des logs Render après un déploiement : le commit qui
+  // vient de démarrer. Évite d'avoir à croire le dashboard sur parole.
+  console.log(`   build ${GIT_COMMIT ? GIT_COMMIT.slice(0, 7) : 'local (hors Render)'}${GIT_BRANCH ? ` @ ${GIT_BRANCH}` : ''}`);
   // Débogage 12/07/2026 (suite 5) — hydratation AVANT le premier
   // pollAndNotify, pour que le tout premier cycle après un redémarrage
   // bénéficie déjà de l'historique persisté (station MF proche
