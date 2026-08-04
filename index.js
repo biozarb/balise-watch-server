@@ -4553,7 +4553,13 @@ async function fetchFoehnDiffServer(axis) {
   if (cached && (Date.now() - cached.ts) < FOEHN_CACHE_TTL_MS) return cached.diff;
   const url = `${OPEN_METEO_URL}?latitude=${axis.a_lat},${axis.b_lat}` +
     `&longitude=${axis.a_lon},${axis.b_lon}` +
-    `&hourly=pressure_msl&models=gfs_seamless&forecast_days=2&timezone=UTC`;
+    // forecast_days : 2 → 3 le 04/08/2026. La fenêtre d'anticipation est
+    // de 36 h (FOEHN_FORECAST_HORIZON_MS) mais Open-Meteo compte ses
+    // journées depuis 00:00 UTC : à 2 jours, l'horizon réellement
+    // couvert tombait de 48 h le matin à 24 h le soir. Un pic prévu
+    // pour le lendemain après-midi sortait donc de la fenêtre en fin de
+    // journée — exactement le moment où un pilote prépare sa sortie.
+    `&hourly=pressure_msl&models=gfs_seamless&forecast_days=3&timezone=UTC`;
   try {
     const r = await fetch(url);
     const j = await r.json();
@@ -4570,24 +4576,42 @@ async function fetchFoehnDiffServer(axis) {
 }
 
 // Pic le plus défavorable (|Δ| max) entre maintenant et l'horizon d'anticipation.
-// Renvoie { time, diff, level, direction } ou null. threshold = seuil du compte.
-// wantDir : sens surveillé par le pilote — 'both' (défaut), 'toA' (Δ négatif,
-// foehn vers A) ou 'toB' (Δ positif, foehn vers B). On ignore le versant
-// qui n'intéresse pas le compte, pour ne pas l'alerter à tort de l'autre côté.
-function foehnServerPeak(d, threshold, wantDir = 'both') {
+// Renvoie { time, diff, level, direction } ou null.
+//
+// ⚠️ RÉVISION DU 04/08/2026 — deux paramètres AJOUTÉS, et ils changent
+// qui reçoit une alerte :
+//
+//  • `thresholdStrong` : le niveau 3 était calé sur FOEHN_HPA_PLAIN = 8,
+//    la constante globale de la v1. Or un vent de gap est en danger à
+//    4 hPa, pas à 8. Le niveau 3 (push `requireInteraction`, voix) ne
+//    partait donc JAMAIS sur les 13 vents de gap.
+//
+//  • `activeSign` : le sens que le PHÉNOMÈNE autorise (colonne ajoutée
+//    à l'étape 29) n'était pas lu ici. Le serveur alertait sur |Δ| dans
+//    les deux sens dès que le pilote n'avait pas choisi de sens — donc
+//    il ne distinguait pas le Südföhn du Nordföhn, qui partagent la
+//    même mesure avec des signes opposés, et prévenait les pilotes du
+//    Tessin les jours de foehn du sud (et réciproquement).
+//
+// Les deux filtres se COMPOSENT : `activeSign` dit ce que le phénomène
+// permet, `wantDir` ce que le pilote surveille, et on ne retient qu'un
+// pas qui satisfait les deux.
+function foehnServerPeak(d, threshold, thresholdStrong, wantDir = 'both', activeSign = 'both') {
   const now = Date.now();
   const hi = now + FOEHN_FORECAST_HORIZON_MS;
+  const allowNeg = activeSign !== 'pos' && wantDir !== 'toB'; // toA = Δ négatif
+  const allowPos = activeSign !== 'neg' && wantDir !== 'toA'; // toB = Δ positif
   let best = null;
   for (let i = 0; i < d.times.length; i++) {
     const t = d.times[i], v = d.diff[i];
     if (v == null || t < now || t > hi) continue;
-    if (wantDir === 'toA' && v >= 0) continue; // toA = Δ négatif seulement
-    if (wantDir === 'toB' && v <= 0) continue; // toB = Δ positif seulement
+    if (v < 0 && !allowNeg) continue;
+    if (v > 0 && !allowPos) continue;
     if (best === null || Math.abs(v) > Math.abs(best.diff)) best = { time: t, diff: v };
   }
   if (!best) return null;
   const mag = Math.abs(best.diff);
-  best.level = mag >= FOEHN_HPA_PLAIN ? 3 : mag >= threshold ? 2 : 0;
+  best.level = mag >= thresholdStrong ? 3 : mag >= threshold ? 2 : 0;
   best.direction = mag < threshold ? 'none' : (best.diff < 0 ? 'toA' : 'toB');
   return best;
 }
@@ -5443,9 +5467,32 @@ async function pollAndNotify() {
           await evaluateFwSignal({ userId: w.user_id, scope, signal: 'foehn', level: 2, active: false, buildPush: () => ({}) });
           continue;
         }
-        const threshold = Number(w.threshold_hpa) || FOEHN_HPA_VALLEY;
+        // ⚠️ CORRECTIF 04/08/2026 — le repli n'est plus la constante
+        // globale mais le SEUIL DU PHÉNOMÈNE. Avant, tout compte dont
+        // la ligne ne portait pas de seuil explicite était veillé à
+        // 4 hPa : le double du seuil réel d'un vent de gap (2 hPa), un
+        // tiers de trop sur un axe pyrénéen (3). Côté client, cocher la
+        // case écrivait justement 4 sans le dire — les deux défauts se
+        // renforçaient, et les pilotes n'étaient jamais avertis sur
+        // exactement les vents qu'ils surveillent.
+        // Ordre voulu : seuil du compte > seuil du phénomène > global.
+        // Le `||` traite 0 et NULL comme « absent », ce qui est la
+        // sémantique « hériter » de l'étape 29.
+        const threshold = Number(w.threshold_hpa) || Number(ax.threshold_hpa) || FOEHN_HPA_VALLEY;
+        const thresholdStrong = Number(ax.threshold_strong_hpa) || FOEHN_HPA_PLAIN;
         const wantDir = w.direction || 'both'; // sens surveillé (step20), défaut both
-        const peak = foehnServerPeak(dd, threshold, wantDir);
+        // ⚠️ RESTE À FAIRE (lot 7) — le RÉFÉRENTIEL, pas le seuil.
+        // `fetchFoehnDiffServer` calcule Δ sur la pression MSL GFS aux
+        // COORDONNÉES DES VILLES. La fiche, elle, lit les stations
+        // déclarées (`station_a`/`station_b`, METAR/SMN/AEMET) avec la
+        // convention QFF/QNH et la correction d'altitude. Les deux
+        // nombres ne coïncident pas : la fiche peut afficher « au-dessus
+        // du seuil » pendant que le serveur se tait, et l'inverse.
+        // Le remède est d'EXTRAIRE `buildPressureReferential` du client
+        // et de le partager, surtout pas d'en recopier une deuxième
+        // version ici — ce sont les deux moitiés d'une même promesse
+        // faite au pilote, elles doivent sortir du même code.
+        const peak = foehnServerPeak(dd, threshold, thresholdStrong, wantDir, ax.active_sign || 'both');
         const level = peak ? peak.level : 0;
         const active = level >= 2;
         const lang = langByUser.get(w.user_id);
