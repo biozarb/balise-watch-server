@@ -2852,10 +2852,17 @@ async function refreshMetarBatch(ids, hours) {
           tempC,
           lat: row.lat ?? null, lon: row.lon ?? null, alt: row.elev ?? null,
           nom: row.name || id,
-          // Vent transmis à titre informatif seulement (ces stations ne
-          // sont pas des balises) — nœuds → km/h, comme MF fait m/s → km/h.
+          // Vent — nœuds → km/h, comme MF fait m/s → km/h.
           dir: typeof row.wdir === 'number' ? row.wdir : null,
           moy: row.wspd != null ? Number(row.wspd) * 1.852 : null,
+          // Rafale (lot balises, 04/08/2026). `wgst` est DÉJÀ dans la
+          // réponse qu'on télécharge : aucun appel réseau ajouté, aucune
+          // clé. Absent la plupart du temps — un METAR ne publie la
+          // rafale que si elle dépasse le vent moyen de 10 kt, c'est la
+          // règle de codage OACI. `null` veut donc dire « pas de rafale
+          // significative », PAS « pas mesurée » : à ne pas afficher
+          // comme une donnée manquante côté client.
+          raf: row.wgst != null ? Number(row.wgst) * 1.852 : null,
         });
       }
     }
@@ -3158,6 +3165,25 @@ async function refreshSmnObs() {
             // Le vent SMN est en m/s → km/h, comme MF.
             moy: smnNum(row.fkl010z0) != null ? smnNum(row.fkl010z0) * 3.6 : null,
             dir: smnNum(row.dkl010z0),
+            // Rafale (lot balises, 04/08/2026). Elle est dans le MÊME
+            // CSV, déjà téléchargé : rien à demander en plus.
+            //
+            // `fkl010z1` = pointe de vent (1 s), maximum sur 10 min, en
+            // m/s. Vérifié colonne par colonne sur Lugano le 03/08 à
+            // 15:40 : fkl010z1 = 6,2 m/s et fu3010z1 = 22,3 km/h, soit
+            // exactement 6,2 × 3,6 = 22,32. Le repli sur `fu3010z1`
+            // n'est donc pas une autre grandeur, c'est la MÊME déjà
+            // convertie — d'où l'ordre : on garde la convention m/s des
+            // autres champs, et on ne descend sur le km/h natif que si
+            // la colonne m/s manque.
+            //
+            // ⚠️ NE PAS confondre avec `fkl010z3` / `fu3010z3` (5,8 m/s
+            // et 20,9 km/h sur le même relevé) : autre fenêtre de
+            // pointe, valeur systématiquement plus basse. Prendre celle
+            // -là ferait sous-annoncer les rafales sur un outil de
+            // sécurité.
+            raf: smnNum(row.fkl010z1) != null ? smnNum(row.fkl010z1) * 3.6
+               : smnNum(row.fu3010z1),
           };
         }
       }
@@ -4146,7 +4172,23 @@ function pressureStationsPayload() {
       lat: o.lat, lon: o.lon, alt: o.alt,
       reduction: 'qnh', resolutionHpa: 1,
       pressure: o.qnh, tempC: o.tempC,
-      dd: o.dir, ff: o.moy, t: o.t,
+      dd: o.dir, ff: o.moy,
+      // Rafale (lot balises). `null` sur un METAR ne veut PAS dire
+      // « non mesurée » mais « pas de rafale significative » : la règle
+      // de codage OACI ne fait publier `wgst` que si la pointe dépasse
+      // le vent moyen de 10 kt. Le client doit donc afficher un tiret
+      // neutre, pas un « — » de donnée manquante.
+      raf: o.raf ?? null,
+      // ── Cadence de publication (lot balises) ──────────────────────
+      // Sans ça, le calque Balises grise les METAR la moitié du temps.
+      // Un METAR sort à :20 et :50 sur les grands terrains, à l'heure
+      // ronde ailleurs, et il est publié APRÈS l'heure d'observation :
+      // un relevé de 25 minutes d'âge est parfaitement NORMAL, là où un
+      // Pioupiou de 25 minutes est mort. Le seuil de péremption ne peut
+      // donc pas être une constante du client, il est une propriété de
+      // la SOURCE — c'est elle qui la connaît.
+      cadenceMin: 30,
+      t: o.t,
     });
   }
   for (const [code, o] of smnObsCache) {
@@ -4163,7 +4205,16 @@ function pressureStationsPayload() {
       // MeteoSuisse, pas une propriété de la convention.
       reduction: o.reduction, resolutionHpa: 0.1,
       pressure: o.p, tempC: o.tempC,
-      dd: o.dir, ff: o.moy, t: o.t,
+      dd: o.dir, ff: o.moy,
+      // Rafale (lot balises) — ici `null` veut bien dire « non
+      // mesurée », contrairement au METAR : SwissMetNet publie
+      // `fkl010z1` sur tous ses relevés, une absence est une lacune.
+      raf: o.raf ?? null,
+      // Cf. la note sur `cadenceMin` au-dessus. SwissMetNet publie
+      // toutes les 10 minutes, comme un réseau automatique moderne :
+      // même règle de péremption qu'une balise ordinaire.
+      cadenceMin: 10,
+      t: o.t,
     });
   }
   return out;
