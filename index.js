@@ -2690,7 +2690,50 @@ const METAR_BOOT_HOURS = 30;
 // donc un redémarrage Render se rattrape tout seul au premier poll.
 // C'est une vraie différence de nature — MF n'expose qu'un instantané,
 // d'où sa table de persistance ; ici la persistance serait un doublon.
+// (Reste vrai après le 04/08/2026, MAIS à la condition expresse du
+// découpage en lots ci-dessous — sans lui le rattrapage ne rattrapait
+// rien. Voir METAR_ROW_BUDGET.)
 const METAR_RETENTION_MS = 36 * 3600 * 1000;
+
+// ── Plafond de la réponse aviationweather, mesuré le 04/08/2026 ──────
+// ⚠️ L'API PLAFONNE le nombre total d'enregistrements d'une réponse
+// (~400) et, quand le plafond est atteint, elle rabote par le TEMPS.
+// Elle ne renvoie NI erreur NI avertissement : elle renvoie simplement
+// moins d'heures que demandé. C'est le pire mode de défaillance
+// possible pour cet outil — la courbe reste plausible, juste courte.
+//
+// Mesures en direct, toutes à `hours=30`, le 04/08/2026 à 05:41 UTC :
+//    2 ancres → 29,7 h  (60 points/station)  ✅
+//    6 ancres → 29,7 h  (~60 points/station) ✅
+//   20 ancres → 11,4 h  (~23 points/station) ❌
+//   43 ancres →  5,5 h  (~10 points/station) ❌
+//
+// C'est LA cause du buffer de ~5 h constaté en prod le 04/08 sur les
+// huit stations testées, et l'explication est structurelle : demander
+// les 43 ancres en une requête ne POUVAIT PAS rendre 30 h. Le poll de
+// démarrage n'a jamais échoué — il n'avait aucune chance d'aboutir.
+// (L'hypothèse d'un redémarrage Render dont le poll de boot aurait
+// échoué est donc écartée : elle n'est pas nécessaire.)
+//
+// La parade : borner `ids × heures × 2` (≈ 2 relevés par heure sur un
+// terrain dense) à ce budget, et découper en autant de requêtes
+// séquentielles qu'il faut. Conséquences voulues :
+//   - à hours=3 (régime établi), 3×2=6 → 50 ancres par requête : les 43
+//     passent en UNE requête, la cadence de croisière ne change pas ;
+//   - à hours=30 (démarrage), 30×2=60 → 5 ancres par requête, soit 9
+//     requêtes espacées de 300 ms. Sur une limite de 100 requêtes PAR
+//     MINUTE, c'est négligeable.
+// Budget volontairement sous le plafond mesuré (300 < ~400) : on ne
+// veut pas se retrouver pile à la limite le jour où un terrain publie
+// des SPECI en rafale.
+const METAR_ROW_BUDGET = 300;
+const METAR_BATCH_DELAY_MS = 300;
+// Passe profonde périodique. Le découpage ci-dessus corrige la cause ;
+// ceci est la ceinture : si un lot échoue au démarrage, si Render
+// redémarre, ou si l'API rebaisse son plafond sans prévenir, le buffer
+// se re-remplit tout seul en moins de 6 h au lieu de rester court
+// jusqu'au prochain déploiement. 9 requêtes toutes les 6 h.
+const METAR_DEEP_MS = 6 * 3600 * 1000;
 
 // Ancres METAR curées. Volontairement une LISTE EXPLICITE plutôt qu'un
 // bbox : sur un outil de sécurité on veut savoir exactement ce qu'on
@@ -2722,6 +2765,7 @@ let metarObsCache = new Map();   // icaoId -> dernier relevé
 let metarHistory = new Map();    // icaoId -> [{t, qnh, tempC}] croissant
 let metarFetchedAt = 0;
 let metarLastError = null;
+let metarDeepDoneAt = 0;      // dernière passe profonde terminée
 
 // Insère un point dans un buffer d'historique trié par t, sans doublon
 // (l'API renvoie des fenêtres qui se recouvrent d'un poll à l'autre) et
@@ -2742,19 +2786,50 @@ function pressureHistoryPush(map, id, point, retentionMs) {
   while (arr.length && arr[0].t < cutoff) arr.shift();
 }
 
-async function refreshMetarObs(hours = METAR_POLL_HOURS) {
+/**
+ * Étendue d'un buffer d'historique, en heures. null si l'ancre est
+ * absente ou n'a qu'un point — un point unique n'a pas d'étendue, et
+ * renvoyer 0 le ferait passer pour un buffer vide dans les moyennes.
+ * Sert au log de démarrage et à /pressure-diag ; c'est cette grandeur,
+ * et elle seule, qui aurait montré le problème du 04/08 en un coup
+ * d'œil au lieu de huit requêtes à la main.
+ */
+function pressureHistorySpanH(map, id) {
+  const arr = map.get(id);
+  if (!arr || arr.length < 2) return null;
+  return (arr[arr.length - 1].t - arr[0].t) / 3600000;
+}
+
+/** Découpe les ancres en lots tenant dans METAR_ROW_BUDGET. */
+function metarBatches(anchors, hours) {
+  const perRequest = Math.max(1, Math.floor(METAR_ROW_BUDGET / Math.max(1, hours * 2)));
+  if (perRequest >= anchors.length) return [anchors];
+  const out = [];
+  for (let i = 0; i < anchors.length; i += perRequest) out.push(anchors.slice(i, i + perRequest));
+  return out;
+}
+
+const metarSleep = ms => new Promise(res => setTimeout(res, ms));
+
+/**
+ * UN lot. Renvoie true si le lot a rendu au moins un relevé exploitable.
+ * N'écrit ni metarFetchedAt ni metarLastError : c'est l'appelant qui
+ * décide, une fois tous les lots passés — sinon un dernier lot vide
+ * effacerait la réussite des précédents.
+ */
+async function refreshMetarBatch(ids, hours) {
   try {
-    const url = `${METAR_URL}?ids=${METAR_ANCHORS.join(',')}&format=json&hours=${hours}`;
+    const url = `${METAR_URL}?ids=${ids.join(',')}&format=json&hours=${hours}`;
     const r = await fetch(url);
     if (!r.ok) {
       metarLastError = `HTTP ${r.status}`;
       console.error(`refreshMetarObs: ${metarLastError}`);
-      return;
+      return false;
     }
     const rows = await r.json();
     // Échec de parsing ou réponse vide : on GARDE l'ancien cache plutôt
     // que de le vider (même politique que refreshAemetObs).
-    if (!Array.isArray(rows) || !rows.length) return;
+    if (!Array.isArray(rows) || !rows.length) return false;
 
     const latest = new Map();
     for (const row of rows) {
@@ -2784,17 +2859,68 @@ async function refreshMetarObs(hours = METAR_POLL_HOURS) {
         });
       }
     }
-    if (latest.size) {
-      // Fusion et non remplacement : un terrain fermé la nuit disparaît
-      // de la réponse, son dernier relevé connu doit survivre (le client
-      // décide de sa fraîcheur, cf. `t` transmis).
-      for (const [id, obs] of latest) metarObsCache.set(id, obs);
-      metarFetchedAt = Date.now();
-      metarLastError = null;
-    }
+    if (!latest.size) return false;
+    // Fusion et non remplacement : un terrain fermé la nuit disparaît
+    // de la réponse, son dernier relevé connu doit survivre (le client
+    // décide de sa fraîcheur, cf. `t` transmis).
+    for (const [id, obs] of latest) metarObsCache.set(id, obs);
+    return true;
   } catch (e) {
     metarLastError = `refreshMetarObs: ${e.message}`;
     console.error(metarLastError);
+    return false;
+  }
+}
+
+/**
+ * Poll METAR complet. `hours` pilote tout : la profondeur demandée ET,
+ * mécaniquement, le nombre d'ancres par requête (cf. METAR_ROW_BUDGET).
+ * Les lots sont SÉQUENTIELS et espacés — pas de Promise.all : neuf
+ * requêtes simultanées sur une API publique gratuite est exactement le
+ * genre de chose qui fait blacklister une IP Render partagée.
+ */
+async function refreshMetarObs(hours = METAR_POLL_HOURS) {
+  const batches = metarBatches(METAR_ANCHORS, hours);
+  let any = false;
+  for (let i = 0; i < batches.length; i++) {
+    if (i) await metarSleep(METAR_BATCH_DELAY_MS);
+    if (await refreshMetarBatch(batches[i], hours)) any = true;
+  }
+  if (any) {
+    metarFetchedAt = Date.now();
+    metarLastError = null;
+  }
+  return any;
+}
+
+/**
+ * Passe profonde : recharge METAR_BOOT_HOURS pour toutes les ancres.
+ * Appelée au démarrage puis toutes les METAR_DEEP_MS. Journalise la
+ * profondeur RÉELLEMENT obtenue — c'est le seul moyen de voir depuis
+ * les logs Render que le plafond de l'API n'a pas rebougé.
+ */
+async function refreshMetarDeep() {
+  const t0 = Date.now();
+  await refreshMetarObs(METAR_BOOT_HOURS);
+  metarDeepDoneAt = Date.now();
+  const spans = METAR_ANCHORS
+    .map(id => pressureHistorySpanH(metarHistory, id))
+    .filter(h => h != null);
+  const profondes = spans.filter(h => h >= METAR_BOOT_HOURS / 2).length;
+  const mediane = spans.length ? spans.slice().sort((a, b) => a - b)[Math.floor(spans.length / 2)] : 0;
+  console.log(
+    `🌡️  METAR passe profonde (${metarBatches(METAR_ANCHORS, METAR_BOOT_HOURS).length} lots, ` +
+    `${((Date.now() - t0) / 1000).toFixed(1)} s) : ${spans.length}/${METAR_ANCHORS.length} ancres alimentées, ` +
+    `étendue médiane ${mediane.toFixed(1)} h, ${profondes} au-delà de ${(METAR_BOOT_HOURS / 2).toFixed(0)} h`
+  );
+  // Une médiane courte alors qu'on a demandé 30 h = le plafond de
+  // l'API a rebougé. On le DIT, plutôt que de laisser une courbe
+  // tronquée passer pour une courbe complète (cf. METAR_ROW_BUDGET).
+  if (spans.length && mediane < METAR_BOOT_HOURS / 3) {
+    console.warn(
+      `⚠️  METAR : étendue médiane ${mediane.toFixed(1)} h pour ${METAR_BOOT_HOURS} h demandées. ` +
+      `Le plafond d'enregistrements de l'API a probablement baissé — réduire METAR_ROW_BUDGET.`
+    );
   }
 }
 
@@ -2811,7 +2937,21 @@ async function refreshMetarObs(hours = METAR_POLL_HOURS) {
 //
 // Format du CSV (vérifié en direct sur LUG) : séparateur `;`, décimale
 // `.`, encodage Windows-1252, horodatage `dd.mm.yyyy HH:MM` en UTC, une
-// ligne toutes les 10 min depuis hier 12 UTC. Colonnes lues par NOM
+// ligne toutes les 10 min.
+//
+// ⚠️ CORRECTION DU 04/08/2026 — ce commentaire disait « depuis hier
+// 12 UTC ». C'est FAUX, et ça a fondé une décision d'architecture
+// entière (voir /pressure-history). Le fichier `_t_now.csv` couvre
+// LE JOUR UTC COURANT, un point c'est tout. Vérifié en direct sur GVE
+// le 04/08 à 05:41 UTC : première ligne `04.08.2026 00:00`, dernière
+// `05:20`, 33 lignes, 5,3 h. Sa profondeur n'est donc pas une propriété
+// du fichier mais l'heure qu'il est : 24 h juste avant minuit UTC,
+// ZÉRO juste après. Le jour de la veille part dans `_t_recent.csv`
+// (rotation quotidienne vers 02:28 UTC), qui couvre l'année entière au
+// pas de 10 min — beaucoup trop gros pour un rattrapage au démarrage.
+// D'où la persistance Supabase ajoutée plus bas : contrairement au
+// METAR, MeteoSuisse ne peut PAS resservir notre fenêtre de 36 h.
+// Colonnes lues par NOM
 // (jamais par position — l'ordre peut changer sans préavis) :
 //   station_abbr, reference_timestamp,
 //   tre200s0  température 2 m (°C)
@@ -2997,6 +3137,13 @@ async function refreshSmnObs() {
       const champ = aDuQff ? 'pp0qffs0' : 'pp0qnhs0';
       const reduction = aDuQff ? 'qff' : 'qnh';
 
+      // Borne haute du buffer AVANT d'y verser ce fichier : tout ce qui
+      // est au-delà est nouveau et part en base. Sans ce repère on
+      // ré-upserterait les ~144 lignes du jour à chaque poll de 15 min,
+      // soit 14 000 lignes/jour pour 2 900 utiles.
+      const dejaVuJusqua = smnHistory.get(abbr)?.at(-1)?.t ?? -Infinity;
+      const nouveaux = [];
+
       let latest = null;
       for (const row of rows) {
         const t = smnParseTimestamp(row.reference_timestamp);
@@ -3004,6 +3151,7 @@ async function refreshSmnObs() {
         if (!Number.isFinite(t) || p == null) continue;
         const tempC = smnNum(row.tre200s0);
         pressureHistoryPush(smnHistory, abbr, { t, p, reduction, tempC }, SMN_RETENTION_MS);
+        if (t > dejaVuJusqua) nouveaux.push({ station_abbr: abbr, t, p, reduction, temp_c: tempC });
         if (!latest || t > latest.t) {
           latest = {
             t, p, reduction, tempC,
@@ -3014,11 +3162,77 @@ async function refreshSmnObs() {
         }
       }
       if (latest) { smnObsCache.set(abbr, { ...latest, ...meta }); ok++; }
+      smnPersistHistory(nouveaux);
     } catch (e) {
       console.error(`refreshSmnObs ${abbr}: ${e.message}`);
     }
   }
-  if (ok) { smnFetchedAt = Date.now(); smnLastError = null; }
+  if (ok) { smnFetchedAt = Date.now(); smnLastError = null; smnPurgeHistory(); }
+}
+
+// ── Persistance SwissMetNet — 04/08/2026 ────────────────────────────
+// Miroir d'aemetPersistHistory, à une différence près : purge à un seul
+// seuil (SMN_RETENTION_MS), là où MF et AEMET séparent vent 48 h /
+// pression seule 12 h. Ici tout est de la pression, il n'y a rien à
+// différencier.
+//
+// POURQUOI cette table existe alors que le commentaire de
+// /pressure-history disait qu'elle serait un doublon : parce que ce
+// commentaire reposait sur une prémisse fausse (cf. le bloc SMN_BASE).
+// `_t_now.csv` ne resert PAS 36 h, il resert le jour courant. Un
+// redémarrage Render à 02:00 UTC laisse donc SwissMetNet à deux heures
+// d'historique, sur les MEILLEURES stations du dispositif — celles au
+// dixième d'hPa qui portent Zurich, Lugano, Sion, Viège. Le METAR, lui,
+// garde sa dispense : son API resert bien 30 h, à la condition du
+// découpage en lots (cf. METAR_ROW_BUDGET), donc rien à persister.
+//
+// Fire-and-forget, comme mfPersistHistory et aemetPersistHistory : une
+// écriture Supabase qui échoue ne doit jamais empêcher le poll suivant.
+function smnPersistHistory(rows) {
+  if (!rows.length) return;
+  sbUpsert('smn_pressure_history', rows, 'station_abbr,t')
+    .catch(e => console.error('smnPersistHistory upsert error:', e.message));
+}
+
+// Purge, appelée UNE FOIS par cycle et non par station — contrairement
+// à aemetPersistHistory, où purge et écriture partagent le même appel.
+// Le seuil est global : vingt DELETE identiques pour un seul `t < X`,
+// c'est dix-neuf requêtes Supabase pour rien, toutes les 15 minutes.
+function smnPurgeHistory() {
+  const cutoff = Date.now() - SMN_RETENTION_MS;
+  sbDelete('smn_pressure_history', `t=lt.${cutoff}`)
+    .catch(e => console.error('smnPurgeHistory error:', e.message));
+}
+
+// Hydrate smnHistory au démarrage. À appeler AVANT le premier
+// refreshSmnObs : celui-ci se sert de la borne haute du buffer pour
+// savoir quoi persister, et repartir d'un buffer vide lui ferait
+// ré-upserter le jour entier pour rien.
+async function hydrateSmnHistoryFromSupabase() {
+  try {
+    const cutoff = Date.now() - SMN_RETENTION_MS;
+    const rows = await sbGet(
+      'smn_pressure_history',
+      `t=gte.${cutoff}&select=station_abbr,t,p,reduction,temp_c&order=t.asc&limit=200000`
+    );
+    if (!Array.isArray(rows) || !rows.length) return;
+    const stations = new Set();
+    for (const r of rows) {
+      const abbr = String(r.station_abbr);
+      // `Number()` explicite : PostgREST rend les `numeric` en CHAÎNES.
+      // Les laisser telles quelles ferait des soustractions de Δ en
+      // concaténations silencieuses côté client.
+      pressureHistoryPush(smnHistory, abbr, {
+        t: Number(r.t), p: Number(r.p),
+        reduction: r.reduction,
+        tempC: r.temp_c == null ? null : Number(r.temp_c),
+      }, SMN_RETENTION_MS);
+      stations.add(abbr);
+    }
+    console.log(`🔄 smnHistory hydraté depuis smn_pressure_history : ${rows.length} points, ${stations.size} stations`);
+  } catch (e) {
+    console.error('hydrateSmnHistoryFromSupabase error:', e.message);
+  }
 }
 
 // ── Module de traduction (commentaires), 08/07 ──────────────────────
@@ -3968,11 +4182,16 @@ app.get('/pressure-stations', (req, res) => {
 });
 
 // Historique d'une balise de pression, `id` préfixé comme ci-dessus.
-// Pas de table Supabase derrière, contrairement à /meteofrance-history
-// et /aemet-history : les deux sources servent elles-mêmes leur propre
-// historique (METAR via `hours`, MeteoSuisse via un fichier `now` qui
-// couvre ~36 h), donc le buffer RAM se reconstitue seul après un
-// redémarrage Render. Une table ici serait un doublon.
+//
+// ⚠️ CORRIGÉ LE 04/08/2026. Ce commentaire affirmait qu'aucune table
+// Supabase n'était nécessaire « puisque les deux sources servent
+// elles-mêmes leur propre historique ». Vrai pour le METAR, FAUX pour
+// MeteoSuisse : `_t_now.csv` couvre le jour UTC courant, pas 36 h (cf.
+// le bloc SMN_BASE). Depuis, `smn_pressure_history` persiste le côté
+// suisse et `hydrateSmnHistoryFromSupabase` le recharge au démarrage,
+// exactement comme /meteofrance-history et /aemet-history. Le METAR
+// garde sa dispense — mais elle tient au découpage en lots du poll,
+// pas à la générosité de l'API (cf. METAR_ROW_BUDGET).
 app.get('/pressure-history/:id', (req, res) => {
   const raw = String(req.params.id || '');
   const sep = raw.indexOf(':');
@@ -3996,6 +4215,65 @@ app.get('/pressure-history/:id', (req, res) => {
     return res.json({ id: raw, reduction: red, resolutionHpa: 0.1, points: pts });
   }
   res.status(400).json({ error: "id attendu sous la forme 'metar:LIMW' ou 'smn:LUG'" });
+});
+
+// ── Diagnostic des buffers de pression (public, lecture seule) ───────
+// Ajouté le 04/08/2026. Raison d'être : le buffer d'historique était
+// tombé à ~5 h au lieu de 30 h et il a fallu huit requêtes manuelles
+// sur /pressure-history pour s'en apercevoir, puis une demi-heure pour
+// comprendre que la cause n'était pas celle qu'on croyait. Cette route
+// rend la même mesure en un coup d'œil, depuis le navigateur, sans
+// redéployer.
+//
+// Ce qu'il faut y lire : `spanH` par ancre. Une étendue courte sur
+// TOUTES les ancres d'une source = un problème de processus (plafond
+// de l'API, redémarrage, poll cassé). Une étendue courte sur une seule
+// = la station se tait, ce qui est normal la nuit sur un aérodrome
+// fermé (LIPB entre 21 h et 04 h UTC, cas documenté).
+//
+// Aucune auth : ne rend que des compteurs et des horodatages sur de la
+// donnée publique — même politique que /lightning-strikes.
+app.get('/pressure-diag', (req, res) => {
+  const now = Date.now();
+  const decrire = (map, ids) => ids.map(id => {
+    const arr = map.get(id) || [];
+    return {
+      id,
+      points: arr.length,
+      spanH: pressureHistorySpanH(map, id),
+      oldest: arr.length ? arr[0].t : null,
+      newest: arr.length ? arr[arr.length - 1].t : null,
+      ageMin: arr.length ? Math.round((now - arr[arr.length - 1].t) / 60000) : null,
+    };
+  });
+  const metar = decrire(metarHistory, METAR_ANCHORS);
+  const smn = decrire(smnHistory, SMN_ANCHORS);
+  const mediane = liste => {
+    const v = liste.map(e => e.spanH).filter(h => h != null).sort((a, b) => a - b);
+    return v.length ? v[Math.floor(v.length / 2)] : null;
+  };
+  res.json({
+    now,
+    metar: {
+      anchors: METAR_ANCHORS.length,
+      medianSpanH: mediane(metar),
+      fetchedAt: metarFetchedAt,
+      deepDoneAt: metarDeepDoneAt,
+      deepBatches: metarBatches(METAR_ANCHORS, METAR_BOOT_HOURS).length,
+      rowBudget: METAR_ROW_BUDGET,
+      lastError: metarLastError,
+      stations: metar,
+    },
+    smn: {
+      anchors: SMN_ANCHORS.length,
+      medianSpanH: mediane(smn),
+      fetchedAt: smnFetchedAt,
+      lastError: smnLastError,
+      stations: smn,
+    },
+    retentionH: METAR_RETENTION_MS / 3600000,
+    expectedSpanH: METAR_BOOT_HOURS,
+  });
 });
 
 // ── Lot 5 — Éclairs (public, lecture seule) ──────────────────────────
@@ -5180,14 +5458,25 @@ app.listen(PORT, async () => {
   // Le PREMIER poll METAR demande METAR_BOOT_HOURS d'un coup, les
   // suivants METAR_POLL_HOURS : c'est ce qui remplace la table de
   // persistance que MF et AEMET ont dû se payer. Un redémarrage Render
-  // ne perd rien, il redemande.
-  refreshMetarObs(METAR_BOOT_HOURS);
+  // ne perd rien, il redemande — mais SEULEMENT depuis le 04/08/2026 et
+  // le découpage en lots : la même ligne, avant, ne ramenait que ~5 h
+  // sur 30 demandées, sans le dire (cf. METAR_ROW_BUDGET).
+  refreshMetarDeep();
   setInterval(() => refreshMetarObs(), METAR_POLL_MS);
+  // Ceinture : si un lot du démarrage a échoué, ou si l'API rabaisse
+  // son plafond, le buffer se recreuse tout seul sous 6 h.
+  setInterval(refreshMetarDeep, METAR_DEEP_MS);
   // MeteoSuisse : les métadonnées d'abord (altitude du baromètre —
   // indispensable à la réduction, cf. refreshSmnMeta), les relevés
   // ensuite. refreshSmnObs les recharge de lui-même si elles manquent,
   // l'ordre ici n'est qu'une optimisation du démarrage.
-  refreshSmnMeta().then(() => refreshSmnObs());
+  //
+  // L'hydratation Supabase passe AVANT le premier refreshSmnObs, et pas
+  // seulement pour la forme : ce dernier se sert de la borne haute du
+  // buffer pour décider quoi persister (cf. smnPersistHistory).
+  hydrateSmnHistoryFromSupabase()
+    .then(() => refreshSmnMeta())
+    .then(() => refreshSmnObs());
   setInterval(refreshSmnObs, SMN_POLL_MS);
   setInterval(refreshSmnMeta, SMN_META_POLL_MS);
   // Étape 28 — détecteur de front de rafales. No-op silencieux si
