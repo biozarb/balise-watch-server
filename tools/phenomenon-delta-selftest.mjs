@@ -110,6 +110,24 @@ const versant = await run(ligne({ active_sign: 'neg' }), [CHAMBERY, AOSTE]);
 check('bon module, versant interdit par le phénomène → niveau 0', versant.measured.level, 0);
 check('… mais le Δ reste affiché, il n\'est pas faux', versant.measured.delta, fort.measured.delta);
 
+console.log('\nla simultanéité des deux relevés');
+// Deux relevés à la même heure : rien à signaler.
+check('relevés simultanés → dans la tolérance', [r1.measured.pairSpanMin, r1.measured.beyondTolerance], [0, false]);
+check('deux METAR → sources homogènes', r1.measured.mixedSources, false);
+// Deux heures d'écart : le Δ est rendu, mais l'écart est DIT. C'est la
+// situation réelle de 16 des 27 phénomènes au 04/08.
+const decale = await run(ligne(), [CHAMBERY, { ...AOSTE, t: T - 2 * 3_600_000 }]);
+check('2 h d\'écart → signalé hors tolérance', decale.measured.beyondTolerance, true);
+check('… avec l\'écart en minutes', decale.measured.pairSpanMin, 120);
+check('… mais le Δ est rendu, pas escamoté', decale.measured.delta, r1.measured.delta);
+// L'âge ne fait pas la simultanéité : deux relevés vieux mais synchrones
+// donnent une mesure valable.
+const vieux = await run(ligne(), [{ ...CHAMBERY, t: T - 3 * 3_600_000 }, { ...AOSTE, t: T - 3 * 3_600_000 }]);
+check('vieux mais simultanés → dans la tolérance', vieux.measured.beyondTolerance, false);
+check('… et leur âge est rapporté à part', vieux.measured.ageMinA, 180);
+const mixte = await run(ligne(), [CHAMBERY, { ...AOSTE, id: 'mf:12345', source: 'meteofrance' }]);
+check('METAR + Météo-France → sources mixtes signalées', mixte.measured.mixedSources, true);
+
 console.log('\nles seuils rendus sont ceux de la règle, replis appliqués');
 const nus = await run(ligne({ threshold_hpa: null, threshold_strong_hpa: null }), [CHAMBERY, AOSTE]);
 check('seuils absents → replis 4 et 8', [nus.thresholds.hpa, nus.thresholds.strongHpa], [4, 8]);
