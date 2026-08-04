@@ -27,6 +27,7 @@
 //    node tools/replay-foehn-alert.mjs --gap        # kind contenant gap
 // ══════════════════════════════════════════════════════════════════
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -71,10 +72,13 @@ const fetchFoehnDiffServer = mk(
   ['foehnDiffCache', 'FOEHN_CACHE_TTL_MS', 'OPEN_METEO_URL'],
   cut('async function fetchFoehnDiffServer'), 'fetchFoehnDiffServer',
 )(new Map(), FOEHN_CACHE_TTL_MS, OPEN_METEO_URL);
+// Depuis le lot 7, foehnServerPeak appelle la règle de niveau de la
+// fiche : on lui injecte le vrai module partagé.
+const PRESSURE = createRequire(import.meta.url)(join(root, 'lib', 'pressure.cjs'));
 const foehnServerPeak = mk(
-  ['FOEHN_FORECAST_HORIZON_MS'],
+  ['FOEHN_FORECAST_HORIZON_MS', 'PRESSURE'],
   cut('function foehnServerPeak'), 'foehnServerPeak',
-)(FOEHN_FORECAST_HORIZON_MS);
+)(FOEHN_FORECAST_HORIZON_MS, PRESSURE);
 
 // ── La règle d'AVANT le 04/08, pour mesurer ce que le correctif change.
 // ⚠️ Ce n'est PAS une deuxième version de la règle vivante : ce code a
@@ -132,9 +136,11 @@ for (const ax of axes) {
   }
   // Mêmes valeurs que le poll : seuil du phénomène (le seuil du compte
   // n'existe pas ici, on rejoue l'axe, pas un abonné), et active_sign.
-  const thr = Number(ax.threshold_hpa) || FOEHN_HPA_VALLEY;
-  const strong = Number(ax.threshold_strong_hpa) || FOEHN_HPA_PLAIN;
-  const p = foehnServerPeak(dd, thr, strong, 'both', ax.active_sign || 'both');
+  // Mapping par la fonction de la fiche : les replis de seuil sont
+  // appliqués une seule fois, au même endroit, pour les deux moitiés.
+  const ph = PRESSURE.phenomenonFromRow(ax);
+  const thr = ph.thresholdHpa, strong = ph.thresholdStrongHpa;
+  const p = foehnServerPeak(dd, ph, 'both');
   const avant = peakAncienneRegle(dd, FOEHN_HPA_VALLEY, 'both'); // repli global d'avant
 
   const lvl = p ? p.level : 0;
@@ -149,7 +155,7 @@ for (const ax of axes) {
   // versant — Südföhn annoncé aux pilotes du Nordföhn, et l'inverse.
   let raison = '';
   if (change) {
-    const sign = ax.active_sign || 'both';
+    const sign = ph.activeSign;
     const versantInterdit = avant && ((avant.diff < 0 && sign === 'pos') || (avant.diff > 0 && sign === 'neg'));
     if (lvl < lvlAvant) {
       raison = versantInterdit
@@ -164,7 +170,7 @@ for (const ax of axes) {
   const marque = lvl >= 3 ? '!!!' : lvl >= 2 ? ' ! ' : '   ';
   const dPart = p ? `${p.diff >= 0 ? '+' : ''}${p.diff.toFixed(1)} hPa ${hhmm(p.time)}` : 'aucun pic retenu';
   lignes.push(
-    `${marque}${pad(ax.label, 34)} ${pad(`${thr}/${strong}`, 7)} ${pad(ax.active_sign || 'both', 5)} ` +
+    `${marque}${pad(ax.label, 34)} ${pad(`${thr}/${strong}`, 7)} ${pad(ph.activeSign, 5)} ` +
     `niv ${lvl}  ${pad(dPart, 30)}${change ? `  ← niv ${lvlAvant} avant : ${raison}` : ''}`,
   );
   await new Promise(res => setTimeout(res, 150)); // courtoisie Open-Meteo

@@ -79,8 +79,13 @@ const phenoNs = await import(pathToFileURL(join(web, 'src', 'lib', 'phenomena.ts
 const ts = {
   ...pressureNs,
   haversineKm: utilsNs.haversineKm,
+  phenomenonFromRow: phenoNs.phenomenonFromRow,
   pickStationFor: phenoNs.pickStationFor,
   resolveAnchors: phenoNs.resolveAnchors,
+  effectiveThreshold: phenoNs.effectiveThreshold,
+  signMatches: phenoNs.signMatches,
+  phenomenonLevel: phenoNs.phenomenonLevel,
+  phenomenonDirection: phenoNs.phenomenonDirection,
 };
 const cjs = createRequire(import.meta.url)(join(serveur, 'lib', 'pressure.cjs'));
 
@@ -175,6 +180,33 @@ duel('buildPressureReferential', stations.slice(0, 2), [
   { id: '73329001', nom: 'Bourg-Saint-Maurice', lat: 45.62, lon: 6.76, alt: 865, pmer: 1014.2, dd: 200, ff: 4, validityTime: '2026-08-04T16:00:00Z' },
   { id: 'sans-alt', nom: 'Sans altitude', lat: 45, lon: 6, alt: null, pmer: 1013, dd: null, ff: null, validityTime: null },
 ], []);
+
+console.log('\n5. la règle de niveau — celle qui décide qui reçoit une alerte');
+// Ligne de base réaliste : un vent de gap curé à 2/4, sens négatif.
+const ligne = (over = {}) => ({
+  id: 'x', user_id: null, kind: 'gap_wind', label: 'Vent d\'est de Maurienne',
+  a_name: 'A', a_lat: 45.2, a_lon: 6.4, b_name: 'B', b_lat: 45.1, b_lon: 6.9,
+  station_a: null, station_b: null, gap_name: null, gap_lat: null, gap_lon: null,
+  gap_alt: null, bearing: null, threshold_hpa: 2, threshold_strong_hpa: 4,
+  active_sign: 'neg', span_km: null, notes: null, local_names: null, ...over,
+});
+duel('phenomenonFromRow', ligne());
+duel('phenomenonFromRow', ligne({ threshold_hpa: null, threshold_strong_hpa: null, active_sign: null }));
+duel('phenomenonFromRow', ligne({ kind: 'inconnu', active_sign: 'nawak', local_names: [] }));
+duel('phenomenonFromRow', ligne({ threshold_hpa: 0 })); // le cas où || et ?? divergeaient
+const phx = ts.phenomenonFromRow(ligne());
+duel('effectiveThreshold', phx);
+duel('effectiveThreshold', phx, 5);
+duel('signMatches', -3, phx);
+duel('signMatches', 3, phx);
+duel('phenomenonLevel', -5, phx);        // ≥ 4 → niveau 3
+duel('phenomenonLevel', -3, phx);        // ≥ 2 → niveau 2
+duel('phenomenonLevel', -1, phx);        // sous le seuil
+duel('phenomenonLevel', 5, phx);         // bon module, mauvais versant → 0
+duel('phenomenonLevel', -3, phx, 6);     // seuil du compte plus haut → 0
+duel('phenomenonDirection', -5, phx);
+duel('phenomenonDirection', 5, phx);
+duel('phenomenonDirection', -1, phx);
 
 console.log(`\n${ok} contrôles au vert, ${ko} au rouge.`);
 if (ko) console.error('\n!! La fiche et le serveur ne calculent PAS le même Δ.\n');

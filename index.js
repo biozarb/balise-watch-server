@@ -6,6 +6,18 @@ const rateLimit = require('express-rate-limit');
 const WebSocket = require('ws'); // Étape 10 Lot 5 : flux foudre Blitzortung (WebSocket temps réel)
 const { PNG } = require('pngjs'); // Étape 10 Lot C : décodage des tuiles radar RainViewer (détection précip)
 
+// ── Lot 7 (04/08/2026) — la physique de la pression, partagée ───────
+// `lib/pressure.cjs` est GÉNÉRÉ depuis PWA/web/src/lib/pressure.ts : la
+// fiche et le serveur exécutent littéralement le même code. Avant, le
+// serveur soustrayait deux pressions MSL de modèle et la fiche
+// convertissait des relevés de stations en QFF — deux nombres
+// différents présentés comme le même. Sur un outil de sécurité, deux
+// vérités valent moins qu'une seule.
+// Ne jamais éditer lib/pressure.cjs à la main (cf. son en-tête) ;
+// contrôle de dérive : node tools/verify-pressure-sync.mjs
+const PRESSURE = require('./lib/pressure.cjs');
+const { computePhenomenonDelta, OBSERVED_HOURS } = require('./lib/phenomenon-delta');
+
 const PORT         = process.env.PORT || 3000;
 // ── Marqueur de build ──────────────────────────────────────────────
 // Ajouté le 04/08/2026. `version` est une constante du source : elle ne
@@ -3974,7 +3986,12 @@ app.get('/precip-distance', async (req, res) => {
 // en cache RAM, zéro coût réseau supplémentaire côté serveur ; le
 // payload JSON grossit (~780 → ~2150 stations) mais reste un unique
 // fetch, pas une requête par station.
-app.get('/meteofrance-stations', (req, res) => {
+// Extrait de la route le 04/08/2026 (lot 7) : le serveur construit
+// désormais LUI-MÊME le référentiel de pression, et il lui faut la même
+// liste que celle qu'il sert au client. La bâtir deux fois, c'est
+// s'exposer à ce que la fiche et la route /phenomenon-delta n'aient pas
+// les mêmes stations — donc pas les mêmes ancres, donc pas le même Δ.
+function mfStationsPayload() {
   const stationsById = new Map(mfStationsList.map(s => [s.id, s]));
   const out = [];
   for (const [id, obs] of mfObsCache) {
@@ -3987,7 +4004,11 @@ app.get('/meteofrance-stations', (req, res) => {
       pres: obs.pres, pmer: obs.pmer, validityTime: obs.validityTime,
     });
   }
-  res.json({ stations: out, fetchedAt: mfObsCacheFetchedAt });
+  return out;
+}
+
+app.get('/meteofrance-stations', (req, res) => {
+  res.json({ stations: mfStationsPayload(), fetchedAt: mfObsCacheFetchedAt });
 });
 
 // ── Étape 11 (suite, 11/07) — Historique court d'une station MF ─────
@@ -4014,26 +4035,30 @@ app.get('/meteofrance-stations', (req, res) => {
 // systématiquement la source des points les plus récents (jamais en
 // retard, jamais remplacé par une lecture Supabase potentiellement
 // périmée de quelques secondes).
-app.get('/meteofrance-history/:id', async (req, res) => {
-  const ramPts = beaconHistory.get(req.params.id) || [];
-  const hoursParam = Number(req.query.hours);
+// Extrait de la route le 04/08/2026 (lot 7) : /phenomenon-delta a besoin
+// du MÊME historique que la fiche pour tracer la MÊME courbe. Passer par
+// une deuxième lecture écrite à part, c'est accepter que les deux courbes
+// diffèrent un jour sans que personne ne s'en aperçoive.
+async function mfHistoryPoints(stationId, hoursParam) {
+  const ramPts = beaconHistory.get(stationId) || [];
   const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 0), MF_HISTORY_RETENTION_H) : null;
-  if (!hours || hours * 3600 * 1000 <= FW_HISTORY_MAX_AGE_MS) {
-    return res.json({ points: ramPts });
-  }
+  if (!hours || hours * 3600 * 1000 <= FW_HISTORY_MAX_AGE_MS) return ramPts;
   try {
     const cutoff = Date.now() - hours * 3600 * 1000;
     const oldPts = await sbGet(
       'mf_station_history',
-      `station_id=eq.${encodeURIComponent(req.params.id)}&t=gte.${cutoff}&select=t,moy,raf,min,dir,pressure&order=t.asc`
+      `station_id=eq.${encodeURIComponent(stationId)}&t=gte.${cutoff}&select=t,moy,raf,min,dir,pressure&order=t.asc`
     );
     const ramCutoff = ramPts[0]?.t ?? Infinity; // évite les doublons : ne garde du passé persistant que ce qui précède le buffer RAM
-    const merged = [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
-    res.json({ points: merged });
+    return [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
   } catch (e) {
     console.error('meteofrance-history (hours) error:', e.message);
-    res.json({ points: ramPts }); // dégradation gracieuse : au pire, la profondeur RAM habituelle
+    return ramPts; // dégradation gracieuse : au pire, la profondeur RAM habituelle
   }
+}
+
+app.get('/meteofrance-history/:id', async (req, res) => {
+  res.json({ points: await mfHistoryPoints(req.params.id, Number(req.query.hours)) });
 });
 
 // ── Étape 12 (suite, 17/07) — Stations Infoclimat (lecture seule) ───
@@ -4123,7 +4148,10 @@ app.get('/infoclimat-history/:id', (req, res) => {
 // /meteofrance-stations (dd/ff/raf10/ddraf10/pres/pmer/validityTime) —
 // délibéré, pour réutiliser telle quelle la même forme côté client
 // plutôt que d'introduire une troisième convention de champs.
-app.get('/aemet-stations', (req, res) => {
+// Extrait de la route pour la même raison que mfStationsPayload : une
+// seule construction, servie au client ET consommée par le référentiel
+// interne (lot 7).
+function aemetStationsPayload() {
   const out = [];
   for (const [id, obs] of aemetObsCache) {
     if (obs.moy == null && obs.pressure == null) continue; // aucun relevé exploitable
@@ -4134,7 +4162,11 @@ app.get('/aemet-stations', (req, res) => {
       validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
     });
   }
-  res.json({ stations: out, fetchedAt: aemetObsCacheFetchedAt, lastError: aemetLastError });
+  return out;
+}
+
+app.get('/aemet-stations', (req, res) => {
+  res.json({ stations: aemetStationsPayload(), fetchedAt: aemetObsCacheFetchedAt, lastError: aemetLastError });
 });
 
 // ── AEMET (Espagne), ajout 22/07/2026 — historique d'une station ────
@@ -4144,26 +4176,27 @@ app.get('/aemet-stations', (req, res) => {
 // complété par aemet_station_history (persistance 48h/12h, cf.
 // aemetPersistHistory) au-delà de cette profondeur RAM via ?hours=N. Pas
 // d'auth : donnée publique en lecture, comme les autres endpoints stations.
-app.get('/aemet-history/:id', async (req, res) => {
-  const ramPts = beaconHistory.get(req.params.id) || [];
-  const hoursParam = Number(req.query.hours);
+// Extrait de la route pour la même raison que mfHistoryPoints (lot 7).
+async function aemetHistoryPoints(stationId, hoursParam) {
+  const ramPts = beaconHistory.get(stationId) || [];
   const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 0), AEMET_HISTORY_RETENTION_H) : null;
-  if (!hours || hours * 3600 * 1000 <= FW_HISTORY_MAX_AGE_MS) {
-    return res.json({ points: ramPts });
-  }
+  if (!hours || hours * 3600 * 1000 <= FW_HISTORY_MAX_AGE_MS) return ramPts;
   try {
     const cutoff = Date.now() - hours * 3600 * 1000;
     const oldPts = await sbGet(
       'aemet_station_history',
-      `station_id=eq.${encodeURIComponent(req.params.id)}&t=gte.${cutoff}&select=t,moy,raf,dir,pressure&order=t.asc`
+      `station_id=eq.${encodeURIComponent(stationId)}&t=gte.${cutoff}&select=t,moy,raf,dir,pressure&order=t.asc`
     );
     const ramCutoff = ramPts[0]?.t ?? Infinity;
-    const merged = [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
-    res.json({ points: merged });
+    return [...(Array.isArray(oldPts) ? oldPts.filter(p => p.t < ramCutoff) : []), ...ramPts];
   } catch (e) {
     console.error('aemet-history (hours) error:', e.message);
-    res.json({ points: ramPts });
+    return ramPts;
   }
+}
+
+app.get('/aemet-history/:id', async (req, res) => {
+  res.json({ points: await aemetHistoryPoints(req.params.id, Number(req.query.hours)) });
 });
 
 // ── Balises de pression (foehn v2, lot 0, 03/08/2026) ──────────────
@@ -4267,18 +4300,20 @@ app.get('/pressure-stations', (req, res) => {
 // exactement comme /meteofrance-history et /aemet-history. Le METAR
 // garde sa dispense — mais elle tient au découpage en lots du poll,
 // pas à la générosité de l'API (cf. METAR_ROW_BUDGET).
-app.get('/pressure-history/:id', (req, res) => {
-  const raw = String(req.params.id || '');
-  const sep = raw.indexOf(':');
-  const source = sep > 0 ? raw.slice(0, sep) : '';
-  const code = sep > 0 ? raw.slice(sep + 1) : '';
-  const hoursParam = Number(req.query.hours);
+// Extrait de la route (lot 7) : /phenomenon-delta trace sa courbe avec
+// EXACTEMENT les mêmes points que la fiche. Renvoie null si l'id n'est
+// pas d'une source de pression, ce que l'appelant traduit à sa façon —
+// un 400 pour la route, une courbe vide pour le calcul interne.
+function pressureHistoryPayload(raw, hoursParam) {
+  const sep = String(raw || '').indexOf(':');
+  const source = sep > 0 ? String(raw).slice(0, sep) : '';
+  const code = sep > 0 ? String(raw).slice(sep + 1) : '';
   const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 0), 36) : 36;
   const cutoff = Date.now() - hours * 3600 * 1000;
 
   if (source === 'metar') {
     const pts = (metarHistory.get(code) || []).filter(p => p.t >= cutoff);
-    return res.json({ id: raw, reduction: 'qnh', resolutionHpa: 1, points: pts });
+    return { id: raw, reduction: 'qnh', resolutionHpa: 1, points: pts };
   }
   if (source === 'smn') {
     const pts = (smnHistory.get(code) || []).filter(p => p.t >= cutoff);
@@ -4287,9 +4322,109 @@ app.get('/pressure-history/:id', (req, res) => {
     // `reduction` de chaque point fait foi ; celui-ci n'est que le
     // résumé de la station, tiré du cache d'observations.
     const red = smnObsCache.get(code)?.reduction ?? pts[pts.length - 1]?.reduction ?? 'qff';
-    return res.json({ id: raw, reduction: red, resolutionHpa: 0.1, points: pts });
+    return { id: raw, reduction: red, resolutionHpa: 0.1, points: pts };
   }
-  res.status(400).json({ error: "id attendu sous la forme 'metar:LIMW' ou 'smn:LUG'" });
+  return null;
+}
+
+app.get('/pressure-history/:id', (req, res) => {
+  const out = pressureHistoryPayload(req.params.id, Number(req.query.hours));
+  if (!out) return res.status(400).json({ error: "id attendu sous la forme 'metar:LIMW' ou 'smn:LUG'" });
+  res.json(out);
+});
+
+// ══════════════════════════════════════════════════════════════════
+//  Lot 7 — LE Δ MESURÉ D'UN PHÉNOMÈNE (route B)
+//
+//  Le problème que cette route supprime : la fiche et le serveur ne
+//  calculaient pas le même Δ. Le serveur soustrayait deux pressions MSL
+//  du modèle GFS AUX COORDONNÉES DES VILLES ; la fiche lisait les
+//  STATIONS déclarées, ramenait tout en QFF, corrigeait l'altitude et
+//  pondérait l'incertitude. Ce ne sont pas deux approximations du même
+//  nombre, ce sont deux nombres — la fiche pouvait afficher « au-dessus
+//  du seuil » pendant que le serveur se taisait, et l'inverse.
+//
+//  Désormais c'est le serveur qui calcule, avec la physique de la
+//  fiche (lib/pressure.cjs), et la fiche consomme. Il possédait déjà
+//  toute la matière : METAR et SwissMetNet en RAM, Météo-France et
+//  AEMET dans leurs caches. Il ne lui manquait que la physique.
+//
+//  ⚠️ CETTE ROUTE NE REND QUE DU MESURÉ. L'alerte, elle, se déclenche
+//  sur le pic PRÉVU à 36 h (foehnServerPeak) — le foehn s'anticipe la
+//  veille, c'est un choix assumé. Les deux séries ne doivent jamais
+//  être confondues, et aucun champ de cette réponse ne mélange les deux.
+//
+//  Lecture publique, comme /pressure-stations : de la donnée
+//  d'observation agrégée, rien de personnel.
+// ══════════════════════════════════════════════════════════════════
+
+// Cache des phénomènes. Motif identique à celui du front de rafales :
+// une lecture Supabase PAR REQUÊTE, pour une donnée strictement
+// identique pour tout le monde et qui change une fois par mois, c'est
+// le piège qui a déjà coûté cher à ce projet (cf. BUGS.md 19/07).
+let foehnAxesCache = [];
+let foehnAxesFetchedAt = 0;
+const FOEHN_AXES_TTL_MS = 10 * 60 * 1000;
+
+async function getFoehnAxes() {
+  if (foehnAxesCache.length && (Date.now() - foehnAxesFetchedAt) < FOEHN_AXES_TTL_MS) return foehnAxesCache;
+  const rows = await sbGet('foehn_axes', 'select=*');
+  if (Array.isArray(rows)) { foehnAxesCache = rows; foehnAxesFetchedAt = Date.now(); }
+  // En cas d'échec on garde le cache précédent : une veille qui tourne
+  // sur des seuils d'il y a dix minutes vaut mieux qu'une veille muette.
+  return foehnAxesCache;
+}
+
+/** LE référentiel, fondu exactement comme AppContext le fond. */
+function pressureReferential() {
+  return PRESSURE.buildPressureReferential(
+    pressureStationsPayload(), mfStationsPayload(), aemetStationsPayload(),
+  );
+}
+
+/** Historique d'une ancre, quelle que soit sa source. */
+async function historyForStation(st) {
+  const src = String(st.id).split(':')[0];
+  if (src === 'metar' || src === 'smn') {
+    return (pressureHistoryPayload(st.id, OBSERVED_HOURS) || {}).points || [];
+  }
+  if (src === 'mf') return mfHistoryPoints(st.code, OBSERVED_HOURS);
+  if (src === 'aemet') return aemetHistoryPoints(st.code, OBSERVED_HOURS);
+  return [];
+}
+
+// Cache court : les relevés bougent toutes les 10 à 30 min selon la
+// source, recalculer à chaque ouverture de fiche n'apporterait rien.
+const phenomenonDeltaCache = new Map(); // id -> { ts, payload }
+const PHENOMENON_DELTA_TTL_MS = 2 * 60 * 1000;
+
+app.get('/phenomenon-delta/:id', async (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const cached = phenomenonDeltaCache.get(id);
+    if (cached && (Date.now() - cached.ts) < PHENOMENON_DELTA_TTL_MS) {
+      return res.json({ ...cached.payload, cached: true });
+    }
+    const rows = await getFoehnAxes();
+    const row = rows.find(r => r.id === id);
+    if (!row) return res.status(404).json({ error: 'phénomène inconnu' });
+
+    const payload = await computePhenomenonDelta({
+      row,
+      referential: pressureReferential(),
+      historyFor: historyForStation,
+      // Le seuil du COMPTE n'est pas lu ici : cette route est publique
+      // et n'a pas de session. Elle rend le seuil du phénomène ; c'est
+      // au client d'appliquer l'éventuel seuil personnel par-dessus,
+      // avec la même fonction (phenomenonLevel), donc sans divergence.
+      userOverride: null,
+    });
+    phenomenonDeltaCache.set(id, { ts: Date.now(), payload });
+    res.json({ ...payload, cached: false });
+  } catch (e) {
+    console.error('phenomenon-delta error:', e.message);
+    res.status(500).json({ error: 'calcul impossible' });
+  }
 });
 
 // ── Diagnostic des buffers de pression (public, lecture seule) ───────
@@ -4620,11 +4755,27 @@ async function fetchFoehnDiffServer(axis) {
 // Les deux filtres se COMPOSENT : `activeSign` dit ce que le phénomène
 // permet, `wantDir` ce que le pilote surveille, et on ne retient qu'un
 // pas qui satisfait les deux.
-function foehnServerPeak(d, threshold, thresholdStrong, wantDir = 'both', activeSign = 'both') {
+//
+// ⚠️ RÉVISION DU LOT 7 — la RÈGLE DE NIVEAU n'est plus écrite ici.
+// Elle était recopiée de `phenomenonLevel` (lib/phenomena.ts) : deux
+// écritures du même seuil de sécurité, c'est-à-dire exactement ce que
+// le commentaire du bloc foehn interdit. Le serveur APPELLE désormais
+// celle de la fiche, via lib/pressure.cjs.
+//
+// Ce qui reste ici, et qui n'appartient qu'au serveur : le CHOIX DU
+// PIC dans la fenêtre d'anticipation. `phenomenonLevel` juge un Δ ; il
+// faut d'abord décider DE QUEL Δ on parle. Le pré-filtrage par signe
+// sert à ça — sans lui, on choisirait le plus fort des deux versants
+// puis on le jugerait nul, en manquant le pic du bon côté.
+//
+// `ph` est un phénomène mappé par `phenomenonFromRow`, pas une ligne
+// brute : les replis de seuil ont déjà été appliqués, une seule fois,
+// au même endroit que pour la fiche.
+function foehnServerPeak(d, ph, wantDir = 'both', userOverride = null) {
   const now = Date.now();
   const hi = now + FOEHN_FORECAST_HORIZON_MS;
-  const allowNeg = activeSign !== 'pos' && wantDir !== 'toB'; // toA = Δ négatif
-  const allowPos = activeSign !== 'neg' && wantDir !== 'toA'; // toB = Δ positif
+  const allowNeg = ph.activeSign !== 'pos' && wantDir !== 'toB'; // toA = Δ négatif
+  const allowPos = ph.activeSign !== 'neg' && wantDir !== 'toA'; // toB = Δ positif
   let best = null;
   for (let i = 0; i < d.times.length; i++) {
     const t = d.times[i], v = d.diff[i];
@@ -4634,9 +4785,8 @@ function foehnServerPeak(d, threshold, thresholdStrong, wantDir = 'both', active
     if (best === null || Math.abs(v) > Math.abs(best.diff)) best = { time: t, diff: v };
   }
   if (!best) return null;
-  const mag = Math.abs(best.diff);
-  best.level = mag >= thresholdStrong ? 3 : mag >= threshold ? 2 : 0;
-  best.direction = mag < threshold ? 'none' : (best.diff < 0 ? 'toA' : 'toB');
+  best.level = PRESSURE.phenomenonLevel(best.diff, ph, userOverride);
+  best.direction = PRESSURE.phenomenonDirection(best.diff, ph, userOverride);
   return best;
 }
 
@@ -5471,7 +5621,7 @@ async function pollAndNotify() {
     // de la veille balises. Push formulé DANGER (non-vol). Défensif :
     // table/axe absent -> réarmement silencieux, jamais de crash.
     if (anyFoehnWatch) {
-      const foehnAxesRows = await sbGet('foehn_axes', 'select=*');
+      const foehnAxesRows = await getFoehnAxes();
       const foehnAxisById = new Map((Array.isArray(foehnAxesRows) ? foehnAxesRows : []).map(a => [a.id, a]));
       const wantedAxisIds = [...new Set(foehnWatchRows.filter(w => w.active).map(w => w.axis_id))];
       const foehnDiffByAxis = new Map();
@@ -5500,23 +5650,31 @@ async function pollAndNotify() {
         // renforçaient, et les pilotes n'étaient jamais avertis sur
         // exactement les vents qu'ils surveillent.
         // Ordre voulu : seuil du compte > seuil du phénomène > global.
-        // Le `||` traite 0 et NULL comme « absent », ce qui est la
-        // sémantique « hériter » de l'étape 29.
-        const threshold = Number(w.threshold_hpa) || Number(ax.threshold_hpa) || FOEHN_HPA_VALLEY;
-        const thresholdStrong = Number(ax.threshold_strong_hpa) || FOEHN_HPA_PLAIN;
+        //
+        // ⚠️ RÉVISION DU LOT 7 — le repli n'est plus écrit ici. C'est
+        // `phenomenonFromRow` (celui de la fiche, via lib/pressure.cjs)
+        // qui décide qu'un seuil absent vaut 4 et un seuil fort absent
+        // 8. Le serveur le décidait de son côté avec un `||` là où la
+        // fiche utilise `??` : sur un seuil à 0 les deux ne disaient
+        // déjà pas la même chose. Une seule écriture, un seul repli.
+        const ph = PRESSURE.phenomenonFromRow(ax);
+        // Le seuil du COMPTE reste un « par-dessus » : il ne remplace
+        // pas la curation du phénomène, il la resserre pour un pilote.
+        // `|| null` parce qu'un 0 en base veut dire « rien de choisi ».
+        const userOverride = Number(w.threshold_hpa) || null;
         const wantDir = w.direction || 'both'; // sens surveillé (step20), défaut both
-        // ⚠️ RESTE À FAIRE (lot 7) — le RÉFÉRENTIEL, pas le seuil.
-        // `fetchFoehnDiffServer` calcule Δ sur la pression MSL GFS aux
-        // COORDONNÉES DES VILLES. La fiche, elle, lit les stations
-        // déclarées (`station_a`/`station_b`, METAR/SMN/AEMET) avec la
-        // convention QFF/QNH et la correction d'altitude. Les deux
-        // nombres ne coïncident pas : la fiche peut afficher « au-dessus
-        // du seuil » pendant que le serveur se tait, et l'inverse.
-        // Le remède est d'EXTRAIRE `buildPressureReferential` du client
-        // et de le partager, surtout pas d'en recopier une deuxième
-        // version ici — ce sont les deux moitiés d'une même promesse
-        // faite au pilote, elles doivent sortir du même code.
-        const peak = foehnServerPeak(dd, threshold, thresholdStrong, wantDir, ax.active_sign || 'both');
+        // ── Le référentiel, réglé par le lot 7 ────────────────────────
+        // Ce commentaire disait « RESTE À FAIRE ». C'est fait, et
+        // autrement que prévu : plutôt que d'extraire la physique vers
+        // le client, c'est le SERVEUR qui est devenu la source unique
+        // (route B). `GET /phenomenon-delta/:id` rend le Δ MESURÉ avec
+        // la physique de la fiche, et la fiche le consomme.
+        //
+        // ⚠️ Ce qui suit reste le Δ PRÉVU, et c'est voulu : l'alerte
+        // vise le pic à 36 h, parce que le foehn s'anticipe la veille.
+        // Mesuré et prévu ne sont pas deux versions du même nombre et
+        // ne doivent jamais être fondus dans un seul champ.
+        const peak = foehnServerPeak(dd, ph, wantDir, userOverride);
         const level = peak ? peak.level : 0;
         const active = level >= 2;
         const lang = langByUser.get(w.user_id);
