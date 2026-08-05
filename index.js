@@ -3694,6 +3694,233 @@ app.get('/wind-grid', async (req, res) => {
   res.json({ model, kind, level, tileLat, tileLon, fetchedAt: entry.fetchedAt, times: entry.times, points: entry.points });
 });
 
+// ── Sommets NOMMÉS autour d'un site (lot B, 05/08/2026) ──────────────
+// Carte d'identité d'un site, CONCEPTION_CARTE_IDENTITE_SITE_05-08.md §3.
+// La fiche d'un déco affiche le point le plus haut avoisinant et le vent
+// à son altitude. L'altitude, le cap et la distance sont déjà calculés
+// côté client par balayage du relief (lib/summit.ts) ; ce qui manque et
+// que seul OpenStreetMap peut donner, c'est le NOM.
+//
+// ── POURQUOI CET ENDPOINT EXISTE, PLUTÔT QU'UN APPEL DEPUIS LE NAVIGATEUR
+// Overpass est lent, sujet aux 429, et sans garantie de disponibilité.
+// Le mettre dans le chemin d'ouverture d'une fiche le rendrait visible à
+// chaque pilote. Surtout, sa politique d'usage (vérifiée le 05/08/2026,
+// dev.overpass-api.de/overpass-doc/en/preface/commons.html) désigne
+// nommément comme problématique le fait de « monter une app destinée à
+// plus que des contributeurs OSM en s'appuyant sur les instances
+// publiques comme backend ». Depuis un navigateur, chaque pilote serait
+// un utilisateur Overpass distinct et personne ne verrait le volume
+// total ; ici tout passe par UNE adresse, la nôtre, avec un cache qu'on
+// contrôle et un volume qu'on peut chiffrer.
+//
+// ── CE QUE DIT LA POLITIQUE, ET OÙ ON SE SITUE ──────────────────────
+// Marges annoncées : ~10 000 requêtes/jour et < 1 Go/jour par
+// utilisateur (l'adresse IP fait l'utilisateur). Comportement cité comme
+// problématique n°1 : « envoyer des dizaines de milliers de fois par
+// jour la même requête depuis la même adresse ».
+//
+// Notre volume MAXIMUM théorique : la base pgEarth compte 3 313 décos ;
+// avec un TTL de 30 jours, même si CHAQUE site était consulté, cela fait
+// ~110 requêtes/jour. Soit ~1 % de la marge. En pratique, ~40 pilotes
+// n'ouvrent qu'une poignée de fiches — l'ordre de grandeur réel est la
+// dizaine par jour.
+//
+// ⚠️ Ce qui fait tenir ce chiffre, ce n'est PAS le TTL de 30 jours, c'est
+// le cache NÉGATIF. Un site sans sommet nommé dans son rayon est le cas
+// où la tentation d'oublier le cache est la plus forte (il n'y a « rien »
+// à garder) et c'est exactement là que le comportement problématique n°1
+// se produirait : chaque ouverture de fiche relancerait la même requête
+// vide. Un « on a cherché, il n'y a rien » se cache aussi longtemps
+// qu'un résultat.
+//
+// ⚠️ Render est en offre GRATUITE et son IP sortante peut être partagée
+// avec d'autres locataires : un 429 peut nous arriver sans être de notre
+// fait. C'est sans conséquence — le client retombe sur son balayage du
+// relief et affiche un point haut sans nom, cf. lib/summit.ts.
+//
+// ── PAS DE PERSISTANCE, ET POURQUOI ─────────────────────────────────
+// Le cache est en RAM et meurt à chaque redéploiement. La conception
+// évoquait un cache disque « si le cache mémoire ne suffit pas au réveil
+// de Render » : le disque d'une instance gratuite est lui aussi éphémère,
+// il n'apporterait donc rien. La vraie option durable serait une table
+// Supabase — écartée pour l'instant parce qu'elle coûterait une migration
+// et du quota pour économiser quelques dizaines de requêtes par jour sur
+// une marge de 10 000. À reconsidérer si le volume réel dépassait le
+// millier de requêtes/jour, ou si un intégrateur externe (lot G) venait
+// s'ajouter aux pilotes.
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+// `[timeout:]` explicite : sans lui, la valeur par défaut est 180 s côté
+// serveur Overpass, et une requête longue occupe un créneau (donc allonge
+// le temps de refroidissement) pour rien. La nôtre tourne en bien moins
+// d'une seconde.
+const OVERPASS_TIMEOUT_S = 25;
+// Coupe-circuit CÔTÉ NOUS, distinct du précédent : le `[timeout:]` est
+// une promesse faite à Overpass, celui-ci garantit qu'une requête pendue
+// ne retient pas une réponse HTTP à un pilote.
+const OVERPASS_ABORT_MS = 20 * 1000;
+// User-Agent descriptif avec un contact : c'est la coutume de la
+// communauté OSM, et la seule façon pour l'exploitant de nous joindre
+// avant de bloquer une IP qui le dérangerait.
+const OVERPASS_UA = 'BaliseWatch/1.0 (PWA meteo parapente; +https://balise-watch.vercel.app; biozarb@gmail.com)';
+// Les sommets ne bougent pas. Le seul événement qui périme une réponse
+// est une contribution OSM, et 30 jours de retard sur un nom de sommet
+// n'a jamais fait de mal à personne.
+const SUMMIT_MAX_AGE_MS = 30 * 24 * 3600 * 1000;
+// Après un échec (429, 504, réseau), pas de nouvelle tentative sur CETTE
+// clé avant ce délai — même patron que WIND_GRID_RETRY_COOLDOWN_MS, et
+// même raison : sans lui, chaque ouverture de fiche relance un appel qui
+// se refait jeter, et le 429 ne se résorbe jamais.
+const SUMMIT_RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+// Intervalle minimal entre DEUX appels Overpass, tous sites confondus.
+// La politique parle de créneaux et de temps de refroidissement ; se
+// sérialiser à un appel par seconde nous met hors de portée du mécanisme
+// de délestage quoi qu'il arrive.
+const OVERPASS_MIN_INTERVAL_MS = 1000;
+const SUMMIT_MAX_PEAKS = 60;
+const SUMMIT_RADIUS_MAX_KM = 20;
+
+const summitCache = new Map();        // clé -> { fetchedAt, peaks: [...] }
+const summitLastAttempt = new Map();  // clé -> ms epoch de la dernière tentative
+const summitInFlight = new Map();     // clé -> Promise, dédoublonne les appels concurrents
+let overpassLastCall = 0;
+
+/** `ele` d'OSM est CONTRIBUTIF et sale : « 3506 », « 3506 m », « 3 506 »,
+ *  « 3506.5 », parfois une chaîne libre. On rend un nombre ou `null`, et
+ *  jamais une valeur devinée — un sommet sans altitude exploitable sera
+ *  mesuré au relief côté client, qui a le DEM sous la main. */
+function parseOsmEle(raw) {
+  if (raw == null) return null;
+  const m = String(raw).replace(/\s| /g, '').match(/-?\d+(?:[.,]\d+)?/);
+  if (!m) return null;
+  const v = Number(m[0].replace(',', '.'));
+  // Bornes de plausibilité terrestre. Une valeur hors de ces bornes est
+  // une faute de saisie (unité en pieds, virgule de milliers mal placée),
+  // et la propager serait pire que de ne rien dire.
+  return Number.isFinite(v) && v > -500 && v < 9000 ? v : null;
+}
+
+async function fetchNamedPeaks(lat, lon, radiusKm) {
+  const now = Date.now();
+  const wait = Math.max(0, OVERPASS_MIN_INTERVAL_MS - (now - overpassLastCall));
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  overpassLastCall = Date.now();
+
+  // `node` seul et pas `nwr` : un sommet est un point dans OSM. Le filtre
+  // `["name"]` fait partie de la requête et pas d'un tri après coup —
+  // c'est ce qui garde la réponse à quelques kilo-octets.
+  const q = `[out:json][timeout:${OVERPASS_TIMEOUT_S}];`
+    + `node["natural"="peak"]["name"](around:${Math.round(radiusKm * 1000)},${lat},${lon});`
+    + `out body ${SUMMIT_MAX_PEAKS};`;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), OVERPASS_ABORT_MS);
+  try {
+    const r = await fetch(OVERPASS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': OVERPASS_UA },
+      body: 'data=' + encodeURIComponent(q),
+      signal: ctrl.signal,
+    });
+    // 429 = quota, 504 = ressources insuffisantes : les deux sont des
+    // refus NORMAUX et documentés, pas des pannes. On les traite comme
+    // un échec silencieux (cooldown), sans bruit dans les logs.
+    if (!r.ok) return null;
+    const j = await r.json();
+    if (!Array.isArray(j?.elements)) return null;
+    return j.elements
+      .filter(e => e && typeof e.lat === 'number' && typeof e.lon === 'number' && e.tags?.name)
+      .map(e => ({
+        name: String(e.tags.name).slice(0, 120),
+        lat: e.lat,
+        lon: e.lon,
+        // `null` assumé : le client mesurera au relief. Cf. parseOsmEle.
+        eleM: parseOsmEle(e.tags.ele),
+      }));
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * GET /summit?lat=&lon=&radiusKm=
+ *
+ * Rend la LISTE des sommets nommés du rayon, pas « le plus haut ».
+ * Le choix appartient au client, et ce n'est pas une paresse : départager
+ * des sommets demande une altitude pour chacun, or `ele` manque sur une
+ * partie d'entre eux et c'est le NAVIGATEUR qui a le relief sous la main
+ * (tuiles Terrarium déjà chargées pour ce rayon, cf. lib/summit.ts). Le
+ * serveur fait ici la seule chose que le navigateur ne doit pas faire :
+ * parler à Overpass.
+ *
+ * `peaks: []` avec `status: 'ok'` = on a cherché, il n'y a aucun sommet
+ * nommé — l'information est vraie et se cache 30 jours.
+ * `status: 'unavailable'` = Overpass n'a pas répondu ; rien n'est mis en
+ * cache long, seulement un cooldown. Les deux mènent le client au même
+ * repli (balayage du relief, point haut sans nom), mais pas pour la même
+ * raison, et la fiche ne doit pas les confondre.
+ */
+app.get('/summit', async (req, res) => {
+  const latRaw = Number(req.query.lat);
+  const lonRaw = Number(req.query.lon);
+  const radiusRaw = Number(req.query.radiusKm);
+  if (!Number.isFinite(latRaw) || latRaw < -90 || latRaw > 90
+      || !Number.isFinite(lonRaw) || lonRaw < -180 || lonRaw > 180) {
+    return res.status(400).json({ error: 'lat/lon invalide' });
+  }
+  // Normalisation CÔTÉ SERVEUR, comme pour /wind-grid : aucune confiance
+  // dans l'arrondi du client. Sans elle, deux appels pour le même site
+  // dont les coordonnées diffèrent au dix-millième créeraient deux clés
+  // de cache, donc deux requêtes Overpass pour la même réponse — le
+  // comportement problématique n°1 de la politique, obtenu par
+  // inadvertance. 3 décimales ≈ 110 m, très en dessous du rayon.
+  const lat = Math.round(latRaw * 1000) / 1000;
+  const lon = Math.round(lonRaw * 1000) / 1000;
+  // Rayon en kilomètres ENTIERS et borné : un rayon libre serait une
+  // clé de cache libre, donc un cache qu'on ne remplit jamais.
+  const radiusKm = Math.min(SUMMIT_RADIUS_MAX_KM, Math.max(1, Math.round(radiusRaw || 8)));
+
+  const key = `${lat}|${lon}|${radiusKm}`;
+  const cached = summitCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < SUMMIT_MAX_AGE_MS) {
+    return res.json({ lat, lon, radiusKm, status: 'ok', fetchedAt: cached.fetchedAt, peaks: cached.peaks });
+  }
+
+  const canRetry = Date.now() - (summitLastAttempt.get(key) ?? 0) > SUMMIT_RETRY_COOLDOWN_MS;
+  if (!canRetry) {
+    // Périmé mais en cooldown : on ressert le vieux plutôt que rien. Un
+    // nom de sommet vieux de 31 jours vaut infiniment mieux qu'un trou.
+    if (cached) {
+      return res.json({ lat, lon, radiusKm, status: 'ok', fetchedAt: cached.fetchedAt, peaks: cached.peaks });
+    }
+    return res.json({ lat, lon, radiusKm, status: 'unavailable', peaks: [] });
+  }
+
+  // Dédoublonnage des appels concurrents : deux pilotes ouvrant la même
+  // fiche en même temps ne doivent pas produire deux requêtes Overpass.
+  let job = summitInFlight.get(key);
+  if (!job) {
+    summitLastAttempt.set(key, Date.now());
+    job = fetchNamedPeaks(lat, lon, radiusKm).finally(() => summitInFlight.delete(key));
+    summitInFlight.set(key, job);
+  }
+  const peaks = await job;
+
+  if (peaks == null) {
+    if (cached) {
+      return res.json({ lat, lon, radiusKm, status: 'ok', fetchedAt: cached.fetchedAt, peaks: cached.peaks });
+    }
+    return res.json({ lat, lon, radiusKm, status: 'unavailable', peaks: [] });
+  }
+  // ⚠️ Le tableau VIDE est mis en cache comme le reste. Cf. le
+  // commentaire en tête de section : c'est le cache négatif qui tient le
+  // volume, pas le TTL.
+  const fetchedAt = Date.now();
+  summitCache.set(key, { fetchedAt, peaks });
+  res.json({ lat, lon, radiusKm, status: 'ok', fetchedAt, peaks });
+});
+
 // ── Sondages réels (radiosondages), 25/07/2026 ───────────────────────
 // Retour pilotes (via Yann) : émagramme modèle ok, mais veulent aussi le
 // VRAI sondage (ballon-sonde) le plus proche, façon Meteociel/Wyoming.
