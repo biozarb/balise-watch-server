@@ -3783,6 +3783,19 @@ const summitCache = new Map();        // clé -> { fetchedAt, peaks: [...] }
 const summitLastAttempt = new Map();  // clé -> ms epoch de la dernière tentative
 const summitInFlight = new Map();     // clé -> Promise, dédoublonne les appels concurrents
 let overpassLastCall = 0;
+/** Dernier échec Overpass, exposé par /summit-diag.
+ *
+ *  ⚠️ Ajouté le 05/08/2026 après le PREMIER appel réel, qui a rendu
+ *  `unavailable` sans rien dire de plus. Le repli silencieux est le bon
+ *  comportement pour un pilote — il voit un point haut sans nom, jamais
+ *  une erreur — mais il rend la panne indiagnosticable de l'extérieur.
+ *  Même leçon que `loops.lastError` dans le health check (étape 28) : un
+ *  composant silencieux EN PANNE est indiscernable d'un composant
+ *  silencieux qui n'a rien à signaler. */
+let summitLastFailure = null;
+/** Dernier succès, pour distinguer « jamais marché » de « marchait, ne
+ *  marche plus » sans avoir à lire les logs Render. */
+let summitLastSuccess = null;
 
 /** `ele` d'OSM est CONTRIBUTIF et sale : « 3506 », « 3506 m », « 3 506 »,
  *  « 3506.5 », parfois une chaîne libre. On rend un nombre ou `null`, et
@@ -3823,10 +3836,24 @@ async function fetchNamedPeaks(lat, lon, radiusKm) {
     });
     // 429 = quota, 504 = ressources insuffisantes : les deux sont des
     // refus NORMAUX et documentés, pas des pannes. On les traite comme
-    // un échec silencieux (cooldown), sans bruit dans les logs.
-    if (!r.ok) return null;
+    // un échec silencieux côté pilote (cooldown), mais on GARDE de quoi
+    // les distinguer — un 429 et une requête malformée demandent deux
+    // corrections opposées, et sans le code on ne peut que deviner.
+    if (!r.ok) {
+      let corps = '';
+      try { corps = (await r.text()).slice(0, 400); } catch { /* corps illisible */ }
+      summitLastFailure = { at: new Date().toISOString(), phase: 'http', status: r.status, body: corps, query: q };
+      return null;
+    }
     const j = await r.json();
-    if (!Array.isArray(j?.elements)) return null;
+    if (!Array.isArray(j?.elements)) {
+      summitLastFailure = {
+        at: new Date().toISOString(), phase: 'shape', status: r.status,
+        body: JSON.stringify(j).slice(0, 400), query: q,
+      };
+      return null;
+    }
+    summitLastSuccess = { at: new Date().toISOString(), elements: j.elements.length };
     return j.elements
       .filter(e => e && typeof e.lat === 'number' && typeof e.lon === 'number' && e.tags?.name)
       .map(e => ({
@@ -3836,7 +3863,11 @@ async function fetchNamedPeaks(lat, lon, radiusKm) {
         // `null` assumé : le client mesurera au relief. Cf. parseOsmEle.
         eleM: parseOsmEle(e.tags.ele),
       }));
-  } catch {
+  } catch (e) {
+    summitLastFailure = {
+      at: new Date().toISOString(), phase: 'network',
+      error: String(e && e.name || e), message: String(e && e.message || '').slice(0, 200), query: q,
+    };
     return null;
   } finally {
     clearTimeout(timer);
@@ -3919,6 +3950,24 @@ app.get('/summit', async (req, res) => {
   const fetchedAt = Date.now();
   summitCache.set(key, { fetchedAt, peaks });
   res.json({ lat, lon, radiusKm, status: 'ok', fetchedAt, peaks });
+});
+
+// Diagnostic de /summit — même esprit que /pressure-diag et que le champ
+// `loops` du health check : rendre visible ce qu'un repli silencieux
+// cache par construction. Sans lui, « aucun point haut ne se nomme
+// jamais » a trois causes possibles (quota Overpass, requête malformée,
+// réseau) qui demandent trois corrections opposées, et rien à l'écran ne
+// permet de choisir. Aucune donnée sensible : la requête et la réponse
+// d'Overpass sont publiques.
+app.get('/summit-diag', (req, res) => {
+  res.json({
+    cacheEntries: summitCache.size,
+    inFlight: summitInFlight.size,
+    lastSuccess: summitLastSuccess,
+    lastFailure: summitLastFailure,
+    overpassUrl: OVERPASS_URL,
+    userAgent: OVERPASS_UA,
+  });
 });
 
 // ── Sondages réels (radiosondages), 25/07/2026 ───────────────────────
