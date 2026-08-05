@@ -44,20 +44,25 @@ MODEL_DIR  = "arome"
 #          SP*/HP*, aucun isobare).
 GRID_SOL   = "001"
 GRID_ALT   = "0025"
-MAX_HOURS  = 36                     # 30/07/2026 : ABAISSÉ de 51 à 36 h pour le
-                                     # quota Storage Supabase (cf. BUGS.md,
+MAX_HOURS  = 51                     # 05/08/2026 : REMONTÉ de 36 à 51 h — l'horizon
+                                     # réel d'AROME-HD (relevé de 48 à 51 le
+                                     # 25/07/2026 après mesure, cf.
+                                     # NOTES_TECHNIQUES_THERMIQUES_AROME.md).
+                                     # Historique : abaissé de 51 à 36 h le 30/07/2026
+                                     # pour le quota Storage Supabase (cf. BUGS.md,
                                      # dépassement du 30/07 — arome/sol + arome/alt
-                                     # pesaient 1,02 Go des 2,1 Go du compte).
-                                     # ⚠️ Ce n'est PAS une correction de l'horizon
-                                     # réel du modèle : AROME-HD publie bien jusqu'à
-                                     # 51 h (relevé de 48 à 51 le 25/07/2026 après
-                                     # mesure, cf. NOTES_TECHNIQUES_THERMIQUES_AROME.md).
-                                     # C'est un arbitrage de coût assumé avec Yann :
-                                     # au-delà de 36 h l'AROME est de toute façon peu
-                                     # exploitable pour décider d'un vol. Remonter
-                                     # cette valeur est sans risque côté modèle, mais
-                                     # regonfle le bucket d'environ 30 Mo par heure
-                                     # d'échéance gardée.
+                                     # pesaient 1,02 Go des 2,1 Go du compte). Cette
+                                     # contrainte n'existe plus : la chaîne écrit sur
+                                     # R2 depuis le 03/08 et `wind-grid` côté Supabase
+                                     # a été purgé le 05/08.
+                                     # Coût chiffré le 03/08 sur `keep_step()` évalué
+                                     # aux 8 heures de run : 31,0 échéances à 36 h
+                                     # contre 43,5 à 51 h, soit ×1,40 → arome/sol +
+                                     # arome/alt passent de 588 à ~825 Mo (11 % du
+                                     # palier R2 de 10 Go). ⚠️ Les ÉCRITURES ne
+                                     # bougent pas d'un objet : les échéances vivent
+                                     # DANS les fichiers, pas dans les clés — 505
+                                     # tuiles par run dans les deux cas.
                                      # Rien à changer côté frontend : le client lit
                                      # `times` du manifest, aucune constante d'horizon
                                      # n'est codée en dur dans web/src (vérifié).
@@ -539,13 +544,17 @@ def main():
     # ── Chiffrer AVANT d'écrire (garde-fou n°1) ───────────────────────
     # Comptes RÉELS du bucket relevés le 03/08/2026 par
     # `tools/audit_storage.py` : 63 tuiles sol + 441 tuiles altitude
-    # (63 × 7 niveaux) + 1 manifest = 505/run, 8 runs/jour, 588 Mo.
+    # (63 × 7 niveaux) + 1 manifest = 505/run, 8 runs/jour.
     # Ces nombres sont le SEUL garde-fou contre une dérive silencieuse :
     # relever MAX_HOURS, ajouter un niveau ou élargir la BBOX les fait
     # bouger, et la ligne journalisée à chaque run le montre au run près
     # plutôt qu'au relevé mensuel — R2 n'a pas de plafond de dépense.
+    # ⚠️ 825 Mo et non 588 depuis le 05/08 : MAX_HOURS est remonté à 51 h
+    # (×1,40 sur les échéances). Le nombre d'OBJETS est inchangé — c'est
+    # justement pourquoi une dérive d'horizon ne se verrait PAS dans le
+    # compteur d'écritures, et pourquoi `mo_par_run` doit suivre à la main.
     plafond = verifier_dimensionnement("arome-wind", objets_par_run=505,
-                                       runs_par_jour=8, mo_par_run=588)
+                                       runs_par_jour=8, mo_par_run=825)
     STORE = Storage("arome-wind", "WIND_GRID_BUCKET", "wind-grid", plafond)
 
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
