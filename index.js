@@ -3749,11 +3749,31 @@ app.get('/wind-grid', async (req, res) => {
 // millier de requêtes/jour, ou si un intégrateur externe (lot G) venait
 // s'ajouter aux pilotes.
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
-// `[timeout:]` explicite : sans lui, la valeur par défaut est 180 s côté
-// serveur Overpass, et une requête longue occupe un créneau (donc allonge
-// le temps de refroidissement) pour rien. La nôtre tourne en bien moins
-// d'une seconde.
-const OVERPASS_TIMEOUT_S = 25;
+// ⚠️ DÉBOGAGE 05/08/2026, sur le PREMIER appel réel : 504 systématique.
+//
+// Ce n'est pas une panne, c'est un refus documenté, et il vient de ce
+// qu'on DÉCLARE, pas de ce qu'on consomme. Overpass n'admet une requête
+// que si elle promet d'utiliser au plus la moitié des ressources encore
+// disponibles — sur les DEUX critères, temps d'exécution et mémoire. Or
+// une requête sans `[maxsize:]` explicite déclare 512 Mio par défaut.
+// La nôtre lit quelques dizaines de nœuds dans un rayon de 8 km : elle
+// demandait mille fois ce qu'elle utilise, et se faisait refuser dès que
+// le serveur avait un peu de charge.
+//
+// D'où deux déclarations désormais explicites et SERRÉES. Elles ne
+// rendent pas la requête plus rapide ; elles la rendent ADMISSIBLE, ce
+// qui n'est pas la même chose et c'est tout le sujet. Une requête qui
+// promet peu passe devant une requête qui promet beaucoup, même si la
+// seconde était en réalité aussi légère.
+//
+// Le refus par ressources est un 504 ; le refus par quota est un 429.
+// Les deux se lisent dans /summit-diag, et ils n'appellent pas la même
+// correction — celui-ci se corrige en déclarant moins, l'autre en
+// appelant moins souvent.
+const OVERPASS_TIMEOUT_S = 10;
+/** 16 Mio, contre 512 par défaut. Un nœud OSM pèse quelques centaines
+ *  d'octets ; 60 nœuds tiennent dans un millième de cette enveloppe. */
+const OVERPASS_MAXSIZE_BYTES = 16 * 1024 * 1024;
 // Coupe-circuit CÔTÉ NOUS, distinct du précédent : le `[timeout:]` est
 // une promesse faite à Overpass, celui-ci garantit qu'une requête pendue
 // ne retient pas une réponse HTTP à un pilote.
@@ -3821,7 +3841,7 @@ async function fetchNamedPeaks(lat, lon, radiusKm) {
   // `node` seul et pas `nwr` : un sommet est un point dans OSM. Le filtre
   // `["name"]` fait partie de la requête et pas d'un tri après coup —
   // c'est ce qui garde la réponse à quelques kilo-octets.
-  const q = `[out:json][timeout:${OVERPASS_TIMEOUT_S}];`
+  const q = `[out:json][timeout:${OVERPASS_TIMEOUT_S}][maxsize:${OVERPASS_MAXSIZE_BYTES}];`
     + `node["natural"="peak"]["name"](around:${Math.round(radiusKm * 1000)},${lat},${lon});`
     + `out body ${SUMMIT_MAX_PEAKS};`;
 
