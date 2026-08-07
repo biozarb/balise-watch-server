@@ -2828,14 +2828,36 @@ async function refreshWindsmobiProviders(providers) {
     return;
   }
   let dropped = 0, kept = 0;
-  const next = new Map(windsmobiObsCache);
   for (const provider of providers) {
     try {
       const rows = await fetchWindsmobi(`/stations/?provider=${encodeURIComponent(provider)}&limit=0`);
       if (!Array.isArray(rows)) continue; // échec : on garde l'ancien cache de CE réseau
-      // Purge des entrées de ce réseau avant réécriture : sinon une
-      // station retirée côté winds.mobi resterait éternellement en RAM.
-      for (const [id, o] of next) if (o.reseau === provider) next.delete(id);
+
+      // ⚠️ ÉCRITURE EN PLACE, RÉSEAU PAR RÉSEAU — et surtout PAS un
+      // `const next = new Map(cache)` en tête de fonction suivi d'un
+      // `cache = next` à la fin. C'est la première version, et elle
+      // perdait des balises en production dès le premier déploiement
+      // (07/08, vu sur /windsmobi-stations : 384 balises, sans Holfuy ni
+      // FFVL).
+      //
+      // La raison : les deux cadences appellent CETTE MÊME fonction, et
+      // le groupe lent (14 appels) finit après le rapide (2 appels).
+      // Chacun ayant pris sa photo du cache au départ, le dernier à
+      // écrire écrasait le travail de l'autre — donc le lent effaçait
+      // Holfuy et la FFVL, c'est-à-dire exactement les balises de déco.
+      //
+      // Le piège est qu'il se répare seul au cycle suivant : cinq
+      // minutes plus tard le rapide les remettait, et une vérification
+      // faite au mauvais moment aurait conclu que tout allait bien. La
+      // perte revenait toutes les 15 min, quand les deux boucles
+      // retombent en phase.
+      //
+      // Ici la purge et la réécriture d'un réseau sont dans le MÊME bloc
+      // synchrone (aucun `await` entre les deux) : Node ne peut pas
+      // intercaler l'autre boucle au milieu, et chaque réseau ne touche
+      // que ses propres entrées. Ajouter un `await` entre ces deux
+      // boucles rouvrirait la fenêtre.
+      for (const [id, o] of windsmobiObsCache) if (o.reseau === provider) windsmobiObsCache.delete(id);
       for (const s of rows) {
         const coords = s?.loc?.coordinates;
         if (!Array.isArray(coords) || coords.length < 2) continue;
@@ -2847,7 +2869,7 @@ async function refreshWindsmobiProviders(providers) {
         if (!last || !Number.isFinite(last._id)) continue;
         if (last['w-avg'] == null) continue; // station sans vent : rien à surveiller
         if (windsmobiIsDuplicate(grid, lat, lon)) { dropped++; continue; }
-        next.set(s._id, {
+        windsmobiObsCache.set(s._id, {
           t: last._id * 1000, // winds.mobi horodate en SECONDES
           moy: last['w-avg'], raf: last['w-max'] ?? null, dir: last['w-dir'] ?? null,
           lat, lon, alt: s.alt ?? null,
@@ -2863,11 +2885,13 @@ async function refreshWindsmobiProviders(providers) {
       windsmobiLastError = `${provider}: ${e.message}`;
     }
   }
-  windsmobiObsCache = next;
   windsmobiFetchedAt = Date.now();
   windsmobiDedupCount = dropped;
   if (kept) windsmobiLastError = null;
-  console.log(`refreshWindsmobi: ${kept} balises retenues, ${dropped} doublons écartés (${providers.join(', ')})`);
+  // Le total du cache est journalisé EN PLUS du compte de ce groupe :
+  // c'est lui qui aurait rendu la perte visible dans les logs Render dès
+  // le premier boot (« 384 » là où on attend ~884).
+  console.log(`refreshWindsmobi: ${kept} balises retenues, ${dropped} doublons écartés (${providers.join(', ')}) — cache total ${windsmobiObsCache.size}`);
 }
 
 const refreshWindsmobiFast = () => refreshWindsmobiProviders(WINDSMOBI_PROVIDERS_FAST);
@@ -6545,10 +6569,21 @@ app.listen(PORT, async () => {
   // réseau (cf. WINDSMOBI_PROVIDERS_FAST/SLOW) : ~1,3 appel/min en
   // moyenne, ce que le point 3 des CGU demande.
   setTimeout(() => {
+    // Les balises de déco d'abord : ce sont elles qu'on veut à l'écran
+    // le plus tôt possible après un redémarrage Render.
     refreshWindsmobiFast();
     setInterval(refreshWindsmobiFast, WINDSMOBI_POLL_FAST_MS);
-    refreshWindsmobiSlow();
-    setInterval(refreshWindsmobiSlow, WINDSMOBI_POLL_SLOW_MS);
+    // Le groupe lent démarre 20 s APRÈS, et ce décalage n'est pas
+    // cosmétique : il évite que les deux groupes soient en phase, donc
+    // qu'ils se chevauchent toutes les 15 min. Le chevauchement n'est
+    // plus DESTRUCTEUR depuis que l'écriture du cache est en place et
+    // réseau par réseau (cf. refreshWindsmobiProviders) — mais deux
+    // rafales de 16 appels simultanées chez un hébergeur qui promet la
+    // blacklist à qui le surcharge, autant les étaler.
+    setTimeout(() => {
+      refreshWindsmobiSlow();
+      setInterval(refreshWindsmobiSlow, WINDSMOBI_POLL_SLOW_MS);
+    }, 20 * 1000);
   }, 90 * 1000);
   // Étape 28 — détecteur de front de rafales. No-op silencieux si
   // GUST_FRONT_ENABLED n'est pas posé. Décalé d'une minute après le
