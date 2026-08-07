@@ -64,36 +64,85 @@ pas cron — c'est ce qui porte déjà `balise-entretien` depuis le 03/08, et
 `Persistent=true` rattrape un run manqué au démarrage suivant, ce que
 cron ne sait pas faire.
 
+> ⚠️ **Cette section a été réécrite le 07/08 APRÈS avoir sondé le VPS,
+> et elle décrivait auparavant une machine qui n'existe pas.** Elle
+> parlait de `/opt/balise-watch/`, d'un utilisateur `balise` et d'un
+> `EnvironmentFile` : les trois sont faux. Le VPS range son code dans
+> `~/balise-watch/`, tourne en `debian`, et son `.env` est écrit en
+> `export VAR=…`, syntaxe que systemd ne sait pas lire — c'est pour ça
+> que `balise-infoclimat.service` passe par un script shell. La recette
+> ci-dessous a réellement tourné.
+
+### La vraie machine, mesurée le 07/08
+
+| | valeur |
+|---|---|
+| Utilisateur | `debian` (l'utilisateur `balise` n'existe pas) |
+| Code | `/home/debian/balise-watch/balise-watch-server/` |
+| Python | `/home/debian/venv-balise/bin/python3` (**`boto3` n'est PAS dans le python3 système**) |
+| Secrets partagés | `~/.balise-watch-r2.env` — `export VAR=…` |
+| Alertes | `~/.balise-watch-alertes.env` |
+| Chaînes déjà là | **deux** : `balise-entretien`, `balise-infoclimat` (pas cinq) |
+
+⚠️ **`R2_BUCKET="balise-watch-packs"` est dans le `.env` partagé, et
+`tools/storage.py` ligne 389 fait `os.environ.get("R2_BUCKET") or defaut`
+côté R2.** `MODEL_VERIF_BUCKET` ne sert donc QUE au dos Supabase :
+laissée seule, l'archive irait se déverser à la racine du bucket des
+packs, HTTP 200 et sans un mot. C'est `run.sh` qui écrase `R2_BUCKET`
+après avoir sourcé le `.env`, et `sonde_r2.py` qui vérifie que rien n'a
+débordé.
+
 ```bash
-# code
-rsync -av model-verif/ vps:/opt/balise-watch/model-verif/
-rsync -av ../tools/storage.py vps:/opt/balise-watch/tools/
+# 1. code (ce n'est PAS un clone git sur le VPS — rsync)
+rsync -av --exclude '__pycache__' model-verif/ \
+  debian@51.91.102.146:~/balise-watch/balise-watch-server/model-verif/
+# tools/storage.py y est déjà depuis le 03/08 — vérifier par sha256sum
+# des deux côtés plutôt que de le réenvoyer à l'aveugle.
 
-# variables (mêmes noms que les cinq chaînes existantes)
-#   SUPABASE_URL, SUPABASE_SERVICE_KEY
-#   STORAGE_BACKEND=r2
-#   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
-#   MODEL_VERIF_BUCKET=model-verif   (bucket à créer côté Cloudflare)
+# 2. l'état doit EXISTER avant tout démarrage : un ReadWritePaths qui
+#    pointe sur un chemin absent fait échouer le montage (piège du 03/08)
+sudo install -d -o debian -g debian -m 755 /var/lib/bw-model-verif
 
-sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+# 3. le fichier de secrets propre à cette chaîne — cf.
+#    model-verif.env.exemple. Aucune autre chaîne du VPS n'écrit dans
+#    les TABLES Supabase, donc SUPABASE_URL / SUPABASE_SERVICE_KEY n'y
+#    sont nulle part.
+#    ⚠️ Un secret ne se retape pas, il se copie, et on compare par
+#    sha256 sans jamais l'afficher.
+
+# 4. deux checks Healthchecks DÉDIÉS, puis leurs URL dans les alertes :
+#      BW_MODEL_COLLECT_PING_URL   et   BW_MODEL_SCORE_PING_URL
+#    Sans elles, run.sh journalise « PERSONNE NE SURVEILLE CE JOB ».
+
+# 5. les unités
+sudo cp systemd/bw-model-*.service systemd/bw-model-*.timer /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/bw-model-collect.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now bw-model-collect.timer bw-model-score.timer
 systemctl list-timers 'bw-model-*'
 ```
 
 `collect` tourne à 03 h 15 UTC, `score` à 03 h 55 — quarante minutes
-d'écart, largement de quoi laisser la collecte finir (≈ 6 min pour 648
-points à 0,25 s la requête, deux fois).
+d'écart, de quoi laisser la collecte finir (**mesuré le 07/08 : 380 s
+pour les 648 points en prévisions, ~9 min avec les observations**).
 
 ### Avant le premier run
 
 1. **Exécuter le SQL** — `PWA/web/supabase_step35_model_verification.sql`,
-   dans le SQL Editor Supabase. **Par Yann, jamais par Claude.**
-2. **Créer le bucket R2** `model-verif`.
-3. Faire un essai à blanc :
+   dans le SQL Editor Supabase. **Par Yann, jamais par Claude.** *(fait
+   le 08/08)*
+2. **Créer le bucket R2** `model-verif` — et ⚠️ **élargir le jeton R2 à
+   ce bucket** : un jeton limité à `balise-watch-packs` rend
+   `AccessDenied` sur `PutObject`, ce que le run signale désormais par un
+   code de sortie 2 (07/08).
+3. Les essais, dans l'ordre — chacun sert à quelque chose :
    ```bash
-   python3 collect.py --out /var/lib/bw-model-verif --dry-run
-   python3 collect.py --out /var/lib/bw-model-verif --limit 5 --skip-obs
+   ./run.sh collect --dry-run            # l'encadré de quota, aucune requête
+   ./run.sh collect --limit 5 --skip-obs # un vrai objet sur R2
+   set -a; . ~/.balise-watch-r2.env; set +a
+   /home/debian/venv-balise/bin/python3 sonde_r2.py   # ⚠️ le CONTENU, pas la forme
+   ./run.sh collect                      # le run complet, à la main
+   ./run.sh score                        # 0 ligne le premier soir est NORMAL
    ```
 
 ---

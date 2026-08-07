@@ -144,12 +144,37 @@ PIOUPIOU_ARCHIVE = "https://api.pioupiou.fr/v1/archive/{id}"
 #: Maurienne, même si c'est là qu'on a le plus de recul.
 BBOX = (41.0, -6.0, 51.5, 11.0)      # latMin, lonMin, latMax, lonMax
 
-BATCH_PAUSE_S = 0.25
+#: ⚠️ MESURÉ LE 07/08, PAS RAISONNÉ. La valeur précédente — 0,25 s — a
+#: coûté **24 points sur 648** en `HTTP 429` au premier run complet.
+#: Trois séries depuis le VPS, sur des points réels (`sonde_cadence.py`) :
+#:
+#:   | cadence réelle | résultat                          |
+#:   |----------------|-----------------------------------|
+#:   |  30 req à 186/min | 30/30 — trop court pour remplir la fenêtre |
+#:   | 320 req à 131/min | 31 × 429, blocage FRANC à partir de la 275ᵉ |
+#:   | 300 req à  89/min | 0 × 429 (un seul échec réseau)    |
+#:
+#: Open-Meteo ne renvoie AUCUN en-tête de limitation : il n'y a rien à
+#: lire pour s'adapter, il faut rester sous la ligne par construction.
+BATCH_PAUSE_S = 0.45
+
+#: Latence aller-retour mesurée depuis le VPS le 07/08 : 300 requêtes en
+#: 201 s à 0,45 s de pause, soit 0,67 s de cycle. Elle compte : la
+#: cadence RÉELLE est 60/(pause + latence), pas 60/pause, et c'est la
+#: réelle qui se compare au plafond.
+LATENCE_S = 0.22
+
 MAX_RETRIES = 3
 TIMEOUT_S = 45
 
+#: Après un 429, la fenêtre de limitation doit se VIDER. Les 1-2-4 s de
+#: `MAX_RETRIES` ne suffisent pas : un point refusé mourait en ~7 s alors
+#: que la porte reste fermée une minute. Une pause franche, une seule
+#: fois par point — après elle, la fenêtre est repartie et les points
+#: suivants passent.
+PAUSE_429_S = 65
+
 #: Plafond gratuit Open-Meteo : 10 000 appels pondérés/jour, 600/min.
-#: Pondération = nb_points × (jours/14) × (nb_variables/10).
 QUOTA_JOUR = 10_000
 QUOTA_MINUTE = 600
 
@@ -180,9 +205,50 @@ def _get_json(url: str, timeout: int = TIMEOUT_S):
 
 
 def _get_json_retry(url: str, label: str):
+    """GET avec réessais, et un traitement À PART du 429.
+
+    ⚠️ POURQUOI LE 429 N'EST PAS UNE ERREUR COMME LES AUTRES. Les autres
+    échecs sont des accidents : on retente vite, ça repasse. Un 429 est
+    une décision — la porte est fermée, et elle le reste le temps que la
+    fenêtre se vide. Retenter au bout d'une, deux puis quatre secondes,
+    c'est frapper trois fois à une porte qu'on sait fermée, puis
+    abandonner le point. C'est exactement ce qui a coûté 24 balises au
+    premier run complet du 07/08.
+
+    Une seule pause franche par point, donc, et pas trois : après elle la
+    fenêtre est repartie, et ce sont les points SUIVANTS qui en
+    profitent. Le point qui a payé l'attente est celui qui la rend aux
+    autres.
+    """
+    pause_429_deja_prise = False
     for attempt in range(MAX_RETRIES):
         try:
             return _get_json(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and not pause_429_deja_prise:
+                pause_429_deja_prise = True
+                # `Retry-After` s'il existe — Open-Meteo n'en envoie pas
+                # (mesuré le 07/08), d'où la valeur de repli.
+                # ⚠️ `exc.headers` peut valoir None : une HTTPError peut
+                # être levée sans en-têtes du tout. Le banc l'a attrapé
+                # avant la production — sans ce `getattr`, la lecture du
+                # Retry-After plantait sur AttributeError, et le point
+                # mourait d'une exception au lieu d'attendre.
+                entetes = getattr(exc, "headers", None)
+                brut = entetes.get("Retry-After") if entetes else None
+                try:
+                    attente = float(brut or 0)
+                except (TypeError, ValueError):
+                    attente = 0.0
+                attente = attente or PAUSE_429_S
+                print(f"  ⏸ 429 sur {label} — pause de {attente:.0f}s, "
+                      f"le temps que la fenêtre se vide", file=sys.stderr)
+                time.sleep(attente)
+                continue
+            if attempt == MAX_RETRIES - 1:
+                print(f"  ⚠️  {label} abandonné : {exc}", file=sys.stderr)
+                return None
+            time.sleep(2 ** attempt)
         except (urllib.error.URLError, RuntimeError, json.JSONDecodeError,
                 TimeoutError, OSError) as exc:
             if attempt == MAX_RETRIES - 1:
@@ -265,22 +331,44 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     run est ce qui rend une dérive visible avant la panne.
     """
     n_vars = len(_hourly_vars()) * len(MODELS)
-    par_point = (forecast_days / 14) * (n_vars / 10)
+    # ⚠️ LA REMISE `jours/14` A ÉTÉ RETIRÉE LE 07/08, ET C'EST LE CŒUR DU
+    # DÉFAUT. Avec elle, une requête pesait 3/14 × 50/10 = 1,07, et cet
+    # encadré annonçait fièrement « 6,9 % du plafond ». À 240 requêtes
+    # théoriques par minute, cela donnait 257 pondérés/min, très en
+    # dessous des 600 : le garde-fou ne pouvait pas se déclencher.
+    #
+    # Le premier run réel a perdu 24 points en 429. Sans la remise, une
+    # requête pèse 5, la cadence réelle du run (131/min) valait 655
+    # pondérés/min — au-dessus de la ligne, ce que les mesures montrent.
+    # On garde donc l'hypothèse la plus DÉFAVORABLE : un garde-fou qui se
+    # trompe doit se tromper du côté qui protège.
+    par_point = n_vars / 10
     total = n_points * par_point
+    # La cadence qui compte est la RÉELLE — pause + aller-retour —, pas
+    # 60/pause. C'est la confusion des deux qui laissait le garde-fou
+    # muet : il comparait des requêtes brutes à un plafond pondéré.
+    cadence_reelle = 60 / (BATCH_PAUSE_S + LATENCE_S)
+    par_min = cadence_reelle * par_point
     print("┌─ QUOTA OPEN-METEO PROJETÉ ───────────────────────────────────")
     print(f"│ points                 : {n_points}")
     print(f"│ modèles × variables    : {len(MODELS)} × {len(_hourly_vars())} = {n_vars}")
-    print(f"│ pondération / point    : {forecast_days}/14 × {n_vars}/10 = {par_point:.2f}")
+    print(f"│ pondération / requête  : {n_vars}/10 = {par_point:.2f} "
+          f"(sans remise sur {forecast_days} jours — cf. 07/08)")
     print(f"│ TOTAL du run           : {total:.0f} appels pondérés "
           f"({total / QUOTA_JOUR * 100:.1f} % du plafond journalier)")
-    print(f"│ cadence                : 1 requête / {BATCH_PAUSE_S}s → "
-          f"{60 / BATCH_PAUSE_S:.0f}/min (plafond {QUOTA_MINUTE}/min)")
+    print(f"│ cadence                : {BATCH_PAUSE_S}s + {LATENCE_S}s → "
+          f"{cadence_reelle:.0f} req/min → {par_min:.0f} pondérés/min "
+          f"(plafond {QUOTA_MINUTE}/min)")
+    print(f"│ durée estimée          : {n_points * (BATCH_PAUSE_S + LATENCE_S) / 60:.0f} min/passe")
     print("└──────────────────────────────────────────────────────────────")
     if total > QUOTA_JOUR * 0.5:
         raise Abort(f"{total:.0f} appels pondérés > 50 % du plafond journalier — "
                     f"comprendre AVANT de forcer (nb de points ? de modèles ?)")
-    if 60 / BATCH_PAUSE_S > QUOTA_MINUTE:
-        raise Abort("cadence au-dessus du plafond par minute")
+    # 90 % et pas 100 : la latence varie, et frôler la ligne, c'est la
+    # franchir une minute sur deux.
+    if par_min > QUOTA_MINUTE * 0.9:
+        raise Abort(f"{par_min:.0f} pondérés/min — trop près du plafond de "
+                    f"{QUOTA_MINUTE}. Augmenter BATCH_PAUSE_S.")
     return total
 
 
@@ -446,14 +534,50 @@ def write_ndjson_gz(path: pathlib.Path, rows_iter) -> int:
     return n
 
 
-def upload_r2(path: pathlib.Path, key: str) -> bool:
-    """Dépose sur R2 via `tools/storage.py` s'il est disponible.
+R2OK_SUFFIXE = ".r2ok"
 
-    ⚠️ L'absence de R2 n'est PAS une erreur : le fichier local existe
-    déjà à ce stade. Faire échouer le run parce que l'envoi distant a
-    échoué reviendrait à préférer aucune archive à une archive locale —
-    l'inverse de ce qu'on veut pour une donnée non rejouable.
+
+def temoin(path: pathlib.Path) -> pathlib.Path:
+    """Le témoin d'envoi, posé à côté de l'objet qu'il décrit.
+
+    Un fichier plutôt qu'un index : il ne peut pas se désynchroniser de
+    l'objet, il survit à un arrêt brutal au milieu du run, et il se
+    répare d'un `rm` le jour où l'on doute de lui.
     """
+    return pathlib.Path(str(path) + R2OK_SUFFIXE)
+
+
+def upload_r2(path: pathlib.Path, key: str) -> bool:
+    """Dépose sur R2 via `tools/storage.py`, et pose son témoin.
+
+    ⚠️ CE QUI A CHANGÉ LE 07/08/2026, ET POURQUOI. Cette fonction rendait
+    déjà ce booléen, et les deux appelants le JETAIENT — au motif, écrit
+    ici, que « faire échouer le run parce que l'envoi distant a échoué
+    reviendrait à préférer aucune archive à une archive locale ».
+
+    L'argument est juste pour ce qu'il défend : on ne jette pas le
+    fichier local, et on ne le jette toujours pas. Mais il ne justifiait
+    pas d'ANNONCER UN SUCCÈS. Constaté au premier essai réel sur le VPS :
+    le jeton R2 n'avait pas droit au bucket `model-verif`, `PutObject`
+    rendait `AccessDenied`, et le run sortait en 0. Healthchecks serait
+    passé au vert sur une nuit dont l'archive irremplaçable n'existait
+    que sur le disque d'une machine que personne ne sauvegarde — le
+    « garde-fou qui vérifie la forme et pas le contenu » du §11, à
+    l'intérieur même du dispositif censé garder.
+
+    Désormais : le local reste, le témoin n'est pas posé, `main` le voit
+    et sort en erreur, et `rattraper()` réessaiera la nuit suivante.
+    """
+    # ⚠️ LE TÉMOIN D'UN ENVOI PRÉCÉDENT MEURT AVANT QU'ON RETENTE, et
+    # c'est la première chose que fait cette fonction. L'objet local a
+    # pu être RÉÉCRIT depuis (le run complet remplace l'essai à cinq
+    # points) : un témoin périmé affirmerait que la nouvelle version est
+    # montée alors qu'elle ne l'est pas, et `en_retard()` la laisserait
+    # passer. Vu le 07/08 en comparant les horodatages — témoin de
+    # 09:36, archive de 09:42. Le témoin dit « ce contenu-ci est parti »,
+    # pas « ce chemin a servi un jour ».
+    temoin(path).unlink(missing_ok=True)
+
     tools = pathlib.Path(__file__).resolve().parent.parent / "tools"
     if str(tools) not in sys.path:
         sys.path.insert(0, str(tools))
@@ -471,11 +595,44 @@ def upload_r2(path: pathlib.Path, key: str) -> bool:
         st.put(key, path.read_bytes(), cache_control=CACHE_IMMUABLE,
                content_type="application/x-ndjson", content_encoding="gzip")
         st.bilan()
+        temoin(path).write_text(
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n",
+            encoding="utf-8")
         return True
     except Exception as exc:                            # noqa: BLE001
-        print(f"  ⚠️  envoi R2 échoué (archive locale conservée) : {exc}",
-              file=sys.stderr)
+        print(f"  ⚠️  envoi R2 échoué (archive locale conservée, "
+              f"rattrapage au prochain run) : {exc}", file=sys.stderr)
         return False
+
+
+def en_retard(out: pathlib.Path) -> list[pathlib.Path]:
+    """Les archives locales qui ne sont jamais montées sur R2."""
+    return sorted(p for p in out.rglob("*.ndjson.gz") if not temoin(p).exists())
+
+
+def rattraper(out: pathlib.Path, plafond: int = 30) -> None:
+    """Réessaie l'envoi des archives restées au sol.
+
+    ⚠️ Sans cette reprise, corriger la cause d'un échec ne ramènerait PAS
+    les nuits déjà collectées : un run n'écrit que la journée du jour, et
+    personne ne repasse derrière. Le fichier serait « conservé
+    localement » à perpétuité, ce qui est une autre façon de le perdre —
+    un disque de VPS n'est pas une archive.
+
+    Tourne AVANT la collecte du jour, pour que l'objet du jour soit
+    ensuite réécrit par le run complet et non par un reliquat partiel.
+    """
+    retard = en_retard(out)
+    if not retard:
+        return
+    print(f"▶ rattrapage : {len(retard)} archive(s) locale(s) jamais montée(s)")
+    # Un plafond, parce qu'un an de panne ferait mille envois d'un coup —
+    # mais un plafond qui se TAIT ferait croire à une reprise complète.
+    lot, reste = retard[:plafond], retard[plafond:]
+    envoyes = sum(1 for p in lot if upload_r2(p, p.relative_to(out).as_posix()))
+    print(f"  {envoyes}/{len(lot)} rattrapée(s)")
+    if reste:
+        print(f"  ⓘ {len(reste)} laissée(s) pour le prochain run (plafond {plafond})")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -525,6 +682,12 @@ def main() -> int:
         return 0
 
     rc = 0
+
+    # ── 0. RATTRAPAGE ────────────────────────────────────────────
+    # Avant tout le reste : si une nuit précédente n'a pas pu monter son
+    # archive, c'est maintenant qu'on la pousse, pendant qu'on a encore
+    # le fichier.
+    rattraper(out)
 
     # ── 1. PRÉVISIONS ────────────────────────────────────────────
     # En premier, et c'est délibéré : c'est la partie non rattrapable.
@@ -590,6 +753,21 @@ def main() -> int:
         if stations and muettes > len(stations) * 0.6:
             print("⚠️ plus de 60 % de balises muettes — vérifier l'API Pioupiou",
                   file=sys.stderr)
+
+    # ── 3. L'ARCHIVE EST-ELLE VRAIMENT À L'ABRI ? ─────────────────
+    # Une seule règle, en fin de run, plutôt qu'un test à chaque envoi :
+    # elle couvre du même geste l'objet du jour et le retard accumulé, et
+    # elle ne peut pas se désynchroniser des appelants.
+    #
+    # ⚠️ C'EST CE CONTRÔLE QUI MANQUAIT. Sans lui, un run pouvait sortir
+    # en 0 avec une archive qui n'existait que sur ce disque.
+    reste = en_retard(out)
+    if reste:
+        apercu = ", ".join(p.relative_to(out).as_posix() for p in reste[:5])
+        print(f"❌ {len(reste)} archive(s) ne sont PAS sur R2 — elles n'existent "
+              f"que sur ce disque : {apercu}"
+              + (" …" if len(reste) > 5 else ""), file=sys.stderr)
+        rc = rc or 2
 
     return rc
 

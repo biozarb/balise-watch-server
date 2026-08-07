@@ -1,26 +1,59 @@
-# Collecte nocturne des prévisions et des observations.
-#   cf. model-verif/README.md — session 08/08/2026
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-collect.service — collecte nocturne (réécrit le 07/08/2026)
 #
-# ⚠️ C'est la partie NON RATTRAPABLE du dispositif : une nuit non
-# collectée est une nuit définitivement perdue, parce qu'aucun modèle
-# Météo-France n'a d'historique de runs passés chez Open-Meteo (sondé
-# le 08/08). D'où `Persistent=true` côté timer, et une alerte à
-# l'échec plutôt qu'un silence.
+#  ⚠️ C'est la partie NON RATTRAPABLE du dispositif : une nuit non
+#  collectée est une nuit définitivement perdue, parce qu'aucun modèle
+#  Météo-France n'a d'historique de runs passés chez Open-Meteo (sondé
+#  le 08/08). D'où `Persistent=true` côté timer, et une alerte au
+#  premier échec plutôt qu'un silence.
+#
+#  ⚠️ RÉÉCRIT APRÈS SONDAGE DU VPS (07/08). La version du 08/08 visait
+#  `/opt/balise-watch`, l'utilisateur `balise` et un
+#  `EnvironmentFile=/opt/balise-watch/.env`. Aucun des trois n'existe :
+#  le VPS range son code dans `~/balise-watch/`, tourne en `debian`, et
+#  son `.env` est écrit en `export VAR=…`, syntaxe que systemd ne sait
+#  pas lire. C'est pour ça que `balise-infoclimat.service` passe par un
+#  script shell — on fait pareil, avec `run.sh`.
+#
+#  Installation :
+#    sudo cp bw-model-*.service bw-model-*.timer /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-model-collect.timer bw-model-score.timer
+# ══════════════════════════════════════════════════════════════════════
 [Unit]
 Description=Balise Watch — collecte des prévisions et observations (score modèles)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=balise
-WorkingDirectory=/opt/balise-watch/model-verif
-EnvironmentFile=/opt/balise-watch/.env
-ExecStart=/usr/bin/python3 /opt/balise-watch/model-verif/collect.py \
-    --out /var/lib/bw-model-verif
-# Le run ne doit jamais se chevaucher avec lui-même : à 648 points et
-# 0,25 s par requête il dure ~6 min, mais une API lente peut l'étirer.
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh collect
+
+# Le chien de garde de run.sh est à 40 min ; celui-ci est la ceinture
+# par-dessus la bretelle. Un run mesuré dure ~6 min pour 648 points en
+# deux passes, mais une API lente peut l'étirer.
 TimeoutStartSec=45min
 Nice=10
-StandardOutput=append:/var/log/bw-model-verif.log
-StandardError=append:/var/log/bw-model-verif.log
+
+# ── Cloisonnement, calqué sur balise-infoclimat.service ──────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ⚠️ Le dossier doit EXISTER avant le premier démarrage, sinon le
+#    montage échoue et le service ne démarre pas (piège du 03/08) :
+#      sudo install -d -o debian -g debian -m 755 /var/lib/bw-model-verif
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

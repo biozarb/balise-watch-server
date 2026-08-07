@@ -1,23 +1,47 @@
-# Notation de la journée écoulée.
-#   cf. model-verif/README.md — session 08/08/2026
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-score.service — notation (réécrit le 07/08/2026)
 #
-# Séparé de la collecte EXPRÈS : un bug dans la formule de score ne doit
-# jamais pouvoir empêcher ou corrompre la collecte, qui est la seule
-# pièce irremplaçable. Ce job-ci, lui, se rejoue sur l'archive autant de
-# fois qu'on veut.
+#  Séparé de la collecte EXPRÈS : un bug dans la formule de score ne
+#  doit jamais pouvoir empêcher ou corrompre la collecte, qui est la
+#  seule pièce irremplaçable. Ce job-ci se rejoue sur l'archive autant
+#  de fois qu'on veut (`run.sh score --day AAAA-MM-JJ`).
+#
+#  ⚠️ RÉÉCRIT APRÈS SONDAGE DU VPS (07/08) — mêmes trois corrections que
+#  pour la collecte : chemins, utilisateur, et pas d'EnvironmentFile.
+#
+#  ⚠️ Ce job-ci a besoin de `SUPABASE_URL` et `SUPABASE_SERVICE_KEY`,
+#  que la collecte n'utilise pas et qu'AUCUNE chaîne existante du VPS ne
+#  possède. Elles vivent dans `~/.balise-watch-model-verif.env` (600),
+#  chargé par `run.sh`. Sans elles, `run.sh` refuse de démarrer et le
+#  dit — plutôt que de collecter proprement et de ne rien noter.
+# ══════════════════════════════════════════════════════════════════════
 [Unit]
 Description=Balise Watch — notation des modèles (journée écoulée)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/README.md
 After=network-online.target bw-model-collect.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=balise
-WorkingDirectory=/opt/balise-watch/model-verif
-EnvironmentFile=/opt/balise-watch/.env
-ExecStart=/usr/bin/python3 /opt/balise-watch/model-verif/score.py \
-    --out /var/lib/bw-model-verif
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh score
 TimeoutStartSec=30min
 Nice=10
-StandardOutput=append:/var/log/bw-model-verif.log
-StandardError=append:/var/log/bw-model-verif.log
+
+# ── Cloisonnement, calqué sur balise-infoclimat.service ──────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
