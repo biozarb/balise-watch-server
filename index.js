@@ -5161,6 +5161,19 @@ app.post('/sync', async (req, res) => {
         // silencieusement côté insert simple, aucune casse avant.
         dir_enabled: w.dirEnabled ?? false,
         dir_sectors: Array.isArray(w.dirSectors) ? w.dirSectors : [],
+        // Lot 4 « Surveiller ce site » (07/08/2026) — la clé du
+        // décollage dont le geste a créé cette ligne, ou null si le
+        // pilote l'a posée à la main.
+        //
+        // ⚠️ AJOUTÉE SEULEMENT SI LE CLIENT LA FOURNIT, et ce `if` est
+        // la garde de migration : tant que le client n'a pas basculé
+        // ORIGIN_SITE_SQL_DONE, il ne l'envoie pas, la clé n'apparaît
+        // pas dans la ligne, et PostgREST ne voit rien d'inconnu. Un
+        // `origin_site: w.originSite ?? null` inconditionnel ferait
+        // refuser le lot ENTIER avant l'exécution de
+        // supabase_step37_origin_site.sql — c'est-à-dire toute la veille
+        // du compte, pas seulement le groupe du site.
+        ...(w.originSite !== undefined ? { origin_site: w.originSite ?? null } : {}),
         updated_at: new Date().toISOString(),
       }));
       // ⚠️ Débogage 07/08/2026 — le retour de sbUpsert était JETÉ, et
