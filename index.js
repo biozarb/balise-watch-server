@@ -2518,6 +2518,32 @@ const AEMET_PRESSURE_ONLY_RETENTION_H = 12;
 // systématiquement rejetée entre deux rafraîchissements normaux.
 const AEMET_OBS_MAX_AGE_MS = 90 * 60 * 1000;
 
+// ── Gardes-fraîcheur des trois réseaux ouverts à la surveillance le
+//    08/08/2026 (lot « Surveiller ce site », cf. pollAndNotify) ────────
+//
+// Règle appliquée, la même que pour MF et AEMET : le seuil de péremption
+// est une propriété de la SOURCE, dérivée de sa cadence de publication —
+// jamais une constante unique du serveur. Un seuil trop serré ne protège
+// de rien, il jette des relevés parfaitement valides et rend la balise
+// muette au moment où on la surveille.
+//
+// METAR : cadence 30 min (cf. `cadenceMin` dans pressureStationsPayload),
+// publication APRÈS l'heure d'observation. 90 min = 3 × cadence. C'est le
+// prix à payer pour ce réseau, et il doit être DIT au pilote : un
+// dépassement peut lui parvenir avec une demi-heure de retard.
+const METAR_OBS_MAX_AGE_MS = 90 * 60 * 1000;
+// SMN : cadence 10 min, réseau automatique moderne — même ordre de
+// grandeur qu'une balise ordinaire.
+const SMN_OBS_MAX_AGE_MS = 40 * 60 * 1000;
+// Infoclimat : PAS de constante ici, `INFOCLIMAT_OBS_MAX_AGE_MS` existe
+// déjà plus haut (90 min) et le cache est DÉJÀ refiltré à la lecture par
+// refreshInfoclimatData — le garde-fraîcheur de pollAndNotify ne fait
+// donc que rejouer une règle existante, il n'en invente pas une seconde.
+// (Une deuxième déclaration du même nom a été écrite ici par erreur le
+// 08/08 : `node --check` l'a attrapée. Deux seuils de péremption pour la
+// même source, c'est exactement le genre de divergence silencieuse que
+// la révision du lot 7 a supprimée côté seuils foehn.)
+
 let aemetObsCache = new Map(); // idema -> {t, moy, raf, dir, dirRaf, pressure, lat, lon, alt, nom}
 let aemetObsCacheFetchedAt = 0;
 let aemetLastError = null; // même principe diagnostic que infoclimatLastError
@@ -2649,6 +2675,203 @@ async function refreshAemetData() {
   if (!AEMET_API_KEY) return;
   await refreshAemetObs();
 }
+
+// ════════════════════════════════════════════════════════════════════
+// WINDS.MOBI — agrégateur multi-réseaux (07/08/2026)
+// ════════════════════════════════════════════════════════════════════
+// Pourquoi un agrégateur alors que le projet a toujours branché ses
+// sources en direct : parce que les trois réseaux visés (Holfuy, Adison,
+// Sencrop) sont fermés. Mesuré le 07/08 — Holfuy répond ` No access`
+// sans mot de passe, Adison n'est pas un réseau mais un bureau d'études
+// qui fabrique les balises FFVL, Sencrop est un partenariat commercial
+// agricole. Et data.ffvl.fr réclame toujours une clé, y compris sur les
+// deux ressources encore publiées comme open data sur data.gouv.fr.
+// Voir PWA/web/RESEAU_WINDSMOBI.md pour le détail des appels, et
+// tools/sonde_windsmobi.mjs pour rejouer la mesure.
+//
+// winds.mobi est un projet open source (AGPL, github.com/winds-mobi)
+// qui collecte 23 réseaux et les republie sous un modèle unique, sans
+// clé. Il a SA propre clé FFVL : la donnée fédérale passe par lui.
+//
+// ⚠️ SES CONDITIONS D'USAGE SONT CONTRAIGNANTES, pas décoratives —
+// « Any IP or service that doesn't respect these rules will be
+// blacklisted without any notice » :
+//   1. user-agent identifiant obligatoire  → WINDSMOBI_UA
+//   2. aucune monétisation                 → conforme (ni pub ni abo)
+//   3. ne pas surcharger, grouper les appels → cf. les deux cadences
+// C'est aussi pourquoi TOUT passe par le serveur : si chaque PWA
+// appelait winds.mobi, le nombre d'appels suivrait le nombre de pilotes
+// connectés au lieu de rester constant.
+//
+// ── Ce qu'on NE prend PAS, et pourquoi ─────────────────────────────
+//  · `pioupiou` : on l'a déjà en direct, et EN PLUS FRAIS — âge médian
+//    mesuré 12,1 min chez winds.mobi contre le poll 5 min d'API_ALL.
+//    Sur une alerte en vol la latence est le sujet ; l'agrégateur vient
+//    en plus, jamais à la place.
+//  · `metar` : l'app a déjà son espace `metar:` (43 stations) dans le
+//    référentiel de pression, et le grand commentaire de
+//    pressureStationsPayload tranche que ce ne sont PAS des balises.
+//    Un second espace d'ids METAR fabriquerait des doublons invisibles.
+//
+// ── Deux cadences, calées sur la fraîcheur MESURÉE (07/08) ─────────
+// Âge médian du dernier relevé, par réseau : holfuy 2,6 min · ffvl
+// 6,2 min · slf et meteoswiss 13,3 min. Poller SLF toutes les 5 min
+// serait donc 2,5 appels sur 3 pour rien — exactement ce que le point 3
+// des CGU demande d'éviter. D'où deux groupes : les réseaux de balises
+// de déco au rythme des alertes, le reste au rythme de la donnée.
+const WINDSMOBI_API = 'https://winds.mobi/api/2';
+const WINDSMOBI_UA = 'balise-watch.app (biozarb@gmail.com)';
+// Réseaux au rythme des alertes : ce sont les balises de décollage.
+const WINDSMOBI_PROVIDERS_FAST = ['holfuy', 'ffvl'];
+// Réseaux d'appoint — stations fixes, cadence source ≥ 10 min.
+const WINDSMOBI_PROVIDERS_SLOW = [
+  'slf', 'meteoswiss', 'windspots', 'aletsch', 'windball', 'windline',
+  'iweathar', 'pgsonda', 'gxaircom', 'pdcs', 'yvbeach', 'thunerwetter',
+  'kachelmannwetter', 'wunderground',
+];
+const WINDSMOBI_POLL_FAST_MS = 5 * 60 * 1000;
+const WINDSMOBI_POLL_SLOW_MS = 15 * 60 * 1000;
+// France + pays limitrophes — le principe de couverture géographique du
+// ROADMAP, pas un cadrage Maurienne. Filtré ICI et pas côté client :
+// une balise hors boîte ne doit jamais entrer dans `releves`.
+const WINDSMOBI_BOX = { latMin: 41.2, latMax: 51.6, lonMin: -5.5, lonMax: 10.2 };
+// Garde-fraîcheur : le plus lent des réseaux retenus publie toutes les
+// ~13 min, 60 min laisse donc passer quatre cycles manqués avant de
+// déclarer une balise muette. Même politique que MF/AEMET — le seuil
+// est une propriété de la source, jamais une constante du serveur.
+const WINDSMOBI_OBS_MAX_AGE_MS = 60 * 60 * 1000;
+// Rayon de dédoublonnage : la valeur déjà tranchée pour la FFVL
+// (PROMPT_REPRISE.md, « Arbitrages tranchés par défaut »).
+const WINDSMOBI_DEDUP_M = 180;
+// Profondeur d'historique servie par winds.mobi, mesurée le 07/08 :
+// 1 336 points sur 168 h pour une station Holfuy. C'est ce qui permet de
+// NE PAS créer de table Supabase pour cette source, contrairement à MF
+// et AEMET dont l'API ne rend que l'instant présent.
+const WINDSMOBI_HISTORY_MAX_H = 168;
+
+let windsmobiObsCache = new Map(); // id -> {t, moy, raf, dir, lat, lon, alt, nom, reseau, reseauNom, url}
+let windsmobiFetchedAt = 0;
+let windsmobiLastError = null;
+let windsmobiDedupCount = 0; // diagnostic : combien de balises écartées comme doublons
+// Coordonnées Pioupiou du dernier poll, alimentées par pollAndNotify.
+// Volontairement PAS un appel réseau à nous : pollAndNotify a déjà la
+// liste complète en main à chaque cycle, la redemander serait payer deux
+// fois la même donnée.
+let pioupiouCoords = [];
+
+// Index géographique de TOUT ce que l'app connaît déjà, toutes sources
+// confondues. Reconstruit à chaque rafraîchissement : les caches sources
+// bougent (une station MF muette sort de mfObsCache), et un index figé
+// ferait réapparaître un doublon au premier trou de donnée.
+function windsmobiKnownGrid() {
+  const grid = new Map(); // "lat0.1,lon0.1" -> [[lat, lon]...]
+  const add = (lat, lon) => {
+    if (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const key = `${Math.round(lat * 10)},${Math.round(lon * 10)}`;
+    let cell = grid.get(key);
+    if (!cell) { cell = []; grid.set(key, cell); }
+    cell.push([lat, lon]);
+  };
+  for (const [lat, lon] of pioupiouCoords) add(lat, lon);
+  for (const s of mfStationsList) add(s.lat, s.lon);
+  for (const o of aemetObsCache.values()) add(o.lat, o.lon);
+  for (const m of infoclimatStationsById.values()) add(m.lat, m.lon);
+  for (const o of metarObsCache.values()) add(o.lat, o.lon);
+  for (const o of smnObsCache.values()) add(o.lat, o.lon);
+  return grid;
+}
+
+// Une cellule de 0,1° fait ~11 km de côté : le rayon cherché (180 m) est
+// très inférieur, donc regarder la cellule et ses 8 voisines suffit et
+// aucun candidat ne peut échapper au test.
+function windsmobiIsDuplicate(grid, lat, lon) {
+  const clat = Math.round(lat * 10), clon = Math.round(lon * 10);
+  for (let dlat = -1; dlat <= 1; dlat++) {
+    for (let dlon = -1; dlon <= 1; dlon++) {
+      const cell = grid.get(`${clat + dlat},${clon + dlon}`);
+      if (!cell) continue;
+      for (const [klat, klon] of cell) {
+        if (fwHaversineKm(lat, lon, klat, klon) * 1000 < WINDSMOBI_DEDUP_M) return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function fetchWindsmobi(path) {
+  const r = await fetch(`${WINDSMOBI_API}${path}`, { headers: { 'user-agent': WINDSMOBI_UA } });
+  if (!r.ok) {
+    // 403/429 = on est peut-être en train de se faire blacklister : le
+    // dire fort dans /diag plutôt que de le noyer dans un log.
+    windsmobiLastError = `HTTP ${r.status} sur ${path}`;
+    console.error(`fetchWindsmobi: ${windsmobiLastError}`);
+    return null;
+  }
+  return r.json();
+}
+
+// ⚠️ `pressure` n'est JAMAIS repris de winds.mobi, décision explicite.
+// La convention de réduction (QFE/QNH/QFF) diffère d'un réseau source à
+// l'autre et l'API ne la dit pas — le champ `pres` n'est même présent
+// que sur une minorité de relevés (vérifié le 07/08 : les stations
+// sondées n'exposaient que w-avg/w-max/w-dir). Mélanger deux conventions
+// sur une même série est exactement le piège FIA-3 corrigé côté foehn.
+// Aucune pression vaut mieux qu'une pression qui fabrique une fausse
+// tendance : les signaux de chute de pression ignorent proprement null.
+async function refreshWindsmobiProviders(providers) {
+  const grid = windsmobiKnownGrid();
+  if (!grid.size) {
+    // Aucun référentiel connu = on ne saurait pas dédoublonner, et
+    // publier sans dédup mettrait ~285 doublons FFVL sur la carte. On
+    // garde le cache précédent (vide au premier boot) et on repassera.
+    console.log('refreshWindsmobi: référentiel de dédup vide, publication reportée');
+    return;
+  }
+  let dropped = 0, kept = 0;
+  const next = new Map(windsmobiObsCache);
+  for (const provider of providers) {
+    try {
+      const rows = await fetchWindsmobi(`/stations/?provider=${encodeURIComponent(provider)}&limit=0`);
+      if (!Array.isArray(rows)) continue; // échec : on garde l'ancien cache de CE réseau
+      // Purge des entrées de ce réseau avant réécriture : sinon une
+      // station retirée côté winds.mobi resterait éternellement en RAM.
+      for (const [id, o] of next) if (o.reseau === provider) next.delete(id);
+      for (const s of rows) {
+        const coords = s?.loc?.coordinates;
+        if (!Array.isArray(coords) || coords.length < 2) continue;
+        const lon = coords[0], lat = coords[1];
+        if (lat < WINDSMOBI_BOX.latMin || lat > WINDSMOBI_BOX.latMax) continue;
+        if (lon < WINDSMOBI_BOX.lonMin || lon > WINDSMOBI_BOX.lonMax) continue;
+        if (s.status === 'red' || s.status === 'hidden') continue;
+        const last = s.last;
+        if (!last || !Number.isFinite(last._id)) continue;
+        if (last['w-avg'] == null) continue; // station sans vent : rien à surveiller
+        if (windsmobiIsDuplicate(grid, lat, lon)) { dropped++; continue; }
+        next.set(s._id, {
+          t: last._id * 1000, // winds.mobi horodate en SECONDES
+          moy: last['w-avg'], raf: last['w-max'] ?? null, dir: last['w-dir'] ?? null,
+          lat, lon, alt: s.alt ?? null,
+          nom: (s.name || s.short || s._id).trim(),
+          reseau: provider,
+          reseauNom: s['pv-name'] || provider,
+          url: s.url?.default ?? null,
+        });
+        kept++;
+      }
+    } catch (e) {
+      console.error(`refreshWindsmobi(${provider}) error:`, e.message);
+      windsmobiLastError = `${provider}: ${e.message}`;
+    }
+  }
+  windsmobiObsCache = next;
+  windsmobiFetchedAt = Date.now();
+  windsmobiDedupCount = dropped;
+  if (kept) windsmobiLastError = null;
+  console.log(`refreshWindsmobi: ${kept} balises retenues, ${dropped} doublons écartés (${providers.join(', ')})`);
+}
+
+const refreshWindsmobiFast = () => refreshWindsmobiProviders(WINDSMOBI_PROVIDERS_FAST);
+const refreshWindsmobiSlow = () => refreshWindsmobiProviders(WINDSMOBI_PROVIDERS_SLOW);
 
 // ════════════════════════════════════════════════════════════════════
 // BALISES DE PRESSION — METAR + MeteoSuisse (foehn v2, lot 0, 03/08/2026)
@@ -4495,6 +4718,86 @@ app.get('/aemet-history/:id', async (req, res) => {
   res.json({ points: await aemetHistoryPoints(req.params.id, Number(req.query.hours)) });
 });
 
+// ── winds.mobi (07/08/2026) — stations agrégées ─────────────────────
+// Même forme de payload que /meteofrance-stations et /aemet-stations
+// (délibéré : le client réutilise la même normalisation), avec DEUX
+// champs en plus, `reseau` et `reseauNom`, parce que la source technique
+// unique `windsmobi` recouvre une quinzaine de réseaux réels et qu'un
+// pilote doit pouvoir distinguer une balise de déco FFVL d'une station
+// de plaine. `pres`/`pmer` sont à null par construction, cf. la note de
+// refreshWindsmobiProviders.
+function windsmobiStationsPayload() {
+  const out = [];
+  for (const [id, obs] of windsmobiObsCache) {
+    if (obs.moy == null) continue;
+    out.push({
+      id, nom: obs.nom, lat: obs.lat, lon: obs.lon, alt: obs.alt,
+      dd: obs.dir, ff: obs.moy, raf10: obs.raf, ddraf10: null,
+      pres: null, pmer: null,
+      reseau: obs.reseau, reseauNom: obs.reseauNom, url: obs.url,
+      validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
+    });
+  }
+  return out;
+}
+
+app.get('/windsmobi-stations', (req, res) => {
+  res.json({ stations: windsmobiStationsPayload(), fetchedAt: windsmobiFetchedAt, lastError: windsmobiLastError });
+});
+
+// ── winds.mobi — historique d'une station ───────────────────────────
+// Seule source du projet dont l'historique n'a PAS de table Supabase :
+// winds.mobi sert lui-même 7 jours (mesuré). Le buffer RAM
+// beaconHistory reste prioritaire sur sa profondeur (il est alimenté par
+// pollAndNotify avec NOS horodatages), l'amont vient compléter au-delà —
+// même contrat de recouvrement que aemetHistoryPoints.
+//
+// ⚠️ C'est le SEUL endroit où une requête client peut déclencher un
+// appel winds.mobi. Le point 3 des CGU l'exige : un cache de 3 min évite
+// qu'un pilote qui ouvre et ferme un graphe cinq fois de suite compte
+// pour cinq appels, et la profondeur est plafonnée pour qu'un ?hours
+// fantaisiste ne demande pas six mois d'archive.
+const windsmobiHistoryCache = new Map(); // id -> {at, points}
+const WINDSMOBI_HISTORY_CACHE_MS = 3 * 60 * 1000;
+
+async function windsmobiHistoryPoints(stationId, hoursParam) {
+  const ramPts = beaconHistory.get(stationId) || [];
+  const hours = Number.isFinite(hoursParam) ? Math.min(Math.max(hoursParam, 1), WINDSMOBI_HISTORY_MAX_H) : 24;
+  const cached = windsmobiHistoryCache.get(stationId);
+  if (cached && Date.now() - cached.at < WINDSMOBI_HISTORY_CACHE_MS && cached.hours >= hours) {
+    return mergeWindsmobiHistory(cached.points, ramPts, hours);
+  }
+  try {
+    const rows = await fetchWindsmobi(
+      `/stations/${encodeURIComponent(stationId)}/historic/?duration=${Math.round(hours * 3600)}`
+    );
+    if (!Array.isArray(rows)) return ramPts;
+    // winds.mobi rend le plus récent EN PREMIER et horodate en secondes.
+    const points = rows
+      .filter(p => Number.isFinite(p?._id))
+      .map(p => ({ t: p._id * 1000, moy: p['w-avg'] ?? null, raf: p['w-max'] ?? null, min: null, dir: p['w-dir'] ?? null, pressure: null }))
+      .sort((a, b) => a.t - b.t);
+    windsmobiHistoryCache.set(stationId, { at: Date.now(), hours, points });
+    return mergeWindsmobiHistory(points, ramPts, hours);
+  } catch (e) {
+    console.error('windsmobi-history error:', e.message);
+    return ramPts;
+  }
+}
+
+// Le buffer RAM gagne sur son propre intervalle : ses points viennent du
+// même poll que les alertes, donc une courbe et une alerte ne peuvent
+// pas se contredire sur les dernières heures.
+function mergeWindsmobiHistory(upstream, ramPts, hours) {
+  const cutoff = Date.now() - hours * 3600 * 1000;
+  const ramCutoff = ramPts[0]?.t ?? Infinity;
+  return [...upstream.filter(p => p.t >= cutoff && p.t < ramCutoff), ...ramPts];
+}
+
+app.get('/windsmobi-history/:id', async (req, res) => {
+  res.json({ points: await windsmobiHistoryPoints(req.params.id, Number(req.query.hours)) });
+});
+
 // ── Balises de pression (foehn v2, lot 0, 03/08/2026) ──────────────
 // Sert metarObsCache + smnObsCache, tous deux rafraîchis en tâche de
 // fond. Jamais d'appel externe déclenché par une requête client.
@@ -4836,7 +5139,35 @@ app.post('/sync', async (req, res) => {
         dir_sectors: Array.isArray(w.dirSectors) ? w.dirSectors : [],
         updated_at: new Date().toISOString(),
       }));
-      await sbUpsert('user_watched', rows, 'user_id,beacon_id,source');
+      // ⚠️ Débogage 07/08/2026 — le retour de sbUpsert était JETÉ, et
+      // /sync répondait `success: true` quoi qu'il arrive.
+      //
+      // sbUpsert rend `r.ok`, il ne lève pas : un lot refusé par
+      // PostgREST (typiquement le CHECK sur `source`, qui n'accepte que
+      // pioupiou/meteofrance/aemet tant que le script d'élargissement
+      // n'a pas tourné) ressortait donc comme un succès. Conséquence :
+      // le pilote voit sa balise « surveillée » dans l'app alors
+      // qu'AUCUNE ligne n'existe en base et qu'aucune alerte ne partira
+      // jamais. Sur un outil de sécurité, une surveillance qui se croit
+      // active est pire qu'une surveillance absente — c'est le même
+      // raisonnement que le témoin `.r2ok` de model-verif : un envoi qui
+      // échoue ne doit pas pouvoir sortir en vert.
+      //
+      // Le nouveau réseau winds.mobi passe exactement par ce chemin :
+      // sans ce garde, une balise Holfuy cochée avant l'exécution de
+      // supabase_step36 serait silencieusement perdue.
+      const ok = await sbUpsert('user_watched', rows, 'user_id,beacon_id,source');
+      if (!ok) {
+        // On ne supprime RIEN : la liste envoyée n'a pas pu être écrite,
+        // la remplacer par elle-même effacerait la seule copie valide
+        // (celle déjà en base) au profit d'un état qu'on n'a pas su
+        // enregistrer.
+        console.error(`⛔ Sync ${user.email || user.id.slice(0, 8)} — upsert user_watched REFUSÉ (${rows.length} ligne(s)), suppression annulée`);
+        return res.status(502).json({
+          error: "La liste de surveillance n'a pas pu être enregistrée sur le compte. Elle reste active sur cet appareil.",
+          sources: [...new Set(rows.map(r => r.source))],
+        });
+      }
     }
     // Supprime les balises qui ne sont plus dans la liste envoyée
     const ids = list.map(w => String(w.id));
@@ -5117,6 +5448,15 @@ async function pollAndNotify() {
       }
     });
 
+    // winds.mobi (07/08/2026) — référentiel de dédoublonnage. Même
+    // principe que gfBeaconPositions juste au-dessus : on se sert d'une
+    // réponse DÉJÀ en main, aucune requête ajoutée. C'est la seule des
+    // six sources du référentiel de dédup qui n'a pas de cache global,
+    // d'où ce recopiage. Lu par windsmobiKnownGrid().
+    pioupiouCoords = (d.data || [])
+      .map(b => [b.location?.latitude, b.location?.longitude])
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+
     // Lot 7 (suite, 11/07/2026) — fusion des stations Météo-France
     // surveillées dans `releves`, EXACT même format que les balises
     // Pioupiou ci-dessus. Choix de Yann : une station MF surveillée doit
@@ -5183,6 +5523,139 @@ async function pollAndNotify() {
       releves[aemetId] = {
         moy: obs.moy, raf: obs.raf, dir: obs.dir,
         pressure: obs.pressure,
+        lat: obs.lat, lon: obs.lon, nom: obs.nom,
+      };
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // LOT « SURVEILLER CE SITE » — METAR, SMN, Infoclimat (08/08/2026)
+    // ══════════════════════════════════════════════════════════════
+    // Ces trois réseaux étaient AFFICHABLES mais pas SURVEILLABLES : ils
+    // ont un cache à jour (metarObsCache / smnObsCache / infoclimatObsCache,
+    // tous rafraîchis en tâche de fond) et ils sortent déjà par
+    // /pressure-stations et /infoclimat-stations — mais personne ne les
+    // versait dans `releves`, donc aucun seuil ne pouvait les évaluer.
+    // Trois boucles, sur le modèle EXACT de MF et AEMET ci-dessus : la
+    // logique en aval (seuils, signaux flightwatch) ne connaît pas la
+    // source, et n'a pas à la connaître.
+    //
+    // Aucun appel réseau ajouté à ce poll — lecture pure des caches.
+    //
+    // ⚠️ VOLUMÉTRIE : ~609 stations de plus dans `releves` (546 Infoclimat,
+    // 43 METAR, 20 SMN, mesuré le 08/08), soit ~+26 % sur le buffer RAM
+    // `fwRecordHistory` juste en dessous, qui échantillonne TOUT `releves`
+    // et pas seulement le surveillé. Même politique que MF/AEMET, qui
+    // versent déjà tout leur réseau ; à surveiller si la RAM Render serre.
+
+    // ── METAR ─────────────────────────────────────────────────────
+    // DEUX PIÈGES, tous deux déjà documentés dans pressureStationsPayload :
+    //
+    //  1. `raf: null` ne veut PAS dire « rafale manquante » mais « pas de
+    //     rafale significative » — la règle de codage OACI ne fait publier
+    //     `wgst` que si la pointe dépasse le moyen de 10 kt. On le laisse
+    //     donc à null SANS le remplacer par 0 : le test de dépassement
+    //     (`rel.raf !== null && ...`, cf. plus bas) l'ignore proprement, là
+    //     où un 0 serait une valeur mesurée et un `moy` recopié serait un
+    //     mensonge. C'est aussi pour ça que le client grise le seuil de
+    //     rafale d'une balise METAR : un seuil qu'on ne peut pas franchir
+    //     ne doit pas se laisser régler.
+    //
+    //  2. `cadenceMin: 30`. Un METAR de 25 minutes d'âge est NORMAL, là où
+    //     un Pioupiou de 25 minutes est mort. Le garde-fraîcheur est donc
+    //     à 90 min (3 × cadence) et non aux 30 min de MF — sinon on
+    //     jetterait la moitié des relevés valides. Conséquence à ASSUMER,
+    //     et que le client DOIT dire au pilote : un dépassement de seuil
+    //     peut être détecté avec une demi-heure de retard.
+    //
+    // `pressure` VOLONTAIREMENT à null (et pas o.qnh) : le QNH d'un METAR
+    // est publié arrondi au hPa entier (`resolutionHpa: 1`). Le signal
+    // « chute de pression » se déclenche à 2 hPa/h — sur une donnée
+    // quantifiée au hPa, ça fait deux crans, et le bruit d'arrondi seul
+    // peut les produire. On préfère aucune pression à une pression qui
+    // fabrique des fausses alertes (budget ≤ 1 faux positif/mois).
+    for (const [code, o] of metarObsCache) {
+      if (o.moy == null) continue;                 // pas de vent exploitable
+      if (o.lat == null || o.lon == null) continue; // même garde que le payload
+      if (!Number.isFinite(o.t) || Date.now() - o.t > METAR_OBS_MAX_AGE_MS) continue;
+      releves[`metar:${code}`] = {
+        moy: o.moy, raf: o.raf ?? null, dir: o.dir ?? null,
+        pressure: null,
+        lat: o.lat, lon: o.lon, nom: o.nom,
+      };
+    }
+
+    // ── SMN (SwissMetNet) ─────────────────────────────────────────
+    // Le réseau le plus propre des trois : cadence 10 min, rafale publiée
+    // sur TOUS les relevés (`fkl010z1`) — un `raf` null y est une vraie
+    // lacune, pas une convention, contrairement au METAR juste au-dessus.
+    // Pression au dixième de hPa : assez fine pour une dérivée, on la
+    // verse. `reduction` (qff|qnh) est une propriété de la STATION et ne
+    // change pas d'un poll à l'autre : une dérivée temporelle reste donc
+    // homogène, ce qui est tout ce dont `fwRealPressureTrend` a besoin
+    // (le piège FIA-3 était de MÉLANGER deux conventions sur une même
+    // station, pas d'en utiliser une de bout en bout).
+    for (const [code, o] of smnObsCache) {
+      if (o.moy == null) continue;
+      if (o.lat == null || o.lon == null) continue;
+      if (!Number.isFinite(o.t) || Date.now() - o.t > SMN_OBS_MAX_AGE_MS) continue;
+      releves[`smn:${code}`] = {
+        moy: o.moy, raf: o.raf ?? null, dir: o.dir ?? null,
+        pressure: o.p ?? null,
+        lat: o.lat, lon: o.lon, nom: o.nom,
+      };
+    }
+
+    // ── Infoclimat ────────────────────────────────────────────────
+    // Ouvertes à la surveillance le 08/08/2026 (décision Yann), ce qui
+    // REVIENT SUR l'en-tête de supabase_step24 (« stations amateur, jamais
+    // rendues watchable »). L'argument de Yann : ces données sont fiables,
+    // on les prend simplement EN DERNIER — l'ordre de priorité réseau
+    // (Pioupiou > MF > AEMET/SMN/METAR > Infoclimat) vit côté client, dans
+    // la sélection du geste « Surveiller ce site ». Mesuré le 08/08 : avec
+    // cet ordre, Infoclimat n'est retenu que sur 16 % des sites, et il est
+    // la SEULE balise dans 15 km sur 65 décollages — c'est exactement le
+    // « au cas où » visé.
+    //
+    // ⚠️ 537 stations sur 546 ne publient AUCUNE rafale (98 %, mesuré le
+    // 08/08 ; le serveur le documentait déjà à ~ligne 4424). Même
+    // traitement que le METAR : `raf` reste null, jamais 0, jamais `moy`
+    // recopié — et le client grise le seuil de rafale, parce qu'un seuil
+    // qui ne peut pas se déclencher ne doit pas se laisser régler.
+    for (const [icId, obs] of infoclimatObsCache) {
+      if (obs.moy == null) continue;
+      const meta = infoclimatStationsById.get(icId);
+      if (!meta || meta.lat == null || meta.lon == null) continue;
+      if (!Number.isFinite(obs.t) || Date.now() - obs.t > INFOCLIMAT_OBS_MAX_AGE_MS) continue;
+      releves[icId] = {
+        moy: obs.moy, raf: obs.raf ?? null, dir: obs.dir ?? null,
+        pressure: obs.pressure ?? null,
+        lat: meta.lat, lon: meta.lon, nom: meta.nom,
+      };
+    }
+
+    // ── winds.mobi (07/08/2026) ───────────────────────────────────
+    // Même moule que les cinq boucles ci-dessus : lecture pure d'un
+    // cache maintenu en tâche de fond, aucun appel réseau ajouté à ce
+    // poll. Les ids portent leur réseau d'origine
+    // (`holfuy-1235`, `ffvl-2820`) — collision impossible avec les
+    // espaces Pioupiou/MF/AEMET/Infoclimat par construction, comme pour
+    // `metar:`/`smn:`.
+    //
+    // `pressure` toujours null, cf. la note de refreshWindsmobiProviders.
+    //
+    // ⚠️ VOLUMÉTRIE : ~910 balises de plus dans `releves` (mesuré le
+    // 07/08 après dédup), qui s'ajoutent aux ~609 du lot du 08/08. Le
+    // buffer RAM fwRecordHistory juste en dessous échantillonne TOUT
+    // `releves`, pas seulement le surveillé : c'est le poste à surveiller
+    // si la RAM Render serre, et la première chose à réduire (filtrer sur
+    // les balises effectivement surveillées) si ça arrive.
+    for (const [wmId, obs] of windsmobiObsCache) {
+      if (obs.moy == null) continue;
+      if (obs.lat == null || obs.lon == null) continue;
+      if (!Number.isFinite(obs.t) || Date.now() - obs.t > WINDSMOBI_OBS_MAX_AGE_MS) continue;
+      releves[wmId] = {
+        moy: obs.moy, raf: obs.raf ?? null, dir: obs.dir ?? null,
+        pressure: null,
         lat: obs.lat, lon: obs.lon, nom: obs.nom,
       };
     }
@@ -6058,6 +6531,25 @@ app.listen(PORT, async () => {
     .then(() => refreshSmnObs());
   setInterval(refreshSmnObs, SMN_POLL_MS);
   setInterval(refreshSmnMeta, SMN_META_POLL_MS);
+  // winds.mobi (07/08/2026) — aucune clé requise, API publique.
+  //
+  // Démarrage DÉCALÉ de 90 s, et ce n'est pas une précaution de style :
+  // windsmobiKnownGrid() a besoin des six caches sources pour
+  // dédoublonner, dont pioupiouCoords que seul le premier pollAndNotify
+  // remplit. Lancé au boot, le premier rafraîchissement trouverait une
+  // grille vide, se reporterait (cf. le garde dans
+  // refreshWindsmobiProviders) et on attendrait 5 min pour rien. 90 s
+  // laissent passer le premier poll complet.
+  //
+  // Les deux cadences sont calées sur la fraîcheur mesurée de chaque
+  // réseau (cf. WINDSMOBI_PROVIDERS_FAST/SLOW) : ~1,3 appel/min en
+  // moyenne, ce que le point 3 des CGU demande.
+  setTimeout(() => {
+    refreshWindsmobiFast();
+    setInterval(refreshWindsmobiFast, WINDSMOBI_POLL_FAST_MS);
+    refreshWindsmobiSlow();
+    setInterval(refreshWindsmobiSlow, WINDSMOBI_POLL_SLOW_MS);
+  }, 90 * 1000);
   // Étape 28 — détecteur de front de rafales. No-op silencieux si
   // GUST_FRONT_ENABLED n'est pas posé. Décalé d'une minute après le
   // démarrage des boucles d'observation : détecter avant que le premier
