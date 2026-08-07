@@ -336,7 +336,16 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
             ordered = sorted(err.per_hour)
             p90 = (ordered[min(len(ordered) - 1, math.floor(len(ordered) * 0.9))]
                    if len(ordered) >= 5 else None)
-            emitted = int(datetime.fromisoformat(row["fetched_at"]).timestamp()) * 1000
+            # ⚠️ `.timestamp()` sur un datetime NAÏF lit l'heure locale de
+            # la machine, pas UTC. collect.py écrit bien un offset
+            # (`datetime.now(timezone.utc).isoformat()`), mais une archive
+            # écrite autrement — ou relue sur une machine en CEST — verrait
+            # `lead_exact_h` glisser de deux heures sans que rien ne le
+            # signale. On tranche ici plutôt que de faire confiance.
+            emitted_dt = datetime.fromisoformat(row["fetched_at"])
+            if emitted_dt.tzinfo is None:
+                emitted_dt = emitted_dt.replace(tzinfo=timezone.utc)
+            emitted = int(emitted_dt.timestamp()) * 1000
             lead_exact = sum(t - emitted for t in (p.t for p in pairs)) / len(pairs) / 3_600_000
 
             rows.append({
@@ -658,10 +667,22 @@ def main() -> int:
     args = ap.parse_args()
 
     root = pathlib.Path(args.out)
-    day = (datetime.strptime(args.day, "%Y-%m-%d") if args.day
-           else datetime.utcnow() - timedelta(days=1)).replace(
+    # ⚠️ AUCUN DATETIME NAÏF NE SORT D'ICI, et c'est délibéré. Ce qui
+    # tenait debout jusqu'ici ne tenait que par accident : `utcnow()`
+    # rend l'heure UTC mais SANS le dire, et `day.replace(tzinfo=utc)`
+    # plus bas ne fait que rattraper cette omission. Les deux lignes ne
+    # sont d'accord que tant que personne ne remplace `utcnow()` par
+    # `now()` — auquel cas `.timestamp()` lirait 22 h la veille comme
+    # minuit UTC, et TOUS les appariements glisseraient de deux heures
+    # sans qu'aucun test ne tombe. Un décalage silencieux, pas un plantage.
+    #
+    # `utcnow()` est par ailleurs déprécié depuis Python 3.12 et le VPS
+    # tourne en 3.13 : on l'entend déjà, on ne l'a pas encore payé.
+    day = (datetime.strptime(args.day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+           if args.day
+           else datetime.now(timezone.utc) - timedelta(days=1)).replace(
                hour=0, minute=0, second=0, microsecond=0)
-    as_of = datetime.utcnow()
+    as_of = datetime.now(timezone.utc)
     utc_offset_s = int(args.utc_offset_h * 3600)
 
     try:
@@ -745,7 +766,7 @@ def main() -> int:
 
     # ── 6. purge ─────────────────────────────────────────────────
     if not args.no_purge:
-        today = datetime.utcnow()
+        today = datetime.now(timezone.utc)
         sb.delete("model_verif_daily",
                   f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
         sb.delete("model_verif_event",
