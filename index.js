@@ -5354,6 +5354,30 @@ const FOEHN_HPA_PLAIN  = 8;   // |Δ| ≥ → foehn en plaine (niveau 3, danger)
 const FOEHN_FORECAST_HORIZON_MS = 36 * 3600 * 1000; // fenêtre d'anticipation du pic
 const FOEHN_CACHE_TTL_MS = 30 * 60 * 1000;          // MSLP prévu bouge lentement
 const FOEHN_ALERT_REPEAT_MS = 3 * 3600 * 1000;      // c'est une prévision : rappel espacé, pas minute par minute
+
+// ⚠️ INTERRUPTEUR DE BASCULE — « un phénomène coché suit l'armement de
+// la veille » (lot 3 « Surveiller ce site », 07/08/2026).
+//
+// CE QUI CHANGE. Jusqu'ici, une ligne `user_foehn_watch.active` suffisait
+// à recevoir un push : le foehn s'anticipe la veille, l'opt-in ÉTAIT la
+// ligne, et le « Démarrer la surveillance » ne la concernait pas. Le
+// geste « Surveiller ce site » arme des phénomènes EN LOT, sans que le
+// pilote les ait ouverts un par un — le même raisonnement ne tient plus :
+// il faut un seul interrupteur maître, celui que le pilote connaît déjà.
+//
+// POURQUOI UN INTERRUPTEUR ET PAS UN COMMIT. Personne ne doit perdre une
+// alerte sans l'avoir su. L'app affiche d'abord un bandeau aux comptes
+// concernés (phénomène coché + veille non démarrée) ; Yann met
+// FOEHN_REQUIRE_ARMED=1 sur Render quand l'annonce a assez tourné, et
+// peut revenir en arrière en une variable d'environnement, sans
+// redéploiement de code.
+//
+// ⚠️ Ceci ne coupe QUE le push. L'état d'alerte reste écrit dans tous les
+// cas (cf. `notify` dans evaluateFwSignal) : la fiche du phénomène
+// continue de montrer ce qui se passe vraiment, veille armée ou non.
+// Un pilote qui regarde voit ; c'est le réveil qui demande d'être armé.
+const FOEHN_REQUIRE_ARMED = process.env.FOEHN_REQUIRE_ARMED === '1';
+
 const foehnDiffCache = new Map(); // axisId -> { ts, diff:{ times, diff } }
 
 // Différentiel Δ = pmsl(A) − pmsl(B) prévu (GFS), deux points en une requête.
@@ -5707,7 +5731,17 @@ async function pollAndNotify() {
     // Lot foehn : la veille foehn est par AXE (user_foehn_watch), indépendante
     // des balises surveillées — on ne coupe court que si NI balise NI axe
     // n'est surveillé, sinon un compte qui ne veille QUE le foehn serait
-    // ignoré (le foehn s'anticipe la veille, sans balise ni départ de veille).
+    // ignoré.
+    //
+    // ⚠️ 07/08/2026 — cette clause DOIT rester, même après la bascule
+    // FOEHN_REQUIRE_ARMED. La tentation était de la resserrer sur les
+    // seuls comptes armés ; ce serait faux dans les deux sens. Un compte
+    // ARMÉ qui ne veille que des phénomènes (aucune balise dans 15 km :
+    // 37 % des décos) n'aurait plus jamais d'alerte, et un compte non
+    // armé cesserait de voir l'ÉTAT de ses phénomènes dans la fiche,
+    // alors que l'état a toujours été écrit indépendamment du push
+    // (cf. `notify` dans evaluateFwSignal). Ce que la bascule coupe,
+    // c'est le réveil — pas l'observation.
     const foehnWatchRows = await sbGet('user_foehn_watch', 'select=*');
     const anyFoehnWatch = Array.isArray(foehnWatchRows) && foehnWatchRows.some(w => w.active);
     if (!watchedRows.length && !anyFoehnWatch) { console.log('Aucune balise ni axe foehn surveillé'); return; }
@@ -6409,9 +6443,11 @@ async function pollAndNotify() {
     // d'arrêt), mutualisée : un seul fetch OM par axe distinct surveillé.
     // Scope 'axis:<id>', réutilise le cycle user_flightwatch_alerts
     // (signal 'foehn'). L'alarme vise le PIC À VENIR (anticipation), pas
-    // l'instant présent. notify:true car le foehn s'anticipe la veille —
-    // l'opt-in EST la ligne user_foehn_watch, indépendant du "démarrage"
-    // de la veille balises. Push formulé DANGER (non-vol). Défensif :
+    // l'instant présent. Le push suivait autrefois la seule existence de
+    // la ligne user_foehn_watch, indépendamment du "démarrage" de la
+    // veille balises ; depuis le lot 3 « Surveiller ce site » il suit
+    // l'interrupteur maître comme tous les autres signaux, sous
+    // FOEHN_REQUIRE_ARMED. Push formulé DANGER (non-vol). Défensif :
     // table/axe absent -> réarmement silencieux, jamais de crash.
     if (anyFoehnWatch) {
       const foehnAxesRows = await getFoehnAxes();
@@ -6475,7 +6511,15 @@ async function pollAndNotify() {
         const prefs = prefsByUser.get(w.user_id) || fwPrefs(null);
         await evaluateFwSignal({
           userId: w.user_id, scope, signal: 'foehn', level: level || 2, active,
-          notify: true, repeatMs: FOEHN_ALERT_REPEAT_MS,
+          // ⚠️ CHANGEMENT 07/08/2026 (lot 3 « Surveiller ce site »).
+          // C'était `notify: true` en dur. Le foehn était le SEUL signal
+          // à réveiller un compte qui n'avait pas démarré sa veille — un
+          // écart assumé tant qu'on cochait un axe à la fois, intenable
+          // dès qu'un bouton en arme cinq d'un coup. Sous interrupteur
+          // (FOEHN_REQUIRE_ARMED, cf. sa déclaration) : tant qu'il est à
+          // 0, comportement d'avant, à l'octet près.
+          notify: FOEHN_REQUIRE_ARMED ? activeByUser.has(w.user_id) : true,
+          repeatMs: FOEHN_ALERT_REPEAT_MS,
           buildPush: () => {
             const town = peak.direction === 'toA' ? ax.a_name : ax.b_name;
             const signed = (peak.diff >= 0 ? '+' : '') + peak.diff.toFixed(1);
