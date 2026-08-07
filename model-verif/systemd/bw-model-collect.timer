@@ -1,0 +1,14 @@
+[Unit]
+Description=Balise Watch — collecte nocturne du score modèles
+
+[Timer]
+# 03 h 15 UTC : après que tous les runs de la nuit soient tombés.
+OnCalendar=*-*-* 03:15:00 UTC
+# ⚠️ Un run manqué (VPS éteint, panne) part au démarrage suivant.
+# C'est LA raison du timer plutôt que cron : la collecte n'est pas
+# rattrapable, et cron laisserait simplement passer la nuit.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

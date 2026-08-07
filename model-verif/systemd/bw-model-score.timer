@@ -1,0 +1,13 @@
+[Unit]
+Description=Balise Watch — notation nocturne du score modèles
+
+[Timer]
+# 40 min après la collecte : elle dure ~6 min pour 648 points (deux
+# passes), la marge absorbe une API lente sans faire se chevaucher les
+# deux jobs.
+OnCalendar=*-*-* 03:55:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

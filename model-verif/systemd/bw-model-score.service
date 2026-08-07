@@ -1,0 +1,23 @@
+# Notation de la journée écoulée.
+#   cf. model-verif/README.md — session 08/08/2026
+#
+# Séparé de la collecte EXPRÈS : un bug dans la formule de score ne doit
+# jamais pouvoir empêcher ou corrompre la collecte, qui est la seule
+# pièce irremplaçable. Ce job-ci, lui, se rejoue sur l'archive autant de
+# fois qu'on veut.
+[Unit]
+Description=Balise Watch — notation des modèles (journée écoulée)
+After=network-online.target bw-model-collect.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=balise
+WorkingDirectory=/opt/balise-watch/model-verif
+EnvironmentFile=/opt/balise-watch/.env
+ExecStart=/usr/bin/python3 /opt/balise-watch/model-verif/score.py \
+    --out /var/lib/bw-model-verif
+TimeoutStartSec=30min
+Nice=10
+StandardOutput=append:/var/log/bw-model-verif.log
+StandardError=append:/var/log/bw-model-verif.log

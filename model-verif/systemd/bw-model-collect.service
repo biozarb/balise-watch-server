@@ -1,0 +1,26 @@
+# Collecte nocturne des prévisions et des observations.
+#   cf. model-verif/README.md — session 08/08/2026
+#
+# ⚠️ C'est la partie NON RATTRAPABLE du dispositif : une nuit non
+# collectée est une nuit définitivement perdue, parce qu'aucun modèle
+# Météo-France n'a d'historique de runs passés chez Open-Meteo (sondé
+# le 08/08). D'où `Persistent=true` côté timer, et une alerte à
+# l'échec plutôt qu'un silence.
+[Unit]
+Description=Balise Watch — collecte des prévisions et observations (score modèles)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=balise
+WorkingDirectory=/opt/balise-watch/model-verif
+EnvironmentFile=/opt/balise-watch/.env
+ExecStart=/usr/bin/python3 /opt/balise-watch/model-verif/collect.py \
+    --out /var/lib/bw-model-verif
+# Le run ne doit jamais se chevaucher avec lui-même : à 648 points et
+# 0,25 s par requête il dure ~6 min, mais une API lente peut l'étirer.
+TimeoutStartSec=45min
+Nice=10
+StandardOutput=append:/var/log/bw-model-verif.log
+StandardError=append:/var/log/bw-model-verif.log
