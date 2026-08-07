@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """collect.py — la collecte nocturne : prévisions et observations.
 
-    Session 08/08/2026.
+    Session 07/08/2026.
     cf. PWA/web/CONCEPTION_SCORE_MODELES_06-08.md §15.6, §16, et le §0 bis
     de supabase_step35_model_verification.sql.
 

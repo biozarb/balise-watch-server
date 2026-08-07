@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """test_scoring.py — banc d'essai de `scoring.py`, et banc de PARITÉ.
 
-    Session 08/08/2026.
+    Session 07/08/2026.
 
 Deux choses en une, et la seconde est la plus importante :
 

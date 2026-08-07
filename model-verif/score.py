@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """score.py — apparier, agréger, accumuler, publier.
 
-    Session 08/08/2026.
+    Session 07/08/2026.
     cf. PWA/web/CONCEPTION_SCORE_MODELES_06-08.md §8, §15.2, §16.1, §16.3
     et PWA/web/supabase_step35_model_verification.sql.
 

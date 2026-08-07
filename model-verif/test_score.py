@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """test_score.py — banc d'essai du job de notation.
 
-    Session 08/08/2026.
+    Session 07/08/2026.
 
 ⚠️ CE BANC PARLE LA LANGUE DE `collect.py`, PAS CELLE DE `score.py`.
 Les entrées sont des lignes NDJSON de la forme EXACTE que `collect.py`

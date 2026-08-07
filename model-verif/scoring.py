@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """scoring.py — le cœur arithmétique du score de fiabilité, côté VPS.
 
-    Session 08/08/2026.
+    Session 07/08/2026.
     cf. PWA/web/CONCEPTION_SCORE_MODELES_06-08.md §8, §15.2, §16.1.
 
 ═══ POURQUOI CE FICHIER EXISTE ALORS QUE LE CODE EXISTE DÉJÀ EN TS ═══

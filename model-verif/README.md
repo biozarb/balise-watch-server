@@ -1,6 +1,6 @@
 # `model-verif/` — le job nocturne du score de fiabilité des modèles
 
-Session du 08/08/2026. Conception complète :
+Session du 07/08/2026. Conception complète :
 `PWA/web/CONCEPTION_SCORE_MODELES_06-08.md` — **§15, §16 et §17 font
 foi** en cas de contradiction avec les §8 et §9.
 

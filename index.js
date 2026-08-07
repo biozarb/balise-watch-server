@@ -2519,7 +2519,7 @@ const AEMET_PRESSURE_ONLY_RETENTION_H = 12;
 const AEMET_OBS_MAX_AGE_MS = 90 * 60 * 1000;
 
 // ── Gardes-fraîcheur des trois réseaux ouverts à la surveillance le
-//    08/08/2026 (lot « Surveiller ce site », cf. pollAndNotify) ────────
+//    07/08/2026 (lot « Surveiller ce site », cf. pollAndNotify) ────────
 //
 // Règle appliquée, la même que pour MF et AEMET : le seuil de péremption
 // est une propriété de la SOURCE, dérivée de sa cadence de publication —
@@ -5589,7 +5589,7 @@ async function pollAndNotify() {
     }
 
     // ══════════════════════════════════════════════════════════════
-    // LOT « SURVEILLER CE SITE » — METAR, SMN, Infoclimat (08/08/2026)
+    // LOT « SURVEILLER CE SITE » — METAR, SMN, Infoclimat (07/08/2026)
     // ══════════════════════════════════════════════════════════════
     // Ces trois réseaux étaient AFFICHABLES mais pas SURVEILLABLES : ils
     // ont un cache à jour (metarObsCache / smnObsCache / infoclimatObsCache,
@@ -5667,7 +5667,7 @@ async function pollAndNotify() {
     }
 
     // ── Infoclimat ────────────────────────────────────────────────
-    // Ouvertes à la surveillance le 08/08/2026 (décision Yann), ce qui
+    // Ouvertes à la surveillance le 07/08/2026 (décision Yann), ce qui
     // REVIENT SUR l'en-tête de supabase_step24 (« stations amateur, jamais
     // rendues watchable »). L'argument de Yann : ces données sont fiables,
     // on les prend simplement EN DERNIER — l'ordre de priorité réseau
