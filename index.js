@@ -143,6 +143,15 @@ const PUSH_LABELS = {
   fr: {
     avg: 'Moy.', gust: 'Rafale',
     dirOut: '🧭 Hors zone :', // Débogage 16/07/2026 (demande Yann) — option orientation par balise
+    // Lot 5 « Surveiller ce site » : le push groupé par site. Le sous-titre
+    // n'est pas décoratif — c'est le garde-fou n°1 (fausse confiance). Un
+    // pilote qui reçoit UN push au lieu de trois doit lire noir sur blanc
+    // qu'il s'agit de trois balises, sinon il conclut que ça se calme. Et
+    // aucune formulation ne doit laisser croire que le site est « couvert ».
+    siteWind: {
+      title: (site, n) => `⚠️ ${site} — ${n} balise${n > 1 ? 's' : ''} au-dessus du seuil`,
+      footer: n => n > 1 ? `${n} balises de ce site dans un seul message.` : '',
+    },
     flightwatch: {
       windSurge: {
         body: (nowKmh, baseKmh, windowMin) =>
@@ -184,6 +193,10 @@ const PUSH_LABELS = {
   en: {
     avg: 'Avg.', gust: 'Gust',
     dirOut: '🧭 Out of zone:',
+    siteWind: {
+      title: (site, n) => `⚠️ ${site} — ${n} beacon${n > 1 ? 's' : ''} above threshold`,
+      footer: n => n > 1 ? `${n} beacons at this site in a single message.` : '',
+    },
     flightwatch: {
       windSurge: {
         body: (nowKmh, baseKmh, windowMin) =>
@@ -224,6 +237,73 @@ const PUSH_LABELS = {
   },
 };
 function pushLabels(lang) { return PUSH_LABELS[lang] || PUSH_LABELS.en; }
+
+// ── Lot 5 « Surveiller ce site » : le nom d'un site, côté serveur ──
+// `origin_site` (lot 4) ne porte que la clé `lat|lon` du décollage qui a
+// créé la ligne. decos.json vit côté PWA — jusqu'ici le serveur n'avait
+// aucun moyen de nommer un site. Décision Yann du 08/08 : « tant qu'à y
+// être on embarque decos.json, ça résout le pb de nom ».
+//
+// On NE COPIE PAS le fichier dans ce dépôt. Deux copies qui divergent, ce
+// n'est pas un nom qui manque, c'est un nom FAUX dans un push — pire que
+// pas de nom du tout. On lit donc l'UNIQUE exemplaire, celui que la PWA
+// publie déjà, et on le garde en RAM (3 313 décollages, ~160 ko) avec un
+// rafraîchissement quotidien : une correction dans decos.json se propage
+// toute seule, là où un instantané recopié resterait faux.
+//
+// ⚠️ La clé est dérivée EXACTEMENT comme côté client (`siteKey`,
+// web/src/lib/decos.ts : `${lat.toFixed(4)}|${lon.toFixed(4)}`). Un
+// arrondi qui divergerait d'un seul chiffre ne lèverait aucune erreur :
+// il ne trouverait simplement jamais rien.
+//
+// Défensif de bout en bout : fetch en panne, JSON illisible, déco déplacé
+// par pgEarth → pas de nom, et l'appelant retombe sur les coordonnées.
+// JAMAIS un nom approché (pas de nearestDeco avec tolérance ici) — c'est
+// la règle du lot 4 : « à défaut on montre les coordonnées plutôt qu'un
+// nom inventé ».
+const DECOS_URL = process.env.DECOS_URL || 'https://balise-watch.vercel.app/data/decos.json';
+const DECOS_TTL_MS = 24 * 60 * 60 * 1000;
+let decoNameByKey = null;
+let decosFetchedAt = 0;
+async function loadDecoNames() {
+  if (decoNameByKey && (Date.now() - decosFetchedAt) < DECOS_TTL_MS) return decoNameByKey;
+  try {
+    const r = await fetch(DECOS_URL, { headers: { 'User-Agent': 'BaliseWatch/1.0 (+https://balise-watch.vercel.app)' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const arr = await r.json();
+    if (!Array.isArray(arr)) throw new Error('format inattendu');
+    const m = new Map();
+    // Deco = [lat, lon, name, altM, sectors] — un tuple, aucun identifiant
+    // stable (vérifié au lot 4). D'où la clé dérivée des coordonnées.
+    for (const d of arr) {
+      if (!Array.isArray(d) || typeof d[0] !== 'number' || typeof d[1] !== 'number') continue;
+      const nom = typeof d[2] === 'string' ? d[2].trim() : '';
+      if (nom) m.set(`${d[0].toFixed(4)}|${d[1].toFixed(4)}`, nom);
+    }
+    if (m.size === 0) throw new Error('aucun décollage lisible');
+    decoNameByKey = m;
+    decosFetchedAt = Date.now();
+    console.log(`🗺️  decos.json chargé : ${m.size} décollages`);
+  } catch (err) {
+    console.warn(`⚠️ decos.json indisponible (${err.message}) — les push de site nommeront les coordonnées`);
+    // Map vide plutôt que null : évite de re-tenter le fetch à chaque
+    // groupe du poll. Le TTL fera la prochaine tentative.
+    if (!decoNameByKey) decoNameByKey = new Map();
+    decosFetchedAt = Date.now();
+  }
+  return decoNameByKey;
+}
+/** Ce qu'on écrit dans un push pour désigner un site : son nom si on
+ *  l'a, ses coordonnées sinon. Jamais un nom approché. */
+function siteLabelFromKey(key) {
+  const nom = decoNameByKey?.get(String(key));
+  if (nom) return nom;
+  const [a, b] = String(key).split('|');
+  const lat = Number(a), lon = Number(b);
+  return Number.isFinite(lat) && Number.isFinite(lon)
+    ? `${lat.toFixed(3)}, ${lon.toFixed(3)}`
+    : String(key);
+}
 
 // ── Étape 10 (flightwatch), Lot 1 : préférences de veille météo ────
 // user_surveillance porte désormais, en plus du flag `active`, les
@@ -5235,10 +5315,39 @@ app.delete('/unsubscribe-device', async (req, res) => {
 // L'utilisateur ne peut acquitter que ses propres lignes — filtre user_id
 // en plus de l'id, même si verifyUser garantit déjà l'identité.
 app.post('/ack', async (req, res) => {
-  const { access_token, beacon_id } = req.body;
+  const { access_token, beacon_id, origin_site } = req.body;
   const user = await verifyUser(access_token);
   if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
-  if (!beacon_id) return res.status(400).json({ error:'beacon_id manquant' });
+
+  // ── Lot 5 : acquitter un push GROUPÉ ─────────────────────────────
+  // Décision Yann (08/08) : « le groupe, rappel maintenu si ça monte, et
+  // surtout pour l'évènement ». Un push groupé décrivait N balises d'un
+  // même site pour UN signal : l'acquitter acquitte ces N balises, pour
+  // CE signal-là seulement — pas les autres signaux du même site, pas
+  // les autres sites. Toute autre lecture ferait re-sonner le pilote pour
+  // quelque chose qu'il vient de lire.
+  // ⚠️ Acquitter ne fige rien : une balise de PLUS qui franchit son seuil
+  // repousse malgré l'acquittement (cf. `force` dans evaluateFwSignal).
+  if (origin_site) {
+    const at = new Date().toISOString();
+    // 1. Le cycle du GROUPE — c'est lui qui décide des rappels.
+    const okGroup = await sbUpsert('user_flightwatch_alerts', {
+      user_id: user.id, scope: `site:${origin_site}`, signal: 'wind_threshold',
+      level: 2, alert_acked_at: at, updated_at: at,
+    }, 'user_id,scope,signal');
+    // 2. L'état INDIVIDUEL, pour que l'affichage suive : l'observation
+    //    reste par balise, la dédup ne coupe que le réveil.
+    await sbPatch(
+      'user_watched',
+      `user_id=eq.${user.id}&origin_site=eq.${encodeURIComponent(String(origin_site))}`,
+      { alert_acked_at: at }
+    );
+    if (!okGroup) return res.status(500).json({ error:'Échec acquittement' });
+    console.log(`🔕 Ack ${user.email||user.id.slice(0,8)} — site ${origin_site}`);
+    return res.json({ success:true });
+  }
+
+  if (!beacon_id) return res.status(400).json({ error:'beacon_id ou origin_site manquant' });
   const ok = await sbPatch(
     'user_watched',
     `user_id=eq.${user.id}&beacon_id=eq.${encodeURIComponent(String(beacon_id))}`,
@@ -5852,7 +5961,13 @@ async function pollAndNotify() {
     // non démarrée. Le PUSH n'est envoyé que si notify=true (= surveillance
     // démarrée). La voix, elle, est déjà bloquée côté client par le même
     // bouton. `notify` absent → traité comme false (défensif).
-    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush, repeatMs, notify }) {
+    // `force` (lot 5) : information NEUVE à l'intérieur d'un épisode déjà
+    // en cours — typiquement une balise de PLUS qui franchit son seuil sur
+    // le même site. Elle traverse l'intervalle de rappel ET l'acquittement,
+    // parce que le pilote a acquitté ce qu'il avait LU, pas ce qui vient de
+    // s'ajouter. Absent chez tous les autres appelants → undefined →
+    // comportement d'avant, à l'identique.
+    async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush, repeatMs, notify, force }) {
       const key = `${userId}|${scope}|${signal}`;
       const row = fwAlertMap.get(key);
       const now = Date.now();
@@ -5875,8 +5990,8 @@ async function pollAndNotify() {
         const justActivated = !row?.alert_active;
         const acked = row?.alert_acked_at && new Date(row.alert_acked_at).getTime() >= lastSent;
         const repeatWindow = repeatMs || FW_ALERT_REPEAT_MS; // anti-répétition par défaut 15 min, surchargée par signal (ex. foudre 10 min, Lot 5)
-        const dueForSend = justActivated || (now - lastSent) >= repeatWindow;
-        if (!(acked && !justActivated) && dueForSend) {
+        const dueForSend = force || justActivated || (now - lastSent) >= repeatWindow;
+        if (!(acked && !justActivated && !force) && dueForSend) {
           const userDevices = devicesByUser[userId] || [];
           for (const dv of userDevices) {
             try {
@@ -5972,6 +6087,31 @@ async function pollAndNotify() {
     // compte a 2 balises dans le même département, un seul par département
     // suffit (la vigilance ne varie pas à l'intérieur d'un département).
     const vigilanceByUserDept = new Map();
+
+    // ── Lot 5 « Surveiller ce site » : le bocal ───────────────────────
+    // Regroupement (compte, site) -> balises de ce site actuellement
+    // au-dessus de leur seuil. Alimenté dans la boucle principale,
+    // consommé juste après — exactement le patron (compte, département)
+    // ci-dessus, et pour la même raison : la vigilance ne varie pas à
+    // l'intérieur d'un département, un front ne varie pas à l'intérieur
+    // d'un bocal de 15 km.
+    //
+    // Règle de Yann : « si les 5 balises repèrent le MÊME événement, on ne
+    // le fait remonter QU'UNE FOIS ; si c'est une brise qui remonte et qui
+    // tape les balises une par une, on informe à chaque fois — la séquence
+    // EST l'information. » Les deux tiennent ensemble ici : un seul push
+    // par site et par signal, MAIS relancé sans attendre dès qu'une balise
+    // de plus tombe (`hasNewCrossing`). Une brise qui progresse fait donc
+    // toujours autant de push qu'elle touche de balises ; un front qui
+    // fait tout tomber d'un coup n'en fait qu'un.
+    //
+    // Ne concerne QUE les lignes venues du geste « Surveiller ce site »
+    // (`origin_site` non nul). Une balise posée à la main garde son push
+    // individuel : c'est la règle d'appartenance du lot 4.
+    const windByUserSite = new Map();
+    // decos.json (nom des sites) : chargé une fois par poll, hors de la
+    // boucle. Échec = pas de nom, jamais d'erreur — cf. loadDecoNames.
+    await loadDecoNames();
 
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
@@ -6265,6 +6405,48 @@ async function pollAndNotify() {
         continue;
       }
 
+      // ── Lot 5 : une ligne venue d'un geste « Surveiller ce site » ne
+      // pousse plus toute seule ────────────────────────────────────────
+      // Elle est collectée ici et évaluée EN GROUPE après la boucle
+      // (scope `site:<origin_site>`, signal `wind_threshold`). Son état
+      // individuel continue d'être écrit exactement comme avant : la
+      // dédup coupe le RÉVEIL, jamais l'OBSERVATION — WatchCard doit
+      // continuer de montrer laquelle des cinq balises est au-dessus.
+      if (w.origin_site) {
+        const gkey = `${w.user_id}|${w.origin_site}`;
+        const g = windByUserSite.get(gkey) || {
+          userId: w.user_id, originSite: w.origin_site,
+          beacons: [], repeatMin: null, hasNewCrossing: false,
+        };
+        g.beacons.push({
+          id: String(w.beacon_id), nom: rel.nom,
+          moy: overM ? rel.moy : null,
+          raf: overR ? rel.raf : null,
+          dirOut: overDir ? sectorNow : null,
+        });
+        // Le rappel du groupe est le PLUS COURT des réglages de ses
+        // balises (décision Yann, 08/08) : sur un groupe, le doute se
+        // tranche toujours du côté qui pousse.
+        const rep = w.repeat_interval_min ?? 10;
+        g.repeatMin = g.repeatMin === null ? rep : Math.min(g.repeatMin, rep);
+        // « Ça monte » (décision Yann, 08/08 : « on surveille les
+        // dépassements de seuil ») = une balise de PLUS qui franchit le
+        // sien. `!w.alert_active` la désigne sans rien inventer : la
+        // colonne retombe à false dès qu'une balise repasse sous son
+        // seuil, donc « pas encore active ET au-dessus maintenant » = elle
+        // vient de tomber. Aucun palier à calibrer, aucune valeur inventée
+        // — et c'est précisément ce qui manquait côté vent.
+        if (!w.alert_active) g.hasNewCrossing = true;
+        windByUserSite.set(gkey, g);
+        // Observation : l'état individuel est écrit même si le réveil est
+        // délégué au groupe. `alert_last_sent` n'est PAS touché ici — le
+        // cycle d'envoi du groupe vit dans user_flightwatch_alerts.
+        if (!w.alert_active) {
+          await sbPatch('user_watched', `id=eq.${w.id}`, { alert_active: true });
+        }
+        continue;
+      }
+
       // Alerte en cours. Intervalle de rappel : réglage utilisateur
       // (plancher 5 min imposé en base) sinon 10 min par défaut (valeur
       // historique du serveur).
@@ -6451,6 +6633,82 @@ async function pollAndNotify() {
         });
       }
     }
+    // ── Lot 5 « Surveiller ce site » : UN push par site et par SIGNAL ──
+    // Décision structurante de Yann (08/08) : « surtout pour l'évènement !
+    // Un orage qui s'approche peut déclencher plusieurs facteurs :
+    // renversement de brise, convection, montée du vent… Il faut que
+    // chaque paramètre soit indépendant dans l'annonce. »
+    // D'où la clé (compte, SITE, SIGNAL) et pas (compte, site) : ce qu'on
+    // interdit, c'est cinq push POUR LA MONTÉE DU VENT. Trois push pour
+    // trois phénomènes différents sur le même site, eux, sont trois
+    // informations et doivent passer. Le signal porté ici est
+    // `wind_threshold` ; les autres gardent leurs propres scopes.
+    //
+    // Aucune fenêtre en minutes n'est introduite. Question posée à Yann :
+    // en combien de temps une lombarde tape deux balises voisines ?
+    // Réponse : « je n'en ai aucune idée » — donc on n'écrit pas un
+    // chiffre qui aurait l'air de venir du terrain. Le regroupement
+    // s'adosse au cycle de rappel qui existe déjà et que le pilote règle
+    // lui-même (`repeat_interval_min`, le plus court du groupe).
+
+    // Réarmement : un site dont plus AUCUNE balise n'est au-dessus n'est
+    // pas dans windByUserSite, donc la boucle ci-dessous ne le verrait
+    // jamais et sa ligne resterait alert_active=true pour toujours — le
+    // prochain épisode ne serait plus « justActivated » et attendrait
+    // l'intervalle de rappel au lieu de partir tout de suite. Or le
+    // premier franchissement doit TOUJOURS pousser immédiatement
+    // (décision Yann : « le 1er, il faut avertir tout de suite, le plus
+    // tôt possible ! »). D'où cette passe, sur le modèle de celle de la
+    // bascule de brise.
+    for (const r of fwAlertMap.values()) {
+      if (r.signal !== 'wind_threshold' || !r.alert_active) continue;
+      if (typeof r.scope !== 'string' || !r.scope.startsWith('site:')) continue;
+      if (windByUserSite.has(`${r.user_id}|${r.scope.slice(5)}`)) continue;
+      await evaluateFwSignal({
+        userId: r.user_id, scope: r.scope, signal: 'wind_threshold',
+        level: r.level ?? 2, active: false, notify: false, buildPush: () => ({}),
+      });
+    }
+
+    for (const g of windByUserSite.values()) {
+      const scope = `site:${g.originSite}`;
+      const lbl = pushLabels(langByUser.get(g.userId));
+      const site = siteLabelFromKey(g.originSite);
+      const n = g.beacons.length;
+      // Le corps nomme CHAQUE balise et sa mesure. Un push groupé qui se
+      // contenterait de « 3 balises au-dessus du seuil » retirerait au
+      // pilote ce qu'il avait avant le lot 5 : savoir laquelle, et
+      // combien. On groupe le réveil, on ne résume pas l'information.
+      const detail = g.beacons.map(b => {
+        const parts = [];
+        if (b.moy != null) parts.push(`${lbl.avg} ${Math.round(b.moy)} km/h`);
+        if (b.raf != null) parts.push(`${lbl.gust} ${Math.round(b.raf)} km/h`);
+        if (b.dirOut != null) parts.push(`${lbl.dirOut} ${WATCH_SECTOR_8_LABELS[b.dirOut]}`);
+        return `${b.nom} — ${parts.join(' · ')}`;
+      }).join('\n');
+      const footer = lbl.siteWind.footer(n);
+      await evaluateFwSignal({
+        userId: g.userId, scope, signal: 'wind_threshold', level: 2,
+        active: true, notify: activeByUser.has(g.userId),
+        repeatMs: g.repeatMin * 60 * 1000,
+        force: g.hasNewCrossing,
+        buildPush: () => ({
+          title: lbl.siteWind.title(site, n),
+          body: footer ? `${detail}\n${footer}` : detail,
+          icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+          // Un tag PAR SITE : les push d'un même bocal se remplacent dans
+          // le tiroir au lieu de s'y empiler, ce qui était toute la
+          // nuisance que le plafond de 5 balises servait à contenir.
+          tag: `alert-site-${g.originSite}`,
+          data: {
+            url: '/', kind: 'siteWatch', signal: 'wind_threshold',
+            scope, originSite: g.originSite,
+            beacons: g.beacons.map(b => b.id),
+          },
+        }),
+      });
+    }
+
     // ── Lot foehn : alarme différentiel de pression par AXE ───────────
     // Veille par axe (user_foehn_watch, déjà lu en tête pour le garde-fou
     // d'arrêt), mutualisée : un seul fetch OM par axe distinct surveillé.
