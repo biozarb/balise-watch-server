@@ -181,12 +181,104 @@ const PUSH_LABELS = {
         body: radiusKm =>
           `Précipitations détectées à moins de ${radiusKm} km de ta balise — donnée radar indicative (RainViewer), non officielle`,
       },
+      // ── Le texte d'une alerte de phénomène, PAR FAMILLE ───────────
+      //
+      // ⚠️ DÉBOGAGE 08/08/2026 (retour Yann sur une notification reçue
+      // pour « Vent d'est de Maurienne » : « on fait plusieurs fois
+      // référence à du foehn. Ce qui est inexact. De plus on peut voler
+      // avec de la lombarde en Maurienne, mais il faut être prudent et
+      // voir sa force. Ce message est donc faux ! »).
+      //
+      // Il n'y avait qu'UN gabarit — « 🌀 Foehn — … Danger pour le vol,
+      // ne décolle pas en foehn » — servi aux 32 phénomènes du
+      // catalogue. Or 18 d'entre eux ne sont pas un débordement de
+      // crête : 13 `gap_wind` (vents de col, dont la lombarde de
+      // Maurienne, et les vents d'est de Tarentaise, du Queyras…) et
+      // 5 `plain_gradient` (Mistral, Tramontane, Autan, Bise, Marin).
+      // Une alerte Mistral disait littéralement « ne décolle pas en
+      // foehn ». Sur un outil de sécurité, un message faux use la
+      // confiance dans tous les autres : le pilote qui sait que la
+      // lombarde se vole apprend à ne plus lire ces notifications.
+      //
+      // La donnée qui manquait était DÉJÀ là. `foehn_axes.kind`
+      // (crest_foehn | gap_wind | plain_gradient) est présent dans `ax`
+      // au moment exact de la composition (`select=*`), et
+      // `PRESSURE.phenomenonFromRow(ax)` le remplit trois lignes plus
+      // haut. Personne ne le lisait.
+      //
+      // Le vocabulaire par famille existe aussi côté client
+      // (`phen.family.<kind>` et `phen.deep.<kind>.danger` dans
+      // web/src/locales/fr.json) mais ne franchit pas la frontière vers
+      // ce serveur, qui garde son dictionnaire à lui. On duplique donc
+      // le MINIMUM : le nom de la famille et le verdict de vol.
+      //
+      // ⚠️ LE VERDICT N'EST PAS UNIFORME, c'est tout l'objet du fix :
+      //  • crest_foehn : c'est le foehn. On ne décolle pas. Inchangé.
+      //  • gap_wind : ça se vole, et la question est la FORCE — « le vent
+      //    peut être nul en aval et violent en amont, c'est tout
+      //    l'intérêt du couloir : un chiffre unique ne peut pas le dire »
+      //    (notes du phénomène en base). Le message renvoie donc aux
+      //    balises du couloir au lieu d'interdire.
+      //  • plain_gradient : vent régional établi ; là aussi la force
+      //    décide, et elle se lit sur les balises.
+      // Aucun label de niveau pilote (contrainte ROADMAP) : on décrit le
+      // vent et où le vérifier, on ne classe pas celui qui le lit.
+      //
+      // `alias` = `local_names` de la ligne (aujourd'hui la seule
+      // Maurienne, `['lombarde']`). Il est rendu dans le CORPS et pas
+      // dans le titre : iOS tronque déjà le titre (« 🌀 Foehn — Vent
+      // d'est de Maur… » sur la capture de Yann), y ajouter « (lombarde) »
+      // le pousserait hors écran — c'est-à-dire perdre le seul mot que le
+      // pilote emploie vraiment.
       foehn: {
-        title: label => `🌀 Foehn — ${label}`,
-        body: (town, signedVal, level, whenStr) =>
-          `Foehn attendu ${whenStr} : Δ ${signedVal} hPa, orienté vers ${town}. ` +
-          (level === 3 ? 'Assez marqué pour déborder en plaine.' : 'Vent fort et turbulent probable dans les vallées.') +
-          ' Danger pour le vol — ne décolle pas en foehn.',
+        family: {
+          crest_foehn: '🌀 Foehn',
+          gap_wind: '🌬️ Vent de col',
+          plain_gradient: '💨 Vent de plaine',
+        },
+        // Un label qui NOMME DÉJÀ sa famille n'a pas besoin du préfixe :
+        // « 🌀 Foehn — Foehn du sud — Chartreuse » dit deux fois la même
+        // chose et mange la place qu'iOS tronque déjà (le titre de la
+        // capture de Yann s'arrêtait à « Vent d'est de Maur… »). L'emoji
+        // reste : il porte la famille sans coûter de caractères.
+        //
+        // Les deux orthographes du foehn sont dans le catalogue
+        // (« Foehn du sud », « Südföhn », « Nordföhn »), d'où le `oe|ö`.
+        // À l'inverse, les trois `gap_wind` mal nommés du catalogue
+        // (« Foehn du Simplon / Gothard / Brenner ») ne matchent PAS
+        // /vent de col/ : ils reçoivent donc le préfixe, qui rectifie leur
+        // nom dans la notification. C'est voulu.
+        already: {
+          crest_foehn: /f(?:oe|ö)hn/i,
+          gap_wind: /vent de col/i,
+          plain_gradient: /vent de plaine/i,
+        },
+        title(label, kind) {
+          const fam = this.family[kind] || this.family.crest_foehn;
+          const re = this.already[kind] || this.already.crest_foehn;
+          return re.test(label) ? `${fam.slice(0, fam.indexOf(' '))} ${label}` : `${fam} — ${label}`;
+        },
+        body({ town, signedVal, level, whenStr, kind, alias }) {
+          const nom = alias ? `Vent de col (« ${alias} »)` : 'Vent de col';
+          const quand = `attendu ${whenStr} : Δ ${signedVal} hPa, orienté vers ${town}.`;
+          if (kind === 'gap_wind') {
+            return `${nom} ${quand} ` +
+              (level === 3
+                ? 'Gradient marqué : jet de col probablement fort, et étalé loin dans la vallée.'
+                : 'Le vent peut être nul en aval et violent en amont.') +
+              ' Vérifie la force sur les balises du couloir avant de décoller.';
+          }
+          if (kind === 'plain_gradient') {
+            return `Vent de plaine ${quand} ` +
+              (level === 3
+                ? 'Régime soutenu et probablement établi jusqu\'en plaine.'
+                : 'Vent régional en place, renforcé dans les couloirs et sur les reliefs.') +
+              ' Vérifie la force sur les balises avant de décoller.';
+          }
+          return `Foehn ${quand} ` +
+            (level === 3 ? 'Assez marqué pour déborder en plaine.' : 'Vent fort et turbulent probable dans les vallées.') +
+            ' Danger pour le vol — ne décolle pas en foehn.';
+        },
       },
     },
   },
@@ -226,12 +318,50 @@ const PUSH_LABELS = {
         body: radiusKm =>
           `Precipitation detected within ${radiusKm} km of your beacon — indicative radar data (RainViewer), unofficial`,
       },
+      // Miroir exact du bloc `fr` — même découpage par famille, mêmes
+      // verdicts. Les 6 autres langues n'existent pas dans PUSH_LABELS :
+      // `pushLabels()` retombe ici, donc ce bloc est celui que reçoit
+      // tout compte non francophone. Il doit rester aligné.
       foehn: {
-        title: label => `🌀 Foehn — ${label}`,
-        body: (town, signedVal, level, whenStr) =>
-          `Foehn expected ${whenStr}: Δ ${signedVal} hPa, toward ${town}. ` +
-          (level === 3 ? 'Strong enough to spill into the plains.' : 'Strong, turbulent wind likely in the valleys.') +
-          ' Dangerous for flying — do not take off in foehn.',
+        family: {
+          crest_foehn: '🌀 Foehn',
+          gap_wind: '🌬️ Gap wind',
+          plain_gradient: '💨 Regional wind',
+        },
+        // Cf. le bloc `fr`. Les labels du catalogue sont en français
+        // (curation FR) : ce sont donc les mêmes motifs qui décident,
+        // sauf le foehn dont l'orthographe est commune aux deux langues.
+        already: {
+          crest_foehn: /f(?:oe|ö)hn/i,
+          gap_wind: /vent de col|gap wind/i,
+          plain_gradient: /vent de plaine|regional wind/i,
+        },
+        title(label, kind) {
+          const fam = this.family[kind] || this.family.crest_foehn;
+          const re = this.already[kind] || this.already.crest_foehn;
+          return re.test(label) ? `${fam.slice(0, fam.indexOf(' '))} ${label}` : `${fam} — ${label}`;
+        },
+        body({ town, signedVal, level, whenStr, kind, alias }) {
+          const nom = alias ? `Gap wind (“${alias}”)` : 'Gap wind';
+          const quand = `expected ${whenStr}: Δ ${signedVal} hPa, toward ${town}.`;
+          if (kind === 'gap_wind') {
+            return `${nom} ${quand} ` +
+              (level === 3
+                ? 'Marked gradient: the gap jet is likely strong and reaching far down the valley.'
+                : 'The wind can be nil downstream and violent upstream.') +
+              ' Check the actual strength on the beacons along the corridor before taking off.';
+          }
+          if (kind === 'plain_gradient') {
+            return `Regional wind ${quand} ` +
+              (level === 3
+                ? 'Sustained regime, likely established all the way to the plains.'
+                : 'Regional wind in place, reinforced in gaps and over ridges.') +
+              ' Check the actual strength on the beacons before taking off.';
+          }
+          return `Foehn ${quand} ` +
+            (level === 3 ? 'Strong enough to spill into the plains.' : 'Strong, turbulent wind likely in the valleys.') +
+            ' Dangerous for flying — do not take off in foehn.';
+        },
       },
     },
   },
@@ -5203,10 +5333,66 @@ app.get('/lightning-strikes', (req, res) => {
 // ── /sync : lie l'appareil (endpoint push) au compte + remplace la liste
 //    de surveillance du compte par celle envoyée (upsert + suppression
 //    des balises qui ne sont plus dans la liste) ──
+//
+// ⚠️ DÉBOGAGE 08/08/2026 — CETTE ROUTE A EFFACÉ LA VEILLE D'UN COMPTE.
+//
+// Symptôme (retour Yann) : cinq balises ajoutées depuis l'ordinateur par
+// « Surveiller ce site » (Aussois), toujours visibles là, disparues du
+// téléphone dix minutes plus tard — encart du site amputé de sa colonne
+// Balises, « 0 balise suivie ». Les deux phénomènes du même geste,
+// eux, intacts : c'est ce qui désigne cette route, seule à toucher
+// `user_watched` et jamais `user_foehn_watch`.
+//
+// Cause côté client (corrigée aussi, cf. `registerPushDevice` dans
+// AppContext.tsx) : l'app postait ici `watchedRef.current` — son
+// instantané localStorage périmé — juste pour enregistrer son endpoint
+// push, avant même d'avoir lu le compte. Remplacement total oblige, tout
+// ce qui n'était pas dans cet instantané a été supprimé.
+//
+// Ce que cette route corrige de SON côté, indépendamment du client :
+//
+//  1. `watched` ABSENT ≠ `watched: []`. Avant, `watched || []` fondait
+//     les deux : « je n'ai rien à dire de la liste » (enregistrement
+//     d'un appareil) devenait « la liste est vide », donc « supprime
+//     tout ». C'est le défaut structurant — il permettait à un appel qui
+//     ne parle PAS de la collection de la détruire.
+//  2. Une liste VIDE doit être DITE : `allow_empty: true`. Retirer sa
+//     dernière balise est légitime et doit marcher ; y arriver par
+//     omission ne doit pas. Sans le drapeau : 409, et rien n'est touché.
+// Ce qui est SIGNALÉ ici mais volontairement PAS changé : le DELETE ne
+// filtre que sur `beacon_id`, alors que la clé d'unicité de la table est
+// (user_id, beacon_id, source). En théorie il peut donc emporter la même
+// balise sur un autre réseau. En pratique non : le client envoie toujours
+// sa liste ENTIÈRE, donc un `beacon_id` suivi sur deux réseaux figure
+// dans `ids` et se protège lui-même. Le corriger demanderait N+1 requêtes
+// (un DELETE par source + un pour les sources absentes), donc des états
+// d'échec partiel, et laisserait survivre une ligne dont `source` serait
+// NULL — un vrai risque de régression pour un défaut qu'aucun chemin
+// actuel n'atteint. Écrit ici plutôt que corrigé à l'aveugle : le jour où
+// un client enverra une liste PARTIELLE, cette ligne redeviendra fausse.
+//
+// La leçon de BUGS.md du 07/08 — « un ajout en lot sur une API qui
+// remplace la liste entière est une COURSE » — n'avait été appliquée
+// qu'aux boucles d'un même client. Elle vaut à l'identique pour DEUX
+// APPAREILS : sur une route de remplacement total, tout client qui écrit
+// la collection sans l'avoir lue écrase les autres.
 app.post('/sync', async (req, res) => {
-  const { access_token, subscription, watched } = req.body;
+  const { access_token, subscription, watched, allow_empty } = req.body;
   const user = await verifyUser(access_token);
   if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
+
+  // Point (1) : l'absence de `watched` ne touche PAS la collection.
+  // `undefined` = « je viens enregistrer un appareil ». Un tableau, même
+  // vide, = « voici la liste du compte ». Deux intentions, deux formes.
+  const declaresList = Array.isArray(watched);
+
+  // Point (2) : le cas dégénéré doit être explicite.
+  if (declaresList && watched.length === 0 && allow_empty !== true) {
+    console.warn(`⛔ Sync ${user.email || user.id.slice(0, 8)} — liste VIDE sans allow_empty, suppression refusée`);
+    return res.status(409).json({
+      error: "Liste de surveillance vide reçue sans confirmation explicite : rien n'a été modifié.",
+    });
+  }
 
   try {
     // subscription optionnelle : la surveillance doit pouvoir se synchroniser
@@ -5219,7 +5405,17 @@ app.post('/sync', async (req, res) => {
       }, 'endpoint');
     }
 
-    const list = watched || [];
+    // ⚠️ 08/08/2026 — c'était `const list = watched || []`, et c'est ce
+    // `|| []` qui a coûté la veille d'un compte : un POST sans `watched`
+    // (enregistrement d'appareil) tombait sur une liste vide, donc sur la
+    // suppression totale plus bas. Cf. l'en-tête de la route.
+    if (!declaresList) {
+      const deviceLabel = subscription?.endpoint ? `device ...${subscription.endpoint.slice(-12)}` : 'sans device';
+      console.log(`✅ Sync ${user.email||user.id.slice(0,8)} — appareil seul (liste non déclarée), ${deviceLabel}`);
+      return res.json({ success:true, watchedTouched:false });
+    }
+
+    const list = watched;
     if (list.length) {
       const rows = list.map(w => ({
         user_id: user.id, beacon_id: String(w.id), beacon_nom: w.nom,
@@ -5286,7 +5482,10 @@ app.post('/sync', async (req, res) => {
         });
       }
     }
-    // Supprime les balises qui ne sont plus dans la liste envoyée
+    // Supprime les balises qui ne sont plus dans la liste envoyée.
+    // La branche `user_id=eq.` seule (liste vide) n'est atteignable que
+    // sur `allow_empty: true` depuis ce débogage — c'est un « supprime
+    // tout » assumé, plus un repli.
     const ids = list.map(w => String(w.id));
     const staleQuery = ids.length
       ? `user_id=eq.${user.id}&beacon_id=not.in.(${ids.map(encodeURIComponent).join(',')})`
@@ -6810,15 +7009,43 @@ async function pollAndNotify() {
             const signed = (peak.diff >= 0 ? '+' : '') + peak.diff.toFixed(1);
             const whenStr = new Date(peak.time).toLocaleString(lang === 'fr' ? 'fr-FR' : 'en-GB',
               { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+            // ⚠️ 08/08/2026 — `kind` et `alias` traversent enfin jusqu'au
+            // texte. Les deux étaient là depuis toujours dans `ax`
+            // (`select=*`) : `kind` dit la FAMILLE du phénomène (un vent
+            // de col n'est pas un foehn et ne s'annonce pas comme tel),
+            // `local_names` dit le nom que les pilotes emploient sur
+            // place (« lombarde » en Maurienne). Cf. le bloc `foehn` de
+            // PUSH_LABELS pour le détail du bug corrigé.
+            //
+            // Repli sur `crest_foehn` si `kind` manque : c'est le défaut
+            // de la colonne en base (step29) et la famille la plus
+            // prudente des trois — un vrai foehn annoncé comme vent de
+            // col serait le seul sens dangereux de l'erreur.
+            const phKind = ax.kind || 'crest_foehn';
+            const alias = Array.isArray(ax.local_names) && ax.local_names.length
+              ? ax.local_names[0]
+              : null;
             return {
-              title: lbl.title(ax.label),
-              body: lbl.body(town, signed, peak.level, whenStr),
+              title: lbl.title(ax.label, phKind),
+              body: lbl.body({ town, signedVal: signed, level: peak.level, whenStr, kind: phKind, alias }),
               icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
               tag: `fw-foehn-${w.axis_id}`, requireInteraction: peak.level === 3,
               data: {
-                url: '/', kind: 'flightwatch', signal: 'foehn', level: peak.level,
+                // ⚠️ 08/08/2026 — c'était `url: '/'`, comme dans tous les
+                // payloads : le tap ramenait sur l'accueil (la carte), à
+                // charge pour le pilote de retrouver le phénomène dont on
+                // venait de lui parler. L'uuid était pourtant déjà dans
+                // `scope` et dans `tag`. Le service worker lit désormais
+                // ce champ (web/src/sw.ts) et la PWA le consomme
+                // (web/src/lib/phenLink.ts) — les trois vont ensemble,
+                // changer ce champ seul ne ferait rien.
+                url: `/?phen=${w.axis_id}`,
+                kind: 'flightwatch', signal: 'foehn', level: peak.level,
                 scope, voice: peak.level === 3 ? !!prefs.voice_enabled : false,
                 value: peak.diff, unit: 'hPa',
+                // La famille, pour un éventuel consommateur côté client
+                // (la voix, par exemple, qui dit encore « foehn »).
+                phenomenonKind: phKind,
               },
             };
           },
