@@ -42,6 +42,12 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
+# ⚠️ AJOUTÉ LOT E (08/08 soir) — absent depuis l'écriture du service,
+# relevé par la revue du 08/08 et toujours vrai jusqu'ici (vérifié par
+# `systemctl show … -p UMask` sur le VPS avant ce commit). 0077 : rien
+# de lisible par le groupe ni par les autres sur les fichiers créés par
+# ce service (état/écriture dans /var/lib/bw-model-verif).
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

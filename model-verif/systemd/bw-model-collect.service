@@ -54,6 +54,9 @@ ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
 LockPersonality=true
+# ⚠️ AJOUTÉ LOT E (08/08 soir) — même correction que bw-model-score.service,
+# cf. son commentaire.
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
