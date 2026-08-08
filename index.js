@@ -6768,7 +6768,21 @@ async function pollAndNotify() {
         // autrement que prévu : plutôt que d'extraire la physique vers
         // le client, c'est le SERVEUR qui est devenu la source unique
         // (route B). `GET /phenomenon-delta/:id` rend le Δ MESURÉ avec
-        // la physique de la fiche, et la fiche le consomme.
+        // la physique de la fiche.
+        //
+        // ⚠️ CORRECTION (audit phénomènes du 08/08/2026, constat n°3) —
+        // la phrase précédente disait « et la fiche le consomme ». FAUX :
+        // aucun appel à `/phenomenon-delta` dans `PWA/web/src` (vérifié
+        // par grep). La fiche ne consomme PAS cette route, elle recalcule
+        // en LOCAL avec les mêmes fonctions partagées (`lib/pressure.ts`,
+        // dont ce fichier `lib/pressure.cjs` est généré) sur le même
+        // référentiel. Les deux chemins rendent aujourd'hui le même
+        // chiffre (écart max 0,005 hPa, audit du 08/08) parce qu'ils
+        // partagent la physique — ce sont deux calculs qui coïncident,
+        // pas un calcul partagé. Si l'un dérive un jour de l'autre (ex. :
+        // cette route calcule déjà `pairSpanMin`/`beyondTolerance`, que la
+        // fiche ignore et recalcule autrement), rien ne le signalera tant
+        // que la fiche n'appelle pas réellement cette route.
         //
         // ⚠️ Ce qui suit reste le Δ PRÉVU, et c'est voulu : l'alerte
         // vise le pic à 36 h, parce que le foehn s'anticipe la veille.
