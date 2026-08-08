@@ -138,6 +138,26 @@ class Supabase:
         """
         if not rows:
             return 0
+        # ⚠️ GARDE-FOU AJOUTÉ LE 08/08, APRÈS AVOIR PAYÉ LE MESSAGE.
+        # PostgREST refuse un envoi groupé dont les objets n'ont pas tous
+        # le même jeu de clés, et il le dit ainsi :
+        #
+        #     HTTP 400 — {"code":"PGRST102", … "All object keys must match"}
+        #
+        # Ni la clé fautive, ni la ligne, ni la table. Le run nocturne
+        # tombe alors sur une pile d'appels `urllib` qui parle de tout
+        # sauf du problème. On vérifie donc AVANT d'envoyer, et on nomme
+        # la clé — le coût est une union d'ensembles sur quelques
+        # milliers de lignes, invisible devant l'aller-retour réseau.
+        formes = {frozenset(r.keys()) for r in rows}
+        if len(formes) > 1:
+            communes = frozenset.intersection(*formes)
+            variables = sorted(set().union(*formes) - communes)
+            raise Abort(
+                f"upsert {table} : {len(formes)} jeux de clés différents dans le "
+                f"même envoi — PostgREST le refusera (PGRST102). Clés présentes "
+                f"dans certaines lignes seulement : {variables}. Les ajouter à "
+                f"`None` partout plutôt que de les omettre.")
         if self.dry_run:
             print(f"  (dry-run) {len(rows)} lignes vers {table}")
             return len(rows)
@@ -616,13 +636,30 @@ def zone_rows_needed(zones: list[dict]) -> list[dict]:
         landform = z["landform"]
         nom = MASSIF_FR.get(massif, massif)
         lf = LANDFORM_FR.get(landform, landform)
+        # ⚠️ LES DEUX LIGNES PORTENT EXACTEMENT LES MÊMES CLÉS, y compris
+        # celles qui valent `None`. Ce n'est pas de la cosmétique :
+        # PostgREST REFUSE un envoi groupé dont les objets n'ont pas le
+        # même jeu de clés, avec un `PGRST102 — All object keys must
+        # match` qui ne dit ni quelle clé ni quelle ligne.
+        #
+        # Défaut trouvé le 08/08 sur le PREMIER run réel avec
+        # `station_zone` peuplée : `massif:forme` portait `landform`,
+        # `massif:*` ne le portait pas, et les 77 lignes partaient dans
+        # le même POST. Le défaut était là depuis le lot B, mais il ne
+        # pouvait pas se déclencher tant que `station_zone` était vide —
+        # `zone_rows_needed` rendait alors une liste vide.
+        #
+        # La même forme à six clés que `zone_row_for` (l'échelon 1), pour
+        # que TOUTE ligne `model_zone` du projet ait la même, quel que
+        # soit son producteur.
         out[f"{massif}:{landform}"] = {
             "zone_id": f"{massif}:{landform}", "kind": "massif_landform",
-            "massif_id": massif, "landform": landform,
+            "basin_id": None, "massif_id": massif, "landform": landform,
             "label": f"{lf}, {nom}"}
         out[f"{massif}:*"] = {
             "zone_id": f"{massif}:*", "kind": "massif",
-            "massif_id": massif, "label": f"{nom}, toutes formes"}
+            "basin_id": None, "massif_id": massif, "landform": None,
+            "label": f"{nom}, toutes formes"}
     return list(out.values())
 
 

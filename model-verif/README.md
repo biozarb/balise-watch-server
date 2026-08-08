@@ -149,16 +149,9 @@ pour les 648 points en prévisions, ~9 min avec les observations**).
 
 ## Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
-- **`station_zone` est vide.** Rattacher une balise à son bassin-versant
-  demande de lire le relief (`zoneClass.assignZone` + `watershed`), ce
-  qui n'est pas dans ce lot. Conséquence assumée : `collect.py` et les
-  étapes 1-3 de `score.py` tournent quand même, mais **les
-  accumulateurs et les scores de zone sont sautés, en le disant**. Une
-  balise sans zone n'est pas rangée dans une case au hasard.
-
-  Le script qui la remplira, lui, n'a plus rien à décider : il appelle
-  `score.write_station_zones(sb, lignes)`, qui écrit `model_zone` PUIS
-  `station_zone` dans cet ordre — voir juste en dessous.
+- ~~**`station_zone` est vide.**~~ **Rempli le 08/08 (lot C)** :
+  647 balises, 304 bassins-versants, 404 lignes `model_zone` d'échelon 1.
+  Voir « Le rattachement des balises » plus bas.
 
 - **Aucun score n'a jamais été calculé sur des données réelles.** Les
   bancs d'essai tournent sur des journées fabriquées. Le premier vrai
@@ -177,6 +170,87 @@ pour les 648 points en prévisions, ~9 min avec les observations**).
   quatre modèles qui l'ont produirait des chiffres asymétriques,
   impossibles à mettre côte à côte avec AROME sans mentir. La colonne
   `fcst_src` existe pour que ce soit faisable proprement le jour venu.
+
+---
+
+## Le rattachement des balises — lot C, 08/08
+
+`station_zone` est rempli par **deux scripts, dans cet ordre** :
+
+```bash
+# 1. le classement (TypeScript, dans le dépôt racine) → un JSON
+cd PWA/web
+npx tsx scripts/assign-zones.ts \
+    --stations /var/lib/bw-model-verif/stations.json \
+    --out .data/zones.json
+
+# 2. l'écriture en base (Python, ici)
+cd ../balise-watch-server/model-verif
+./assign_zones.py ../../web/.data/zones.json --verifier
+```
+
+**Les deux sont rejouables** : relancer le premier reproduit un JSON
+identique à l'octet près ; relancer le second réécrit les mêmes lignes
+(upsert sur `source,station_id` et sur `zone_id`). Vérifié le 08/08 :
+647 → 647 et 411 → 411.
+
+### Pourquoi deux étapes et pas un portage Python
+
+Tout le raisonnement géographique est en TypeScript et vert au banc.
+Le porter demanderait un banc de parité à maintenir, comme
+`scripts/parity-scoring.ts` et ses 54 assertions — sans quoi les deux
+implémentations divergeraient en silence, et un classement faux ne se
+voit pas : il se contente de diluer un score. Le JSON intermédiaire est
+en outre relisible le jour où un classement sera contesté, avec les
+métriques de relief qui l'ont produit.
+
+### ⚠️ Le bassin ne vient PAS de `watershed.descend`
+
+C'était le plan, et il a été essayé et **mesuré** : 647 balises →
+593 bassins distincts, dont 553 à une seule balise. Chamonix Ensa et le
+déco de Planpraz — même vallée, 2 km d'écart — tombaient dans deux
+cases. La cause n'est pas un réglage : les tuiles Terrarium sont PLATES
+au fond des vallées (les seize voisins de Doussard sont à 444,0 m), donc
+une descente de plus grande pente s'arrête au premier fond venu et le
+prend pour un exutoire.
+
+Le bassin vient donc de `PWA/web/scripts/lib/subbasins.ts`, qui fait le
+calcul hydrologique complet sur une grille de 0,5 km couvrant toute la
+`BBOX` (6,15 M mailles) : comblement des cuvettes, D8, accumulation de
+flux, et découpage à la première confluence aval au-delà de 300 km²
+drainés. `watershed.ts` garde sa descente locale pour l'usage
+interactif du navigateur ; **c'est `subbasins.ts` qui fait autorité**
+pour ce qui est écrit en base.
+
+### Le relief, et le quota Open-Meteo
+
+⛔ **Aucune lecture d'altitude ne passe par Open-Meteo.** Le classement
+demande ~2 270 lectures par balise (voisinage, descente, distance à la
+côte) : ~1,5 million au total, sur le MÊME quota que la collecte
+nocturne, qui en consomme déjà 51,8 %. Une seule exécution ferait
+tomber la nuit suivante. La source est la tuile Terrarium
+(`scripts/lib/terrarium-node.ts`), hors quota, avec cache disque :
+34 899 tuiles, 2,7 Go, téléchargées une fois en moins de deux minutes.
+
+Le décodeur PNG est **sans dépendance** — `zlib.inflateSync` de Node
+fait le travail difficile, il ne restait que le défiltrage. Rien à
+ajouter à `package.json`, rien à installer sur le VPS.
+
+### Ce que `basin_uncertain` veut dire depuis le lot C
+
+Plus « descente tronquée » (il n'y a plus de descente), mais **maille de
+mer ou hors couverture** : la balise est posée sur un port, un estuaire
+ou le bord exact de l'emprise, et son bassin a été emprunté à la terre
+voisine dans un rayon de 4 km. Trois balises sont dans ce cas au 08/08
+(Port Bourgenay, Zebulon Régie, Veitsberg).
+
+### ⚠️ Une limite connue à surveiller
+
+`score.py` lit `sb.select("station_zone")` sans pagination, et PostgREST
+plafonne une réponse à **1 000 lignes**. À 647 balises on est loin du
+plafond ; le jour où le référentiel le franchira, les scores de zone
+seront calculés sur une partie du réseau **sans le dire**. À corriger
+avant d'élargir la collecte à d'autres sources.
 
 ---
 
@@ -387,6 +461,56 @@ Deux erreurs corrigées au passage, toutes deux dans la table du 07/08 :
 `knmi_harmonie_arome_europe` est à **5,5 km** (le 2 km de KNMI, c'est la
 variante « netherlands »), et sa boîte s'arrêtait au nord de la France
 alors qu'il répond jusqu'aux Pyrénées.
+
+### ⚠️ Quatre modèles locaux de l'app ne sont PAS notés
+
+`localModels.ts` en présente **dix** au pilote ; `MODELS` ci-dessus en
+note **dix aussi**, mais ce ne sont pas les mêmes listes. Vérifié le
+08/08 dans le code ET dans `model_verif_daily` (les dix modèles notés y
+sont, et eux seuls) :
+
+| modèle local | maille | balises dans sa boîte | noté ? |
+|---|---:|---:|---|
+| ICON-CH1 | 1 km | 237 / 647 | ✅ |
+| AROME HD | 1,3 km | 628 | ✅ |
+| DMI HARMONIE | 2 km | 623 | ✅ |
+| ICON-CH2 | 2 km | 422 | ✅ |
+| **ICON-2I** (ItaliaMeteo) | 2 km | 274 | ❌ |
+| **UKMO 2 km** | 2 km | 41 | ❌ |
+| ICON-D2 | 2,2 km | 572 | ✅ |
+| ALADIN CE | 2,3 km | 462 | ✅ |
+| **AROME Autriche** (GeoSphere) | 2,5 km | 45 | ❌ |
+| **Harmonie AROME** (KNMI) | 5,5 km | 623 | ❌ |
+
+⚠️ **Aucune balise n'en souffre aujourd'hui.** Compté : pour chacun des
+quatre absents, il y a **zéro** balise où il serait le seul ou le
+deuxième avis à maille fine — partout où ils répondent, au moins deux
+modèles notés répondent déjà. Leur absence appauvrit le comparateur,
+elle ne laisse aucun coin du réseau sans second avis.
+
+**Et c'est le quota qui ferme la porte, pas un oubli.** Recalculé avec
+`quota_projete` sur 647 points et 8 variables horaires :
+
+| modèles | pondérés/nuit | % du plafond (garde-fou 60 %) | pondérés/min (plafond 600) | |
+|---:|---:|---:|---:|---|
+| **10** (actuel) | 5 176 | 51,8 % | 522 | ✅ |
+| 11 | 5 694 | 56,9 % | 574 | ✅ |
+| 12 | 6 211 | **62,1 %** | **626** | ❌ refusé |
+| 14 (les quatre) | 7 246 | 72,5 % | 730 | ❌ refusé |
+
+**Il reste exactement une place** dans le quota gratuit à la cadence
+actuelle. Le douzième modèle franchit *les deux* limites à la fois — le
+garde-fou journalier ET le plafond par minute. En ajouter plus suppose
+de ralentir la cadence (donc d'allonger le run), de retirer une variable
+horaire, ou de payer.
+
+Si cette place doit servir, les trois candidats ne se valent pas :
+**ICON-2I** est le seul à 2 km et couvre 274 balises (Corse, Alpes du
+Sud, frontière italienne) ; **KNMI** couvre le plus large (623) mais à
+5,5 km, entre ICON-D2 et ARPEGE ; **UKMO** est la seule famille de
+modèle vraiment différente (Unified Model, ni ICON ni HARMONIE ni
+ALADIN) mais ne couvre que 41 balises. Aucun n'est urgent — garder la
+marge est une réponse valable.
 
 ### L'ordre des onglets
 

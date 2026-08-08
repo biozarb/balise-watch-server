@@ -239,6 +239,48 @@ def test_lignes_de_zone():
               r.get("landform") is None or r["landform"] in LANDFORMS_SQL, True)
         check(f"libellé non vide pour {r['zone_id']}", bool(r["label"]), True)
 
+    # ── ⚠️ LE JEU DE CLÉS, IDENTIQUE D'UNE LIGNE À L'AUTRE ──
+    # Défaut trouvé le 08/08 sur le PREMIER run réel avec `station_zone`
+    # peuplée : `massif:forme` portait `landform`, `massif:*` ne le
+    # portait pas, et les 77 lignes partaient dans le même POST →
+    # `PGRST102 — All object keys must match`, un 400 qui ne nomme ni la
+    # clé ni la ligne. Le défaut existait depuis le lot B et ne pouvait
+    # pas se déclencher tant que `station_zone` était vide : la liste
+    # rendue était alors vide.
+    #
+    # On teste chaque producteur SÉPARÉMENT, parce que c'est par envoi
+    # que PostgREST vérifie — et les deux ensemble, parce que la table
+    # gagne à n'avoir qu'une seule forme de ligne.
+    for nom, lot in (("zone_rows_for", J.zone_rows_for(cas)),
+                     ("zone_rows_needed", J.zone_rows_needed(cas)),
+                     ("les deux réunis",
+                      J.zone_rows_for(cas) + J.zone_rows_needed(cas))):
+        check(f"{nom} : un seul jeu de clés dans l'envoi",
+              len({frozenset(r.keys()) for r in lot}), 1)
+    check("et c'est bien le jeu de colonnes de model_zone",
+          sorted(J.zone_rows_needed(cas)[0].keys()),
+          ["basin_id", "kind", "label", "landform", "massif_id", "zone_id"])
+    # ⚠️ Une clé à `None` DOIT être présente, pas omise : c'est
+    # exactement ce que l'omission avait cassé.
+    for r in J.zone_rows_needed(cas):
+        check(f"{r['zone_id']} porte la clé landform même quand elle est nulle",
+              "landform" in r, True)
+
+    # ── … et le garde-fou qui le dit avant l'envoi ──
+    # ⚠️ Le VRAI `Supabase`, pas la doublure : c'est son `upsert` qui
+    # porte le garde-fou. `dry_run=True` lui évite d'exiger des secrets
+    # et de parler au réseau, et le contrôle passe AVANT ce test-là.
+    sb_garde = J.Supabase(dry_run=True)
+    try:
+        sb_garde.upsert("model_zone",
+                        [{"zone_id": "a", "kind": "massif"},
+                         {"zone_id": "b", "kind": "massif", "landform": "valley"}],
+                        "zone_id")
+        check("un envoi hétérogène est refusé AVANT le réseau", "accepté", "refusé")
+    except J.Abort as exc:
+        check("un envoi hétérogène est refusé AVANT le réseau", True, True)
+        check("… et le message nomme la clé fautive", "landform" in str(exc), True)
+
     # ── dédoublonnage : deux balises d'une même vallée ──
     jumelle = dict(cas[0], station_id="5")
     rows = J.zone_rows_for(cas + [jumelle])
