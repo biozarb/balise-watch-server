@@ -232,7 +232,11 @@ verifie("pondérés/min" in sortie, "l'encadré annonce la cadence PONDÉRÉE pa
 verifie("durée estimée" in sortie, "et la durée, qui décide du TimeoutStartSec")
 
 # La cadence en vigueur doit passer, avec de la marge.
-cadence_reelle = 60 / (C.BATCH_PAUSE_S + C.LATENCE_S)
+# ⚠️ `FCST_PAUSE_S` DEPUIS LE 08/08, ET C'EST LE CŒUR DU BANC. La passe
+# prévisions a sa propre pause parce qu'elle seule pèse sur le quota
+# pondéré ; ce banc a viré au rouge à l'instant où le code a changé de
+# constante sans que le banc suive — exactement ce qu'on lui demande.
+cadence_reelle = 60 / (C.FCST_PAUSE_S + C.LATENCE_S)
 par_min = cadence_reelle * n_vars / 10
 verifie(par_min <= C.QUOTA_MINUTE * 0.9,
         f"la cadence en vigueur reste sous 90 % du plafond — {par_min:.0f}/min")
@@ -242,8 +246,8 @@ verifie(cadence_reelle < 120,
 
 # ⚠️ Et surtout : l'ANCIENNE valeur doit être REFUSÉE. Un garde-fou qui
 # laisse passer ce qui a déjà cassé ne garde rien.
-pause_avant = C.BATCH_PAUSE_S
-C.BATCH_PAUSE_S = 0.25
+pause_avant = C.FCST_PAUSE_S
+C.FCST_PAUSE_S = 0.25
 try:
     refuse = False
     try:
@@ -253,7 +257,85 @@ try:
         refuse = True
     verifie(refuse, "0,25 s — la cadence qui a coûté 24 points — est REFUSÉE")
 finally:
-    C.BATCH_PAUSE_S = pause_avant
+    C.FCST_PAUSE_S = pause_avant
+
+# ⚠️ ET L'ANCIENNE PAUSE, 0,45 s, DOIT ELLE AUSSI ÊTRE REFUSÉE DÉSORMAIS.
+# Elle était juste à 5 variables (448 pondérés/min) ; à 8 elle vaut
+# 716/min. C'est l'assertion qui empêche quelqu'un de « remettre comme
+# avant » pour gagner 4 minutes de run, et de reprendre des 429 le mois
+# suivant sans comprendre pourquoi.
+pause_avant = C.FCST_PAUSE_S
+C.FCST_PAUSE_S = 0.45
+try:
+    refuse = False
+    try:
+        with redirect_stdout(io.StringIO()):
+            C.quota_projete(648, 3)
+    except C.Abort:
+        refuse = True
+    verifie(refuse, "0,45 s — juste à 5 variables, trop rapide à 8 — est REFUSÉE")
+finally:
+    C.FCST_PAUSE_S = pause_avant
+
+# ⚠️ Et le plafond JOURNALIER doit rester un plafond. Il a été relevé de
+# 50 % à 60 % le 08/08 pour laisser passer 51,8 % ; il doit toujours
+# refuser ce qu'il est censé attraper — « quelqu'un a doublé le nombre
+# de points sans recompter ».
+refuse = False
+try:
+    with redirect_stdout(io.StringIO()):
+        C.quota_projete(1300, 3)
+except C.Abort:
+    refuse = True
+verifie(refuse, "1300 points (10 400 pondérés) restent REFUSÉS par le plafond journalier")
+
+# ── 7 bis. les variables d'E4/E6 sont bien demandées ─────────────────
+# ⚠️ Ce n'est pas une assertion décorative : ces trois variables sont la
+# seule chose de ce dépôt qu'on ne peut pas rattraper. Si quelqu'un les
+# retire pour « alléger le quota », il faut que ce banc hurle le jour
+# même, pas qu'on s'en aperçoive dans six mois devant une archive vide.
+vars_demandees = C._hourly_vars()
+for v in ("precipitation", "pressure_msl", "temperature_2m"):
+    verifie(v in vars_demandees, f"`{v}` est demandée à Open-Meteo (E4/E6)")
+verifie("surface_pressure" not in vars_demandees,
+        "`surface_pressure` reste ÉCARTÉE — redondante avec `pressure_msl`, "
+        "et 648 pondérés/nuit de plus")
+
+
+# ── 7 ter. une clé pleine de nulls n'entre pas dans l'archive ────────
+# ⚠️ SONDÉ LE 08/08 : AROME rend `pressure_msl_meteofrance_arome_france_hd`
+# PRÉSENTE et intégralement nulle. Un `get` naïf archiverait 72 nulls
+# par balise et par nuit, qui se reliraient dans un an comme une donnée.
+_st = {"id": "42", "source": "pioupiou", "lat": 45.2, "lon": 6.42}
+_hourly = {
+    "time": [0, 3600, 7200],
+    # deux modèles servent le point → suffixes présents, cas nominal
+    "wind_speed_10m_gfs_global": [10.0, 11.0, 12.0],
+    "wind_speed_10m_meteofrance_arome_france_hd": [9.0, 9.5, 10.0],
+    # AROME : clé présente, tout nul — le cas réel
+    "pressure_msl_meteofrance_arome_france_hd": [None, None, None],
+    "precipitation_meteofrance_arome_france_hd": [0.0, 0.1, 0.0],
+    # GFS : sert la pression
+    "pressure_msl_gfs_global": [1013.0, 1012.5, 1012.0],
+    # personne ne sert la température ici → clé absente des deux côtés
+}
+_lignes = {r["model"]: r for r in
+           C.forecast_rows(_st, {"hourly": _hourly}, "2026-08-08T03:18:00+00:00")}
+_arome = _lignes.get("meteofrance_arome_france_hd")
+_gfs = _lignes.get("gfs_global")
+verifie(_arome is not None and "pmsl" not in _arome,
+        "AROME : `pressure_msl` toute nulle → champ ABSENT de la ligne, pas [null,…]")
+verifie(_arome is not None and _arome.get("precip") == [0.0, 0.1, 0.0],
+        "AROME : `precipitation` servie → archivée, y compris les 0.0")
+verifie(_gfs is not None and _gfs.get("pmsl") == [1013.0, 1012.5, 1012.0],
+        "GFS : `pressure_msl` servie → archivée")
+verifie(_arome is not None and "t2m" not in _arome and _gfs is not None
+        and "t2m" not in _gfs,
+        "variable absente de la réponse → champ absent de la ligne")
+# Et les champs historiques n'ont pas bougé — c'est une EXTENSION.
+for _champ in ("station_id", "source", "lat", "lon", "model", "fetched_at",
+               "t0", "step_s", "speed", "dir", "gust"):
+    verifie(_champ in _gfs, f"le champ historique `{_champ}` est toujours là")
 
 
 # ── 8. le 429 prend une pause franche, une seule fois ────────────────
@@ -284,6 +366,85 @@ verifie(dormi.count(65) == 1,
         f"UNE seule pause longue, pas une par réessai — {dormi}")
 verifie(appels["n"] == C.MAX_RETRIES,
         f"le budget de réessais reste celui de MAX_RETRIES — {appels['n']}")
+
+
+# ── 9. METAR : les conversions, et les deux façons d'être vide ───────
+# ⚠️ Ce banc ne teste PAS qu'Iowa State répond — un banc qui appelle le
+# réseau ment un jour sur dix. Il teste ce qui, ici, se trompe en
+# silence : une unité mal convertie, un QNH lu dans la mauvaise colonne,
+# une station vide archivée quand même.
+_aeros = [
+    {"id": "LFLS", "source": "metar", "network": "FR__ASOS",
+     "lat": 45.3629, "lon": 5.3294, "elev": 384.0, "name": "Grenoble"},
+    {"id": "LFMN", "source": "metar", "network": "FR__ASOS",
+     "lat": 43.66, "lon": 7.21, "elev": 4.0, "name": "Nice"},
+    {"id": "LFXX", "source": "metar", "network": "FR__ASOS",
+     "lat": 45.0, "lon": 5.0, "elev": 0.0, "name": "Muette"},
+]
+_csv = "\n".join([
+    "station,valid,lon,lat,drct,sknt,gust,alti,tmpf",
+    # 10 kt = 18,52 km/h ; 29,92 inHg = 1013,21 hPa ; 68 °F = 20,0 °C
+    "LFLS,2026-08-07 00:00,5.3294,45.3629,250.00,10.00,,29.92,68.00",
+    # rafale absente (le cas à 99,6 %) et direction absente (17 %)
+    "LFLS,2026-08-07 01:00,5.3294,45.3629,,3.00,,29.95,66.20",
+    "LFMN,2026-08-07 00:00,7.21,43.66,90.00,5.00,25.00,30.00,77.00",
+    # station connue du référentiel mais qui n'a rien mesuré
+    "LFXX,2026-08-07 00:00,5.0,45.0,,,,,",
+    # station INCONNUE du référentiel — doit être ignorée, pas devinée
+    "EGLL,2026-08-07 00:00,-0.46,51.47,200.00,12.00,,29.80,60.00",
+])
+_texte_avant = C._get_text
+try:
+    C._get_text = lambda url, timeout=120: _csv
+    _m = {r["station_id"]: r for r in C.metar_rows(_aeros, "2026-08-07")}
+finally:
+    C._get_text = _texte_avant
+
+verifie(set(_m) == {"LFLS", "LFMN"},
+        f"seules les stations du référentiel qui ont mesuré sont archivées — {sorted(_m)}")
+verifie("LFXX" not in _m,
+        "un aérodrome présent au référentiel mais muet n'entre PAS dans l'archive")
+_l = _m.get("LFLS", {})
+verifie(_l.get("speed") == [18.5, 5.6],
+        f"les nœuds deviennent des km/h (10 kt → 18,5) — {_l.get('speed')}")
+verifie(_l.get("qnh") == [1013.21, 1014.22],
+        f"les pouces de mercure deviennent des hPa (29,92 → 1013,21) — {_l.get('qnh')}")
+verifie(_l.get("t2m") == [20.0, 19.0],
+        f"les °F deviennent des °C (68 → 20,0) — {_l.get('t2m')}")
+verifie("precip" not in _l,
+        "AUCUN champ de précipitation dans l'archive METAR — `p01i` vaut 0.00 "
+        "partout en Europe (5 856 valeurs sondées, 0 non nulle), et un zéro "
+        "faux se relit comme « il n'a pas plu »")
+verifie(_l.get("gust") == [None, None],
+        "une rafale non diffusée reste None — elle ne vaut PAS zéro")
+verifie(_l.get("dir") == [250.0, None],
+        f"une direction absente reste None — {_l.get('dir')}")
+verifie(_l.get("t") == [1786060800, 1786064400],
+        f"les horodatages sont lus en UTC — {_l.get('t')}")
+verifie(_l.get("elev") == 384.0 and _l.get("network") == "FR__ASOS",
+        "l'altitude du terrain et le réseau sont archivés (le QNH n'est pas du pressure_msl)")
+verifie(_m.get("LFMN", {}).get("gust") == [46.3],
+        f"une rafale diffusée est convertie (25 kt → 46,3) — {_m.get('LFMN', {}).get('gust')}")
+
+# ⚠️ Un en-tête qui change de forme doit faire ABANDONNER, pas décaler.
+try:
+    C._get_text = lambda url, timeout=120: "station,valid,lon,lat,drct,sknt\nLFLS,x,1,2,3,4"
+    with redirect_stdout(io.StringIO()):
+        _vide = list(C.metar_rows(_aeros, "2026-08-07"))
+finally:
+    C._get_text = _texte_avant
+verifie(_vide == [],
+        "un en-tête inattendu → zéro ligne, pas des colonnes devinées")
+
+# ⚠️ Et le flux ne doit jamais s'exécuter sur un référentiel vide.
+verifie(list(C.metar_rows([], "2026-08-07")) == [],
+        "référentiel METAR vide → aucune requête, aucune ligne")
+
+verifie("alti" in C.METAR_CHAMPS and "mslp" not in C.METAR_CHAMPS,
+        "on demande `alti` (100 % rempli) et PAS `mslp` (2 %) — sondé le 08/08")
+verifie("p01i" not in C.METAR_CHAMPS,
+        "on ne demande PAS `p01i` : servi à 100 % en Europe, nul à 100 % — "
+        "la vérité terrain d'E4 passe par Météo-France, pas par le METAR")
 
 
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")

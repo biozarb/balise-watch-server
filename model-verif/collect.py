@@ -158,6 +158,21 @@ BBOX = (41.0, -6.0, 51.5, 11.0)      # latMin, lonMin, latMax, lonMax
 #: lire pour s'adapter, il faut rester sous la ligne par construction.
 BATCH_PAUSE_S = 0.45
 
+#: ⚠️ PAUSE SÉPARÉE POUR LA PASSE PRÉVISIONS, ajoutée le 08/08.
+#: Le plafond Open-Meteo est PONDÉRÉ : il compte des variables, pas des
+#: requêtes. Passer de 5 à 8 variables par modèle fait passer le poids
+#: d'une requête de 5,0 à 8,0 — à cadence inchangée, 89 req/min × 8 =
+#: 716 pondérés/min, au-dessus du plafond de 600. La cadence doit donc
+#: BAISSER dans la même proportion où le poids monte :
+#:     60/(0,70 + 0,22) = 65 req/min × 8 = 522 pondérés/min < 540.
+#: Mesuré à 89 req/min le 07/08 avec 0,45 s ; la valeur ci-dessous est
+#: dérivée de cette mesure, et re-mesurée par le run manuel du 08/08.
+#:
+#: Elle est SÉPARÉE de `BATCH_PAUSE_S` exprès : la passe observations
+#: interroge Pioupiou, qui n'a ni le même plafond ni la même pondération.
+#: La ralentir « par sympathie » aurait coûté 4 min de run pour rien.
+FCST_PAUSE_S = 0.70
+
 #: Latence aller-retour mesurée depuis le VPS le 07/08 : 300 requêtes en
 #: 201 s à 0,45 s de pause, soit 0,67 s de cycle. Elle compte : la
 #: cadence RÉELLE est 60/(pause + latence), pas 60/pause, et c'est la
@@ -316,8 +331,39 @@ def load_stations(path: pathlib.Path, max_age_days: int = 7) -> list[dict]:
 #  PRÉVISIONS
 # ══════════════════════════════════════════════════════════════════
 
+#: Variables ajoutées le 08/08 pour E4 (précipitations) et E6 (pression,
+#: température). Elles ne servent à AUCUN score aujourd'hui — elles sont
+#: archivées parce que c'est la seule pièce du dispositif qui ne se
+#: rattrape pas : une nuit non collectée n'existera jamais, alors que
+#: tout le calcul se rejoue depuis R2 quand on veut.
+#:
+#: ⚠️ SONDÉ EN DIRECT LE 08/08 SUR 4 POINTS RÉELS (Maurienne, Pyrénées,
+#: Bretagne, plaine du Sud-Ouest), pas lu dans la doc :
+#:
+#:   · `meteofrance_arome_france_hd` NE SERT NI `pressure_msl` NI
+#:     `surface_pressure`. La clé est PRÉSENTE et intégralement `null`,
+#:     sur les quatre points. E6 n'aura donc jamais AROME — c'est un
+#:     fait de l'API, pas un trou de collecte, et il ne faut pas le
+#:     relire dans six mois comme une panne.
+#:   · Les autres modèles hors domaine, eux, n'ont PAS de clé du tout.
+#:     Deux comportements différents dans la même réponse : d'où le
+#:     `_serie()` de `forecast_rows`, qui teste le CONTENU et pas la
+#:     présence. C'est le piège ERA5 du 06/08, en plus sournois.
+#:   · `surface_pressure` a été écartée : partout où elle existe,
+#:     `pressure_msl` existe aussi, et c'est le gradient au niveau de la
+#:     mer qui porte E6. Deux variables auraient coûté 648 appels
+#:     pondérés de plus par nuit pour une information redondante.
+#:   · AROME s'arrête à 55 pas sur 72 pour `precipitation` et
+#:     `temperature_2m`, ICON-CH1 à 40 : c'est leur horizon, pas un
+#:     défaut. Les listes sont donc plus courtes que `speed` sur
+#:     certains modèles — le format le supporte, `t0 + i × step_s`
+#:     reste la seule convention.
+NEW_SURFACE_VARS = ["precipitation", "pressure_msl", "temperature_2m"]
+
+
 def _hourly_vars() -> list[str]:
     return ["wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
+            *NEW_SURFACE_VARS,
             f"wind_speed_{REGIME_LEVEL}", f"wind_direction_{REGIME_LEVEL}"]
 
 
@@ -347,7 +393,7 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     # La cadence qui compte est la RÉELLE — pause + aller-retour —, pas
     # 60/pause. C'est la confusion des deux qui laissait le garde-fou
     # muet : il comparait des requêtes brutes à un plafond pondéré.
-    cadence_reelle = 60 / (BATCH_PAUSE_S + LATENCE_S)
+    cadence_reelle = 60 / (FCST_PAUSE_S + LATENCE_S)
     par_min = cadence_reelle * par_point
     print("┌─ QUOTA OPEN-METEO PROJETÉ ───────────────────────────────────")
     print(f"│ points                 : {n_points}")
@@ -356,19 +402,41 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
           f"(sans remise sur {forecast_days} jours — cf. 07/08)")
     print(f"│ TOTAL du run           : {total:.0f} appels pondérés "
           f"({total / QUOTA_JOUR * 100:.1f} % du plafond journalier)")
-    print(f"│ cadence                : {BATCH_PAUSE_S}s + {LATENCE_S}s → "
+    print(f"│ cadence                : {FCST_PAUSE_S}s + {LATENCE_S}s → "
           f"{cadence_reelle:.0f} req/min → {par_min:.0f} pondérés/min "
           f"(plafond {QUOTA_MINUTE}/min)")
-    print(f"│ durée estimée          : {n_points * (BATCH_PAUSE_S + LATENCE_S) / 60:.0f} min/passe")
+    print(f"│ durée estimée          : {n_points * (FCST_PAUSE_S + LATENCE_S) / 60:.0f} min "
+          f"(prévisions) + {n_points * (BATCH_PAUSE_S + LATENCE_S) / 60:.0f} min (obs)")
     print("└──────────────────────────────────────────────────────────────")
-    if total > QUOTA_JOUR * 0.5:
-        raise Abort(f"{total:.0f} appels pondérés > 50 % du plafond journalier — "
+    # ⚠️ SEUIL RELEVÉ DE 50 % À 60 % LE 08/08 — décision assumée, pas
+    # contournement. Les trois variables d'E4/E6 portent le run mesuré de
+    # 3 240 à 5 184 appels pondérés, soit 51,8 % : à 50 %, le garde-fou
+    # aurait refusé de démarrer et la nuit aurait été perdue en silence.
+    # Ce que ce seuil protège n'a pas changé — il attrape « quelqu'un a
+    # ajouté dix modèles sans regarder », pas « on a délibérément ajouté
+    # trois variables et on a recompté ». 60 % laisse 4 000 appels
+    # pondérés de marge sur la journée.
+    #
+    # ⚠️ CE QUE CETTE MARGE DOIT COUVRIR — vérifié sur le VPS le 08/08,
+    # pas supposé. Ce job est le seul consommateur Open-Meteo PLANIFIÉ
+    # depuis cette IP (`systemctl list-timers` : les autres timers sont
+    # `balise-infoclimat`, qui interroge Infoclimat, et l'entretien ;
+    # aucun timer ni cron n'appelle `traces/backfill_packs.py`,
+    # `match_analogs.py`, `day_features.py` ni `sonde_openmeteo.py`).
+    # Mais ces quatre-là appellent bien Open-Meteo quand quelqu'un les
+    # lance À LA MAIN, depuis la même IP et donc sur le même plafond
+    # journalier. La marge de 4 000 est là pour ça : un backfill lancé
+    # dans la journée ne doit pas faire tomber la collecte de la nuit.
+    # L'app, elle, n'y touche pas — elle interroge Open-Meteo depuis le
+    # navigateur des pilotes, jamais depuis ce serveur.
+    if total > QUOTA_JOUR * 0.6:
+        raise Abort(f"{total:.0f} appels pondérés > 60 % du plafond journalier — "
                     f"comprendre AVANT de forcer (nb de points ? de modèles ?)")
     # 90 % et pas 100 : la latence varie, et frôler la ligne, c'est la
     # franchir une minute sur deux.
     if par_min > QUOTA_MINUTE * 0.9:
         raise Abort(f"{par_min:.0f} pondérés/min — trop près du plafond de "
-                    f"{QUOTA_MINUTE}. Augmenter BATCH_PAUSE_S.")
+                    f"{QUOTA_MINUTE}. Augmenter FCST_PAUSE_S.")
     return total
 
 
@@ -430,6 +498,27 @@ def forecast_rows(station: dict, payload: dict, fetched_at: str):
               f"Point abandonné (aucune ligne écrite).", file=sys.stderr)
         return
 
+    def _serie(nom: str, model: str):
+        """Une série, ou `None` si le modèle ne la sert pas.
+
+        ⚠️ NE PAS SIMPLIFIER EN `hourly.get(...)`. Sondé le 08/08 sur
+        quatre points réels : Open-Meteo a DEUX façons de dire « je ne
+        sers pas cette variable », et une seule est visible d'un `get` :
+
+          · hors domaine géographique → la clé est ABSENTE ;
+          · AROME sur `pressure_msl`  → la clé est PRÉSENTE et remplie
+            de 72 `null`.
+
+        Sans ce filtre, l'archive gagnerait, pour chaque balise et
+        chaque nuit, une liste de 72 nulls qui se relirait dans un an
+        comme « AROME prévoyait quelque chose et on l'a mal lu ». Un
+        champ absent dit la vérité ; une liste de nulls ment.
+        """
+        s = hourly.get(f"{nom}_{model}")
+        if not s or all(v is None for v in s):
+            return None
+        return s
+
     for model in MODELS:
         speed = hourly.get(f"wind_speed_10m_{model}")
         # ⚠️ On teste le CONTENU, pas la présence de la clé. Open-Meteo
@@ -447,6 +536,20 @@ def forecast_rows(station: dict, payload: dict, fetched_at: str):
             "dir": hourly.get(f"wind_direction_10m_{model}"),
             "gust": hourly.get(f"wind_gusts_10m_{model}"),
         }
+        # ⚠️ EXTENSION DU FORMAT, PAS RENOMMAGE (08/08). Les lignes
+        # gagnent trois champs facultatifs ; aucun nom existant ne
+        # bouge, aucun champ ne disparaît. Les archives des 07 et 08/08,
+        # écrites sans eux, restent lisibles par ce même code — et
+        # `score.py` lit déjà tout en `row.get(...)`, donc une archive
+        # mixte ne lui pose aucune question. Un champ ABSENT signifie
+        # « ce modèle ne sert pas cette variable ici », et c'est une
+        # information ; un champ à `null` ne signifierait rien.
+        for nom, court in (("precipitation", "precip"),
+                           ("pressure_msl", "pmsl"),
+                           ("temperature_2m", "t2m")):
+            serie = _serie(nom, model)
+            if serie is not None:
+                row[court] = serie
         if model == REGIME_REF_MODEL:
             # Le vent d'altitude ne sert qu'à étiqueter le régime, et
             # un seul modèle le porte : le stocker pour les huit
@@ -511,6 +614,242 @@ def fetch_archive(station: dict, day: str):
     return {"station_id": station["id"], "source": station["source"],
             "lat": station["lat"], "lon": station["lon"],
             "t": t, "speed": speed, "gust": gust, "dir": direction}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  OBSERVATIONS METAR (aérodromes) — ajouté le 08/08
+# ══════════════════════════════════════════════════════════════════
+#
+#  POURQUOI CE FLUX EXISTE, ET POURQUOI IL EST À PART
+#
+#  Pioupiou observe des décollages : du relief, de la brise, et un biais
+#  de site énorme. E4 (précipitations) et E6 (pression) ne s'y vérifient
+#  pas — une balise Pioupiou ne mesure ni la pluie ni la pression de
+#  référence. Les aérodromes, si : ils rendent QNH, température,
+#  précipitation horaire et vent, en plaine, au même pas horaire que les
+#  modèles. C'est la vérité terrain qui manquait aux trois variables
+#  ajoutées le même jour.
+#
+#  ⚠️ CE FLUX N'EST PAS URGENT, ET IL FAUT LE SAVOIR. Contrairement aux
+#  prévisions, l'archive METAR d'Iowa State est RÉTROACTIVE : on peut
+#  redemander le 7 août dans deux ans. Il est collecté quand même pour
+#  deux raisons honnêtes — ne pas dépendre d'un tiers qui pourrait
+#  fermer, et rendre la donnée rejouable localement comme le reste.
+#  Mais s'il tombe, il ne fait perdre RIEN d'irrattrapable : d'où le
+#  `try/except` qui l'enveloppe dans `main()`, et sa place en dernier.
+#
+#  ⚠️ IL S'ÉCRIT DANS SA PROPRE CLÉ (`obsmetar/`), PAS DANS `obs/`.
+#  Mélanger deux réseaux qui n'ont ni la même cadence, ni les mêmes
+#  variables, ni la même géographie dans un fichier que `score.py` lit
+#  déjà, c'était risquer de casser une notation qui marche pour une
+#  donnée que personne ne note encore. Le jour où on notera la plaine,
+#  on lira `obsmetar/` explicitement.
+
+#: Les réseaux ASOS/METAR qui touchent France + limitrophes. Comptés le
+#: 08/08 sur les geojson réels : FR 127, DE 92, GB 112, IT 108, ES 67,
+#: NL 32, CH 20, BE 12, LU 1 — dont **278 dans la `BBOX`**, et **225
+#: qui ont effectivement rendu des relevés** pour le 07/08.
+#: `AD__ASOS` existe mais est VIDE (0 station) : gardé dans la liste
+#: pour que personne ne le « redécouvre » et ne le rajoute en croyant
+#: combler un trou.
+METAR_NETWORKS = ["FR__ASOS", "CH__ASOS", "BE__ASOS", "LU__ASOS", "DE__ASOS",
+                  "IT__ASOS", "ES__ASOS", "AD__ASOS", "GB__ASOS", "NL__ASOS"]
+METAR_GEOJSON = "https://mesonet.agron.iastate.edu/geojson/network/{net}.geojson"
+METAR_ASOS = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+
+#: ⚠️ `alti` ET PAS `mslp` — SONDÉ LE 08/08, LA DOC AURAIT MENTI.
+#: Sur 5 090 relevés réels du 07/08 : `mslp` rempli à **2 %**, `alti`
+#: rempli à **100 %**. Les METAR européens diffusent le QNH (calage
+#: altimétrique), pas la pression réduite au niveau de la mer au sens
+#: SYNOP. Bâtir E6 sur `mslp` aurait donné une archive vide à 98 %.
+#: Le QNH n'est pas exactement `pressure_msl` — il réduit en atmosphère
+#: standard, pas avec la température du jour. L'écart est de l'ordre du
+#: dixième d'hPa en plaine et grandit avec l'altitude du terrain : c'est
+#: pour ça qu'on archive aussi `elev`, pour pouvoir corriger plus tard.
+#: On archive la mesure, pas une correction — la correction se rejoue.
+#:
+#: Remplissage mesuré des autres champs, même jour : `tmpf` 100 %,
+#: `sknt` 99 %, `drct` 83 %, `gust` **0,4 %** (une rafale n'est diffusée
+#: que si elle existe — un champ vide veut dire « pas de rafale
+#: signalée », pas « pas de mesure »).
+#:
+#: ⚠️⚠️ `p01i` — LA PRÉCIPITATION — A ÉTÉ RETIRÉE, ET C'EST LE RÉSULTAT
+#: LE PLUS IMPORTANT DE LA SONDE DU 08/08. Le champ est SERVI À 100 %
+#: pour les stations européennes… et vaut **0.00 partout, toujours**.
+#: Mesuré, pas supposé :
+#:
+#:   | jeu                                  | valeurs | non nulles |
+#:   |--------------------------------------|---------|------------|
+#:   | janvier 2026, 4 stations FR          |   2 976 |     **0**  |
+#:   | novembre 2025, 4 stations FR         |   2 880 |     **0**  |
+#:   | novembre 2025, DEN + SEA (États-Unis)|   1 438 |     251    |
+#:
+#: Le groupe de précipitation horaire est une particularité ASOS
+#: américaine ; le METAR européen ne le diffuse pas. Le champ « marche »
+#: donc parfaitement — il rend un zéro sincère du point de vue du
+#: format, et un mensonge du point de vue du sens.
+#:
+#: L'archiver aurait été le pire des cas : pas un trou visible, mais une
+#: colonne pleine de `0.0` qu'on aurait relue dans six mois comme « il
+#: n'a pas plu », et contre laquelle on aurait noté E4. Un modèle qui
+#: prévoit 20 mm aurait été déclaré faux par une donnée qui n'existe pas.
+#:
+#: CONSÉQUENCE À RETENIR : **la vérité terrain d'E4 n'est PAS dans le
+#: METAR.** Elle demande Météo-France (RADOME / pluviomètres), donc une
+#: clé sur `portail-api.meteofrance.fr` — sondée le 08/08, elle répond
+#: HTTP 401 sans clé, et l'ancien portail libre
+#: `donneespubliques.meteofrance.fr` ne sert plus que du HTML.
+#: Tant que la clé n'existe pas, on archive la PRÉVISION de
+#: précipitation (elle, irréversible) sans sa vérification. C'est
+#: cohérent : l'archive se rejoue, la vérité terrain se rebranche.
+METAR_CHAMPS = ["drct", "sknt", "gust", "alti", "tmpf"]
+
+
+def _get_text(url: str, timeout: int = 120) -> str:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "balise-watch/model-verif"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read().decode("utf-8", "replace")
+
+
+def metar_stations(cache: pathlib.Path) -> list[dict]:
+    """Le référentiel des aérodromes, avec cache sur disque.
+
+    ⚠️ LE CACHE N'EST PAS UNE OPTIMISATION, C'EST LE FILET. Neuf appels
+    à un service tiers en tête d'un flux facultatif : si Iowa State est
+    en maintenance cette nuit-là, on collecte quand même avec le
+    référentiel d'hier plutôt que de sauter la nuit. Un aérodrome n'ouvre
+    pas tous les mois ; une liste vieille d'une semaine est juste.
+    """
+    stations, echecs = {}, []
+    for net in METAR_NETWORKS:
+        try:
+            payload = json.loads(_get_text(METAR_GEOJSON.format(net=net), timeout=45))
+        except Exception as exc:                       # noqa: BLE001
+            echecs.append(f"{net} ({exc})")
+            continue
+        for s in payload.get("features") or []:
+            coords = (s.get("geometry") or {}).get("coordinates") or []
+            if len(coords) < 2:
+                continue
+            lon, lat = float(coords[0]), float(coords[1])
+            if not (BBOX[0] <= lat <= BBOX[2] and BBOX[1] <= lon <= BBOX[3]):
+                continue
+            props = s.get("properties") or {}
+            stations[s["id"]] = {
+                "id": s["id"], "source": "metar", "network": net,
+                "lat": round(lat, 4), "lon": round(lon, 4),
+                "elev": props.get("elevation"),
+                "name": (props.get("sname") or "")[:60],
+            }
+    if echecs:
+        print(f"  ⚠️  référentiel METAR incomplet — {', '.join(echecs)}",
+              file=sys.stderr)
+    if stations:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sorted(stations.values(), key=lambda s: s["id"]),
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
+        return list(stations.values())
+    if cache.exists():
+        anciennes = json.loads(cache.read_text(encoding="utf-8"))
+        print(f"  ⚠️  aucun réseau joignable — on repart du cache "
+              f"({len(anciennes)} aérodromes)", file=sys.stderr)
+        return anciennes
+    return []
+
+
+def _f(v: str):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def metar_rows(stations: list[dict], day: str):
+    """Une journée de METAR pour TOUS les aérodromes, en UNE requête.
+
+    ⚠️ UNE SEULE REQUÊTE, ET C'EST MESURÉ : 278 stations, un jour
+    complet, **2,1 s et 342 Ko** le 08/08. Le service accepte autant de
+    paramètres `station=` qu'on veut (URL de 3 870 caractères, servie
+    sans broncher). Boucler station par station aurait coûté 278
+    requêtes pour la même donnée — c'est le genre de boucle qu'on écrit
+    par réflexe et qui fait qu'un tiers gratuit finit par fermer la
+    porte.
+
+    Le débordement de 40 min appliqué à Pioupiou n'a pas lieu d'être
+    ici : les METAR sont à l'heure ronde, il n'y a pas de fenêtre à
+    moyenner. On prend la journée civile UTC, franche.
+
+    Unités : le service rend des nœuds, des pouces de mercure, des
+    degrés Fahrenheit et des pouces de pluie. On convertit À
+    L'ÉCRITURE — une archive doit se relire sans table de conversion,
+    et les modèles sont déjà demandés en km/h et °C.
+    """
+    if not stations:
+        return
+    par_id = {s["id"]: s for s in stations}
+    debut = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    fin = debut + timedelta(days=1)
+    q = [("year1", str(debut.year)), ("month1", str(debut.month)), ("day1", str(debut.day)),
+         ("year2", str(fin.year)), ("month2", str(fin.month)), ("day2", str(fin.day)),
+         ("tz", "UTC"), ("format", "onlycomma"), ("latlon", "yes"),
+         ("missing", "empty"), ("trace", "0.0001"), ("report_type", "3")]
+    q += [("data", c) for c in METAR_CHAMPS]
+    q += [("station", sid) for sid in sorted(par_id)]
+    txt = _get_text(f"{METAR_ASOS}?{urllib.parse.urlencode(q)}")
+
+    lignes = txt.splitlines()
+    if not lignes:
+        return
+    entete = lignes[0].split(",")
+    try:
+        col = {c: entete.index(c) for c in
+               ("station", "valid", *METAR_CHAMPS)}
+    except ValueError:
+        # ⚠️ L'en-tête a changé de forme → on ABANDONNE au lieu de
+        # deviner des positions de colonnes. Une archive vide est un
+        # problème visible ; une archive décalée d'une colonne ne se
+        # voit qu'au moment où on s'en sert.
+        print(f"  ⚠️  en-tête METAR inattendu : {lignes[0][:120]} — "
+              f"aucune ligne écrite", file=sys.stderr)
+        return
+
+    par_station: dict[str, dict] = {}
+    for l in lignes[1:]:
+        p = l.split(",")
+        if len(p) != len(entete):
+            continue
+        sid = p[col["station"]]
+        st = par_id.get(sid)
+        if st is None:
+            continue
+        try:
+            ts = int(datetime.strptime(p[col["valid"]], "%Y-%m-%d %H:%M")
+                     .replace(tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            continue
+        r = par_station.setdefault(sid, {
+            "station_id": sid, "source": "metar", "network": st["network"],
+            "lat": st["lat"], "lon": st["lon"], "elev": st["elev"],
+            "t": [], "speed": [], "gust": [], "dir": [],
+            "qnh": [], "t2m": [],
+        })
+        kt, gkt = _f(p[col["sknt"]]), _f(p[col["gust"]])
+        alti, tf = _f(p[col["alti"]]), _f(p[col["tmpf"]])
+        r["t"].append(ts)
+        r["speed"].append(round(kt * 1.852, 1) if kt is not None else None)
+        r["gust"].append(round(gkt * 1.852, 1) if gkt is not None else None)
+        r["dir"].append(_f(p[col["drct"]]))
+        # 1 inHg = 33,8639 hPa ; °C = (°F − 32) × 5/9.
+        r["qnh"].append(round(alti * 33.8639, 2) if alti is not None else None)
+        r["t2m"].append(round((tf - 32.0) * 5.0 / 9.0, 1) if tf is not None else None)
+
+    for r in par_station.values():
+        # Même règle que pour les prévisions : une station qui n'a rien
+        # mesuré ne rentre pas dans l'archive sous forme de nulls.
+        if all(v is None for v in r["speed"]) and all(v is None for v in r["qnh"]):
+            continue
+        yield r
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -650,6 +989,8 @@ def main() -> int:
                     help="journée d'observations à collecter (défaut : hier)")
     ap.add_argument("--skip-forecast", action="store_true")
     ap.add_argument("--skip-obs", action="store_true")
+    ap.add_argument("--skip-metar", action="store_true",
+                    help="saute les observations d'aérodrome (flux rattrapable)")
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
@@ -709,7 +1050,9 @@ def main() -> int:
                     yield from forecast_rows(st, payload, fetched_at)
                 if i % 50 == 0:
                     print(f"  … {i}/{len(stations)} ({failed} échecs)")
-                time.sleep(BATCH_PAUSE_S)
+                # `FCST_PAUSE_S`, pas `BATCH_PAUSE_S` : c'est cette
+                # boucle-ci qui pèse 8 sur le quota pondéré.
+                time.sleep(FCST_PAUSE_S)
 
         n = write_ndjson_gz(path, _fcst_rows())
         print(f"✅ {n} lignes, {failed} points en échec, "
@@ -753,6 +1096,28 @@ def main() -> int:
         if stations and muettes > len(stations) * 0.6:
             print("⚠️ plus de 60 % de balises muettes — vérifier l'API Pioupiou",
                   file=sys.stderr)
+
+    # ── 2 bis. OBSERVATIONS METAR (aérodromes) ───────────────────
+    # ⚠️ EN DERNIER, ET SOUS FILET. Ce flux est le seul du script dont
+    # la perte se rattrape (l'archive d'Iowa State est rétroactive). Il
+    # ne doit donc JAMAIS pouvoir faire tomber ce qui le précède : une
+    # exception ici se journalise et ne change pas le code de sortie.
+    # L'inverse — mettre en péril une nuit de prévisions pour une
+    # donnée qu'on peut redemander dans deux ans — serait absurde.
+    if not args.skip_metar:
+        try:
+            d = datetime.strptime(obs_day, "%Y-%m-%d")
+            key = f"obsmetar/{d:%Y/%m}/obsmetar_{obs_day}.ndjson.gz"
+            path = out / key
+            aeros = metar_stations(out / "metar_stations.json")
+            print(f"▶ METAR du {obs_day} : {len(aeros)} aérodromes → {path}")
+            n = write_ndjson_gz(path, metar_rows(aeros, obs_day))
+            print(f"✅ {n} aérodromes servis sur {len(aeros)}, "
+                  f"{path.stat().st_size / 1024:.0f} Ko")
+            upload_r2(path, key)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"⚠️ passe METAR abandonnée ({exc!r}) — flux rattrapable, "
+                  f"le reste du run n'est pas affecté", file=sys.stderr)
 
     # ── 3. L'ARCHIVE EST-ELLE VRAIMENT À L'ABRI ? ─────────────────
     # Une seule règle, en fin de run, plutôt qu'un test à chaque envoi :
