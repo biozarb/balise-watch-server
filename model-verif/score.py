@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """score.py — apparier, agréger, accumuler, publier.
 
-    Session 07/08/2026.
+    Session 08/08/2026.
     cf. PWA/web/CONCEPTION_SCORE_MODELES_06-08.md §8, §15.2, §16.1, §16.3
     et PWA/web/supabase_step35_model_verification.sql.
 
@@ -397,6 +397,159 @@ def _r(x, nd: int = 4):
 # ══════════════════════════════════════════════════════════════════
 #  ZONES ET REPLI
 # ══════════════════════════════════════════════════════════════════
+#
+# ═══ QUI CRÉE LES LIGNES `model_zone` — décision du 08/08 (lot B) ═══
+#
+# Trois producteurs se partagent cette table, et la frontière entre eux
+# n'est PAS une affaire de goût : elle se lit dans le schéma.
+#
+#   échelon 1  `b45.28_6.51:valley`   → LE SCRIPT D'AFFECTATION
+#   échelon 2  `alpes-nord:valley`    → `zone_rows_needed`, ici
+#   échelon 3  `*:valley`             → le SQL (step35), une fois
+#   échelon 4  `alpes-nord:*`         → `zone_rows_needed`, ici
+#   échelon 5  `*:*`                  → le SQL (step35), une fois
+#
+# LA RAISON, et pas seulement le comportement : `station_zone.zone_id`
+# porte LUI-MÊME une clé étrangère vers `model_zone` (step35 l. 199).
+# L'échelon 1 doit donc exister AVANT que la balise ne soit rattachée —
+# donc avant que ce job ne voie quoi que ce soit. Aucun autre producteur
+# n'est possible, et c'est ce qui tranche la question.
+#
+# ⚠️ COROLLAIRE, ET IL COMPTE : ce job n'a PAS à rattraper un échelon 1
+# manquant, et un tel « filet » serait du code mort par construction. La
+# clé étrangère garantit déjà que toute ligne `station_zone` lue ici a sa
+# ligne `model_zone`. Écrire ce filet donnerait l'illusion d'une défense
+# là où il n'y a rien à défendre — et masquerait que la vraie défense est
+# la contrainte, qui échoue tôt, en pleine session, avec un message clair.
+#
+# Les échelons 2 et 4, eux, ne sont référencés que par `model_score_zone`
+# et `model_character`, écrits des heures plus tard : rien ne force leur
+# existence, et ce job est le seul à pouvoir les reconstruire depuis les
+# lignes `station_zone` qu'il vient de lire. D'où `zone_rows_needed`.
+
+#: Formes de terrain en français, pour les libellés lus dans l'atelier
+#: admin. Les mêmes mots que les libellés semés par le SQL (« Fonds de
+#: vallée, tous massifs »), pour qu'une liste triée se lise d'un bloc.
+LANDFORM_FR = {
+    "valley": "Fonds de vallée", "slope": "Versants", "ridge": "Crêtes",
+    "plateau": "Plateaux", "plain": "Plaines", "coastal": "Littoral",
+}
+
+#: Massifs en français — MIROIR de `MASSIFS` dans `src/lib/zoneClass.ts`,
+#: qui reste la source de vérité. Un identifiant absent d'ici retombe sur
+#: lui-même : un libellé moins joli, jamais une ligne manquante.
+MASSIF_FR = {
+    "alpes-nord": "Alpes du Nord", "alpes-sud": "Alpes du Sud",
+    "alpes-suisses": "Alpes suisses", "jura": "Jura", "vosges": "Vosges",
+    "pyrenees-ouest": "Pyrénées occidentales",
+    "pyrenees-est": "Pyrénées orientales",
+    "massif-central": "Massif central", "corse": "Corse",
+    "mediterranee": "Pourtour méditerranéen",
+    "atlantique": "Façade atlantique", "france-nord": "Moitié nord",
+    "france-sud": "Moitié sud", "espagne": "Espagne",
+}
+
+
+def zone_id_for(zone: dict) -> str:
+    """L'identifiant de la case fine d'une balise — l'échelon 1.
+
+    Reproduit `zoneClass.assignZone` : le bassin s'il est connu, sinon
+    le massif, sinon `*`. Le dernier cas n'est pas un aveu d'échec mais
+    la réponse honnête : un point sans bassin ET sans massif n'a pas de
+    case à lui, et « cette forme de terrain, partout » est ce qu'on sait
+    de plus fin à son sujet.
+    """
+    head = zone.get("basin_id") or zone.get("massif_id") or "*"
+    return f"{head}:{zone['landform']}"
+
+
+def zone_kind_for(zone: dict) -> str:
+    """L'échelon auquel appartient RÉELLEMENT le `zone_id` d'une balise.
+
+    ⚠️ SE DÉDUIT DES COLONNES, JAMAIS DE LA FORME DE LA CHAÎNE. Un
+    `LIKE '%*%'` sur l'identifiant est exactement la dépendance au format
+    contre laquelle le SQL de step35 met en garde : `kind` y est
+    volontairement redondant avec `zone_id` pour qu'on n'ait jamais à
+    renifler l'un pour retrouver l'autre.
+
+    ⚠️ ET C'EST AUSSI UN CORRECTIF. Avant le 08/08, `fallback_chain`
+    étiquetait le premier échelon `basin_landform` quoi qu'il arrive.
+    Une balise sans bassin publiait donc un score `agg_level =
+    'basin_landform'` sur une zone dont `model_zone.kind` disait
+    `massif_landform` : deux colonnes du même schéma se contredisaient
+    sur la même zone, et le score mentait sur sa propre précision — ce
+    que la colonne `agg_level` existe précisément pour empêcher.
+    """
+    if zone.get("basin_id"):
+        return "basin_landform"
+    if zone.get("massif_id"):
+        return "massif_landform"
+    return "landform"
+
+
+def zone_row_for(zone: dict) -> dict | None:
+    """La ligne `model_zone` qu'une balise EXIGE pour pouvoir être
+    rattachée, ou `None` quand cette ligne est déjà semée par le SQL.
+
+    À appeler par le script d'affectation, AVANT d'écrire `station_zone`
+    (cf. la décision ci-dessus). `None` n'est pas un cas dégradé : c'est
+    le cas d'une balise dont la case fine est `*:forme`, l'un des sept
+    échelons constants posés une fois pour toutes par step35.
+    """
+    kind = zone_kind_for(zone)
+    if kind == "landform":
+        return None
+    landform = zone["landform"]
+    lf = LANDFORM_FR.get(landform, landform)
+    massif = zone.get("massif_id")
+    basin = zone.get("basin_id")
+    if kind == "basin_landform":
+        label = f"{lf} du bassin {basin}"
+        if massif:
+            label += f" ({MASSIF_FR.get(massif, massif)})"
+    else:
+        label = f"{lf}, {MASSIF_FR.get(massif, massif)}"
+    return {"zone_id": zone.get("zone_id") or zone_id_for(zone), "kind": kind,
+            "basin_id": basin, "massif_id": massif, "landform": landform,
+            "label": label}
+
+
+def zone_rows_for(zones: list[dict]) -> list[dict]:
+    """Les lignes `model_zone` d'échelon 1 d'un lot de balises, dédoublonnées.
+
+    Deux balises de la même vallée partagent leur case fine : sans ce
+    dédoublonnage, le même `zone_id` partirait deux fois dans le même
+    envoi, ce que PostgREST refuse (« ON CONFLICT ne peut affecter la
+    ligne une seconde fois ») — un échec qui n'a rien à voir avec les
+    données et tout à voir avec la façon de les envoyer.
+    """
+    out: dict[str, dict] = {}
+    for z in zones:
+        row = zone_row_for(z)
+        if row:
+            out[row["zone_id"]] = row
+    return list(out.values())
+
+
+def write_station_zones(sb, zones: list[dict]) -> tuple[int, int]:
+    """Écrit `model_zone` PUIS `station_zone`, dans cet ordre, en upsert.
+
+    ⚠️ L'ORDRE N'EST PAS NÉGOCIABLE et c'est tout l'intérêt de cette
+    fonction : un script qui construit les deux jeux en mémoire puis les
+    « envoie ensemble » échoue en 23503. Le point d'entrée est ici pour
+    que la question ne se repose pas à chaque script d'affectation.
+
+    ⚠️ REJOUABLE. Les deux écritures sont des upserts sur leur clé, donc
+    relancer l'affectation sur les mêmes balises réécrit les mêmes
+    lignes. `assigned_at` garde la trace du dernier passage.
+
+    Rend (lignes `model_zone` créées ou réécrites, lignes `station_zone`).
+    """
+    rows = zone_rows_for(zones)
+    n_zone = sb.upsert("model_zone", rows, "zone_id") if rows else 0
+    n_stat = sb.upsert("station_zone", zones, "source,station_id")
+    return n_zone, n_stat
+
 
 def fallback_chain(zone: dict) -> list[tuple[str, str]]:
     """Les cinq échelons du §16.3, dans l'ordre, avec leur `agg_level`.
@@ -409,10 +562,18 @@ def fallback_chain(zone: dict) -> list[tuple[str, str]]:
     Reproduit `zoneClass.zoneFallbackChain`, y compris son
     dédoublonnage : quand le bassin manque, la case fine retombe sur
     `massif:forme`, qui serait sinon dupliquée à l'échelon 2.
+
+    ⚠️ LE PREMIER ÉCHELON N'EST PAS TOUJOURS `basin_landform`, et le
+    croire était un défaut (corrigé le 08/08) : la case fine d'une
+    balise sans bassin EST `massif:forme`, celle d'une balise sans
+    bassin ni massif EST `*:forme`. L'étiquette vient donc de
+    `zone_kind_for`, la même dérivation que celle qui a servi à écrire
+    `model_zone.kind` — de sorte que `agg_level` et `kind` ne peuvent
+    plus se contredire sur une même zone.
     """
     landform = zone["landform"]
     massif = zone.get("massif_id")
-    chain = [(zone["zone_id"], "basin_landform")]
+    chain = [(zone["zone_id"], zone_kind_for(zone))]
     if massif:
         chain.append((f"{massif}:{landform}", "massif_landform"))
     chain.append((f"*:{landform}", "landform"))
@@ -429,23 +590,39 @@ def fallback_chain(zone: dict) -> list[tuple[str, str]]:
 
 
 def zone_rows_needed(zones: list[dict]) -> list[dict]:
-    """Les lignes `model_zone` que le job doit créer avant d'écrire des
-    scores : les échelons `massif:forme` et `massif:*` rencontrés.
+    """Les lignes `model_zone` que CE JOB doit créer avant d'écrire des
+    scores : les échelons `massif:forme` et `massif:*` rencontrés, et
+    eux seuls.
 
-    Les échelons `*:forme` et `*:*` sont posés par le fichier SQL —
-    inutile de les réécrire chaque nuit."""
+    Périmètre exact, décidé le 08/08 (cf. le pavé en tête de section) :
+
+    · `*:forme` et `*:*` sont posés une fois par le fichier SQL —
+      inutile de les réécrire chaque nuit ;
+    · `bassin:forme` appartient au script d'affectation, parce que la
+      clé étrangère de `station_zone.zone_id` l'exige AVANT que la
+      balise n'existe. Cette fonction ne le rattrape pas, et ce n'est
+      pas un oubli : toute ligne `station_zone` lue par ce job a déjà,
+      par contrainte, sa ligne `model_zone`. Un rattrapage ici ne
+      pourrait jamais s'exécuter ;
+    · restent les échelons 2 et 4, que rien ne force à préexister
+      puisqu'ils ne sont référencés que par `model_score_zone` et
+      `model_character`, écrits plus loin dans ce même run.
+    """
     out: dict[str, dict] = {}
     for z in zones:
         massif = z.get("massif_id")
         if not massif:
             continue
-        out[f"{massif}:{z['landform']}"] = {
-            "zone_id": f"{massif}:{z['landform']}", "kind": "massif_landform",
-            "massif_id": massif, "landform": z["landform"],
-            "label": f"{massif} · {z['landform']}"}
+        landform = z["landform"]
+        nom = MASSIF_FR.get(massif, massif)
+        lf = LANDFORM_FR.get(landform, landform)
+        out[f"{massif}:{landform}"] = {
+            "zone_id": f"{massif}:{landform}", "kind": "massif_landform",
+            "massif_id": massif, "landform": landform,
+            "label": f"{lf}, {nom}"}
         out[f"{massif}:*"] = {
             "zone_id": f"{massif}:*", "kind": "massif",
-            "massif_id": massif, "label": massif}
+            "massif_id": massif, "label": f"{nom}, toutes formes"}
     return list(out.values())
 
 
@@ -583,7 +760,7 @@ def rolling_scores(daily: list[dict], zone_of: dict[str, dict], as_of: datetime)
     return rows
 
 
-def regime_scores(accs: list[dict], as_of: datetime):
+def regime_scores(accs: list[dict], as_of: datetime, kind_of: dict[str, str]):
     """Le score par régime du §16.1, depuis les accumulateurs.
 
     ⚠️ CE N'EST PAS UNE FENÊTRE GLISSANTE, et c'est tout l'intérêt.
@@ -591,6 +768,19 @@ def regime_scores(accs: list[dict], as_of: datetime):
     marin et trois jours de brise — la moyenne qui en sort n'est vraie
     aucun de ces jours. Ici on lit « les N dernières fois qu'on a eu CE
     régime ici », quelle que soit leur ancienneté.
+
+    ⚠️ `kind_of` EST OBLIGATOIRE — c'est `model_zone` elle-même,
+    lue en base, et non une déduction. Cette fonction devinait
+    auparavant l'échelon en RENIFLANT la forme du `zone_id` (`*:` au
+    début, `:*` à la fin, sinon « bassin »). Deux conséquences, toutes
+    deux fausses : `alpes-nord:valley` était publié
+    `agg_level = 'basin_landform'` alors que sa ligne `model_zone` dit
+    `massif_landform`, et l'échelon 2 était donc INATTEIGNABLE dans
+    cette colonne. Le SQL de step35 prévient explicitement contre cette
+    dépendance au format de chaîne : `kind` y est redondant avec
+    `zone_id` pour qu'on n'ait jamais à renifler l'un pour retrouver
+    l'autre. Passer la table rend l'égalité `agg_level == kind` vraie
+    par construction plutôt que par coïncidence.
     """
     by_key: dict[tuple, dict] = defaultdict(dict)
     for a in accs:
@@ -608,10 +798,15 @@ def regime_scores(accs: list[dict], as_of: datetime):
         beats = None
         if mm and mr and mm["sum_w"] > 0 and mr["sum_w"] > 0:
             beats = (mm["sum_wx"] / mm["sum_w"]) < (mr["sum_wx"] / mr["sum_w"])
-        level = ("global" if zid == "*:*"
-                 else "landform" if zid.startswith("*:")
-                 else "massif" if zid.endswith(":*")
-                 else "basin_landform")
+        # ⚠️ Un `zone_id` absent de `model_zone` est IMPOSSIBLE :
+        # `model_character.zone_id` porte la clé étrangère. Si ça
+        # arrivait quand même, mieux vaut sauter la ligne que publier un
+        # échelon inventé — un score anonyme sur sa précision ment.
+        level = kind_of.get(zid)
+        if level is None:
+            print(f"  ⚠️ zone inconnue de model_zone, score sauté : {zid}",
+                  file=sys.stderr)
+            continue
         row = {
             "as_of": as_of.strftime("%Y-%m-%d"), "zone_id": zid, "model": model,
             "lead_h": lead, "window_kind": "regime", "regime": regime,
@@ -757,7 +952,12 @@ def main() -> int:
         daily = sb.select("model_verif_daily", f"?day=gte.{since}")
         scores = rolling_scores(daily, zone_of, as_of)
         accs = sb.select("model_character")
-        scores += regime_scores(accs, as_of)
+        # `model_zone` est relue APRÈS l'upsert des échelons 2 et 4, pour
+        # que `agg_level` soit littéralement le `kind` de la zone et non
+        # une déduction faite sur la forme de son identifiant. Une table
+        # de quelques centaines de lignes, une fois par nuit.
+        kind_of = {r["zone_id"]: r["kind"] for r in sb.select("model_zone")}
+        scores += regime_scores(accs, as_of, kind_of)
         if scores:
             n = sb.upsert("model_score_zone", scores,
                           "as_of,zone_id,model,lead_h,window_kind,regime")

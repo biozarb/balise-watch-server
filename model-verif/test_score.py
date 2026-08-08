@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """test_score.py — banc d'essai du job de notation.
 
-    Session 07/08/2026.
+    Session 08/08/2026.
 
 ⚠️ CE BANC PARLE LA LANGUE DE `collect.py`, PAS CELLE DE `score.py`.
 Les entrées sont des lignes NDJSON de la forme EXACTE que `collect.py`
@@ -100,7 +100,7 @@ def brise(h):
 def test_chaine_de_repli():
     print("── chaîne de repli (§16.3) ──")
     z = {"zone_id": "b45.28_6.51:valley", "landform": "valley",
-         "massif_id": "alpes-nord"}
+         "basin_id": "b45.28_6.51", "massif_id": "alpes-nord"}
     check("cinq échelons, du bassin au réseau entier",
           J.fallback_chain(z),
           [("b45.28_6.51:valley", "basin_landform"),
@@ -115,20 +115,152 @@ def test_chaine_de_repli():
           niveaux.index("landform") < niveaux.index("massif"), True)
 
     sans_bassin = {"zone_id": "alpes-nord:valley", "landform": "valley",
-                   "massif_id": "alpes-nord"}
+                   "basin_id": None, "massif_id": "alpes-nord"}
     check("sans bassin, la case fine retombe sur massif:forme sans doublon",
           J.fallback_chain(sans_bassin),
-          [("alpes-nord:valley", "basin_landform"),
+          [("alpes-nord:valley", "massif_landform"),
            ("*:valley", "landform"),
            ("alpes-nord:*", "massif"),
            ("*:*", "global")])
+    # ⚠️ Et elle s'ANNONCE massif_landform, pas basin_landform. Le
+    # contraire (défaut corrigé le 08/08) faisait publier un score
+    # `agg_level = 'basin_landform'` sur une zone dont `model_zone.kind`
+    # dit `massif_landform` : le score mentait sur sa propre précision,
+    # ce que la colonne `agg_level` existe pour empêcher.
+    check("… et la case fine ne se fait pas passer pour un bassin",
+          J.fallback_chain(sans_bassin)[0][1], "massif_landform")
 
     hors_massif = {"zone_id": "b48.1_2.3:plain", "landform": "plain",
-                   "massif_id": None}
+                   "basin_id": "b48.1_2.3", "massif_id": None}
     check("hors de tout massif, trois échelons seulement",
           J.fallback_chain(hors_massif),
           [("b48.1_2.3:plain", "basin_landform"),
            ("*:plain", "landform"), ("*:*", "global")])
+
+    # Ni bassin ni massif : `assignZone` rend `*:forme` depuis le 08/08
+    # (il rendait `hors-zone:forme`, un identifiant que personne
+    # n'insérait — donc une balise que la clé étrangère refusait).
+    ni_l_un_ni_l_autre = {"zone_id": "*:slope", "landform": "slope",
+                          "basin_id": None, "massif_id": None}
+    check("ni bassin ni massif : la case fine EST « cette forme, partout »",
+          J.fallback_chain(ni_l_un_ni_l_autre),
+          [("*:slope", "landform"), ("*:*", "global")])
+
+
+#: Les sept lignes que `supabase_step35_model_verification.sql` sème une
+#: fois pour toutes. Recopiées ici parce que le banc ne touche pas la
+#: base : si le SQL en ajoute une, cette liste doit suivre, et l'oubli
+#: se voit tout de suite sur l'assertion d'inclusion ci-dessous.
+SEMEES_PAR_LE_SQL = {"*:valley", "*:slope", "*:ridge", "*:plateau",
+                     "*:plain", "*:coastal", "*:*"}
+
+#: Les CHECK de step35, à la lettre (l. 169 et 177). Un `kind` inventé
+#: passe le typage Python et échoue en base : c'est ici qu'il doit
+#: mourir, pas à 05 h 58.
+KINDS_SQL = {"basin_landform", "massif_landform", "landform", "massif",
+             "global"}
+LANDFORMS_SQL = {"valley", "slope", "ridge", "plateau", "plain", "coastal"}
+
+
+class _SupabaseFactice:
+    """Enregistre l'ordre des écritures. Ne parle à personne."""
+
+    def __init__(self):
+        self.appels: list[tuple] = []
+
+    def upsert(self, table, rows, on_conflict, chunk=500):
+        self.appels.append((table, on_conflict, len(rows)))
+        return len(rows)
+
+
+def test_lignes_de_zone():
+    print("── qui crée les lignes model_zone (lot B) ──")
+    # Les quatre cas possibles, pas les trois qu'on croit : le bassin et
+    # le massif sont absents INDÉPENDAMMENT l'un de l'autre.
+    cas = [
+        {"source": "pioupiou", "station_id": "1", "zone_id": "b45.28_6.51:valley",
+         "landform": "valley", "basin_id": "b45.28_6.51",
+         "massif_id": "alpes-nord"},
+        {"source": "pioupiou", "station_id": "2", "zone_id": "b48.1_2.3:plain",
+         "landform": "plain", "basin_id": "b48.1_2.3", "massif_id": None},
+        {"source": "pioupiou", "station_id": "3", "zone_id": "alpes-nord:valley",
+         "landform": "valley", "basin_id": None, "massif_id": "alpes-nord"},
+        {"source": "pioupiou", "station_id": "4", "zone_id": "*:slope",
+         "landform": "slope", "basin_id": None, "massif_id": None},
+    ]
+
+    # ── l'identifiant que construit l'affectation est celui que la
+    #    balise portera : sans ça, la clé étrangère refuserait la ligne.
+    for z in cas:
+        check(f"zone_id_for reconstruit {z['zone_id']}",
+              J.zone_id_for(z), z["zone_id"])
+
+    # ── échelon 1 : qui produit quoi ──
+    check("bassin connu → une ligne basin_landform à créer",
+          (J.zone_row_for(cas[0])["kind"], J.zone_row_for(cas[0])["basin_id"]),
+          ("basin_landform", "b45.28_6.51"))
+    check("bassin connu hors massif → basin_landform quand même",
+          J.zone_row_for(cas[1])["kind"], "basin_landform")
+    check("bassin nul, massif connu → massif_landform, pas basin_landform",
+          J.zone_row_for(cas[2])["kind"], "massif_landform")
+    # ⚠️ `None` n'est pas un échec : la ligne existe déjà, semée par le
+    # SQL. Créer un doublon serait le vrai défaut.
+    check("ni bassin ni massif → rien à créer, le SQL a déjà semé *:forme",
+          J.zone_row_for(cas[3]), None)
+    check("… et l'identifiant visé est bien l'un des sept semés",
+          cas[3]["zone_id"] in SEMEES_PAR_LE_SQL, True)
+
+    # ── `agg_level` et `kind` ne peuvent plus se contredire ──
+    for z in cas:
+        row = J.zone_row_for(z)
+        kind = row["kind"] if row else "landform"
+        check(f"agg_level == model_zone.kind pour {z['zone_id']}",
+              J.fallback_chain(z)[0][1], kind)
+
+    # ── L'ASSERTION QUI PROTÈGE VRAIMENT ──
+    # Pas « zone_rows_needed rend deux lignes » : celle-là resterait
+    # verte le jour où un sixième échelon apparaîtrait. L'ensemble des
+    # zone_id de TOUTES les chaînes de repli doit être inclus dans
+    # l'union des trois producteurs.
+    produites = ({r["zone_id"] for r in J.zone_rows_for(cas)}
+                 | {r["zone_id"] for r in J.zone_rows_needed(cas)}
+                 | SEMEES_PAR_LE_SQL)
+    attendues = {zid for z in cas for zid, _ in J.fallback_chain(z)}
+    check("tout zone_id d'une chaîne de repli a un producteur",
+          sorted(attendues - produites), [])
+    # Et l'inverse est faux exprès : le SQL sème six formes dont on
+    # n'utilise ici que trois. Un producteur peut créer plus que le
+    # strict nécessaire, jamais moins.
+
+    # ── les CHECK du SQL, honorés avant l'envoi ──
+    for r in J.zone_rows_for(cas) + J.zone_rows_needed(cas):
+        check(f"kind légal pour {r['zone_id']}", r["kind"] in KINDS_SQL, True)
+        check(f"landform légale pour {r['zone_id']}",
+              r.get("landform") is None or r["landform"] in LANDFORMS_SQL, True)
+        check(f"libellé non vide pour {r['zone_id']}", bool(r["label"]), True)
+
+    # ── dédoublonnage : deux balises d'une même vallée ──
+    jumelle = dict(cas[0], station_id="5")
+    rows = J.zone_rows_for(cas + [jumelle])
+    check("deux balises du même bassin → une seule ligne model_zone",
+          len(rows), len({r["zone_id"] for r in rows}))
+    check("trois lignes d'échelon 1 pour quatre cas (la 4ᵉ est semée)",
+          len(rows), 3)
+
+    # ── L'ORDRE D'ÉCRITURE, qui n'est pas négociable ──
+    sb = _SupabaseFactice()
+    n_zone, n_stat = J.write_station_zones(sb, cas)
+    check("model_zone est écrite AVANT station_zone",
+          [t for t, _, _ in sb.appels], ["model_zone", "station_zone"])
+    check("les deux écritures sont des upserts sur leur clé",
+          [c for _, c, _ in sb.appels], ["zone_id", "source,station_id"])
+    check("les quatre balises partent, y compris celle sans zone à créer",
+          (n_zone, n_stat), (3, 4))
+
+    # ── rejouable : un second passage écrit les mêmes lignes ──
+    sb2 = _SupabaseFactice()
+    check("relancer l'affectation ne change rien",
+          J.write_station_zones(sb2, cas), (n_zone, n_stat))
 
 
 def test_agregat_quotidien():
@@ -200,13 +332,21 @@ def test_agregat_quotidien():
 
 def test_accumulateurs():
     print("── accumulateurs ──")
+    # ⚠️ `basin_id` EST RENSEIGNÉ, comme dans une vraie ligne
+    # `station_zone` : c'est lui qui dit à quel échelon appartient la
+    # case fine. L'omettre ici ferait passer ces zones pour des zones de
+    # massif — un banc qui invente ses entrées teste la fonction, pas
+    # l'intégration.
     zone_of = {
         "pioupiou:835": {"zone_id": "b1:valley", "landform": "valley",
-                         "massif_id": "alpes-nord", "basin_uncertain": False},
+                         "basin_id": "b1", "massif_id": "alpes-nord",
+                         "basin_uncertain": False},
         "pioupiou:836": {"zone_id": "b1:valley", "landform": "valley",
-                         "massif_id": "alpes-nord", "basin_uncertain": False},
+                         "basin_id": "b1", "massif_id": "alpes-nord",
+                         "basin_uncertain": False},
         "pioupiou:999": {"zone_id": "b2:slope", "landform": "slope",
-                         "massif_id": "alpes-nord", "basin_uncertain": True},
+                         "basin_id": "b2", "massif_id": "alpes-nord",
+                         "basin_uncertain": True},
     }
     banded = [
         {"key": "pioupiou:835", "model": "icon_d2", "lead_h": 24,
@@ -267,7 +407,7 @@ def test_accumulateurs():
 def test_scores_de_zone():
     print("── scores de zone ──")
     zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
-                                 "massif_id": "alpes-nord",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
                                  "basin_uncertain": False}
                for i in range(830, 836)}
     daily = []
@@ -339,8 +479,31 @@ def test_score_par_regime():
                      "regime": "fluxN", "band": "strong", "metric": "errKmh",
                      "sum_w": 20.0, "sum_wx": err * 20, "sum_wx2": 0.0,
                      "days": 20, "last_day": "2026-08-05"})
-    rows = J.regime_scores(accs, DAY)
+    # `model_zone` telle qu'elle est en base : c'est elle qui dit
+    # l'échelon, et non la forme de l'identifiant.
+    kind_of = {"b1:valley": "basin_landform",
+               "alpes-nord:valley": "massif_landform",
+               "alpes-nord:*": "massif", "*:valley": "landform",
+               "*:*": "global"}
+    rows = J.regime_scores(accs, DAY, kind_of)
     check("une ligne par modèle, pas une par tranche", len(rows), 2)
+    check("l'échelon publié est celui de model_zone, pas un reniflage",
+          {r["agg_level"] for r in rows}, {"basin_landform"})
+
+    # ⚠️ LE CAS QUI MENTAIT. `alpes-nord:valley` ne commence pas par
+    # `*:` et ne finit pas par `:*` : l'ancienne déduction le publiait
+    # `basin_landform`, alors que sa ligne `model_zone` dit
+    # `massif_landform` — et l'échelon 2 n'était donc JAMAIS atteignable
+    # dans cette colonne.
+    au_massif = [dict(a, zone_id="alpes-nord:valley") for a in accs]
+    check("une zone de massif s'annonce massif_landform, pas basin_landform",
+          {r["agg_level"] for r in J.regime_scores(au_massif, DAY, kind_of)},
+          {"massif_landform"})
+    # Une zone absente de model_zone est impossible (clé étrangère) ;
+    # si elle survenait, on saute plutôt que d'inventer un échelon.
+    check("zone inconnue de model_zone → aucune ligne publiée",
+          J.regime_scores([dict(a, zone_id="b9:ridge") for a in accs],
+                          DAY, kind_of), [])
     check("la fenêtre est bien celle du régime, pas les 15 jours",
           {r["window_kind"] for r in rows}, {"regime"})
     best = next(r for r in rows if r["model"] == "icon_d2")
@@ -356,14 +519,15 @@ def test_score_par_regime():
         b = dict(a)
         b["days"] = 3
         rares.append(b)
-    rows2 = J.regime_scores(rares, DAY)
+    rows2 = J.regime_scores(rares, DAY, kind_of)
     check("3 occurrences du régime → aucun rang, et la raison est dite",
           (all(r["rank"] is None for r in rows2), rows2[0]["rank_reason"]),
           (True, "insufficient"))
 
 
 def main() -> int:
-    for fn in (test_chaine_de_repli, test_agregat_quotidien, test_accumulateurs,
+    for fn in (test_chaine_de_repli, test_lignes_de_zone,
+               test_agregat_quotidien, test_accumulateurs,
                test_scores_de_zone, test_score_par_regime):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")

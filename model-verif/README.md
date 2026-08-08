@@ -1,6 +1,6 @@
 # `model-verif/` — le job nocturne du score de fiabilité des modèles
 
-Session du 07/08/2026. Conception complète :
+Session du 08/08/2026. Conception complète :
 `PWA/web/CONCEPTION_SCORE_MODELES_06-08.md` — **§15, §16 et §17 font
 foi** en cas de contradiction avec les §8 et §9.
 
@@ -155,6 +155,11 @@ pour les 648 points en prévisions, ~9 min avec les observations**).
   étapes 1-3 de `score.py` tournent quand même, mais **les
   accumulateurs et les scores de zone sont sautés, en le disant**. Une
   balise sans zone n'est pas rangée dans une case au hasard.
+
+  Le script qui la remplira, lui, n'a plus rien à décider : il appelle
+  `score.write_station_zones(sb, lignes)`, qui écrit `model_zone` PUIS
+  `station_zone` dans cet ordre — voir juste en dessous.
+
 - **Aucun score n'a jamais été calculé sur des données réelles.** Les
   bancs d'essai tournent sur des journées fabriquées. Le premier vrai
   chiffre demandera quinze nuits de collecte.
@@ -172,6 +177,51 @@ pour les 648 points en prévisions, ~9 min avec les observations**).
   quatre modèles qui l'ont produirait des chiffres asymétriques,
   impossibles à mettre côte à côte avec AROME sans mentir. La colonne
   `fcst_src` existe pour que ce soit faisable proprement le jour venu.
+
+---
+
+## Qui crée les lignes `model_zone` — décision du 08/08 (lot B)
+
+Trois producteurs se partagent cette table, et **la frontière entre eux
+se lit dans le schéma, pas dans un usage** :
+
+| échelon | exemple | producteur |
+|---|---|---|
+| 1 `basin_landform` | `b45.28_6.51:valley` | le script d'affectation |
+| 2 `massif_landform` | `alpes-nord:valley` | `score.py:zone_rows_needed` |
+| 3 `landform` | `*:valley` | le SQL step35, une fois |
+| 4 `massif` | `alpes-nord:*` | `score.py:zone_rows_needed` |
+| 5 `global` | `*:*` | le SQL step35, une fois |
+
+**La raison :** `station_zone.zone_id` porte lui-même une clé étrangère
+vers `model_zone` (step35 l. 199). L'échelon 1 doit donc exister *avant*
+que la balise ne soit rattachée — donc avant que le job de nuit ne voie
+quoi que ce soit. Aucun autre producteur n'est possible, et c'est ce qui
+tranche la question.
+
+⚠️ **Et donc le job n'a pas de « filet » pour l'échelon 1** : il serait
+du code mort. La contrainte garantit déjà que toute ligne `station_zone`
+lue la nuit a sa ligne `model_zone`. La vraie défense est la clé
+étrangère elle-même, qui échoue tôt — au moment de l'affectation, en
+pleine session, avec un message clair — et non trois heures avant l'aube
+dans un journal que personne ne lit.
+
+Le point d'entrée du script d'affectation est
+`score.write_station_zones(sb, lignes)` : il écrit `model_zone` puis
+`station_zone`, dans cet ordre, en upsert, et il est rejouable.
+
+Deux corollaires, vérifiés au banc (`test_score.py:test_lignes_de_zone`) :
+
+- la case fine d'une balise **sans bassin** est `massif:forme`, celle
+  d'une balise **sans bassin ni massif** est `*:forme`. `agg_level` le
+  dit désormais honnêtement : avant le 08/08, `fallback_chain`
+  étiquetait le premier échelon `basin_landform` quoi qu'il arrive, et
+  le score contredisait alors le `kind` de sa propre zone — exactement
+  ce que cette colonne existe pour empêcher ;
+- `assignZone` rendait `hors-zone:forme` quand ni bassin ni massif
+  n'étaient connus : un identifiant que personne n'insérait, donc une
+  balise que la clé étrangère refusait. Il rend `*:forme`, dont la ligne
+  est déjà semée.
 
 ---
 
@@ -228,13 +278,76 @@ la forme **exacte** que `collect.py` écrit.
 | Points Pioupiou, France + limitrophes | **648** | catalogue live, pas une estimation |
 | Archive de prévisions | **3,1 Ko gzippés / point / nuit** | run réel de `collect.py`, 10 modèles |
 | | **2,1 Mo/nuit → 749 Mo/an** | 7,5 %/an du palier R2 gratuit |
-| Quota Open-Meteo | **~694 appels pondérés/nuit** | 648 × (3/14) × (50/10) |
-| | soit **6,9 %** du plafond journalier | plafond 10 000/jour, pondéré par IP |
 | Horizons réels | AROME 52 h · ICON-D2 52 h · ICON-CH1 34 h | réponse réelle, 72 h demandées |
+
+⚠️ **Deux lignes de ce tableau étaient fausses et ont été retirées le
+08/08 (après-midi).** Elles annonçaient « ~694 appels pondérés/nuit,
+6,9 % du plafond », calculés en `648 × (3/14) × (50/10)`. **La remise
+`jours/14` avait été retirée du code le 07/08 au matin**, précisément
+parce qu'elle rendait le garde-fou muet et avait coûté 24 points en
+`HTTP 429` — mais personne n'avait mis le tableau à jour. Le chiffre
+survivait donc dans la doc, et il a été recopié tel quel dans le prompt
+de reprise du 09/08 comme une valeur « mesurée ». Elle ne l'était pas.
+
+Le compte juste, tel que `quota_projete` le journalise à chaque run :
+
+| | avant le 08/08 (5 variables) | depuis le 08/08 (8 variables) |
+|---|---|---|
+| variables × modèles | 5 × 10 = 50 | 8 × 10 = 80 |
+| poids d'une requête | 5,00 | **8,00** |
+| total du run (648 points) | 3 240 pondérés — **32,4 %** | **5 184 — 51,8 %** |
+| pause de la passe prévisions | `BATCH_PAUSE_S` 0,45 s | **`FCST_PAUSE_S` 0,70 s** |
+| cadence pondérée | 448/min (plafond 600) | **522/min** |
+| seuil du garde-fou journalier | 50 % | **60 %**, justifié dans le code |
+
+---
+
+## Les trois flux archivés (mis à jour le 08/08, après-midi)
+
+| clé R2 | contenu | rattrapable ? |
+|---|---|---|
+| `fcst/` | 10 modèles × 648 points × 72 h — vent (`speed`, `dir`, `gust`), plus **`precip`, `pmsl`, `t2m` depuis le 09/08** ; `aloft_*` pour ECMWF seul | **NON.** Aucun modèle Météo-France n'a d'historique de runs passés chez Open-Meteo. Une nuit manquée est perdue. |
+| `obs/` | Pioupiou, ~4 min de résolution, `speed`/`gust`/`dir` | oui — l'archive Pioupiou reste interrogeable |
+| `obsmetar/` | **nouveau le 08/08.** 225 aérodromes servis sur 278 dans la bbox, 9 réseaux, ~22,6 relevés/jour chacun — `speed`, `gust`, `dir`, **`qnh`**, `t2m`, plus `elev` | oui — l'archive Iowa State est rétroactive |
+
+Ce que le METAR apporte et ce qu'il n'apporte pas, **mesuré le 08/08 sur
+5 090 relevés réels du 07/08** :
+
+| champ demandé | remplissage | verdict |
+|---|---|---|
+| `alti` → `qnh` | **100 %** | la référence de pression d'E6, en plaine comme à 2 173 m |
+| `tmpf` → `t2m` | 100 % | vérité terrain de la température |
+| `sknt` → `speed` | 99 % | vent de plaine, hors biais de site de relief |
+| `drct` → `dir` | 83 % | un cap absent reste `None`, jamais 0 |
+| `gust` | **0,4 %** | une rafale n'est diffusée que si elle existe |
+| `mslp` | **2 %** | **écarté.** Le METAR européen diffuse le QNH, pas la pression SYNOP |
+| `p01i` | 100 % servi, **0,00 partout** | **écarté.** Voir ci-dessous |
+
+⚠️ **Il n'y a PAS de vérité terrain de précipitation dans le METAR
+européen.** Le champ `p01i` répond, à 100 %, et vaut zéro dans tous les
+cas : 2 976 valeurs sur janvier 2026 et 2 880 sur novembre 2025 (4
+stations françaises), **aucune non nulle** — contre 251 non nulles sur
+1 438 pour deux stations américaines le même mois. Le groupe de
+précipitation horaire est une particularité ASOS américaine. L'archiver
+aurait produit une colonne de `0.0` qu'on aurait relue comme « il n'a
+pas plu » et contre laquelle on aurait noté E4 à tort.
+
+**Conséquence : E4 attend Météo-France.** Sondé le 08/08 :
+`public-api.meteofrance.fr` répond **HTTP 401** sans clé, et l'ancien
+portail libre `donneespubliques.meteofrance.fr` ne sert plus que du HTML
+(les fichiers SYNOP `.csv.gz` n'y sont plus). Il faut donc une clé
+applicative sur `portail-api.meteofrance.fr`, à créer par Yann, puis une
+variable dans `~/.balise-watch-model-verif.env`. En attendant, la
+**prévision** de précipitation est archivée (elle, irréversible) sans sa
+vérification — ce qui est le bon ordre, l'archive se rejouant.
 
 Le §9.2 tablait sur 250 points et 5 modèles. Le catalogue en compte
 **648**, et le lot en suit **10** (8 le 08/08 au matin, plus DMI HARMONIE
-et ALADIN CE après cartographie des domaines réels). Le quota reste très confortable, la
+et ALADIN CE après cartographie des domaines réels). Le quota n'est plus
+« très confortable » comme l'annonçait cette page : à 51,8 % du plafond
+journalier, il reste 4 000 appels pondérés de marge, et c'est cette marge
+qui doit absorber un `traces/backfill_packs.py` lancé à la main dans la
+journée — depuis la même IP, donc sur le même plafond. La
 volumétrie de `model_verif_daily` est en revanche **quatre fois**
 l'estimation du §15.2 — à re-mesurer sur un vrai mois plutôt qu'à croire
 sur parole.
