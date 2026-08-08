@@ -37,6 +37,18 @@
 #  zones de vol negligeables pour ce projet, ajoutable plus tard sans
 #  douleur si besoin (juste étendre COUNTRIES).
 #
+#  Ajout d'AT le 08/08/2026 (audit phénomènes du 08/08, constat n°1) :
+#  pas un voisin de la France, mais du DOMAINE DES PHÉNOMÈNES de
+#  gradient — « Südföhn – Tyrol » et « Foehn du Brenner » rattachent
+#  leur versant aval à Innsbruck/Wipptal, en Autriche. Sans site
+#  autrichien en base, ces deux phénomènes sur 27 ne pouvaient
+#  rattacher AUCUN décollage (mesuré : passeB.mjs, 0+0 sites avant ce
+#  correctif). Sondé le 08/08 : iso=at rend 256 sites chez pgEarth.
+#  Pas d'extension aux AUTRES voisins de l'Autriche (Liechtenstein,
+#  Slovénie, Tchéquie, Slovaquie, Hongrie) : aucun des 27+4 phénomènes
+#  n'a de géométrie qui les atteint aujourd'hui — à revoir seulement
+#  si un futur phénomène en a besoin, pas par principe.
+#
 #  ── SORTIE ─────────────────────────────────────────────────────────
 #  `PWA/web/public/data/decos.json` — tableau compact de tableaux (pas
 #  d'objets : le gain de poids est réel sur ~3300 entrées) :
@@ -115,7 +127,7 @@ import sys
 import time
 import urllib.request
 
-COUNTRIES = ["fr", "ch", "it", "es", "de"]
+COUNTRIES = ["fr", "ch", "it", "es", "de", "at"]
 URL = "https://paraglidingearth.com/api/geojson/getCountrySites.php?iso={cc}"
 CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache_pge")
 UA = "balise-watch/ingest_decos_pge (contact via balise-watch project)"
