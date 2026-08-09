@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""test_inference.py — banc d'essai du socle statistique du lot G.
+
+    Session 09/08/2026.
+
+Ce banc a une particularité : il ne se contente pas de vérifier que
+les fonctions rendent quelque chose de la bonne forme. Il vérifie
+qu'elles font ce que leur NOM promet, sur des données dont on connaît
+la réponse parce qu'on les a fabriquées.
+
+Trois preuves, dans l'ordre d'importance :
+
+  1. **Le bloc est un bloc.** Sur des données à corrélation
+     journalière CONNUE, l'IC par blocs doit être NETTEMENT plus large
+     que l'IC i.i.d. Sans ce contrôle, on ne saurait pas dire si le
+     bootstrap par blocs a été implémenté ou seulement nommé — et un
+     bootstrap par blocs qui tire en réalité i.i.d. rendrait des
+     intervalles trop étroits, donc de faux gagnants, exactement le
+     défaut qu'il est censé corriger.
+
+  2. **Le bloc couvre.** Sur 60 jeux tirés du même modèle, la
+     proportion de fois où l'intervalle contient la vraie valeur doit
+     s'approcher de 95 % pour les blocs, et rester nettement en
+     dessous pour l'i.i.d. C'est la propriété qui compte vraiment :
+     « plus large » ne vaut que si c'est plus large du bon montant.
+
+  3. **Le poids emprunté dit la vérité.** Une case à une seule
+     balise-jour doit rendre une estimation proche du parent et un
+     poids emprunté proche de 1 ; une case bien fournie l'inverse.
+
+Aucun `random` : un générateur congruentiel maison, graine explicite.
+Un banc qui bouge d'une exécution à l'autre ne prouve rien.
+
+Usage :
+    python3 test_inference.py
+"""
+from __future__ import annotations
+
+import math
+import sys
+
+import inference as I
+import scoring as S
+
+OK = 0
+KO = 0
+
+
+def check(label: str, cond: bool, detail: str = ""):
+    global OK, KO
+    if cond:
+        OK += 1
+    else:
+        KO += 1
+        print(f"  ❌ {label}" + (f"\n       {detail}" if detail else ""))
+
+
+class LCG:
+    """Générateur congruentiel — reproductible, et qui ne sert QU'au banc."""
+
+    def __init__(self, seed: int = 12345):
+        self.s = seed & 0xFFFFFFFF
+
+    def u(self) -> float:
+        self.s = (1103515245 * self.s + 12345) & 0x7FFFFFFF
+        return self.s / 0x7FFFFFFF
+
+    def normal(self) -> float:
+        # Somme de 12 uniformes − 6 : approximation d'une normale
+        # centrée réduite, suffisante et sans dépendance externe.
+        return sum(self.u() for _ in range(12)) - 6.0
+
+
+def make_diffs(rnd: LCG, n_days: int, n_stations: int,
+               day_sd: float, noise_sd: float, mean: float = 0.0):
+    """Fabrique des différences appariées à corrélation journalière connue.
+
+    `day_sd` est l'écart-type de l'effet JOURNÉE — la situation
+    synoptique, partagée par toutes les balises du jour. `noise_sd`
+    est le bruit propre à chaque balise-jour. Quand `day_sd` domine,
+    les 30 balises d'un même jour n'apportent pas 30 informations mais
+    à peu près une seule : c'est exactement ce qu'un bootstrap i.i.d.
+    ignore.
+    """
+    out = []
+    for d in range(n_days):
+        eff = rnd.normal() * day_sd
+        day = f"2026-07-{d + 1:02d}"
+        for st in range(n_stations):
+            out.append(I.PairedDiff(day=day, unit=f"p:{st}",
+                                    diff=mean + eff + rnd.normal() * noise_sd))
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════
+print("\n── 1. appariement ──")
+
+rows_a = [{"day": "2026-08-01", "unit": "p:1", "err_vec_med": 5.0},
+          {"day": "2026-08-01", "unit": "p:2", "err_vec_med": 7.0},
+          {"day": "2026-08-02", "unit": "p:1", "err_vec_med": 6.0},
+          {"day": "2026-08-03", "unit": "p:9", "err_vec_med": 4.0}]
+rows_b = [{"day": "2026-08-01", "unit": "p:1", "err_vec_med": 4.0},
+          {"day": "2026-08-01", "unit": "p:2", "err_vec_med": 9.0},
+          {"day": "2026-08-02", "unit": "p:1", "err_vec_med": 6.5},
+          {"day": "2026-08-02", "unit": "p:7", "err_vec_med": 3.0}]
+d = I.paired_differences(rows_a, rows_b)
+check("seules les balise-jours présentes des DEUX côtés sont appariées",
+      len(d) == 3, f"n={len(d)}")
+check("aucune balise-jour orpheline n'est comblée",
+      all((x.day, x.unit) != ("2026-08-03", "p:9") for x in d))
+check("le signe est err(A) − err(B)",
+      [round(x.diff, 6) for x in d] == [1.0, -2.0, -0.5],
+      str([x.diff for x in d]))
+check("une valeur non finie d'un côté écarte la paire",
+      len(I.paired_differences(
+          [{"day": "d", "unit": "u", "err_vec_med": None}],
+          [{"day": "d", "unit": "u", "err_vec_med": 3.0}])) == 0)
+
+# ══════════════════════════════════════════════════════════════════
+print("── 2. refus explicites plutôt qu'intervalles fabriqués ──")
+
+short = make_diffs(LCG(1), n_days=2, n_stations=40, day_sd=2.0, noise_sd=1.0)
+ci = I.block_bootstrap_ci(short)
+check("deux jours → window_too_short (l'état réel de l'archive au 09/08)",
+      ci.reason == "window_too_short", ci.reason)
+check("… et aucun intervalle n'est publié malgré 80 paires",
+      ci.ci_low is None and ci.ci_high is None)
+check("… mais la médiane brute reste disponible", ci.median is not None)
+check("… et separates rend None, pas False",
+      ci.separates is None)
+
+tiny = make_diffs(LCG(2), n_days=20, n_stations=1, day_sd=1.0, noise_sd=1.0)[:3]
+check("moins de 4 paires → too_few_pairs",
+      I.block_bootstrap_ci(tiny).reason == "too_few_pairs")
+
+# ══════════════════════════════════════════════════════════════════
+print("── 3. LE BLOC EST UN BLOC (corrélation journalière connue) ──")
+
+corr = make_diffs(LCG(7), n_days=20, n_stations=30, day_sd=3.0, noise_sd=1.0)
+blk = I.block_bootstrap_ci(corr)
+iid = I.iid_bootstrap_ci(corr)
+w_blk = blk.ci_high - blk.ci_low
+w_iid = iid.ci_high - iid.ci_low
+check("l'IC par blocs se calcule (20 jours, 600 paires)", blk.reason == "ok")
+check("la longueur de bloc respecte le plancher synoptique de 3 jours",
+      blk.block_days is not None and blk.block_days >= I.MIN_BLOCK_DAYS,
+      f"L={blk.block_days}")
+check("l'IC par blocs est PLUS LARGE que l'i.i.d. sur données corrélées",
+      w_blk > w_iid, f"blocs={w_blk:.3f} vs iid={w_iid:.3f}")
+check("… et nettement : au moins 2× (l'effet journée domine)",
+      w_blk > 2 * w_iid, f"rapport={w_blk / w_iid:.2f}")
+print(f"     ⓘ largeur blocs {w_blk:.3f} km/h · i.i.d. {w_iid:.3f} km/h "
+      f"· rapport {w_blk / w_iid:.2f}")
+
+# ⚠️ Moyenné sur six jeux, et pas mesuré sur un seul. Le rapport des
+# largeurs d'un unique tirage varie de ±40 % d'une graine à l'autre :
+# une assertion posée sur un seul jeu passerait ou tomberait selon la
+# graine, ce qui ferait d'elle un thermomètre du hasard et non du code.
+ratios = []
+for s in range(6):
+    flat = make_diffs(LCG(80 + s), n_days=20, n_stations=30,
+                      day_sd=0.0, noise_sd=3.0)
+    wb = I.block_bootstrap_ci(flat)
+    wi = I.iid_bootstrap_ci(flat)
+    ratios.append((wb.ci_high - wb.ci_low) / (wi.ci_high - wi.ci_low))
+ratio = sum(ratios) / len(ratios)
+check("sans effet journée, les deux intervalles se rejoignent",
+      0.7 < ratio < 1.5, f"rapport moyen={ratio:.2f} sur {ratios}")
+print(f"     ⓘ sans corrélation, rapport moyen blocs/i.i.d. = {ratio:.2f}")
+
+check("le bootstrap par blocs est DÉTERMINISTE",
+      I.block_bootstrap_ci(corr).ci_low == blk.ci_low
+      and I.block_bootstrap_ci(corr).ci_high == blk.ci_high)
+check("… et change si la graine change",
+      I.block_bootstrap_ci(corr, seed=1234).ci_low != blk.ci_low)
+
+# ══════════════════════════════════════════════════════════════════
+print("── 4. LE BLOC COUVRE (60 réplications) ──")
+
+n_rep, cov_blk, cov_iid = 60, 0, 0
+for r in range(n_rep):
+    sample = make_diffs(LCG(1000 + r), n_days=16, n_stations=25,
+                        day_sd=3.0, noise_sd=1.0, mean=0.0)
+    b = I.block_bootstrap_ci(sample, iterations=200)
+    i2 = I.iid_bootstrap_ci(sample, iterations=200)
+    if b.ci_low is not None and b.ci_low <= 0 <= b.ci_high:
+        cov_blk += 1
+    if i2.ci_low is not None and i2.ci_low <= 0 <= i2.ci_high:
+        cov_iid += 1
+p_blk, p_iid = cov_blk / n_rep, cov_iid / n_rep
+print(f"     ⓘ couverture réelle d'un IC 95 % : blocs {p_blk:.0%} · "
+      f"i.i.d. {p_iid:.0%} (vraie différence = 0)")
+check("l'IC par blocs couvre la vraie valeur au moins 80 % du temps",
+      p_blk >= 0.80, f"{p_blk:.0%}")
+check("l'IC i.i.d. SOUS-COUVRE nettement — c'est la fabrique de faux gagnants",
+      p_iid < p_blk - 0.15, f"blocs {p_blk:.0%} vs iid {p_iid:.0%}")
+
+# ══════════════════════════════════════════════════════════════════
+print("── 5. le verdict : réel ET utile, jamais l'un des deux ──")
+
+def rows(n_days, n_st, base, rnd, day_sd=0.5, noise=0.4):
+    out = []
+    for dd in range(n_days):
+        eff = rnd.normal() * day_sd
+        for st in range(n_st):
+            out.append({"day": f"2026-07-{dd + 1:02d}", "unit": f"p:{st}",
+                        "err_vec_med": base + eff + rnd.normal() * noise})
+    return out
+
+r0 = LCG(21)
+a = rows(16, 20, 4.0, r0)
+b = rows(16, 20, 8.0, r0)
+v = I.compare_pair("A", "B", a, b)
+check("un écart large et net donne un gagnant", v.winner == "A",
+      f"{v.winner} / {v.reason}")
+check("… avec un IC qui exclut zéro", v.ci.separates is True)
+
+r1 = LCG(22)
+a2 = rows(16, 20, 6.00, r1)
+b2 = rows(16, 20, 6.05, r1)
+v2 = I.compare_pair("A", "B", a2, b2)
+check("un écart minuscule ne donne pas de gagnant", v2.winner is None, v2.reason)
+check("… et la raison n'est pas 'insufficient' mais un vrai motif",
+      v2.reason in ("tied", "not_separable"), v2.reason)
+
+# Significatif mais inutile : 8 % d'écart, très bien mesuré.
+r2 = LCG(23)
+a3 = rows(24, 40, 6.00, r2, day_sd=0.15, noise=0.2)
+b3 = rows(24, 40, 6.50, r2, day_sd=0.15, noise=0.2)
+v3 = I.compare_pair("A", "B", a3, b3)
+check("un écart bien mesuré mais sous 15 % reste 'tied' (significatif ≠ applicable)",
+      v3.winner is None and v3.reason == "tied",
+      f"{v3.reason} gap={v3.relative_gap:.3f}" if v3.relative_gap else v3.reason)
+check("… et l'IC, lui, excluait bien zéro", v3.ci.separates is True)
+
+r3 = LCG(24)
+a4 = rows(3, 40, 4.0, r3)
+b4 = rows(3, 40, 9.0, r3)
+v4 = I.compare_pair("A", "B", a4, b4)
+check("écart énorme mais fenêtre courte → PAS de repli sur l'écart relatif",
+      v4.winner is None and v4.reason == "window_too_short", v4.reason)
+
+# ══════════════════════════════════════════════════════════════════
+print("── 6. classement : la marche du haut, ou rien ──")
+
+cases = [{"model": "A", "typical_err_kmh": 4.0, "occurrences": 20},
+         {"model": "B", "typical_err_kmh": 8.0, "occurrences": 20},
+         {"model": "C", "typical_err_kmh": 9.0, "occurrences": 20}]
+rk, reason, _ = I.rank_models(cases, {"A": a, "B": b, "C": b})
+check("le vainqueur net est classé 1", rk.get("A") == 1, str(rk))
+check("… et les suivants suivent l'erreur en km/h", rk.get("B") == 2 and rk.get("C") == 3)
+
+rk2, reason2, _ = I.rank_models(
+    [{"model": "A", "typical_err_kmh": 6.00, "occurrences": 20},
+     {"model": "B", "typical_err_kmh": 6.05, "occurrences": 20}],
+    {"A": a2, "B": b2})
+check("deux modèles indiscernables → aucun rang", rk2 == {}, str(rk2))
+check("… et la raison est publiée", reason2 in ("tied", "not_separable"), reason2)
+
+rk3, reason3, _ = I.rank_models(
+    [{"model": "A", "typical_err_kmh": 4.0, "occurrences": 3}], {"A": a})
+check("sous le quorum → 'insufficient', aucun rang",
+      rk3 == {} and reason3 == "insufficient")
+
+rk4, reason4, _ = I.rank_models(
+    [{"model": "A", "typical_err_kmh": 4.0, "occurrences": 20}], {"A": a})
+check("un seul modèle au-dessus du quorum est classé 1 sans test",
+      rk4 == {"A": 1} and reason4 == "ok")
+
+# ══════════════════════════════════════════════════════════════════
+print("── 7. rétrécissement vers le parent, et poids emprunté ──")
+
+# Fratrie : 5 vallées bien fournies, dispersées autour de 6 km/h.
+fratrie = [(5.0, 40, 4.0), (6.0, 40, 4.0), (7.0, 40, 4.0),
+           (5.5, 40, 4.0), (6.5, 40, 4.0)]
+tau2, sigma2 = I.pooling_variances(fratrie)
+check("τ² est strictement positif quand les sœurs diffèrent vraiment",
+      tau2 is not None and tau2 > 0, f"tau2={tau2}")
+
+maigre = I.pool_toward_parent(2.0, 1, 6.0, tau2, sigma2)
+check("une case à UNE balise-jour emprunte presque tout",
+      maigre.borrowed is not None and maigre.borrowed > 0.85,
+      f"borrowed={maigre.borrowed:.3f}")
+check("… et son estimation est tirée vers le parent",
+      abs(maigre.value - 6.0) < abs(2.0 - 6.0) / 3,
+      f"value={maigre.value:.3f}")
+
+fournie = I.pool_toward_parent(2.0, 400, 6.0, tau2, sigma2)
+check("une case bien fournie n'emprunte presque rien",
+      fournie.borrowed is not None and fournie.borrowed < 0.15,
+      f"borrowed={fournie.borrowed:.3f}")
+check("… et son estimation reste la sienne",
+      abs(fournie.value - 2.0) < 0.6, f"value={fournie.value:.3f}")
+
+check("le poids emprunté est monotone en n",
+      I.pool_toward_parent(2.0, 1, 6.0, tau2, sigma2).borrowed
+      > I.pool_toward_parent(2.0, 10, 6.0, tau2, sigma2).borrowed
+      > I.pool_toward_parent(2.0, 100, 6.0, tau2, sigma2).borrowed)
+
+plates = [(6.0, 40, 4.0), (6.0, 40, 4.0), (6.0, 40, 4.0)]
+tau0, sig0 = I.pooling_variances(plates)
+check("des sœurs indiscernables donnent τ² = 0", tau0 == 0.0, f"tau2={tau0}")
+p0 = I.pool_toward_parent(2.0, 40, 6.0, tau0, sig0)
+check("… et alors tout est emprunté, ce qui est le bon aveu",
+      p0.borrowed == 1.0 and p0.value == 6.0)
+
+check("sans parent, rien n'est emprunté et on le dit",
+      I.pool_toward_parent(3.0, 10, None, tau2, sigma2).reason == "no_parent")
+check("sans enfant, l'estimation EST le parent, emprunt = 1",
+      I.pool_toward_parent(None, 0, 6.0, tau2, sigma2).borrowed == 1.0)
+check("une fratrie d'un seul enfant ne dit rien sur τ²",
+      I.pooling_variances([(5.0, 10, 2.0)]) == (None, None))
+
+# ══════════════════════════════════════════════════════════════════
+print("── 8. climatologie horaire ──")
+
+H = 3600_000
+obs_by_day = {}
+for dd in range(10):
+    base = 1_754_000_000_000 + dd * 86_400_000
+    obs_by_day[f"j{dd}"] = [
+        S.ObsSample(t=base + h * H,
+                    speed=(20.0 if 10 <= h <= 16 else 4.0),
+                    dir=270.0 if 10 <= h <= 16 else 90.0)
+        for h in range(24)]
+clim = I.hourly_climatology(obs_by_day)
+check("la climatologie couvre les 24 heures vues 10 jours", len(clim) == 24)
+check("… et retrouve le cycle de brise", clim[13][0] == 20.0 and clim[3][0] == 4.0)
+check("… avec la direction, vectoriellement", round(clim[13][1]) == 270)
+
+rare = {"j0": [S.ObsSample(t=1_754_000_000_000, speed=9.0, dir=180.0)]}
+check("une heure vue un seul jour n'est pas une climatologie",
+      I.hourly_climatology(rare) == {})
+
+pairs = [S.VerifPair(t=1_754_000_000_000 + 13 * H, fcst_speed=20.0,
+                     fcst_dir=270.0, obs_speed=20.0, obs_dir=270.0, n_obs=3),
+         S.VerifPair(t=1_754_000_000_000 + 14 * H, fcst_speed=20.0,
+                     fcst_dir=270.0, obs_speed=20.0, obs_dir=270.0, n_obs=3)]
+sk, n, mm, mc = I.skill_vs_climatology(pairs, clim)
+check("un modèle parfait face à une climatologie parfaite : MSE nuls",
+      mm == 0.0 and mc == 0.0 and n == 2)
+check("… et le skill est None, jamais une division par zéro", sk is None)
+
+pairs_bad = [S.VerifPair(t=1_754_000_000_000 + 13 * H, fcst_speed=2.0,
+                         fcst_dir=90.0, obs_speed=20.0, obs_dir=270.0, n_obs=3)
+             for _ in range(3)]
+sk2, n2, mm2, mc2 = I.skill_vs_climatology(pairs_bad, clim)
+check("un modèle mauvais face à une climatologie juste : MSE modèle > 0",
+      mm2 is not None and mm2 > 0 and mc2 == 0.0)
+
+# ══════════════════════════════════════════════════════════════════
+print("── 9. stabilité des rangs — et ce que le chiffre recouvre ──")
+
+wa = {("z1", 6, "all"): {"A": 1, "B": 2, "C": 3},
+      ("z2", 6, "all"): {"A": 1, "B": 2}}
+wb_same = {("z1", 6, "all"): {"A": 1, "B": 2, "C": 3},
+           ("z2", 6, "all"): {"A": 1, "B": 2}}
+days_a = [f"2026-07-{d:02d}" for d in range(1, 16)]
+days_b = [f"2026-07-{d:02d}" for d in range(16, 31)]
+st = I.rank_stability(wa, wb_same, days_a, days_b)
+check("classements identiques sur fenêtres disjointes → tau = 1",
+      st.kendall_tau == 1.0 and st.reason == "ok")
+check("… et l'accord sur le vainqueur vaut 1", st.top1_agreement == 1.0)
+check("… et zéro jour partagé est constaté, pas supposé", st.shared_days == 0)
+
+wb_rev = {("z1", 6, "all"): {"A": 3, "B": 2, "C": 1},
+          ("z2", 6, "all"): {"A": 2, "B": 1}}
+st2 = I.rank_stability(wa, wb_rev, days_a, days_b)
+check("classements inversés → tau = −1", st2.kendall_tau == -1.0)
+check("… et aucun accord sur le vainqueur", st2.top1_agreement == 0.0)
+
+chevauche = [f"2026-07-{d:02d}" for d in range(2, 17)]
+st3 = I.rank_stability(wa, wb_same, days_a, chevauche)
+check("DEUX FENÊTRES QUI SE RECOUVRENT SONT SIGNALÉES",
+      st3.reason == "windows_overlap" and st3.shared_days == 14,
+      f"{st3.reason} / {st3.shared_days}")
+check("… et `covers` le dit en toutes lettres, pour que le chiffre "
+      "ne circule pas sans sa réserve",
+      "recouvrement" in st3.covers)
+
+st4 = I.rank_stability({("z9", 6, "all"): {"A": 1}}, wa, days_a, days_b)
+check("aucune case commune classable → no_common_case",
+      st4.reason == "no_common_case" and st4.kendall_tau is None)
+
+# ══════════════════════════════════════════════════════════════════
+print(f"\n{'✅' if KO == 0 else '❌'} {OK} assertions vertes, {KO} rouges.\n")
+sys.exit(1 if KO else 0)

@@ -58,14 +58,17 @@ import math
 import os
 import pathlib
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import events as EV  # noqa: E402
+import inference as INF  # noqa: E402
 import scoring as S  # noqa: E402
 
 DAY_MS = 86_400_000
@@ -87,6 +90,55 @@ ROLLING_DAYS = 15
 RETENTION_DAILY_D = 30
 RETENTION_EVENT_D = 90
 RETENTION_SCORE_D = 7
+
+# ══════════════════════════════════════════════════════════════════
+#  LOT G — LES TROIS ARBITRAGES, TRANCHÉS LE 09/08/2026
+# ══════════════════════════════════════════════════════════════════
+#
+# 1. PROFONDEUR D'ARCHIVE. L'archive R2 commence le 07/08/2026 : deux
+#    jours au moment où ce code est écrit. Un bootstrap par blocs de
+#    jours sur deux jours n'a aucun sens, et le partial pooling non
+#    plus. Décision : ÉCRIRE LE CODE MAINTENANT et le laisser rendre
+#    `None` avec une raison explicite (`window_too_short`) tant que la
+#    fenêtre est trop courte. Le code est prêt le jour où les données
+#    arrivent, et l'archive permet de tout REJOUER — c'est
+#    précisément ce pour quoi elle ne se purge jamais.
+#    Le contraire (attendre deux semaines) aurait fait écrire le même
+#    code plus tard, sans banc, sur des données qu'on n'aurait pas pu
+#    rejouer avant.
+#
+# 2. `hold_ms` — cf. `events.py`, en-tête de `HOLD_MS`. Fenêtre
+#    ADAPTATIVE au pas réel de la série, plutôt qu'un seuil fixe.
+#
+# 3. PARTIAL POOLING ET QUORUM. Le §16.3 dit « en remplacement
+#    progressif du quorum sec ». Décision : le pooling AMÉLIORE
+#    l'estimation, le quorum reste le seuil d'AFFICHAGE, et le poids
+#    emprunté est publié à côté de chaque chiffre. Un remplacement
+#    franc ferait apparaître des chiffres partout, y compris là où
+#    presque tout est emprunté au parent — c'est-à-dire ouvrirait la
+#    vanne au moment précis où on affirme la refermer.
+
+#: Fenêtre du chemin RÉGIME, en jours d'archive rejoués. Le chemin
+#: régime ne lit plus les accumulateurs pour son erreur typique : trois
+#: sommes (`sum_w`, `sum_wx`, `sum_wx2`) savent faire une moyenne et une
+#: variance, jamais un décile. Elles restent la mémoire longue du
+#: CARACTÈRE (§15.4) ; la DISTRIBUTION se rejoue depuis les paires
+#: brutes.
+REGIME_REPLAY_DAYS = 30
+
+#: Où le rejeu range ses journées déjà recalculées, sous `--out`. Une
+#: journée rejouée ne change plus jamais : l'archive est immuable et la
+#: formule est versionnée par `REPLAY_FORMULA`. Sans ce cache, rejouer
+#: 30 jours chaque nuit multiplierait la durée du run par 30.
+REPLAY_SUBDIR = "replay"
+
+#: ⚠️ À INCRÉMENTER À CHAQUE FOIS QUE `daily_rows` CHANGE DE RÉSULTAT.
+#: Un cache qui survit à un changement de formule sert des chiffres
+#: calculés par du code qui n'existe plus, sans que rien ne le signale —
+#: le même piège que le `dist_old_*` servi par localhost le 08/08.
+#: 2 — lot G4 : `daily_rows` porte désormais `mse_clim` à côté de
+#:     `mse_persist`. Les caches de la formule 1 sont donc ignorés.
+REPLAY_FORMULA = 2
 
 
 class Abort(Exception):
@@ -175,6 +227,43 @@ class Supabase:
             if len(page) < self.PAGE:
                 return out
             offset += self.PAGE
+
+    _schema: dict | None = None
+
+    def columns(self, table: str) -> set[str] | None:
+        """Les colonnes RÉELLES d'une table, lues une fois par run.
+
+        ⚠️ Ce n'est pas de la curiosité : le lot G ajoute des colonnes à
+        `model_score_zone` (`pooled_err_kmh`, `borrowed_weight`, …) et le
+        SQL ne s'exécute JAMAIS depuis ici — c'est Yann qui le lance,
+        quand il le lance. Entre le déploiement du code et l'exécution du
+        SQL, un run qui enverrait les nouvelles colonnes recevrait un
+        `PGRST204 — column … does not exist` et la nuit serait perdue.
+
+        On lit donc le schéma que PostgREST publie à sa racine et on
+        n'envoie que ce que la table sait recevoir. Le jour où le SQL est
+        passé, les colonnes apparaissent d'elles-mêmes : aucun drapeau à
+        basculer, donc aucun drapeau à oublier.
+
+        Rend `None` si le schéma n'est pas lisible — l'appelant se
+        rabat alors sur le jeu de colonnes historique.
+        """
+        if self.dry_run:
+            return None
+        if Supabase._schema is None:
+            try:
+                req = self._req("", "GET", None, {"Accept": "application/openapi+json"})
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    Supabase._schema = json.loads(r.read().decode("utf-8"))
+            except Exception as exc:                      # noqa: BLE001
+                print(f"  ⚠️ schéma PostgREST illisible ({exc}) : on s'en tient "
+                      f"aux colonnes historiques.", file=sys.stderr)
+                Supabase._schema = {}
+        defs = (Supabase._schema or {}).get("definitions", {})
+        d = defs.get(table)
+        if not d:
+            return None
+        return set((d.get("properties") or {}).keys())
 
     def upsert(self, table: str, rows: list[dict], on_conflict: str,
                chunk: int = 500) -> int:
@@ -393,7 +482,7 @@ def day_regime(fcst_ref: dict | None, obs: list[S.ObsSample],
 
 def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                obs_day: list[dict], obs_prev: list[dict],
-               utc_offset_s: int):
+               utc_offset_s: int, clim: dict | None = None):
     """Rend (lignes model_verif_daily, détail par tranche de vent).
 
     Le détail par tranche ne va PAS en base : il alimente les
@@ -461,6 +550,17 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
             emitted = int(emitted_dt.timestamp()) * 1000
             lead_exact = sum(t - emitted for t in (p.t for p in pairs)) / len(pairs) / 3_600_000
 
+            # ── seconde référence : la climatologie horaire (lot G4) ──
+            # ⚠️ `mse_clim` sort À CÔTÉ de `mse_persist`, jamais à sa
+            # place. Les deux répondent à des questions différentes, et
+            # remplacer l'une par l'autre reviendrait à changer la
+            # question sans changer le nom de la réponse.
+            mse_c = None
+            if clim:
+                c = clim.get(key)
+                if c:
+                    _, _, _, mse_c = INF.skill_vs_climatology(pairs, c, utc_offset_s)
+
             rows.append({
                 "day": day.strftime("%Y-%m-%d"),
                 "source": row["source"], "station_id": row["station_id"],
@@ -472,6 +572,7 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 "err_vec_rms": _r(err.rms), "err_vec_med": _r(err.med),
                 "err_vec_p90": _r(p90),
                 "mse_model": _r(mse_m), "mse_persist": _r(mse_r),
+                "mse_clim": _r(mse_c),
                 "bias_ratio": _r(bias.speed_ratio),
                 "bias_dir_deg": _r(bias.dir_offset),
                 "vector_ratio": _r(err.vector_ratio),
@@ -505,6 +606,196 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
 
 def _r(x, nd: int = 4):
     return None if x is None or not S._finite(x) else round(float(x), nd)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  REJEU DE L'ARCHIVE (lot G1)
+# ══════════════════════════════════════════════════════════════════
+#
+# ⚠️ POURQUOI REJOUER PLUTÔT QUE LIRE LES AGRÉGATS.
+#
+# Le chemin régime posait `worst_decile_kmh = None`, `ci_low = None`,
+# `ci_high = None`, `skill = None` — quatre colonnes vides sur
+# précisément les lignes qui intéressent un pilote. La cause était
+# structurelle : l'accumulateur de `model_character` porte TROIS SOMMES
+# (`sum_w`, `sum_wx`, `sum_wx2`). Trois sommes savent faire une moyenne
+# et une variance. Elles ne savent pas faire un décile, et aucune
+# torsion ne leur en fera produire un — on obtiendrait un nombre qui
+# ressemble à un décile sans en être un, ce qui est pire que rien.
+#
+# Un quantile demande la DISTRIBUTION. Elle existe : dans l'archive R2,
+# qui garde les paires brutes et ne se purge jamais. On la rejoue.
+#
+# ⚠️ ET POURQUOI PAS `model_verif_daily`. Elle porte bien les mêmes
+# balise-jours, mais avec 30 jours de rétention et sans garantie
+# d'exister pour les journées antérieures au dernier correctif. Le
+# rejeu depuis l'archive est la seule source qui remonte aussi loin que
+# l'archive elle-même, et la seule qui reste juste quand la formule
+# change (il suffit d'incrémenter `REPLAY_FORMULA`).
+
+def replay_path(root: pathlib.Path, day: datetime) -> pathlib.Path:
+    return root / REPLAY_SUBDIR / f"replay_{day:%Y-%m-%d}.json.gz"
+
+
+def replay_write(root: pathlib.Path, day: datetime, rows: list[dict]) -> None:
+    """Range une journée déjà calculée à côté de l'archive.
+
+    Appelé avec le résultat de `daily_rows` du run courant : la journée
+    notée ce soir est donc mise en cache SANS aucun calcul
+    supplémentaire. Le rejeu n'a plus qu'à combler les trous du passé,
+    ce qu'il ne fait qu'une fois par journée manquante.
+    """
+    try:
+        p = replay_path(root, day)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        body = json.dumps({"formula": REPLAY_FORMULA,
+                           "day": day.strftime("%Y-%m-%d"),
+                           "rows": rows}, separators=(",", ":")).encode("utf-8")
+        p.write_bytes(gzip.compress(body))
+    except OSError as exc:
+        print(f"  ⚠️ cache de rejeu non écrit pour {day:%Y-%m-%d} : {exc}",
+              file=sys.stderr)
+
+
+def replay_read(root: pathlib.Path, day: datetime) -> list[dict] | None:
+    p = replay_path(root, day)
+    if not p.exists():
+        return None
+    try:
+        d = json.loads(gzip.decompress(p.read_bytes()).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    # Un cache produit par une autre formule est IGNORÉ, pas réparé :
+    # mélanger deux formules dans une même fenêtre donnerait une
+    # distribution qui n'est celle d'aucune des deux.
+    if d.get("formula") != REPLAY_FORMULA:
+        return None
+    return d.get("rows") or []
+
+
+def replay_day(root: pathlib.Path, day: datetime, storage,
+               utc_offset_s: int) -> list[dict]:
+    """Les balise-jours d'UNE journée : du cache, ou recalculés."""
+    cached = replay_read(root, day)
+    if cached is not None:
+        return cached
+    snapshots = {off: read_ndjson(root, fcst_key(day - timedelta(days=off)), storage)
+                 for off in LEAD_BY_OFFSET}
+    obs_day = read_ndjson(root, obs_key(day), storage)
+    if not obs_day:
+        replay_write(root, day, [])
+        return []
+    obs_prev = read_ndjson(root, obs_key(day - timedelta(days=1)), storage)
+    rows, _ = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s)
+    replay_write(root, day, rows)
+    return rows
+
+
+def replay_window(root: pathlib.Path, day: datetime, storage,
+                  utc_offset_s: int, n_days: int = REGIME_REPLAY_DAYS,
+                  budget_new_days: int | None = None):
+    """La fenêtre rejouée, la plus récente d'abord.
+
+    Rend `(lignes, bilan)`. Chaque ligne porte en plus `unit`
+    (« source:station_id »), la clé d'appariement du test du G2.
+
+    ⚠️ `budget_new_days` BORNE LE TRAVAIL D'UNE NUIT. Rejouer trente
+    journées jamais vues d'un coup peut multiplier la durée du run par
+    trente, et un run qui déborde son timer est un run qui ne finit
+    pas. On en rattrape donc quelques-unes par nuit, et — piège n°7 du
+    lot G — LE BILAN LE DIT : une fenêtre tronquée en silence se lirait
+    comme une fenêtre complète.
+    """
+    rows: list[dict] = []
+    vus, rejoues, manquants, ignores = 0, 0, 0, 0
+    for k in range(n_days):
+        d = day - timedelta(days=k)
+        cached = replay_read(root, d)
+        if cached is None:
+            if budget_new_days is not None and rejoues >= budget_new_days:
+                ignores += 1
+                continue
+            cached = replay_day(root, d, storage, utc_offset_s)
+            rejoues += 1
+        if not cached:
+            manquants += 1
+            continue
+        vus += 1
+        for r in cached:
+            r = dict(r)
+            r["unit"] = f"{r['source']}:{r['station_id']}"
+            rows.append(r)
+    bilan = (f"{len(rows)} balise-jours sur {vus} journées "
+             f"({rejoues} rejouée(s) cette nuit, {manquants} vide(s)"
+             + (f", {ignores} REPORTÉE(S) faute de budget" if ignores else "")
+             + ")")
+    return rows, bilan
+
+
+# ══════════════════════════════════════════════════════════════════
+#  CLIMATOLOGIE HORAIRE (lot G4) — la seconde référence
+# ══════════════════════════════════════════════════════════════════
+
+CLIM_SUBDIR = "clim"
+
+#: Jours d'observations lus pour établir « le vent habituel ici à cette
+#: heure-ci ». Plus long que la fenêtre de score : une climatologie qui
+#: bouge chaque nuit n'est pas une climatologie.
+CLIM_DAYS = 30
+
+#: Journées distinctes minimales pour qu'une heure soit climatologisée.
+CLIM_MIN_DAYS = 5
+
+
+def climatology_by_station(root: pathlib.Path, day: datetime, storage,
+                           utc_offset_s: int, n_days: int = CLIM_DAYS):
+    """Le vent HABITUEL de chaque balise, heure locale par heure locale.
+
+    ⚠️ POURQUOI UNE SECONDE RÉFÉRENCE. Le skill se mesure aujourd'hui
+    contre la persistance — « l'observation de la même heure la veille ».
+    C'est une prévision naïve redoutable sur un site de vol, et c'est la
+    bonne référence pour la question « le modèle apporte-t-il quelque
+    chose par rapport à hier ». Mais ce n'est pas la question que se pose
+    un pilote qui consulte trois jours à l'avance : la sienne est « le
+    modèle sait-il quelque chose que je ne sais pas déjà ». Battre la
+    climatologie et battre la persistance sont deux exploits différents,
+    et un modèle peut réussir l'un en échouant l'autre — typiquement
+    quand la veille était atypique.
+
+    ⚠️ Rend `{}` plutôt qu'une climatologie fabriquée quand l'archive est
+    trop courte : au 09/08 elle porte deux jours, et « le vent habituel »
+    tiré de deux journées serait le vent de ces deux journées-là.
+    """
+    cache = root / CLIM_SUBDIR / f"clim_{day:%Y-%m-%d}_{n_days}.json.gz"
+    if cache.exists():
+        try:
+            d = json.loads(gzip.decompress(cache.read_bytes()).decode("utf-8"))
+            return {u: {int(h): tuple(v) for h, v in hs.items()}
+                    for u, hs in d.get("clim", {}).items()}
+        except (OSError, ValueError):
+            pass
+
+    obs_by_unit_day: dict[str, dict[str, list]] = defaultdict(dict)
+    for k in range(n_days):
+        d = day - timedelta(days=k)
+        for row in read_ndjson(root, obs_key(d), storage):
+            unit = f"{row['source']}:{row['station_id']}"
+            obs_by_unit_day[unit][d.strftime("%Y-%m-%d")] = to_obs_samples(row)
+
+    out: dict[str, dict[int, tuple]] = {}
+    for unit, by_day in obs_by_unit_day.items():
+        clim = INF.hourly_climatology(by_day, utc_offset_s, CLIM_MIN_DAYS)
+        if clim:
+            out[unit] = clim
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(gzip.compress(json.dumps(
+            {"clim": {u: {str(h): list(v) for h, v in hs.items()}
+                      for u, hs in out.items()}},
+            separators=(",", ":")).encode("utf-8")))
+    except OSError:
+        pass
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -876,6 +1167,79 @@ def _series_of(row: dict, day_start_ms: int, aloft: bool = False):
     return out
 
 
+def median_step_ms(series) -> int | None:
+    """Le pas RÉEL d'une série, en millisecondes. Médiane des écarts.
+
+    Médiane et pas moyenne : un trou de trois heures au milieu d'une
+    journée à 4 min de cadence tirerait la moyenne à 10 min et ferait
+    croire à une série grossière là où il n'y a qu'une coupure.
+    """
+    ts = sorted({s.t for s in series})
+    if len(ts) < 3:
+        return None
+    return int(S.median([ts[i + 1] - ts[i] for i in range(len(ts) - 1)]) or 0) or None
+
+
+def adaptive_hold_ms(series, base: int = EV.DEFAULT_DETECT.hold_ms) -> int:
+    """La fenêtre de maintien, ajustée au pas réel de la série.
+
+    ═══ L'ARBITRAGE, TRANCHÉ LE 09/08/2026 ═══
+
+    Le lot F avait laissé `hold_ms` ouvert et le problème est
+    structurel : la détection de bascule compare la fenêtre `hold_ms`
+    AVANT à la fenêtre `hold_ms` APRÈS. À 45 min sur une série HORAIRE,
+    les deux fenêtres ne peuvent pas contenir deux valeurs distinctes —
+    le détecteur est aveugle par construction, pas par réglage.
+
+    Mesuré sur les mêmes balises réelles (pleine cadence ~4 min /
+    observations dégradées à 1 h) :
+
+        45 min → 34 / 0      ← l'état actuel : aveugle à l'heure
+        60 min → 37 / 31     ← le minimum qui marche
+        75 min → 42 / 51     ← la série DÉGRADÉE en trouve plus que la
+                               pleine cadence : sur-détection
+        90 min → 42 / 22
+       120 min → 41 / 16
+
+    Trois voies étaient possibles. 75 min donne le plus de détections
+    mais la série dégradée y trouve PLUS d'événements que la série
+    complète, ce qui ne peut pas être vrai : c'est la signature d'une
+    fenêtre si large qu'elle fabrique des bascules à partir du bruit de
+    rééchantillonnage. 60 min fixe marche partout, mais change le
+    comportement des balises denses, qui sont les seules sur lesquelles
+    quoi que ce soit ait été calibré — on paierait un recul certain sur
+    les bonnes données pour un gain incertain sur les mauvaises.
+
+    D'où la fenêtre ADAPTATIVE : `max(45 min, 1,5 × pas réel)`.
+
+      · Sur une balise à 4 min de cadence : 1,5 × 4 min = 6 min < 45 min
+        → 45 min, soit EXACTEMENT le comportement d'aujourd'hui. Aucun
+        recul là où il y avait de la calibration.
+      · Sur une série horaire : 1,5 × 60 = 90 min → deux pas de part et
+        d'autre, donc une comparaison qui a un sens.
+
+    Le facteur 1,5 est le plus petit qui garantisse au moins un pas
+    entier de chaque côté après arrondi. Ce n'est pas un réglage de
+    confort : c'est la condition minimale pour que les deux fenêtres
+    comparées puissent contenir des valeurs différentes.
+
+    ⚠️ CE CHOIX VIT ICI, PAS DANS `events.py`. `events.py` est le
+    portage de `windEvents.ts` et un banc de parité les compare terme à
+    terme ; y ajouter une règle sans jumeau TS casserait la garantie que
+    ce banc existe pour tenir. Le choix du paramètre appartient à
+    l'appelant, qui est le seul à connaître la cadence de la série.
+
+    ⚠️ ET `reversal` N'EST TOUJOURS PAS PUBLIÉ. Cette fenêtre rend la
+    détection possible sur les séries horaires ; elle ne prouve pas que
+    ce qu'on détecte est juste. La calibration (`EVENTS_CALIBRATED`)
+    reste à faire, et `EVENT_PUBLISHABLE_TYPES` reste inchangé.
+    """
+    step = median_step_ms(series)
+    if step is None:
+        return base
+    return max(base, int(round(1.5 * step)))
+
+
 def station_events(series, crest, utc_offset_s: int) -> list[EV.WindEvent]:
     """Tous les événements d'UNE série : E1-E3, plus `breeze_yield`.
 
@@ -891,7 +1255,16 @@ def station_events(series, crest, utc_offset_s: int) -> list[EV.WindEvent]:
     suit est une mise en forme pour passer par le même appariement, pas
     une fusion des deux détecteurs.
     """
-    out = EV.detect_all(series, EVENT_ONSET_KMH)
+    # ⚠️ LA MÊME FENÊTRE DES DEUX CÔTÉS. `adaptive_hold_ms` est appelé
+    # sur la série qu'on détecte, observations comme prévisions — et les
+    # deux n'ont PAS la même cadence (4 min contre 60). C'est voulu : ce
+    # qu'on ajuste, c'est la résolution de l'instrument à la finesse de
+    # sa matière, pas un seuil de sévérité. Imposer la fenêtre de
+    # l'observation à la prévision rendrait le modèle aveugle ; imposer
+    # celle de la prévision à l'observation lui ferait rater ce qu'elle
+    # a vraiment vu.
+    p = replace(EV.DEFAULT_DETECT, hold_ms=adaptive_hold_ms(series))
+    out = EV.detect_all(series, EVENT_ONSET_KMH, p)
     if crest:
         out = out + EV.conflicts_as_events(
             EV.detect_conflicts(series, crest,
@@ -1190,154 +1563,413 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict],
 #  SCORES DE ZONE
 # ══════════════════════════════════════════════════════════════════
 
-def rolling_scores(daily: list[dict], zone_of: dict[str, dict], as_of: datetime):
-    """Le score « 15 jours glissants » du §8, depuis `model_verif_daily`.
+def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
+               window_kind: str, regime: str, min_stations: int,
+               level_of: dict[str, str] | None = None,
+               with_ci: bool = True):
+    """Le corps commun des deux chemins de score.
 
-    ⚠️ Le bootstrap rééchantillonne des BALISES-JOURS, pas des heures :
-    deux heures consécutives de la même balise ne sont pas
-    indépendantes, et rééchantillonner à l'heure produirait un
-    intervalle beaucoup trop étroit — donc des gagnants qui n'en sont
-    pas (§8.4).
+    ⚠️ UN SEUL CORPS POUR `rolling15` ET POUR `regime`, et c'est la
+    correction de fond du lot G. Les deux chemins étaient deux codes
+    différents : l'un lisait des balise-jours et savait donc calculer un
+    décile et un intervalle, l'autre lisait des accumulateurs et ne le
+    pouvait pas. D'où quatre colonnes nulles sur 10 250 lignes — pas un
+    oubli d'écriture, une impossibilité arithmétique.
+
+    Maintenant les deux lisent la même matière : des BALISE-JOURS. Le
+    chemin régime ne diffère plus que par son filtre (les journées de CE
+    régime, quelle que soit leur ancienneté) et par sa fenêtre.
+
+    `units` : lignes de balise-jour portant `unit`, `day`, `model`,
+    `lead_h`, `err_vec_med`, et facultativement `mse_model`/`mse_persist`.
     """
-    # (zone, model, lead) → {err: [...], mse_m: [...], mse_r: [...], st: set}
     acc: dict[tuple, dict] = defaultdict(
-        lambda: {"err": [], "mse_m": [], "mse_r": [], "st": set(), "n_hours": 0})
-    for d in daily:
-        z = zone_of.get(f"{d['source']}:{d['station_id']}")
+        lambda: {"by_day": defaultdict(list), "st": set(), "rows": [],
+                 "mse_m": [], "mse_r": [], "mse_c": [], "n_hours": 0})
+    for d in units:
+        z = zone_of.get(d["unit"])
         if z is None or z.get("basin_uncertain"):
             continue
         if d.get("err_vec_med") is None:
             continue
         for zid, level in fallback_chain(z):
             b = acc[(zid, d["model"], d["lead_h"], level)]
-            b["err"].append(d["err_vec_med"])
+            b["by_day"][d["day"]].append(d["err_vec_med"])
+            b["rows"].append(d)
             if d.get("mse_model") is not None and d.get("mse_persist") is not None:
                 b["mse_m"].append(d["mse_model"])
                 b["mse_r"].append(d["mse_persist"])
-            b["st"].add(f"{d['source']}:{d['station_id']}")
+            if d.get("mse_model") is not None and d.get("mse_clim") is not None:
+                b["mse_c"].append((d["mse_model"], d["mse_clim"]))
+            b["st"].add(d["unit"])
             b["n_hours"] += d.get("n_hours") or 0
 
     rows: list[dict] = []
     # Le classement se décide zone par zone et échéance par échéance :
     # comparer deux modèles sur des zones différentes n'a aucun sens.
     by_case: dict[tuple, list[dict]] = defaultdict(list)
+    rows_by_case_model: dict[tuple, dict[str, list[dict]]] = defaultdict(dict)
     for (zid, model, lead, level), b in acc.items():
-        if len(b["st"]) < MIN_STATIONS_ZONE:
+        if len(b["st"]) < min_stations:
             continue
-        med, lo, hi = S.bootstrap_ci(b["err"])
+        # ⚠️ `level_of` (= `model_zone.kind`, lu en base) prime sur
+        # l'échelon déduit de la chaîne quand il est fourni : c'est la
+        # leçon du reniflage de `zone_id` corrigé le 08/08. Une zone
+        # absente de `model_zone` est sautée plutôt que publiée sous un
+        # échelon inventé — un score anonyme sur sa précision ment.
+        if level_of is not None:
+            level = level_of.get(zid)
+            if level is None:
+                print(f"  ⚠️ zone inconnue de model_zone, score sauté : {zid}",
+                      file=sys.stderr)
+                continue
+        values = [v for vs in b["by_day"].values() for v in vs]
+        # ⚠️ `with_ci=False` SAUTE LE BOOTSTRAP UNAIRE, et seulement lui.
+        # Mesuré le 09/08 à la taille réelle (647 balises × 10 modèles ×
+        # 30 jours = 194 100 balise-jours) : le chemin régime complet
+        # coûte 85,6 s, dont l'essentiel part dans ce rééchantillonnage —
+        # 500 tirages par ligne, sur 5 360 lignes. Le rapport de
+        # stabilité (G5) n'a besoin QUE des rangs, et les rangs viennent
+        # du test APPARIÉ, pas de cet intervalle-là. Le calculer deux
+        # fois de plus pour le jeter serait doubler la durée du run pour
+        # rien.
+        ci = (INF.block_median_ci(b["by_day"]) if with_ci
+              else INF.DiffCI(S.median(values), None, None, len(values),
+                              len(b["by_day"]), None, "not_computed"))
         mse_m = S.median(b["mse_m"])
         mse_r = S.median(b["mse_r"])
-        ordered = sorted(b["err"])
+        # ⚠️ La climatologie s'apparie AVANT de se médianiser : comparer
+        # la médiane des MSE du modèle à celle d'une climatologie
+        # calculée sur une population de balise-jours différente
+        # comparerait deux échantillons, pas deux prévisions.
+        mse_cm = S.median([m for m, _ in b["mse_c"]])
+        mse_cc = S.median([c for _, c in b["mse_c"]])
+        ordered = sorted(values)
         row = {
             "as_of": as_of.strftime("%Y-%m-%d"), "zone_id": zid, "model": model,
-            "lead_h": lead, "window_kind": "rolling15", "regime": "all",
+            "lead_h": lead, "window_kind": window_kind, "regime": regime,
             "agg_level": level, "n_stations": len(b["st"]),
-            "n_hours": b["n_hours"], "occurrences": len(b["err"]),
-            "typical_err_kmh": _r(med),
+            "n_hours": b["n_hours"], "occurrences": len(values),
+            "typical_err_kmh": _r(ci.median),
             "worst_decile_kmh": _r(ordered[min(len(ordered) - 1,
                                                math.floor(len(ordered) * 0.9))])
             if len(ordered) >= 5 else None,
             "beats_persist": None if mse_m is None or mse_r is None else mse_m < mse_r,
             "skill": None if not mse_r else _r(1 - mse_m / mse_r),
-            "ci_low": _r(lo), "ci_high": _r(hi),
+            "beats_clim": None if mse_cm is None or mse_cc is None else mse_cm < mse_cc,
+            "skill_clim": None if not mse_cc else _r(1 - mse_cm / mse_cc),
+            "ci_low": _r(ci.ci_low), "ci_high": _r(ci.ci_high),
             "rank": None, "rank_reason": None,
+            # ── colonnes du lot G ──
+            # `err_sd` : dispersion des balise-jours de la case. Publiée
+            # parce qu'elle est lisible en soi (« ce modèle est régulier
+            # ici »), et parce que le rétrécissement du G3 en a besoin —
+            # la déduire de la demi-largeur de l'IC marcherait quand
+            # l'IC existe et donnerait `None` quand il manque,
+            # c'est-à-dire précisément sur les cases maigres, celles qui
+            # doivent emprunter le plus. Un estimateur qui se tait là où
+            # il est le plus utile n'est pas un estimateur.
+            "err_sd": _r(math.sqrt(INF.sample_variance(values))
+                         if INF.sample_variance(values) is not None else None),
+            "n_days": ci.n_days,
+            "ci_kind": "block_day" if ci.reason == "ok" else None,
+            "ci_reason": ci.reason,
+            "block_days": ci.block_days,
+            "pooled_err_kmh": None, "borrowed_weight": None,
         }
         rows.append(row)
         by_case[(zid, lead, level)].append(row)
+        rows_by_case_model[(zid, lead, level)][model] = b["rows"]
 
-    _apply_rank(by_case)
+    _apply_rank(by_case, rows_by_case_model)
     return rows
 
 
-def regime_scores(accs: list[dict], as_of: datetime, kind_of: dict[str, str]):
-    """Le score par régime du §16.1, depuis les accumulateurs.
+def rolling_scores(daily: list[dict], zone_of: dict[str, dict], as_of: datetime):
+    """Le score « 15 jours glissants » du §8, depuis `model_verif_daily`.
 
-    ⚠️ CE N'EST PAS UNE FENÊTRE GLISSANTE, et c'est tout l'intérêt.
-    « Les 15 derniers jours » mélange un flux de nord, deux jours de
-    marin et trois jours de brise — la moyenne qui en sort n'est vraie
-    aucun de ces jours. Ici on lit « les N dernières fois qu'on a eu CE
-    régime ici », quelle que soit leur ancienneté.
-
-    ⚠️ `kind_of` EST OBLIGATOIRE — c'est `model_zone` elle-même,
-    lue en base, et non une déduction. Cette fonction devinait
-    auparavant l'échelon en RENIFLANT la forme du `zone_id` (`*:` au
-    début, `:*` à la fin, sinon « bassin »). Deux conséquences, toutes
-    deux fausses : `alpes-nord:valley` était publié
-    `agg_level = 'basin_landform'` alors que sa ligne `model_zone` dit
-    `massif_landform`, et l'échelon 2 était donc INATTEIGNABLE dans
-    cette colonne. Le SQL de step35 prévient explicitement contre cette
-    dépendance au format de chaîne : `kind` y est redondant avec
-    `zone_id` pour qu'on n'ait jamais à renifler l'un pour retrouver
-    l'autre. Passer la table rend l'égalité `agg_level == kind` vraie
-    par construction plutôt que par coïncidence.
+    ⚠️ Le rééchantillonnage se fait par BLOCS DE JOURS CONSÉCUTIFS
+    (lot G), et plus par balise-jour indépendante. La note précédente
+    disait déjà qu'il ne fallait pas rééchantillonner à l'heure parce
+    que deux heures consécutives ne sont pas indépendantes. C'était vrai
+    et insuffisant : deux JOURNÉES consécutives ne le sont pas non plus,
+    une situation synoptique durant environ trois jours. Un tirage
+    i.i.d. sur les balise-jours fabriquait donc des intervalles trop
+    étroits — mesuré sur données simulées à corrélation connue : 42 % de
+    couverture réelle pour un intervalle annoncé à 95 % (cf.
+    `test_inference.py`, section 4). C'est une fabrique de faux
+    gagnants, pas une imprécision.
     """
-    by_key: dict[tuple, dict] = defaultdict(dict)
-    for a in accs:
-        if a["band"] != "all" or a["regime"] == "all":
-            continue
-        by_key[(a["zone_id"], a["model"], a["lead_h"], a["regime"])][a["metric"]] = a
+    units = []
+    for d in daily:
+        r = dict(d)
+        r["unit"] = f"{d['source']}:{d['station_id']}"
+        units.append(r)
+    return _case_rows(units, zone_of, as_of, "rolling15", "all",
+                      MIN_STATIONS_ZONE)
 
+
+def regime_scores(units: list[dict], as_of: datetime,
+                  zone_of: dict[str, dict], kind_of: dict[str, str],
+                  min_stations: int = 1):
+    """Le score par régime du §16.1 — désormais depuis les BALISE-JOURS
+    rejoués, et non plus depuis les accumulateurs.
+
+    ⚠️ CE N'EST TOUJOURS PAS UNE FENÊTRE GLISSANTE, et c'est tout
+    l'intérêt. « Les 15 derniers jours » mélange un flux de nord, deux
+    jours de marin et trois jours de brise — la moyenne qui en sort
+    n'est vraie aucun de ces jours. Ici on lit « les N dernières fois
+    qu'on a eu CE régime ici », quelle que soit leur ancienneté ; la
+    seule limite est la profondeur de l'archive rejouée.
+
+    ⚠️ CE QUI A CHANGÉ AU LOT G, ET POURQUOI. Cette fonction lisait
+    `model_character`, dont l'accumulateur ne porte que trois sommes.
+    Elle publiait donc `worst_decile_kmh = None`, `ci_low = None`,
+    `ci_high = None` et `skill = None` sur TOUTES ses lignes : 10 250
+    sur 10 250, mesuré le 09/08. Ce n'était pas réparable dans
+    l'accumulateur — un quantile demande la distribution, trois sommes
+    ne la portent pas.
+
+    Les accumulateurs ne disparaissent pas pour autant : ils restent la
+    mémoire longue du CARACTÈRE (§15.4, « ce modèle sous-estime le vent
+    fort dans cette vallée »), qui est une moyenne pondérée et qui, elle,
+    tient parfaitement dans trois sommes. Ce sont deux questions
+    différentes, et c'est de les avoir confondues que venait le trou.
+
+    ⚠️ `min_stations` VAUT 1 ICI, à dessein. Le quorum du chemin régime
+    est un nombre d'OCCURRENCES (`REGIME_MIN_OCCURRENCES`), appliqué au
+    classement, pas un nombre de balises : une case fine peut n'avoir
+    qu'une balise et beaucoup de journées de ce régime.
+    """
     rows: list[dict] = []
-    by_case: dict[tuple, list[dict]] = defaultdict(list)
-    for (zid, model, lead, regime), metrics in by_key.items():
-        err = metrics.get("errKmh")
-        if err is None or err["sum_w"] <= 0:
-            continue
-        mm, mr = metrics.get("mseModel"), metrics.get("msePersist")
-        beats = None
-        if mm and mr and mm["sum_w"] > 0 and mr["sum_w"] > 0:
-            beats = (mm["sum_wx"] / mm["sum_w"]) < (mr["sum_wx"] / mr["sum_w"])
-        # ⚠️ Un `zone_id` absent de `model_zone` est IMPOSSIBLE :
-        # `model_character.zone_id` porte la clé étrangère. Si ça
-        # arrivait quand même, mieux vaut sauter la ligne que publier un
-        # échelon inventé — un score anonyme sur sa précision ment.
-        level = kind_of.get(zid)
-        if level is None:
-            print(f"  ⚠️ zone inconnue de model_zone, score sauté : {zid}",
-                  file=sys.stderr)
-            continue
-        row = {
-            "as_of": as_of.strftime("%Y-%m-%d"), "zone_id": zid, "model": model,
-            "lead_h": lead, "window_kind": "regime", "regime": regime,
-            "agg_level": level, "n_stations": 0, "n_hours": 0,
-            "occurrences": err["days"],
-            "typical_err_kmh": _r(err["sum_wx"] / err["sum_w"]),
-            "worst_decile_kmh": None, "beats_persist": beats,
-            "skill": None, "ci_low": None, "ci_high": None,
-            "rank": None, "rank_reason": None,
-        }
-        rows.append(row)
-        by_case[(zid, lead, regime)].append(row)
-
-    _apply_rank(by_case)
+    by_regime: dict[str, list[dict]] = defaultdict(list)
+    for u in units:
+        reg = u.get("regime")
+        # « unknown » n'est pas un régime : une journée qu'on n'a pas su
+        # classer ne doit pas être versée dans une case, surtout pas dans
+        # la plus peuplée.
+        if reg and reg != "unknown" and reg in S.REGIMES:
+            by_regime[reg].append(u)
+    for reg, us in sorted(by_regime.items()):
+        rows += _case_rows(us, zone_of, as_of, "regime", reg,
+                           min_stations, level_of=kind_of)
     return rows
 
 
-def _apply_rank(by_case: dict[tuple, list[dict]]):
-    """Classe, ou refuse de classer.
+def _apply_rank(by_case: dict[tuple, list[dict]],
+                rows_by_case_model: dict[tuple, dict[str, list[dict]]]):
+    """Classe, ou refuse de classer — par TEST APPARIÉ (lot G2).
 
     ⚠️ `rank` NUL SUR TOUTES LES LIGNES est un résultat de première
     classe, et ce sera le cas le plus fréquent. Une colonne qui force un
     classement fabriquerait un gagnant là où il n'y en a pas — c'est le
     reproche fait au 🏆 du score actuel.
+
+    ⚠️ UN SEUL MÉCANISME, PAS DEUX. Le verdict venait auparavant d'un
+    écart relatif de 15 % sur l'erreur médiane, avec deux intervalles
+    unaires publiés à côté — et un lecteur qui compare deux intervalles
+    unaires croit faire un test sans en faire un. Le verdict vient
+    maintenant de l'intervalle de la DIFFÉRENCE APPARIÉE, et l'écart
+    relatif reste ce qu'il aurait toujours dû être : la question
+    PRATIQUE (« est-ce que ça change une décision de vol »), distincte
+    de la question statistique (« est-ce réel »). Il faut les deux.
+
+    ⚠️ ET PAS DE REPLI. Quand la fenêtre est trop courte pour le test,
+    on ne retombe pas sur l'écart relatif seul : ce serait remettre en
+    service le mécanisme qu'on remplace, et publier sous le même nom
+    deux verdicts de nature différente. `rank_reason` vaut alors
+    `window_too_short`, et c'est la réponse honnête tant que l'archive
+    ne porte que deux jours.
     """
-    for rows in by_case.values():
-        key, reason = S.rank_by_regime(
-            [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],
-              "occurrences": r["occurrences"]} for r in rows])
+    for key, rows in by_case.items():
+        cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],
+                  "occurrences": r["occurrences"]} for r in rows]
+        ranks, reason, verdict = INF.rank_models(
+            cases, rows_by_case_model.get(key, {}))
         for r in rows:
             r["rank_reason"] = reason
-        if key is None:
-            continue
-        ordered = sorted((r for r in rows if r["typical_err_kmh"] is not None),
-                         key=lambda r: r["typical_err_kmh"])
-        for i, r in enumerate(ordered, 1):
-            r["rank"] = i
+            r["rank"] = ranks.get(r["model"])
 
+
+# ══════════════════════════════════════════════════════════════════
+#  RÉTRÉCISSEMENT VERS LE PARENT (lot G3)
+# ══════════════════════════════════════════════════════════════════
+
+def apply_pooling(rows: list[dict], zones: list[dict]) -> int:
+    """Rétrécit chaque case fine vers son parent, et publie l'emprunt.
+
+    Le parent d'une zone est l'échelon SUIVANT de sa chaîne de repli —
+    la même chaîne que celle qui sert déjà à agréger, donc aucune
+    hiérarchie nouvelle à maintenir.
+
+    ⚠️ LE QUORUM RESTE LE SEUIL D'AFFICHAGE (arbitrage du 09/08). Le
+    pooling améliore l'ESTIMATION ; il ne fait apparaître aucune ligne
+    qui n'existait pas. Le §16.3 parlait d'un « remplacement progressif
+    du quorum sec » : un remplacement franc ferait apparaître des
+    chiffres partout, y compris là où presque tout est emprunté au
+    massif, c'est-à-dire ouvrirait la vanne au moment précis où l'on
+    affirme la refermer.
+
+    ⚠️ `borrowed_weight` EST PUBLIÉ À CÔTÉ DE CHAQUE CHIFFRE, et
+    `typical_err_kmh` n'est PAS écrasé. Un score à 80 % emprunté au
+    massif n'est pas un score de vallée : le remplacer en silence serait
+    la même faute que le débiaisage silencieux du lot D. Le lecteur voit
+    les deux et sait lequel il regarde.
+    """
+    parent_of: dict[str, str] = {}
+    for z in zones:
+        chain = fallback_chain(z)
+        for i in range(len(chain) - 1):
+            parent_of.setdefault(chain[i][0], chain[i + 1][0])
+
+    par_famille: dict[tuple, dict[str, dict]] = defaultdict(dict)
+    for r in rows:
+        par_famille[(r["model"], r["lead_h"], r["window_kind"],
+                     r["regime"])][r["zone_id"]] = r
+
+    n = 0
+    for famille in par_famille.values():
+        # Fratries : les zones qui partagent le même parent.
+        fratries: dict[str, list[dict]] = defaultdict(list)
+        for zid, r in famille.items():
+            p = parent_of.get(zid)
+            if p and p in famille:
+                fratries[p].append(r)
+        for pid, enfants in fratries.items():
+            parent = famille[pid]
+            spread = [(e["typical_err_kmh"], e["occurrences"],
+                       _within_var(e)) for e in enfants]
+            tau2, sigma2 = INF.pooling_variances(
+                [(v, k, s) for v, k, s in spread if v is not None and s is not None])
+            for e in enfants:
+                p = INF.pool_toward_parent(
+                    e["typical_err_kmh"], e["occurrences"],
+                    parent["typical_err_kmh"], tau2, sigma2)
+                e["pooled_err_kmh"] = _r(p.value)
+                e["borrowed_weight"] = _r(p.borrowed, 3)
+                n += 1
+    return n
+
+
+# ══════════════════════════════════════════════════════════════════
+#  CRITÈRE DE SORTIE (lot G5) — mesuré, pas décrété
+# ══════════════════════════════════════════════════════════════════
+
+def stability_report(units: list[dict], zone_of: dict[str, dict],
+                     as_of: datetime, kind_of: dict[str, str],
+                     half_days: int = ROLLING_DAYS) -> dict:
+    """Les rangs tiennent-ils d'une période à la suivante ?
+
+    C'est le chiffre qui devra décider, un jour, de sortir de l'atelier.
+    Il n'est pas décrété : il se mesure, et il se mesure d'une façon
+    précise.
+
+    ⚠️ SUR DES FENÊTRES DISJOINTES, ET C'EST TOUT LE PIÈGE. La mesure
+    naturelle — comparer la fenêtre glissante de 15 jours d'hier à celle
+    d'aujourd'hui — est trompeuse : deux fenêtres glissantes décalées
+    d'un jour partagent 14 jours sur 15. Leur accord serait proche de 1
+    quoi qu'il arrive, et ce 1 dirait « les données sont les mêmes », pas
+    « le classement est stable ». On coupe donc la fenêtre rejouée en
+    deux moitiés SANS AUCUN JOUR COMMUN, et le rapport porte le nombre de
+    jours partagés (0) pour que personne n'ait à le croire sur parole.
+
+    ⚠️ Un `tau` élevé ne suffira pas à sortir de l'atelier : il dit que
+    le classement se reproduit, pas qu'il est juste. Un détecteur
+    systématiquement biaisé est parfaitement stable.
+    """
+    jours = sorted({u["day"] for u in units}, reverse=True)
+    recents = set(jours[:half_days])
+    anciens = set(jours[half_days:half_days * 2])
+    if not anciens:
+        return {"reason": "window_too_short", "shared_days": 0,
+                "n_cases": 0, "n_comparable": 0,
+                "kendall_tau": None, "top1_agreement": None,
+                "covers": (f"{len(jours)} journées rejouées : il en faut "
+                           f"{half_days * 2} pour comparer deux fenêtres "
+                           f"disjointes de {half_days} jours")}
+
+    def rangs(jeu: set[str]) -> dict[tuple, dict[str, int]]:
+        rows = _case_rows([u for u in units if u["day"] in jeu],
+                          zone_of, as_of, "rolling15", "all",
+                          MIN_STATIONS_ZONE, level_of=kind_of, with_ci=False)
+        out: dict[tuple, dict[str, int]] = defaultdict(dict)
+        for r in rows:
+            if r["rank"] is not None:
+                out[(r["zone_id"], r["lead_h"])][r["model"]] = r["rank"]
+        return out
+
+    st = INF.rank_stability(rangs(recents), rangs(anciens), recents, anciens)
+    return {"reason": st.reason, "shared_days": st.shared_days,
+            "n_cases": st.n_cases, "n_comparable": st.n_comparable,
+            "kendall_tau": _r(st.kendall_tau, 3),
+            "top1_agreement": _r(st.top1_agreement, 3),
+            "window_days": half_days, "covers": st.covers}
+
+
+def _within_var(row: dict) -> float | None:
+    """Variance interne d'une case — la dispersion de ses balise-jours.
+
+    Lue directement dans `err_sd`, et non reconstituée depuis la
+    demi-largeur de l'intervalle : l'intervalle manque exactement sur
+    les cases maigres, qui sont celles qui doivent emprunter le plus.
+    """
+    sd = row.get("err_sd")
+    return None if sd is None else float(sd) * float(sd)
 
 # ══════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
+
+def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
+    """N'envoie que les colonnes que la table sait recevoir.
+
+    ⚠️ LE SQL NE S'EXÉCUTE JAMAIS DEPUIS ICI — c'est Yann qui le lance,
+    quand il le lance. Entre le déploiement de ce code et l'exécution de
+    `supabase_step40_lot_g.sql`, un run qui enverrait `pooled_err_kmh` ou
+    `mse_clim` recevrait un `PGRST204 — column … does not exist` et la
+    nuit serait perdue pour une colonne d'agrément.
+
+    Le jour où le SQL est passé, les colonnes apparaissent d'elles-mêmes.
+    Aucun drapeau à basculer, donc aucun drapeau à oublier — et c'est le
+    point : un `SCHEMA_LOT_G = True` à changer à la main aurait été une
+    seconde chose à ne pas oublier, le lendemain d'une nuit blanche.
+    """
+    if not rows:
+        return rows
+    cols = sb.columns(table)
+    if not cols:
+        return rows
+    absentes = sorted(set(rows[0]) - cols)
+    if not absentes:
+        return rows
+    print(f"  ⓘ {table} : colonnes pas encore en base, non envoyées — "
+          f"{', '.join(absentes)}. Lancer supabase_step40_lot_g.sql "
+          f"pour les activer.")
+    out = [{k: v for k, v in r.items() if k in cols} for r in rows]
+
+    # ⚠️ ET LE CAS QUI NE SE VOIT PAS. `model_score_zone.rank_reason`
+    # porte un CHECK écrit dans step35 :
+    #
+    #     check (rank_reason in ('ok','insufficient','tied'))
+    #
+    # Le lot G en ajoute trois (`window_too_short`, `not_separable`,
+    # `too_few_pairs`) et la contrainte les REFUSE — ce n'est plus une
+    # colonne manquante qu'on peut omettre, c'est tout l'envoi qui part
+    # en HTTP 400. Tant que le SQL du lot G n'est pas passé, on écrit
+    # donc `null` en base plutôt que de perdre la nuit ; le JSON publié,
+    # lui, garde la vraie raison, et c'est lui que lit l'écran.
+    if table == "model_score_zone" and "ci_reason" in absentes:
+        historiques = {"ok", "insufficient", "tied", None}
+        nouvelles = {r.get("rank_reason") for r in out} - historiques
+        if nouvelles:
+            print(f"     ⚠️ rank_reason : {', '.join(sorted(nouvelles))} "
+                  f"refusé(s) par le CHECK de step35 → écrit `null` en base "
+                  f"cette nuit. Le JSON publié garde la raison exacte.")
+            for r in out:
+                if r.get("rank_reason") not in historiques:
+                    r["rank_reason"] = None
+    return out
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
@@ -1348,6 +1980,12 @@ def main() -> int:
                          "(défaut : 2 = heure d'été française)")
     ap.add_argument("--no-purge", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--regime-days", type=int, default=REGIME_REPLAY_DAYS,
+                    help="profondeur du rejeu d'archive pour le chemin régime")
+    ap.add_argument("--replay-budget", type=int, default=3,
+                    help="journées JAMAIS rejouées qu'une nuit peut rattraper. "
+                         "Borne la durée du run : rejouer trente journées d'un "
+                         "coup peut la multiplier par trente.")
     args = ap.parse_args()
 
     root = pathlib.Path(args.out)
@@ -1400,12 +2038,24 @@ def main() -> int:
               "persistance ne sera pas calculable pour cette journée.")
 
     # ── 2-3. apparier et écrire l'agrégat quotidien ──────────────
-    rows, banded = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s)
+    t_clim = time.monotonic()
+    clim = climatology_by_station(root, day, st, utc_offset_s)
+    print(f"  climatologie horaire : {len(clim)} balises "
+          f"({time.monotonic() - t_clim:.1f} s)"
+          + ("" if clim else " — archive trop courte, seconde référence "
+                             "indisponible, `beats_clim` restera nul"))
+    rows, banded = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s, clim)
     print(f"  {len(rows)} agrégats quotidiens, {len(banded)} détails par tranche")
     if rows:
-        n = sb.upsert("model_verif_daily", rows,
+        n = sb.upsert("model_verif_daily", _pour_la_base(sb, "model_verif_daily", rows),
                       "day,source,station_id,model,lead_h,fcst_src")
         print(f"  → model_verif_daily : {n} lignes")
+    # ⚠️ Le cache de rejeu est alimenté PAR CE CALCUL-CI, pas par un
+    # second. La journée notée ce soir entre donc dans la fenêtre du
+    # chemin régime sans coûter une seule seconde de plus. C'est ce qui
+    # rend le rejeu tenable en régime de croisière : le run ne rattrape
+    # que le passé, et le passé se remplit une fois.
+    replay_write(root, day, rows)
 
     # ── 4-5. zones, accumulateurs, scores ────────────────────────
     # ⚠️ Chaque `select` passe la clé primaire de sa table en `order` :
@@ -1485,21 +2135,62 @@ def main() -> int:
         since = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
         daily = sb.select("model_verif_daily", f"?day=gte.{since}",
                           order="day,source,station_id,model,lead_h,fcst_src")
+        t_roll = time.monotonic()
         scores = rolling_scores(daily, zone_of, as_of)
-        accs = sb.select("model_character",
-                         order="zone_id,model,lead_h,regime,band,metric,event_type")
+        print(f"  score glissant : {len(scores)} lignes "
+              f"({time.monotonic() - t_roll:.1f} s)")
         # `model_zone` est relue APRÈS l'upsert des échelons 2 et 4, pour
         # que `agg_level` soit littéralement le `kind` de la zone et non
         # une déduction faite sur la forme de son identifiant. Une table
         # de quelques centaines de lignes, une fois par nuit.
         kind_of = {r["zone_id"]: r["kind"]
                    for r in sb.select("model_zone", order="zone_id")}
-        scores += regime_scores(accs, as_of, kind_of)
+
+        # ── chemin régime : archive rejouée, plus accumulateurs ───
+        t_replay = time.monotonic()
+        units, bilan_replay = replay_window(
+            root, day, st, utc_offset_s, args.regime_days, args.replay_budget)
+        print(f"  rejeu d'archive : {bilan_replay} en "
+              f"{time.monotonic() - t_replay:.1f} s")
+        t_reg = time.monotonic()
+        reg_rows = regime_scores(units, as_of, zone_of, kind_of)
+        scores += reg_rows
+        # ⚠️ CHIFFRE À SURVEILLER. Mesuré le 09/08 sur un jeu synthétique
+        # à la taille réelle (194 100 balise-jours, 30 jours) : 85,6 s.
+        # C'est le poste le plus cher du lot G, et il grandit avec la
+        # profondeur d'archive. Le jour où il déborde, la manette est
+        # `--regime-days`, pas le timer.
+        print(f"  score par régime : {len(reg_rows)} lignes "
+              f"({time.monotonic() - t_reg:.1f} s)")
+
+        n_pool = apply_pooling(scores, list(zone_of.values()))
+        print(f"  rétrécissement vers le parent : {n_pool} cases fines "
+              f"rapprochées de leur échelon supérieur (poids emprunté publié)")
+
+        t_stab = time.monotonic()
+        stabilite = stability_report(units, zone_of, as_of, kind_of)
+        print(f"  ({time.monotonic() - t_stab:.1f} s)", end=" ")
+        print(f"  stabilité des rangs : {stabilite['reason']}"
+              + (f" · tau = {stabilite['kendall_tau']} sur "
+                 f"{stabilite['n_comparable']} cases, "
+                 f"{stabilite['shared_days']} jour(s) partagé(s)"
+                 if stabilite["kendall_tau"] is not None else ""))
+        print(f"     ⓘ {stabilite['covers']}")
+
         if scores:
-            n = sb.upsert("model_score_zone", scores,
+            n = sb.upsert("model_score_zone",
+                          _pour_la_base(sb, "model_score_zone", scores),
                           "as_of,zone_id,model,lead_h,window_kind,regime")
             print(f"  → model_score_zone : {n} lignes")
-            _publish(st, scores, as_of, args.dry_run)
+            # Le JSON publié, lui, porte TOUT : il n'a pas de schéma à
+            # respecter, et c'est lui que lira l'écran des bêta-testeurs.
+            _publish(st, scores, as_of, args.dry_run,
+                     meta={"stability": stabilite,
+                           "replay": bilan_replay,
+                           "regime_days": args.regime_days,
+                           "climatology_stations": len(clim),
+                           "events_calibrated": EVENTS_CALIBRATED,
+                           "audience": "beta"})
 
     # ── 6. purge ─────────────────────────────────────────────────
     if not args.no_purge:
@@ -1518,7 +2209,8 @@ def main() -> int:
     return 0
 
 
-def _publish(st, scores: list[dict], as_of: datetime, dry_run: bool):
+def _publish(st, scores: list[dict], as_of: datetime, dry_run: bool,
+             meta: dict | None = None):
     """Publie le JSON que lira la PWA.
 
     Même patron que les packs de site : R2 sert le fichier, Supabase
@@ -1529,7 +2221,15 @@ def _publish(st, scores: list[dict], as_of: datetime, dry_run: bool):
         print("  ⓘ publication R2 sautée (pas de storage, ou dry-run)")
         return
     from storage import CACHE_REECRIT             # type: ignore
-    body = json.dumps({"as_of": as_of.strftime("%Y-%m-%d"), "scores": scores},
+    # ⚠️ `audience: "beta"` VOYAGE AVEC LES CHIFFRES. Le garde de
+    # l'écran est côté PWA (`isAdmin || isBetaTester`), et c'est lui qui
+    # décide ; ce champ ne protège rien. Il sert à ce qu'un fichier
+    # retrouvé seul, ou lu par un outil qu'on n'a pas encore écrit, dise
+    # de lui-même qu'il n'est pas destiné aux pilotes. Un JSON qui ne
+    # porte pas sa propre destination finit toujours par être servi à
+    # quelqu'un d'autre.
+    body = json.dumps({"as_of": as_of.strftime("%Y-%m-%d"),
+                       **(meta or {}), "scores": scores},
                       separators=(",", ":")).encode("utf-8")
     # Clé STABLE, réécrite chaque nuit → cache court obligatoire. Un TTL
     # long laisserait un edge CDN servir un classement périmé bien après

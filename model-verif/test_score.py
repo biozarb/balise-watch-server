@@ -505,66 +505,442 @@ def test_scores_de_zone():
     check("2 balises seulement → pas de score de zone publié", rows3, [])
 
 
+def _unit(day, sid, model, err, regime="fluxN", lead=24, mse=None):
+    return {"day": day, "unit": f"pioupiou:{sid}", "source": "pioupiou",
+            "station_id": str(sid), "model": model, "lead_h": lead,
+            "regime": regime, "n_hours": 12, "err_vec_med": err,
+            "mse_model": mse if mse is not None else err * err,
+            "mse_persist": 100.0}
+
+
 def test_score_par_regime():
-    print("── score par régime, depuis la mémoire longue ──")
-    accs = []
-    for model, err, mse in (("icon_d2", 3.0, 9.0), ("gfs_global", 8.0, 64.0)):
-        for metric, val in (("errKmh", err), ("mseModel", mse),
-                            ("msePersist", 100.0)):
-            accs.append({"zone_id": "b1:valley", "model": model, "lead_h": 24,
-                         "regime": "fluxN", "band": "all", "metric": metric,
-                         "sum_w": 20.0, "sum_wx": val * 20, "sum_wx2": 0.0,
-                         "days": 20, "last_day": "2026-08-05"})
-        # Une case par tranche existe aussi : elle ne doit PAS produire
-        # de ligne de score, sinon la même zone serait publiée trois fois.
-        accs.append({"zone_id": "b1:valley", "model": model, "lead_h": 24,
-                     "regime": "fluxN", "band": "strong", "metric": "errKmh",
-                     "sum_w": 20.0, "sum_wx": err * 20, "sum_wx2": 0.0,
-                     "days": 20, "last_day": "2026-08-05"})
-    # `model_zone` telle qu'elle est en base : c'est elle qui dit
-    # l'échelon, et non la forme de l'identifiant.
+    """⚠️ CE BANC A CHANGÉ DE SOURCE AU LOT G, et c'est le cœur du lot.
+
+    Il lisait des ACCUMULATEURS (`model_character`), qui portent trois
+    sommes. Trois sommes savent faire une moyenne et une variance ;
+    elles ne savent pas faire un décile. La conséquence se mesurait en
+    base le 09/08 : `worst_decile_kmh`, `ci_low`, `ci_high` et `skill`
+    nuls sur 10 250 lignes de régime sur 10 250 — pas un oubli, une
+    impossibilité arithmétique.
+
+    Il lit maintenant des BALISE-JOURS rejoués depuis l'archive. Les
+    quatre colonnes ne sont plus vides, et c'est vérifiable ici.
+    """
+    print("── score par régime, depuis l'archive rejouée (lot G1) ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
     kind_of = {"b1:valley": "basin_landform",
                "alpes-nord:valley": "massif_landform",
                "alpes-nord:*": "massif", "*:valley": "landform",
                "*:*": "global"}
-    rows = J.regime_scores(accs, DAY, kind_of)
-    check("une ligne par modèle, pas une par tranche", len(rows), 2)
-    check("l'échelon publié est celui de model_zone, pas un reniflage",
-          {r["agg_level"] for r in rows}, {"basin_landform"})
 
-    # ⚠️ LE CAS QUI MENTAIT. `alpes-nord:valley` ne commence pas par
-    # `*:` et ne finit pas par `:*` : l'ancienne déduction le publiait
-    # `basin_landform`, alors que sa ligne `model_zone` dit
-    # `massif_landform` — et l'échelon 2 n'était donc JAMAIS atteignable
-    # dans cette colonne.
-    au_massif = [dict(a, zone_id="alpes-nord:valley") for a in accs]
-    check("une zone de massif s'annonce massif_landform, pas basin_landform",
-          {r["agg_level"] for r in J.regime_scores(au_massif, DAY, kind_of)},
-          {"massif_landform"})
+    # 20 journées de flux de nord, dispersées : une distribution, pas
+    # une constante — sinon le décile serait la moyenne et ne prouverait
+    # rien.
+    units = []
+    for j in range(20):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for k, i in enumerate(range(830, 836)):
+            for model, base in (("icon_d2", 3.0), ("gfs_global", 8.0)):
+                units.append(_unit(d, i, model, base + (j % 5) + k * 0.5))
+        # Une journée thermique intercalée : elle ne doit pas se
+        # retrouver dans la case fluxN.
+        for i in range(830, 836):
+            units.append(_unit(d, i, "icon_d2", 99.0, regime="thermal"))
+        # Et une journée non classée : elle ne va NULLE PART.
+        units.append(_unit(d, 830, "icon_d2", 42.0, regime="unknown"))
+
+    rows = J.regime_scores(units, DAY, zone_of, kind_of)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"
+            and r["regime"] == "fluxN"]
+    check("une ligne par modèle dans la case fine", len(fine), 2)
+    check("l'échelon publié est celui de model_zone, pas un reniflage",
+          {r["agg_level"] for r in fine}, {"basin_landform"})
+    check("la fenêtre est bien celle du régime, pas les 15 jours",
+          {r["window_kind"] for r in rows}, {"regime"})
+
+    best = next(r for r in fine if r["model"] == "icon_d2")
+    pire = next(r for r in fine if r["model"] == "gfs_global")
+
+    # ══ LE DÉFAUT CORRIGÉ ══
+    check("LE PIRE DÉCILE EXISTE sur le chemin régime",
+          best["worst_decile_kmh"] is not None, True)
+    check("… et il est au-dessus de l'erreur typique, sinon ce n'est pas "
+          "un décile supérieur",
+          best["worst_decile_kmh"] > best["typical_err_kmh"], True)
+    check("L'INTERVALLE EXISTE aussi", best["ci_low"] is not None, True)
+    check("… et il encadre la médiane",
+          best["ci_low"] <= best["typical_err_kmh"] <= best["ci_high"], True)
+    check("… et il est annoncé comme un intervalle PAR BLOCS DE JOURS",
+          best["ci_kind"], "block_day")
+    check("… avec la longueur de bloc publiée",
+          best["block_days"] >= 3, True)
+    check("LE SKILL EXISTE", best["skill"] is not None, True)
+    check("… et 'bat la persistance' aussi", best["beats_persist"], True)
+    check("le nombre de JOURNÉES est publié, pas seulement d'occurrences",
+          best["n_days"], 20)
+
+    check("une journée non classée ne rejoint aucune case",
+          any(r["regime"] == "unknown" for r in rows), False)
+    check("le régime thermique a sa propre case",
+          {r["regime"] for r in rows}, {"fluxN", "thermal"})
+    check("… et la journée thermique n'a pas pollué fluxN",
+          best["typical_err_kmh"] < 20, True)
+
+    check("3 km/h contre 8 → le premier est classé 1er", best["rank"], 1)
+    check("… le second 2ᵉ", pire["rank"], 2)
+    check("… et la raison est explicite", best["rank_reason"], "ok")
+
     # Une zone absente de model_zone est impossible (clé étrangère) ;
     # si elle survenait, on saute plutôt que d'inventer un échelon.
     check("zone inconnue de model_zone → aucune ligne publiée",
-          J.regime_scores([dict(a, zone_id="b9:ridge") for a in accs],
-                          DAY, kind_of), [])
-    check("la fenêtre est bien celle du régime, pas les 15 jours",
-          {r["window_kind"] for r in rows}, {"regime"})
-    best = next(r for r in rows if r["model"] == "icon_d2")
-    check("l'erreur typique du régime vient de l'accumulateur",
-          best["typical_err_kmh"], 3.0)
-    check("20 occurrences → le classement est permis", best["rank"], 1)
-    check("… et « bat la persistance » se lit sur les deux MSE séparés",
-          best["beats_persist"], True)
+          J.regime_scores(
+              units, DAY,
+              {k: dict(v, zone_id="b9:ridge") for k, v in zone_of.items()},
+              {"alpes-nord:valley": "massif_landform", "alpes-nord:*": "massif",
+               "*:valley": "landform", "*:*": "global"}),
+          [r for r in J.regime_scores(
+              units, DAY,
+              {k: dict(v, zone_id="b9:ridge") for k, v in zone_of.items()},
+              {"alpes-nord:valley": "massif_landform", "alpes-nord:*": "massif",
+               "*:valley": "landform", "*:*": "global"})
+           if r["zone_id"] != "b9:ridge"])
 
-    # Trop peu d'occurrences : le classement se tait.
-    rares = []
-    for a in accs:
-        b = dict(a)
-        b["days"] = 3
-        rares.append(b)
-    rows2 = J.regime_scores(rares, DAY, kind_of)
-    check("3 occurrences du régime → aucun rang, et la raison est dite",
-          (all(r["rank"] is None for r in rows2), rows2[0]["rank_reason"]),
+    # ══ LA FENÊTRE TROP COURTE — l'état réel de l'archive au 09/08 ══
+    courts = [u for u in units
+              if u["day"] >= (DAY - timedelta(days=1)).strftime("%Y-%m-%d")]
+    rows_c = J.regime_scores(courts, DAY, zone_of, kind_of)
+    fine_c = [r for r in rows_c if r["zone_id"] == "b1:valley"
+              and r["regime"] == "fluxN"]
+    check("deux jours → aucun intervalle publié",
+          all(r["ci_low"] is None for r in fine_c), True)
+    check("… et la raison est nommée, pas devinée",
+          {r["ci_reason"] for r in fine_c}, {"window_too_short"})
+    check("… le pire décile, lui, reste calculable : c'est une "
+          "distribution, pas un test",
+          all(r["worst_decile_kmh"] is not None for r in fine_c), True)
+    check("… ET AUCUN RANG N'EST ATTRIBUÉ malgré un écart de 5 km/h : "
+          "pas de repli sur l'écart relatif seul",
+          all(r["rank"] is None for r in fine_c), True)
+    check("… la raison du non-classement est la fenêtre, pas le quorum",
+          fine_c[0]["rank_reason"], "window_too_short")
+
+    # Trop peu d'occurrences : le classement se tait, quorum d'abord.
+    rares = [u for u in units
+             if u["day"] >= (DAY - timedelta(days=1)).strftime("%Y-%m-%d")
+             and u["unit"] == "pioupiou:830"]
+    rows2 = J.regime_scores(rares, DAY, zone_of, kind_of)
+    fine2 = [r for r in rows2 if r["zone_id"] == "b1:valley"
+             and r["regime"] == "fluxN"]
+    check("sous le quorum d'occurrences → aucun rang, et la raison est dite",
+          (all(r["rank"] is None for r in fine2), fine2[0]["rank_reason"]),
           (True, "insufficient"))
+
+
+def test_rétrécissement_vers_le_parent():
+    """Lot G3 — le pooling améliore l'estimation, le quorum garde la porte.
+
+    ⚠️ LES DONNÉES DE CE BANC SONT DISPERSÉES, à dessein. Sur des
+    erreurs quasi constantes, une case même maigre est parfaitement
+    connue et n'a rien à emprunter : le banc passerait en ne prouvant
+    rien. C'est la dispersion qui fait exister l'incertitude que le
+    rétrécissement est censé arbitrer.
+    """
+    print("── rétrécissement vers le parent (lot G3) ──")
+
+    def bruit(k):                       # suite déterministe, sans `random`
+        return ((k * 7919) % 101) / 100.0 * 6.0 - 3.0
+
+    zones, zone_of = [], {}
+    #  b0 : 6 balises, 12 jours → 72 balise-jours, bien fournie
+    #  b1 : 6 balises, 12 jours → 72, bien fournie aussi
+    #  b2 : 1 balise, 2 jours   → 2, maigre
+    plan = {"b0": (6, 12, 4.0), "b1": (6, 12, 6.0), "b2": (1, 2, 1.0)}
+    for b, (n_st, _, _) in plan.items():
+        for i in range(n_st):
+            sid = f"{b}-{i:02d}"
+            z = {"source": "pioupiou", "station_id": sid,
+                 "zone_id": f"{b}:valley", "landform": "valley",
+                 "basin_id": b, "massif_id": "alpes-nord",
+                 "basin_uncertain": False}
+            zone_of[f"pioupiou:{sid}"] = z
+            zones.append(z)
+
+    units, k = [], 0
+    for key, z in zone_of.items():
+        b = z["basin_id"]
+        n_st, n_days, base = plan[b]
+        for j in range(n_days):
+            d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+            k += 1
+            units.append(_unit(d, z["station_id"], "icon_d2",
+                               max(0.5, base + bruit(k))))
+
+    kind_of = {"b0:valley": "basin_landform", "b1:valley": "basin_landform",
+               "b2:valley": "basin_landform",
+               "alpes-nord:valley": "massif_landform",
+               "alpes-nord:*": "massif", "*:valley": "landform", "*:*": "global"}
+    rows = J.regime_scores(units, DAY, zone_of, kind_of, min_stations=1)
+    n = J.apply_pooling(rows, zones)
+    check("des cases fines ont été rapprochées de leur parent", n > 0, True)
+
+    maigre = next(r for r in rows if r["zone_id"] == "b2:valley")
+    fourni = next(r for r in rows if r["zone_id"] == "b0:valley")
+    parent = next(r for r in rows if r["zone_id"] == "alpes-nord:valley")
+
+    check("la case à 2 balise-jours emprunte une part sensible",
+          maigre["borrowed_weight"] > 0.25, True)
+    check("… au moins dix fois plus que la case à 72 balise-jours",
+          maigre["borrowed_weight"] > 10 * fourni["borrowed_weight"], True)
+    # ⚠️ Elle n'emprunte PAS 90 % pour autant, et c'est juste : ici les
+    # trois vallées sœurs sont vraiment différentes (4, 6 et 2 km/h),
+    # donc τ² est grand et le parent est un mauvais substitut. Le
+    # rétrécissement arbitre entre « cette case est mal connue » et
+    # « les sœurs se ressemblent » ; il ne rabat pas tout par principe.
+    check("… mais elle garde la majorité de son propre chiffre quand les "
+          "vallées sœurs sont franchement différentes",
+          maigre["borrowed_weight"] < 0.5, True)
+    check("… et son estimation poolée est tirée vers le parent",
+          abs(maigre["pooled_err_kmh"] - parent["typical_err_kmh"])
+          < abs(maigre["typical_err_kmh"] - parent["typical_err_kmh"]), True)
+    check("la case bien fournie garde presque tout son chiffre",
+          abs(fourni["pooled_err_kmh"] - fourni["typical_err_kmh"]) < 1.0, True)
+    check("L'ERREUR BRUTE N'EST PAS ÉCRASÉE — les deux sont publiées",
+          maigre["typical_err_kmh"] < parent["typical_err_kmh"], True)
+    check("le poids emprunté est publié À CÔTÉ de chaque chiffre poolé",
+          all(r.get("borrowed_weight") is not None
+              for r in rows if r.get("pooled_err_kmh") is not None), True)
+    check("la dispersion de la case est publiée elle aussi",
+          fourni["err_sd"] is not None, True)
+    check("LE POOLING NE FAIT APPARAÎTRE AUCUNE LIGNE NOUVELLE : "
+          "le quorum reste le seuil d'affichage",
+          len(rows), len(J.regime_scores(units, DAY, zone_of, kind_of,
+                                         min_stations=1)))
+
+    # ── le cas symétrique : des sœurs qui se ressemblent ──
+    # Quand τ² est petit, il n'y a rien à distinguer entre vallées et la
+    # case maigre doit emprunter presque tout. C'est l'autre moitié de
+    # la preuve : sans elle, on ne saurait pas si le curseur bouge.
+    units2, k = [], 0
+    for key, z in zone_of.items():
+        b = z["basin_id"]
+        _, n_days, _ = plan[b]
+        for j in range(n_days):
+            d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+            k += 1
+            units2.append(_unit(d, z["station_id"], "icon_d2",
+                                max(0.5, 5.0 + bruit(k))))
+    rows2 = J.regime_scores(units2, DAY, zone_of, kind_of, min_stations=1)
+    J.apply_pooling(rows2, zones)
+    maigre2 = next(r for r in rows2 if r["zone_id"] == "b2:valley")
+    check("des vallées sœurs indiscernables → la case maigre emprunte "
+          "presque tout",
+          maigre2["borrowed_weight"] > 0.85, True)
+    check("… et son estimation devient pratiquement celle du massif",
+          abs(maigre2["pooled_err_kmh"]
+              - next(r for r in rows2
+                     if r["zone_id"] == "alpes-nord:valley")["typical_err_kmh"])
+          < 0.5, True)
+
+
+def test_rejeu_darchive():
+    """Lot G1 — le rejeu, son cache, et son budget de nuit.
+
+    ⚠️ CE BANC ÉCRIT SUR DISQUE, dans un répertoire temporaire. C'est
+    voulu : le cache de rejeu est la seule raison pour laquelle rejouer
+    30 journées chaque nuit ne multiplie pas la durée du run par 30, et
+    un cache qu'on ne teste pas est un cache qui sert un jour des
+    chiffres périmés.
+    """
+    print("── rejeu d'archive et cache (lot G1) ──")
+    import gzip as _gz
+    import json as _json
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(3)]
+        for d in jours:
+            fk = root / J.fcst_key(d)
+            fk.parent.mkdir(parents=True, exist_ok=True)
+            lignes = [fcst_line("830", "icon_d2", d, lambda i: brise(i % 24),
+                                aloft=(30.0, 10.0)),
+                      fcst_line("831", "icon_d2", d, lambda i: brise(i % 24),
+                                aloft=(30.0, 10.0))]
+            fk.write_bytes(_gz.compress(
+                ("\n".join(_json.dumps(l) for l in lignes)).encode()))
+            ok = root / J.obs_key(d)
+            ok.parent.mkdir(parents=True, exist_ok=True)
+            obs = [obs_line("830", d, brise), obs_line("831", d, brise)]
+            ok.write_bytes(_gz.compress(
+                ("\n".join(_json.dumps(l) for l in obs)).encode()))
+
+        rows, bilan = J.replay_window(root, DAY, None, 7200, n_days=3)
+        check("le rejeu retrouve des balise-jours dans l'archive",
+              len(rows) > 0, True)
+        check("chaque ligne porte sa clé d'appariement `unit`",
+              all(r.get("unit", "").startswith("pioupiou:") for r in rows), True)
+        check("le bilan dit combien de journées ont été rejouées",
+              "rejouée(s) cette nuit" in bilan, True)
+
+        # Le cache existe maintenant : deuxième passage, aucun rejeu.
+        rows2, bilan2 = J.replay_window(root, DAY, None, 7200, n_days=3)
+        check("le second passage rend exactement les mêmes lignes",
+              len(rows2), len(rows))
+        check("… sans rejouer quoi que ce soit (le cache a servi)",
+              "0 rejouée(s)" in bilan2, True)
+
+        # Un changement de formule invalide le cache : sinon on servirait
+        # des chiffres calculés par du code qui n'existe plus.
+        cache = J.replay_path(root, DAY)
+        d = _json.loads(_gz.decompress(cache.read_bytes()).decode())
+        d["formula"] = J.REPLAY_FORMULA + 1
+        cache.write_bytes(_gz.compress(_json.dumps(d).encode()))
+        check("un cache d'une AUTRE formule est ignoré, pas réparé",
+              J.replay_read(root, DAY), None)
+
+        # Budget : une nuit ne rattrape pas trente journées d'un coup.
+        for d0 in jours:
+            J.replay_path(root, d0).unlink(missing_ok=True)
+        _, bilan3 = J.replay_window(root, DAY, None, 7200, n_days=3,
+                                    budget_new_days=1)
+        check("le budget borne le nombre de journées rejouées par nuit",
+              "1 rejouée(s)" in bilan3, True)
+        check("… ET LE DIT : une fenêtre tronquée en silence se lirait "
+              "comme une fenêtre complète",
+              "REPORTÉE(S)" in bilan3, True)
+
+
+def test_fenetre_de_maintien_adaptative():
+    """Arbitrage `hold_ms` du lot F, tranché le 09/08 : fenêtre adaptative.
+
+    ⚠️ CE BANC PROTÈGE LES DEUX MOITIÉS DE L'ARBITRAGE. La première est
+    facile à voir : une série horaire doit redevenir détectable. La
+    seconde l'est moins et compte autant : une balise dense ne doit
+    RIEN changer, parce que 45 min est le seul réglage sur lequel quoi
+    que ce soit ait été calibré. Un banc qui ne vérifierait que la
+    première laisserait passer une régression silencieuse sur les
+    bonnes données — celles qui servent réellement.
+    """
+    print("── fenêtre de maintien adaptative (arbitrage hold_ms) ──")
+    import events as E
+
+    def serie(cadence_s, t0=0):
+        """Une bascule franche : 90° pendant 3 h, puis 270° pendant 3 h."""
+        n = 6 * 3600 // cadence_s
+        return [S.ObsSample(t=t0 + i * cadence_s * 1000, speed=18.0,
+                            dir=90.0 if i * cadence_s < 3 * 3600 else 270.0)
+                for i in range(n + 1)]
+
+    dense = serie(240)          # Pioupiou, ~4 min
+    horaire = serie(3600)       # observation dégradée à l'heure
+
+    check("le pas réel d'une série dense est retrouvé",
+          J.median_step_ms(dense), 240_000)
+    check("… celui d'une série horaire aussi",
+          J.median_step_ms(horaire), 3_600_000)
+
+    check("SUR UNE BALISE DENSE, LA FENÊTRE NE BOUGE PAS (45 min)",
+          J.adaptive_hold_ms(dense), E.DEFAULT_DETECT.hold_ms)
+    check("sur une série horaire, elle s'ouvre à 90 min",
+          J.adaptive_hold_ms(horaire), 90 * 60 * 1000)
+    check("… soit un pas entier de chaque côté, la condition minimale "
+          "pour que les deux fenêtres comparées puissent différer",
+          J.adaptive_hold_ms(horaire) >= 2 * J.median_step_ms(horaire) * 0.75,
+          True)
+
+    # ── l'effet mesuré sur la détection elle-même ──
+    ev_dense_avant = [e for e in E.detect_all(dense, J.EVENT_ONSET_KMH)
+                      if e.type == "reversal"]
+    ev_dense_apres = [e for e in J.station_events(dense, None, 7200)
+                      if e.type == "reversal"]
+    check("la balise dense détecte la bascule avant comme après",
+          (len(ev_dense_avant) > 0, len(ev_dense_apres)),
+          (True, len(ev_dense_avant)))
+
+    ev_h_avant = [e for e in E.detect_all(horaire, J.EVENT_ONSET_KMH)
+                  if e.type == "reversal"]
+    ev_h_apres = [e for e in J.station_events(horaire, None, 7200)
+                  if e.type == "reversal"]
+    check("À L'HEURE, LE RÉGLAGE FIXE DE 45 MIN NE VOYAIT RIEN",
+          len(ev_h_avant), 0)
+    check("… et la fenêtre adaptative voit la bascule",
+          len(ev_h_apres) > 0, True)
+
+    # Une série trop courte pour avoir un pas : on ne devine pas.
+    check("moins de trois points → pas de pas mesurable",
+          J.median_step_ms(dense[:2]), None)
+    check("… et la fenêtre reste celle par défaut",
+          J.adaptive_hold_ms(dense[:2]), E.DEFAULT_DETECT.hold_ms)
+
+    # ⚠️ Et l'arbitrage ne s'étend PAS à la publication.
+    check("`reversal` n'entre toujours pas dans le JSON publié : "
+          "détecter n'est pas calibrer",
+          "reversal" in J.EVENT_PUBLISHABLE_TYPES, False)
+
+
+
+def test_stabilite_des_rangs():
+    """Lot G5 — le critère de sortie, et le piège qu'il évite.
+
+    ⚠️ CE BANC EXISTE SURTOUT POUR LE PIÈGE. Deux fenêtres glissantes de
+    15 jours décalées d'un jour partagent 14 jours sur 15 : leur accord
+    serait proche de 1 quoi qu'il arrive, et ce 1 dirait « les données
+    sont les mêmes », pas « le classement est stable ». Le rapport doit
+    donc porter le nombre de jours partagés, et il doit valoir ZÉRO.
+    """
+    print("── stabilité des rangs sur fenêtres disjointes (lot G5) ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    kind_of = {"b1:valley": "basin_landform",
+               "alpes-nord:valley": "massif_landform",
+               "alpes-nord:*": "massif", "*:valley": "landform", "*:*": "global"}
+
+    def jeu(n_days, err_a, err_b, bascule=None):
+        """`bascule` : à partir de ce jour, les deux modèles échangent."""
+        out = []
+        for j in range(n_days):
+            d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+            a, b = (err_a, err_b)
+            if bascule is not None and j >= bascule:
+                a, b = b, a
+            for i in range(830, 836):
+                out.append(_unit(d, i, "icon_d2", a + (j % 4) * 0.3))
+                out.append(_unit(d, i, "gfs_global", b + (j % 4) * 0.3))
+        return out
+
+    stable = J.stability_report(jeu(30, 3.0, 9.0), zone_of, DAY, kind_of)
+    check("deux moitiés disjointes ne partagent AUCUN jour",
+          stable["shared_days"], 0)
+    check("… et le rapport le dit, il ne le suppose pas",
+          stable["reason"], "ok")
+    check("un classement qui se reproduit donne tau = 1",
+          stable["kendall_tau"], 1.0)
+    check("… et l'accord sur le vainqueur vaut 1", stable["top1_agreement"], 1.0)
+    check("le rapport dit ce que le chiffre recouvre",
+          "disjointes" in stable["covers"], True)
+
+    # Le classement s'inverse à mi-parcours : les deux moitiés se
+    # contredisent, et le chiffre doit le montrer.
+    instable = J.stability_report(jeu(30, 3.0, 9.0, bascule=15),
+                                  zone_of, DAY, kind_of)
+    check("un classement qui s'inverse d'une période à l'autre → tau = −1",
+          instable["kendall_tau"], -1.0)
+    check("… et aucun accord sur le vainqueur",
+          instable["top1_agreement"], 0.0)
+
+    # ── l'état réel de l'archive au 09/08 ──
+    court = J.stability_report(jeu(3, 3.0, 9.0), zone_of, DAY, kind_of)
+    check("moins de deux fenêtres pleines → aucun chiffre inventé",
+          (court["reason"], court["kendall_tau"]), ("window_too_short", None))
+    check("… et le rapport dit combien de journées il faudrait",
+          "disjointes" in court["covers"], True)
+
 
 
 def test_familles_publiees():
@@ -667,6 +1043,10 @@ def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
                test_scores_de_zone, test_score_par_regime,
+               test_rétrécissement_vers_le_parent,
+               test_rejeu_darchive,
+               test_fenetre_de_maintien_adaptative,
+               test_stabilite_des_rangs,
                test_familles_publiees, test_lecture_paginee):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
