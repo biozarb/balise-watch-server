@@ -1785,12 +1785,20 @@ function gfMeasureLatency(obsMap, now) {
 
 // ── Lot A : grille modèle AROME ────────────────────────────────────
 //  Produite par la GitHub Action arome-gustfront (8×/jour) et déposée
-//  dans Supabase Storage. Le serveur la relit par GET CONDITIONNEL
-//  (If-None-Match) : un 304 ne coûte quasiment rien, et on ne
-//  retélécharge les ~1,6 Mo que quand le run a réellement changé. Sans
-//  ça, une relecture toutes les 30 min ferait 77 Mo/jour d'egress
-//  Storage pour une donnée qui ne bouge que 8 fois par jour.
-const GF_MODEL_URL = `${SB_URL}/storage/v1/object/public/wind-grid/arome/gustfront/grid.json`;
+//  sur R2 (bucket balise-watch-grids, migration STORAGE_BACKEND_GUSTFRONT
+//  du 09/08/2026 — cf. STORAGE_BACKEND_GUSTFRONT côté Actions). Le
+//  serveur la relit par GET CONDITIONNEL (If-None-Match) : un 304 ne
+//  coûte quasiment rien, et on ne retélécharge les ~1,6 Mo que quand le
+//  run a réellement changé. Sans ça, une relecture toutes les 30 min
+//  ferait 77 Mo/jour d'egress pour une donnée qui ne bouge que 8 fois
+//  par jour.
+//  09/08/2026 — même bascule R2 que WIND_GRID_BASE_URL côté client
+//  (web/src/lib/config.ts) : surchargeable sans redéploiement via
+//  WIND_GRID_BASE_URL, défaut = R2 puisque c'est là que les 4 chaînes
+//  grid (wind/thermal×2/gustfront) écrivent désormais.
+const WIND_GRID_BASE_URL = process.env.WIND_GRID_BASE_URL
+  || 'https://pub-7a401bae4fe54a6c8dbdd6b5a33a7bec.r2.dev';
+const GF_MODEL_URL = `${WIND_GRID_BASE_URL}/arome/gustfront/grid.json`;
 const GF_MODEL_CHECK_MS = 30 * 60 * 1000;
 
 let gfModelGrid = null;
