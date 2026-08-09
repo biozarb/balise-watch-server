@@ -60,6 +60,21 @@ K_MAX = 10
 COUVERTURE_MIN = 0.6
 
 
+import os as _os                                          # noqa: E402
+import sys as _sys                                        # noqa: E402
+
+_TOOLS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                       "..", "tools")
+if _TOOLS not in _sys.path:
+    _sys.path.insert(0, _TOOLS)
+try:
+    from quota_openmeteo import Budget as _Budget, poids_url as _poids_url
+    BUDGET = _Budget("match_analogs")
+except Exception as _exc:                                 # noqa: BLE001
+    print(f"  ⓘ budget Open-Meteo indisponible ({_exc}) — sans comptage partagé")
+    BUDGET = None
+
+
 def fetch_today_features(site_slug: str) -> dict:
     """Features du jour J depuis la prévision LIVE (pas l'archive —
     aujourd'hui n'y est pas encore). Même fenêtre/logique que
@@ -74,7 +89,16 @@ def fetch_today_features(site_slug: str) -> dict:
         "forecast_days": 1, "past_days": 0,
         "hourly": hf_vars, "models": "meteofrance_seamless", "timezone": "UTC",
     })
-    req = urllib.request.Request(f"{LIVE_URL}?{params}", headers={"User-Agent": UA})
+    # ── budget Open-Meteo partagé (09/08/2026) ────────────────────
+    # ⚠️ CE SCRIPT N'EST DANS AUCUN TIMER : il se lance à la main, et
+    # c'est précisément le scénario de la prochaine panne. Le plafond
+    # est par ADRESSE IP ; lancé pendant la collecte de 05:15, il
+    # mangerait la fenêtre horaire de la nuit sans laisser de trace
+    # exploitable. Le compteur partagé, lui, le nomme.
+    _url = f"{LIVE_URL}?{params}"
+    if BUDGET is not None:
+        BUDGET.demander(_poids_url(_url))
+    req = urllib.request.Request(_url, headers={"User-Agent": UA})
     with urllib.request.urlopen(req, timeout=30) as r:
         data = json.loads(r.read().decode("utf-8"))
     hourly = data.get("hourly", {})

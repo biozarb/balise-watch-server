@@ -106,7 +106,36 @@ MODELS = [
     "icon_eu",
     "gfs_global",
     "ecmwf_ifs025",
-    "meteoswiss_icon_ch1",
+    # ⚠️ `meteoswiss_icon_ch1` RETIRÉ LE 09/08 — et ce n'est pas un
+    # arbitrage de goût, c'est de l'arithmétique de quota.
+    #
+    # À 8 variables, 10 modèles pèsent 8,0 par point : 648 × 8 = 5 184
+    # appels pondérés, au-dessus du plafond HORAIRE de 5 000 que le code
+    # ne modélisait pas. La nuit du 09/08 s'est arrêtée à 625 points
+    # collectés — 5 000 pondérés à l'unité près — puis n'a plus rien
+    # obtenu pendant 26 min, jusqu'au chien de garde. À 9 modèles le
+    # poids tombe à 7,2 et le run redescend à 4 666 : il rentre.
+    #
+    # ⚠️ POURQUOI CELUI-LÀ ET PAS UN AUTRE — mesuré sur l'archive
+    # complète du 08/08 (648 balises), pas raisonné :
+    #   · retirer AROME HD ou DMI HARMONIE coûterait à 53 balises leur
+    #     DEUXIÈME avis à maille fine (et AROME en laisserait 2 sans
+    #     aucun) — exclus ;
+    #   · CH1 couvre EXACTEMENT les mêmes 515 balises que CH2 (ensembles
+    #     identiques, vérifié) : même fournisseur, même domaine, 1 km
+    #     contre 2 km. C'est le seul vrai doublon de la liste ;
+    #   · son horizon médian mesuré vaut 34 h, donc il ne concourait
+    #     déjà pas au +48 h.
+    # Retirer CH1 ne fait tomber AUCUNE balise sous son nombre d'avis
+    # fins actuel. C'est le seul des dix dont on puisse dire ça.
+    #
+    # ⚠️ CE QUE ÇA COÛTE, ET QUI DOIT LE DIRE. L'app continue de
+    # PROPOSER ICON-CH1 aux pilotes (`localModels.ts` — il y est le plus
+    # fin en Maurienne) alors qu'il ne sera plus NOTÉ. Il rejoint les
+    # quatre modèles déjà dans ce cas (ICON-2I, UKMO 2 km, AROME
+    # Autriche, KNMI Harmonie) : l'écran qui juxtapose « modèles de la
+    # coupe » et « modèles notés » doit l'écrire, sinon il se lira
+    # comme un trou de données.
     "meteoswiss_icon_ch2",
     # Ajoutés le 08/08 après cartographie des domaines réels. DMI est
     # le seul modèle à 2 km qui couvre les Pyrénées, la Bretagne et le
@@ -158,26 +187,25 @@ BBOX = (41.0, -6.0, 51.5, 11.0)      # latMin, lonMin, latMax, lonMax
 #: lire pour s'adapter, il faut rester sous la ligne par construction.
 BATCH_PAUSE_S = 0.45
 
-#: ⚠️ PAUSE SÉPARÉE POUR LA PASSE PRÉVISIONS, ajoutée le 08/08.
-#: Le plafond Open-Meteo est PONDÉRÉ : il compte des variables, pas des
-#: requêtes. Passer de 5 à 8 variables par modèle fait passer le poids
-#: d'une requête de 5,0 à 8,0 — à cadence inchangée, 89 req/min × 8 =
-#: 716 pondérés/min, au-dessus du plafond de 600. La cadence doit donc
-#: BAISSER dans la même proportion où le poids monte :
-#:     60/(0,70 + 0,22) = 65 req/min × 8 = 522 pondérés/min < 540.
-#: Mesuré à 89 req/min le 07/08 avec 0,45 s ; la valeur ci-dessous est
-#: dérivée de cette mesure, et re-mesurée par le run manuel du 08/08.
+#: ⚠️ `FCST_PAUSE_S` ET LA CONSTANTE DE LATENCE ONT DISPARU LE 09/08.
+#: Elles réglaient la passe prévisions en BOUCLE OUVERTE : on choisissait
+#: un délai en espérant une cadence, et personne ne mesurait la cadence
+#: obtenue. Le 09/08 l'a payé — la latence réelle valait 0,06 s et non
+#: les 0,22 s inscrites ici, donc 79 req/min × 8 = 631 pondérés/min, au
+#: -dessus des 600. Un réseau PLUS RAPIDE faisait DÉPASSER le plafond.
 #:
-#: Elle est SÉPARÉE de `BATCH_PAUSE_S` exprès : la passe observations
-#: interroge Pioupiou, qui n'a ni le même plafond ni la même pondération.
-#: La ralentir « par sympathie » aurait coûté 4 min de run pour rien.
-FCST_PAUSE_S = 0.70
-
-#: Latence aller-retour mesurée depuis le VPS le 07/08 : 300 requêtes en
-#: 201 s à 0,45 s de pause, soit 0,67 s de cycle. Elle compte : la
-#: cadence RÉELLE est 60/(pause + latence), pas 60/pause, et c'est la
-#: réelle qui se compare au plafond.
-LATENCE_S = 0.22
+#: La passe prévisions demande désormais son droit de parler à
+#: `tools/quota_openmeteo.py`, qui compte en POIDS sur trois fenêtres
+#: glissantes (minute, HEURE, jour) et partage ce compte avec les quatre
+#: autres scripts qui appellent Open-Meteo depuis cette IP. On ne décide
+#: plus combien de temps dormir : on décide quand on a le droit de
+#: partir, et le sommeil en découle. La latence est alors absorbée, plus
+#: estimée — c'est tout l'objet du lot.
+#:
+#: `BATCH_PAUSE_S` reste, et reste une pause fixe : la passe
+#: observations interroge Pioupiou, qui n'a ni le même plafond ni la
+#: même pondération. La ralentir « par sympathie » aurait coûté 4 min de
+#: run pour rien.
 
 MAX_RETRIES = 3
 TIMEOUT_S = 45
@@ -189,9 +217,42 @@ TIMEOUT_S = 45
 #: suivants passent.
 PAUSE_429_S = 65
 
-#: Plafond gratuit Open-Meteo : 10 000 appels pondérés/jour, 600/min.
+#: ⚠️ PLAFONDS OPEN-METEO — TROIS, PAS DEUX. C'est le défaut qui a coûté
+#: la nuit du 09/08 : le code ne connaissait que le jour et la minute,
+#: et le palier gratuit compte AUSSI 5 000 appels pondérés par HEURE.
+#: 648 points × 8 tenaient sous les 10 000 du jour et sous les 600 de la
+#: minute — et franchissaient l'heure au 626ᵉ point. Le run s'est arrêté
+#: à 625 points collectés, soit 5 000 pondérés à l'unité près, puis n'a
+#: plus rien obtenu pendant 26 min : contrairement à la minute, une
+#: fenêtre horaire pleine ne se vide pas en attendant 65 s.
+#:
+#: Les valeurs vivent maintenant dans `tools/quota_openmeteo.py`, avec
+#: le compteur qui les fait respecter. Les alias ci-dessous ne sont là
+#: que pour les messages de `quota_projete`.
 QUOTA_JOUR = 10_000
 QUOTA_MINUTE = 600
+QUOTA_HEURE = 5_000
+
+
+def charger_quota():
+    """Le module de budget partagé, ou `None` s'il n'est pas déployé.
+
+    ⚠️ IMPORT PARESSEUX ET RATTRAPÉ, comme `storage.py` plus bas. Un
+    garde-fou qui empêche de tourner est pire que le risque qu'il
+    couvre : si `tools/quota_openmeteo.py` manque sur le VPS — un rsync
+    qui n'a copié que `model-verif/`, par exemple —, la collecte doit
+    repartir en cadence conservatrice, pas s'arrêter.
+    """
+    tools = pathlib.Path(__file__).resolve().parent.parent / "tools"
+    if str(tools) not in sys.path:
+        sys.path.insert(0, str(tools))
+    try:
+        import quota_openmeteo                        # type: ignore
+        return quota_openmeteo
+    except Exception as exc:                          # noqa: BLE001
+        print(f"  ⓘ budget partagé indisponible ({exc}) — cadence "
+              f"conservatrice, sans comptage partagé", file=sys.stderr)
+        return None
 
 
 class Abort(Exception):
@@ -390,11 +451,15 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     # trompe doit se tromper du côté qui protège.
     par_point = n_vars / 10
     total = n_points * par_point
-    # La cadence qui compte est la RÉELLE — pause + aller-retour —, pas
-    # 60/pause. C'est la confusion des deux qui laissait le garde-fou
-    # muet : il comparait des requêtes brutes à un plafond pondéré.
-    cadence_reelle = 60 / (FCST_PAUSE_S + LATENCE_S)
-    par_min = cadence_reelle * par_point
+    # ⚠️ CE QUI EST PROJETÉ ICI N'EST PLUS UNE CADENCE, C'EST UN VOLUME.
+    # L'ancienne ligne comparait `60/(pause + latence)` au plafond de la
+    # minute — une cadence ESPÉRÉE, jamais mesurée, et fausse le 09/08.
+    # La cadence est maintenant tenue par le seau à jetons, qui la
+    # mesure au lieu de l'estimer. Ce qu'aucun seau ne peut corriger, en
+    # revanche, c'est un run qui ne TIENT PAS dans une fenêtre : d'où le
+    # plafond horaire ci-dessous, qui est le seul garde-fou qui restait
+    # à écrire.
+    points_par_heure = QUOTA_HEURE / par_point
     print("┌─ QUOTA OPEN-METEO PROJETÉ ───────────────────────────────────")
     print(f"│ points                 : {n_points}")
     print(f"│ modèles × variables    : {len(MODELS)} × {len(_hourly_vars())} = {n_vars}")
@@ -402,11 +467,12 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
           f"(sans remise sur {forecast_days} jours — cf. 07/08)")
     print(f"│ TOTAL du run           : {total:.0f} appels pondérés "
           f"({total / QUOTA_JOUR * 100:.1f} % du plafond journalier)")
-    print(f"│ cadence                : {FCST_PAUSE_S}s + {LATENCE_S}s → "
-          f"{cadence_reelle:.0f} req/min → {par_min:.0f} pondérés/min "
-          f"(plafond {QUOTA_MINUTE}/min)")
-    print(f"│ durée estimée          : {n_points * (FCST_PAUSE_S + LATENCE_S) / 60:.0f} min "
-          f"(prévisions) + {n_points * (BATCH_PAUSE_S + LATENCE_S) / 60:.0f} min (obs)")
+    print(f"│ fenêtre HORAIRE        : {total:.0f} / {QUOTA_HEURE} "
+          f"({total / QUOTA_HEURE * 100:.1f} %) — l'heure autorise "
+          f"{points_par_heure:.0f} points à ce poids")
+    print(f"│ cadence                : tenue par le seau à jetons "
+          f"(tools/quota_openmeteo.py), plafonds {QUOTA_MINUTE}/min · "
+          f"{QUOTA_HEURE}/h · {QUOTA_JOUR}/j")
     print("└──────────────────────────────────────────────────────────────")
     # ⚠️ SEUIL RELEVÉ DE 50 % À 60 % LE 08/08 — décision assumée, pas
     # contournement. Les trois variables d'E4/E6 portent le run mesuré de
@@ -432,11 +498,27 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     if total > QUOTA_JOUR * 0.6:
         raise Abort(f"{total:.0f} appels pondérés > 60 % du plafond journalier — "
                     f"comprendre AVANT de forcer (nb de points ? de modèles ?)")
-    # 90 % et pas 100 : la latence varie, et frôler la ligne, c'est la
-    # franchir une minute sur deux.
-    if par_min > QUOTA_MINUTE * 0.9:
-        raise Abort(f"{par_min:.0f} pondérés/min — trop près du plafond de "
-                    f"{QUOTA_MINUTE}. Augmenter FCST_PAUSE_S.")
+    # ⚠️ LE GARDE-FOU QUI MANQUAIT, ET QUI AURAIT SAUVÉ LA NUIT DU 09/08.
+    # L'ancien comparait une cadence espérée au plafond de la minute ;
+    # celui-ci compare le VOLUME du run au plafond de l'HEURE, qui est
+    # celui qui a mordu. Il n'y a rien à régler pour le contourner :
+    # aucune cadence ne fait tenir plus de 5 000 pondérés dans une heure.
+    # Les trois issues sont un choix de produit — moins de variables,
+    # moins de modèles, ou une passe étalée sur deux heures — et le
+    # message doit les poser plutôt que de laisser chercher.
+    #
+    # 95 % et pas 100 : le compteur du serveur et le nôtre ne datent pas
+    # une requête à la même milliseconde, et les scripts lancés à la
+    # main partagent la même IP.
+    if total > QUOTA_HEURE * 0.95:
+        raise Abort(
+            f"{total:.0f} appels pondérés pour {n_points} points, alors que "
+            f"l'heure n'en autorise que {QUOTA_HEURE} — soit "
+            f"{points_par_heure:.0f} points à {par_point:.1f} de poids. "
+            f"C'est exactement ce qui a tué la nuit du 09/08. Aucune "
+            f"cadence ne corrige un volume : retirer une variable ou un "
+            f"modèle, ou étaler la passe sur deux heures (et relever "
+            f"alors MAX_MINUTES, qui vaut 40).")
     return total
 
 
@@ -1040,9 +1122,41 @@ def main() -> int:
         print(f"▶ prévisions : {len(stations)} points × {len(MODELS)} modèles → {path}")
         failed = 0
 
+        # ⚠️ LE SEAU EST CONSTRUIT ICI, PAS DANS LA BOUCLE : c'est lui
+        # qui porte le compte, et un seau reconstruit à chaque point
+        # relirait l'état 648 fois pour rien.
+        qm = charger_quota()
+        budget = qm.Budget("collect") if qm else None
+        # ⚠️ POIDS DÉRIVÉ, JAMAIS RECOPIÉ. Si quelqu'un ajoute demain une
+        # variable ou un modèle, ce calcul suit ; un `8` en dur, non.
+        poids_point = (qm.poids(len(_hourly_vars()), len(MODELS))
+                       if qm else None)
+        refuses = 0
+
         def _fcst_rows():
-            nonlocal failed
+            nonlocal failed, refuses
             for i, st in enumerate(stations, 1):
+                # Le droit de parler AVANT de parler. En dégradé comme
+                # en nominal, `demander` rend la main quand c'est l'heure.
+                if budget is not None:
+                    try:
+                        budget.demander(
+                            poids_point,
+                            etiquette=f"{st['lat']:.3f},{st['lon']:.3f}")
+                    except qm.BudgetRefuse as exc:
+                        # ⚠️ TROU DÉCLARÉ, JAMAIS COMBLÉ. Un point non
+                        # collecté se dit ; il ne s'interpole pas, et il
+                        # ne fait pas non plus tuer le run par le chien
+                        # de garde — c'était la mort du 09/08.
+                        print(f"  ⛔ {exc}", file=sys.stderr)
+                        refuses += 1
+                        failed += 1
+                        continue
+                else:
+                    # Module absent : cadence conservatrice d'avant le
+                    # lot, celle qui a tenu le 08/08.
+                    time.sleep(0.70)
+
                 payload = fetch_forecast(st["lat"], st["lon"], args.forecast_days)
                 if payload is None:
                     failed += 1
@@ -1050,13 +1164,24 @@ def main() -> int:
                     yield from forecast_rows(st, payload, fetched_at)
                 if i % 50 == 0:
                     print(f"  … {i}/{len(stations)} ({failed} échecs)")
-                # `FCST_PAUSE_S`, pas `BATCH_PAUSE_S` : c'est cette
-                # boucle-ci qui pèse 8 sur le quota pondéré.
-                time.sleep(FCST_PAUSE_S)
 
         n = write_ndjson_gz(path, _fcst_rows())
-        print(f"✅ {n} lignes, {failed} points en échec, "
+        print(f"✅ {n} lignes, {failed} points en échec "
+              f"(dont {refuses} refusés par le quota), "
               f"{path.stat().st_size / 1024:.0f} Ko")
+        # ⚠️ LA LIGNE QUI NOMME LES CONSOMMATEURS. Un budget partagé qui
+        # ne dit pas QUI a consommé QUOI déplace le problème au lieu de
+        # le résoudre : quand la collecte échouera, on doit pouvoir lire
+        # « day_features a pris 4 000 unités entre 05:12 et 05:31 » et
+        # non « quelque chose a dépassé ».
+        if budget is not None:
+            print(f"ⓘ {budget.resume()}")
+            for nom_f, info in budget.etat()["fenetres"].items():
+                if info["par_consommateur"]:
+                    detail = ", ".join(f"{q} {v:.0f}" for q, v
+                                       in info["par_consommateur"].items())
+                    print(f"   {nom_f:<7} {info['consomme']:>6.0f}/"
+                          f"{info['plafond']:<6} — {detail}")
         upload_r2(path, key)
         # ⚠️ Sortie en erreur si plus d'un point sur cinq a échoué : une
         # nuit à moitié collectée doit réveiller quelqu'un, pas passer

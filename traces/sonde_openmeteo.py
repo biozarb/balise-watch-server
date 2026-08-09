@@ -77,6 +77,21 @@ DEPTH_DATES = ["2021-06-15", "2022-06-15", "2023-06-15",
                "2023-12-16", "2024-01-15", "2024-06-15"]
 
 
+import os as _os                                          # noqa: E402
+import sys as _sys                                        # noqa: E402
+
+_TOOLS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                       "..", "tools")
+if _TOOLS not in _sys.path:
+    _sys.path.insert(0, _TOOLS)
+try:
+    from quota_openmeteo import Budget as _Budget, poids_url as _poids_url
+    BUDGET = _Budget("sonde_openmeteo")
+except Exception as _exc:                                 # noqa: BLE001
+    print(f"  ⓘ budget Open-Meteo indisponible ({_exc}) — sans comptage partagé")
+    BUDGET = None
+
+
 def fetch(base, date, var, model=None):
     q = {
         "latitude": LAT, "longitude": LON,
@@ -86,6 +101,13 @@ def fetch(base, date, var, model=None):
     if model:
         q["models"] = model
     url = base + "?" + urllib.parse.urlencode(q)
+    # ⚠️ MÊME UNE SONDE COMPTE. C'est le piège n°3 du lot : une sonde
+    # lancée « juste pour voir » pendant la collecte tire sur la même
+    # fenêtre horaire, depuis la même IP, et sa consommation doit
+    # apparaître sous son nom plutôt que de disparaître dans un trou
+    # que la collecte ne saura pas expliquer.
+    if BUDGET is not None:
+        BUDGET.demander(_poids_url(url))
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:

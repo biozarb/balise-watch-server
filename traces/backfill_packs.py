@@ -473,6 +473,21 @@ def _alarme(secondes):
         signal.signal(signal.SIGALRM, ancien)
 
 
+import os as _os                                          # noqa: E402
+import sys as _sys                                        # noqa: E402
+
+_TOOLS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                       "..", "tools")
+if _TOOLS not in _sys.path:
+    _sys.path.insert(0, _TOOLS)
+try:
+    from quota_openmeteo import Budget as _Budget, poids_url as _poids_url
+    BUDGET = _Budget("backfill_packs")
+except Exception as _exc:                                 # noqa: BLE001
+    print(f"  ⓘ budget Open-Meteo indisponible ({_exc}) — sans comptage partagé")
+    BUDGET = None
+
+
 def get_json(url, poids, essai_restant=1):
     """GET + rattrapage du piège de concurrence : l'erreur arrive dans le
     CORPS avec un HTTP 200, un test sur le code de statut ne la verrait
@@ -480,6 +495,20 @@ def get_json(url, poids, essai_restant=1):
     if CPT.appels_ponderes + poids > MAX_WEIGHTED_CALLS:
         raise Abort(f"plafond d'appels pondérés atteint "
                     f"({CPT.appels_ponderes:.0f} + {poids:.0f} > {MAX_WEIGHTED_CALLS})")
+    # ── budget Open-Meteo partagé (09/08/2026) ────────────────────
+    # ⚠️ `CPT` NE VOIT QUE CE PROCESSUS-CI, ET C'EST LÀ SA LIMITE. Il
+    # compte bien, il compte en poids, mais il compte SEUL : il ne sait
+    # rien de la collecte de 05:15 ni des trois scripts lancés à la
+    # main, alors que le plafond Open-Meteo est par ADRESSE IP et que
+    # tout le VPS en partage une. Les deux comptes coexistent donc, et
+    # ce n'est pas une redondance : `CPT` borne CE run (garde-fou de
+    # l'appelant), le budget borne L'IP (garde-fou du voisinage).
+    #
+    # ⚠️ Le poids passé ici en argument est celui que l'appelant a
+    # calculé ; celui du budget est relu sur l'URL — lots de points
+    # compris. Si les deux divergent un jour, c'est l'URL qui dit vrai.
+    if BUDGET is not None:
+        BUDGET.demander(_poids_url(url))
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     t0 = time.time()
     try:

@@ -50,6 +50,15 @@ ProtectHome=read-only
 # ... sauf l'état et le journal, qui vivent dans le home.
 ReadWritePaths=/home/debian/.balise-watch-entretien
 ReadWritePaths=/home/debian/balise-watch/balise-watch-server/traces/traces_cache
+# ⚠️ AJOUTÉ LE 09/08 — le budget Open-Meteo partagé, et il l'est
+# VRAIMENT : `backfill_packs.py` ne pèse que 18 pondérés par jour contre
+# ~4 700 pour la collecte, mais le plafond est par ADRESSE IP et les
+# deux chaînes en partagent une. Un compteur auquel un seul des deux
+# consommateurs écrit ne compte rien : il rendrait la collecte prudente
+# vis-à-vis d'elle-même et aveugle au reste, ce qui est le problème
+# d'origine sous un autre nom. `ProtectSystem=strict` rend `/var` en
+# lecture seule sans cette ligne.
+ReadWritePaths=/var/lib/bw-quota
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

@@ -119,10 +119,37 @@ def _pressure_level_for_alt(alt_m: float) -> int:
     return min(levels, key=lambda lv: abs(lv - p))
 
 
+# ── budget Open-Meteo partagé (09/08/2026) ────────────────────────
+# ⚠️ CE SCRIPT N'EST DANS AUCUN TIMER, ET C'EST EXACTEMENT POUR ÇA
+# QU'IL EST CÂBLÉ ICI. Le plafond Open-Meteo est par ADRESSE IP, et tout
+# le VPS en partage une : un lancement à la main pendant la collecte de
+# 05:15 mangerait la fenêtre horaire de la nuit, et le journal de la
+# collecte ne saurait pas dire d'où vient le trou — il dirait « quelque
+# chose a dépassé ». Instrumenter la collecte seule aurait donné un faux
+# sentiment de sécurité ; le prochain incident serait venu d'ici.
+import os as _os                                          # noqa: E402
+import sys as _sys                                        # noqa: E402
+
+_TOOLS = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                       "..", "tools")
+if _TOOLS not in _sys.path:
+    _sys.path.insert(0, _TOOLS)
+try:
+    from quota_openmeteo import Budget as _Budget, poids_url as _poids_url
+    BUDGET = _Budget("day_features")
+except Exception as _exc:                                 # noqa: BLE001
+    print(f"  ⓘ budget Open-Meteo indisponible ({_exc}) — sans comptage partagé")
+    BUDGET = None
+
+
 def _get_json(url: str, retry: bool = True):
     """GET + rattrapage du piège de concurrence (cf. en-tête) : l'erreur
     arrive dans le CORPS avec un HTTP 200, un test sur le code de statut
     ne la verrait pas."""
+    # Le droit de parler avant de parler. Le poids est lu sur l'URL
+    # elle-même : rien à recompter, donc rien à oublier.
+    if BUDGET is not None:
+        BUDGET.demander(_poids_url(url))
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=90) as r:

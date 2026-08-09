@@ -228,54 +228,50 @@ n_vars = len(C._hourly_vars()) * len(C.MODELS)
 verifie(abs(total - 648 * n_vars / 10) < 1e-6,
         f"le total suit la pondération sans remise de jours — {total}")
 verifie(total > 3000, f"648 points pèsent plus de 3000 pondérés, pas 694 — {total:.0f}")
-verifie("pondérés/min" in sortie, "l'encadré annonce la cadence PONDÉRÉE par minute")
-verifie("durée estimée" in sortie, "et la durée, qui décide du TimeoutStartSec")
+verifie("fenêtre HORAIRE" in sortie,
+        "l'encadré annonce la fenêtre HORAIRE — celle qui a tué le 09/08")
+verifie(f"{C.QUOTA_HEURE}" in sortie, "et le plafond de l'heure, en clair")
 
-# La cadence en vigueur doit passer, avec de la marge.
-# ⚠️ `FCST_PAUSE_S` DEPUIS LE 08/08, ET C'EST LE CŒUR DU BANC. La passe
-# prévisions a sa propre pause parce qu'elle seule pèse sur le quota
-# pondéré ; ce banc a viré au rouge à l'instant où le code a changé de
-# constante sans que le banc suive — exactement ce qu'on lui demande.
-cadence_reelle = 60 / (C.FCST_PAUSE_S + C.LATENCE_S)
-par_min = cadence_reelle * n_vars / 10
-verifie(par_min <= C.QUOTA_MINUTE * 0.9,
-        f"la cadence en vigueur reste sous 90 % du plafond — {par_min:.0f}/min")
-verifie(cadence_reelle < 120,
-        f"et sous les ~120 req/min où la porte s'est fermée le 07/08 — "
-        f"{cadence_reelle:.0f}/min")
+# ⚠️ CE BANC A CHANGÉ DE NATURE LE 09/08, ET C'EST LE FOND DU LOT.
+# Il vérifiait une CADENCE dérivée de deux constantes de pause. Ces
+# constantes ont disparu : la cadence est maintenant tenue par le seau à
+# jetons de `tools/quota_openmeteo.py`, qui la MESURE au lieu de
+# l'espérer (son banc à lui, `tools/test_quota_openmeteo.py`, prouve
+# qu'elle ne bouge plus quand la latence varie de 0,05 s à 0,40 s).
+# Ce qu'aucun seau ne peut corriger, c'est un VOLUME qui ne tient pas
+# dans une fenêtre — et c'est cela que ce banc surveille désormais.
+verifie(total <= C.QUOTA_HEURE * 0.95,
+        f"le run tient dans la fenêtre horaire — {total:.0f} / {C.QUOTA_HEURE}")
 
-# ⚠️ Et surtout : l'ANCIENNE valeur doit être REFUSÉE. Un garde-fou qui
-# laisse passer ce qui a déjà cassé ne garde rien.
-pause_avant = C.FCST_PAUSE_S
-C.FCST_PAUSE_S = 0.25
+# ⚠️ ET LA CONFIGURATION DU 09/08 DOIT ÊTRE REFUSÉE. 10 modèles × 8
+# variables pesaient 8,0 par point, soit 5 184 pondérés : au-dessus des
+# 5 000 de l'heure. Le run s'était arrêté à 625 points collectés — 5 000
+# à l'unité près — puis n'avait plus rien obtenu pendant 26 minutes.
+# C'est l'assertion qui empêche de rajouter un dixième modèle sans
+# recompter, et de rejouer cette nuit-là.
+modeles_avant = C.MODELS
+C.MODELS = list(modeles_avant) + ["meteoswiss_icon_ch1"]
 try:
     refuse = False
     try:
         with redirect_stdout(io.StringIO()):
             C.quota_projete(648, 3)
-    except C.Abort:
+    except C.Abort as exc:
         refuse = True
-    verifie(refuse, "0,25 s — la cadence qui a coûté 24 points — est REFUSÉE")
+        motif = str(exc)
+    verifie(refuse, "10 modèles × 8 variables — la nuit du 09/08 — est REFUSÉE")
+    verifie(refuse and "heure" in motif,
+            "et le refus dit que c'est l'HEURE qui bloque, pas la cadence")
 finally:
-    C.FCST_PAUSE_S = pause_avant
+    C.MODELS = modeles_avant
 
-# ⚠️ ET L'ANCIENNE PAUSE, 0,45 s, DOIT ELLE AUSSI ÊTRE REFUSÉE DÉSORMAIS.
-# Elle était juste à 5 variables (448 pondérés/min) ; à 8 elle vaut
-# 716/min. C'est l'assertion qui empêche quelqu'un de « remettre comme
-# avant » pour gagner 4 minutes de run, et de reprendre des 429 le mois
-# suivant sans comprendre pourquoi.
-pause_avant = C.FCST_PAUSE_S
-C.FCST_PAUSE_S = 0.45
-try:
-    refuse = False
-    try:
-        with redirect_stdout(io.StringIO()):
-            C.quota_projete(648, 3)
-    except C.Abort:
-        refuse = True
-    verifie(refuse, "0,45 s — juste à 5 variables, trop rapide à 8 — est REFUSÉE")
-finally:
-    C.FCST_PAUSE_S = pause_avant
+# ⚠️ AUCUNE CONSTANTE DE LATENCE NE DOIT REVENIR. Le seau existe pour
+# n'avoir plus à connaître la latence ; si quelqu'un en réintroduit une
+# pour « affiner », c'est que le lot a été défait.
+verifie(not hasattr(C, "LATENCE_S"),
+        "plus aucune constante de latence dans collect.py")
+verifie(not hasattr(C, "FCST_PAUSE_S"),
+        "plus de pause fixe pour la passe prévisions — le seau la remplace")
 
 # ⚠️ Et le plafond JOURNALIER doit rester un plafond. Il a été relevé de
 # 50 % à 60 % le 08/08 pour laisser passer 51,8 % ; il doit toujours

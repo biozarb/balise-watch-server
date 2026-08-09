@@ -99,9 +99,28 @@ rsync -av --exclude '__pycache__' model-verif/ \
 # tools/storage.py y est déjà depuis le 03/08 — vérifier par sha256sum
 # des deux côtés plutôt que de le réenvoyer à l'aveugle.
 
+# 1 bis. ⚠️ LE BUDGET PARTAGÉ VIT DANS `tools/`, PAS DANS `model-verif/`.
+#    Un rsync qui ne copie que `model-verif/` laisse `collect.py` sans
+#    son compteur : il repartira en cadence conservatrice et le DIRA,
+#    mais les cinq appelants cesseront de partager leur quota — donc le
+#    défaut du 09/08 redevient possible sans que rien ne s'allume.
+rsync -av --exclude '__pycache__' balise-watch-server/tools/quota_openmeteo.py \
+  debian@51.91.102.146:~/balise-watch/balise-watch-server/tools/
+
 # 2. l'état doit EXISTER avant tout démarrage : un ReadWritePaths qui
 #    pointe sur un chemin absent fait échouer le montage (piège du 03/08)
 sudo install -d -o debian -g debian -m 755 /var/lib/bw-model-verif
+
+# 2 bis. l'état du budget, même règle — et il est PARTAGÉ entre les
+#    chaînes, donc il ne vit pas sous `/var/lib/bw-model-verif/`.
+#    ⚠️ `bw-model-collect.service` doit le déclarer en ReadWritePaths,
+#    sinon le montage systemd le rendra lisible mais pas inscriptible :
+#    la collecte basculerait en dégradé toutes les nuits, en le disant,
+#    et personne ne lirait la ligne.
+sudo install -d -o debian -g debian -m 755 /var/lib/bw-quota
+
+# l'état se lit à l'œil quand ça va mal — c'est la commande de 6 h du matin
+python3 ~/balise-watch/balise-watch-server/tools/quota_openmeteo.py
 
 # 3. le fichier de secrets propre à cette chaîne — cf.
 #    model-verif.env.exemple. Aucune autre chaîne du VPS n'écrit dans
@@ -488,29 +507,66 @@ deuxième avis à maille fine — partout où ils répondent, au moins deux
 modèles notés répondent déjà. Leur absence appauvrit le comparateur,
 elle ne laisse aucun coin du réseau sans second avis.
 
-**Et c'est le quota qui ferme la porte, pas un oubli.** Recalculé avec
-`quota_projete` sur 647 points et 8 variables horaires :
+**Et c'est le quota qui ferme la porte, pas un oubli.**
 
-| modèles | pondérés/nuit | % du plafond (garde-fou 60 %) | pondérés/min (plafond 600) | |
+> ⚠️ **CE TABLEAU ÉTAIT FAUX, ET IL A COÛTÉ LA NUIT DU 09/08.** Il
+> comparait le volume au plafond du JOUR et la cadence à celui de la
+> MINUTE — les deux seuls que `collect.py` connaissait. Le palier
+> gratuit Open-Meteo en compte **trois** : 600/min, **5 000/heure** et
+> 10 000/jour. Comme la passe prévisions tient en une quinzaine de
+> minutes, elle tombe tout entière dans UNE heure : c'est la fenêtre
+> horaire qui décide, pas la journalière. L'ancienne version concluait
+> qu'il restait « exactement une place » ; il en manquait une.
+>
+> La preuve est dans le journal du 09/08 : le run s'est arrêté à
+> **625 points collectés — 5 000 pondérés à l'unité près** — puis n'a
+> plus rien obtenu pendant 26 minutes, jusqu'au chien de garde. Une
+> fenêtre horaire pleine, contrairement à celle de la minute, ne se
+> vide pas en attendant 65 s.
+
+Recalculé sur 648 points et 8 variables horaires, **contre la fenêtre
+horaire** (garde-fou à 95 % de 5 000, soit 4 750) :
+
+| modèles | poids/point | pondérés/nuit | % de l'heure | |
 |---:|---:|---:|---:|---|
-| **10** (actuel) | 5 176 | 51,8 % | 522 | ✅ |
-| 11 | 5 694 | 56,9 % | 574 | ✅ |
-| 12 | 6 211 | **62,1 %** | **626** | ❌ refusé |
-| 14 (les quatre) | 7 246 | 72,5 % | 730 | ❌ refusé |
+| 8 | 6,4 | 4 147 | 82,9 % | ✅ |
+| **9** (actuel depuis le 09/08) | 7,2 | 4 666 | **93,3 %** | ✅ |
+| 10 (jusqu'au 09/08) | 8,0 | 5 184 | **103,7 %** | ❌ la nuit du 09/08 |
+| 11 | 8,8 | 5 702 | 114,0 % | ❌ refusé |
+| 12 | 9,6 | 6 221 | 124,4 % | ❌ refusé |
 
-**Il reste exactement une place** dans le quota gratuit à la cadence
-actuelle. Le douzième modèle franchit *les deux* limites à la fois — le
-garde-fou journalier ET le plafond par minute. En ajouter plus suppose
-de ralentir la cadence (donc d'allonger le run), de retirer une variable
-horaire, ou de payer.
+**Il ne reste aucune place, et il y a 93 % de la fenêtre déjà prise.**
+Ajouter un modèle suppose désormais d'en retirer un autre, de retirer
+une variable horaire, d'étaler la passe sur deux heures (et de relever
+`MAX_MINUTES`, qui vaut 40), ou de payer une clé.
 
-Si cette place doit servir, les trois candidats ne se valent pas :
-**ICON-2I** est le seul à 2 km et couvre 274 balises (Corse, Alpes du
-Sud, frontière italienne) ; **KNMI** couvre le plus large (623) mais à
-5,5 km, entre ICON-D2 et ARPEGE ; **UKMO** est la seule famille de
+⚠️ **La marge restante est mince : 84 pondérés, soit une douzaine de
+points.** Un script lancé à la main pendant la collecte la consomme.
+C'est exactement ce que `tools/quota_openmeteo.py` surveille — il fera
+attendre la collecte au lieu de la laisser se faire refuser, et le
+journal nommera le script fautif.
+
+⚠️ **ET DEPUIS LE 09/08, ILS SONT CINQ, PAS QUATRE.**
+`meteoswiss_icon_ch1` a été retiré de `MODELS` pour faire tenir le run
+sous la fenêtre horaire. Le choix s'est fait sur l'archive complète du
+08/08, pas au jugé : CH1 couvre **exactement les mêmes 515 balises**
+qu'ICON-CH2 — ensembles identiques — et son horizon médian mesuré vaut
+34 h, donc il ne concourait déjà pas au +48 h. C'est le seul des dix
+dont le retrait ne fasse tomber **aucune** balise sous son nombre
+d'avis à maille fine actuel ; retirer AROME HD ou DMI HARMONIE en
+aurait privé 53 de leur deuxième avis.
+
+L'app continue de le PROPOSER aux pilotes (`localModels.ts` — il y est
+le plus fin en Maurienne). L'écran qui juxtapose « modèles de la coupe »
+et « modèles notés » doit donc le dire, sinon il se lira comme un trou
+de données.
+
+Si une place se libère un jour, les trois autres candidats ne se valent
+pas : **ICON-2I** est le seul à 2 km et couvre 274 balises (Corse, Alpes
+du Sud, frontière italienne) ; **KNMI** couvre le plus large (623) mais
+à 5,5 km, entre ICON-D2 et ARPEGE ; **UKMO** est la seule famille de
 modèle vraiment différente (Unified Model, ni ICON ni HARMONIE ni
-ALADIN) mais ne couvre que 41 balises. Aucun n'est urgent — garder la
-marge est une réponse valable.
+ALADIN) mais ne couvre que 41 balises.
 
 ### L'ordre des onglets
 
