@@ -65,6 +65,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import events as EV  # noqa: E402
 import scoring as S  # noqa: E402
 
 DAY_MS = 86_400_000
@@ -119,13 +120,61 @@ class Supabase:
             headers={"apikey": self.key, "Authorization": f"Bearer {self.key}",
                      "Content-Type": "application/json", **(extra or {})})
 
-    def select(self, table: str, query: str = "") -> list[dict]:
+    #: Nombre de lignes qu'un seul appel PostgREST peut rendre. Mesuré en
+    #: direct le 08/08 : `Range: 0-4999` sur une table de 1 946 lignes en
+    #: rend 1 000, pas 1 946. C'est `db-max-rows` côté serveur, pas une
+    #: limite du client — demander plus n'y change rien.
+    PAGE = 1000
+
+    def select(self, table: str, query: str = "", order: str | None = None,
+               ) -> list[dict]:
+        """Lit une table ENTIÈRE, page par page.
+
+        ⚠️ DÉFAUT TROUVÉ LE 08/08 EN VÉRIFIANT LES CHIFFRES DU LOT F, ET
+        IL NE DATAIT PAS DU LOT F. La version précédente faisait UN appel
+        et rendait ce qui venait. PostgREST plafonne à 1 000 lignes et le
+        dit dans un en-tête que personne ne lisait : la fonction rendait
+        donc une TRONCATURE SILENCIEUSE, jamais une erreur.
+        Conséquences mesurées sur la base réelle :
+          · `model_verif_daily` sur 15 jours = 5 407 lignes → 1 000 lues,
+            soit un score glissant calculé sur 18 % de sa fenêtre ;
+          · `model_character` = 81 960 accumulateurs → 1 000 lus, donc
+            80 960 accumulateurs repartaient de ZÉRO chaque nuit. La
+            mémoire longue du §15.4, dont c'est toute la raison d'être,
+            n'a jamais mémorisé quoi que ce soit.
+        Rien ne plantait, rien n'était rouge, et les chiffres avaient
+        l'air normaux. C'est le motif exact contre lequel ce chantier se
+        bat : une table raisonnée n'est pas une table vérifiée.
+
+        ⚠️ `order` N'EST PAS DÉCORATIF. Sans `ORDER BY`, PostgreSQL n'a
+        aucune obligation de rendre deux pages dans un ordre cohérent :
+        une ligne peut apparaître deux fois et une autre jamais. On
+        ordonne donc sur la clé primaire de la table, et l'appelant la
+        passe explicitement — la deviner ici serait la même faute de
+        reniflage que celle corrigée dans `zone_kind_for`.
+        """
         if self.dry_run:
             return []
         sep = "&" if "?" in query else "?"
-        url = f"{table}{query}{sep}select=*" if "select=" not in query else f"{table}{query}"
-        with urllib.request.urlopen(self._req(url, "GET"), timeout=60) as r:
-            return json.loads(r.read().decode("utf-8"))
+        base = (f"{table}{query}{sep}select=*" if "select=" not in query
+                else f"{table}{query}")
+        if order:
+            base += f"{'&' if '?' in base else '?'}order={order}"
+        out: list[dict] = []
+        offset = 0
+        while True:
+            req = self._req(base, "GET", None,
+                            {"Range-Unit": "items",
+                             "Range": f"{offset}-{offset + self.PAGE - 1}"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                page = json.loads(r.read().decode("utf-8"))
+            out.extend(page)
+            # Une page incomplète est la fin : c'est le seul signal fiable
+            # sans demander un `count=exact`, qui coûte un balayage complet
+            # de la table à chaque appel.
+            if len(page) < self.PAGE:
+                return out
+            offset += self.PAGE
 
     def upsert(self, table: str, rows: list[dict], on_conflict: str,
                chunk: int = 500) -> int:
@@ -172,6 +221,50 @@ class Supabase:
             except urllib.error.HTTPError as e:
                 detail = e.read()[:400].decode("utf-8", "replace")
                 raise Abort(f"upsert {table} : HTTP {e.code} — {detail}") from e
+            n += len(rows[i:i + chunk])
+        self.ecritures += n
+        return n
+
+    def insert(self, table: str, rows: list[dict], chunk: int = 500) -> int:
+        """Insertion simple, pour les tables SANS clé d'unicité.
+
+        ⚠️ `model_verif_event` n'a PAS de contrainte d'unicité, et ce
+        n'est pas un oubli : elle porte UNE LIGNE PAR ÉVÉNEMENT
+        INDIVIDUEL (chaque succès, chaque raté, chaque fausse alarme),
+        pas un agrégat par nuit. Deux bascules ratées le même jour par le
+        même modèle sur la même zone sont deux lignes légitimes, qu'un
+        `on_conflict` fusionnerait en une.
+
+        L'idempotence se joue donc ailleurs : l'appelant PURGE la journée
+        avant de réinsérer (`?day=eq.…`). Contrairement au cas de
+        `upsert`, le trou de lecture ne coûte rien ici — la purge ne
+        touche qu'un jour sur une fenêtre de 90, et personne ne lit cette
+        table en direct : le JSON publié est reconstruit après.
+        """
+        if not rows:
+            return 0
+        formes = {frozenset(r.keys()) for r in rows}
+        if len(formes) > 1:
+            communes = frozenset.intersection(*formes)
+            variables = sorted(set().union(*formes) - communes)
+            raise Abort(
+                f"insert {table} : {len(formes)} jeux de clés différents dans le "
+                f"même envoi — PostgREST le refusera (PGRST102). Clés présentes "
+                f"dans certaines lignes seulement : {variables}.")
+        if self.dry_run:
+            print(f"  (dry-run) {len(rows)} lignes vers {table}")
+            return len(rows)
+        n = 0
+        for i in range(0, len(rows), chunk):
+            body = json.dumps(rows[i:i + chunk]).encode("utf-8")
+            req = self._req(table, "POST", body,
+                            {"Prefer": "return=minimal"})
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    r.read()
+            except urllib.error.HTTPError as e:
+                detail = e.read()[:400].decode("utf-8", "replace")
+                raise Abort(f"insert {table} : HTTP {e.code} — {detail}") from e
             n += len(rows[i:i + chunk])
         self.ecritures += n
         return n
@@ -675,6 +768,365 @@ def zone_rows_needed(zones: list[dict]) -> list[dict]:
 #: quatre métriques d'origine décrivent un BIAIS (« sous-estime le vent
 #: fort »), aucune ne porte l'ERREUR TYPIQUE, qui est justement le
 #: premier des deux nombres que Yann demande.
+#: (définition juste avant `accumulator_updates`, plus bas — la section
+#: ÉVÉNEMENTS s'intercale ici parce qu'elle n'a besoin que des zones.)
+
+# ══════════════════════════════════════════════════════════════════
+#  ÉVÉNEMENTS — `model_verif_event` (lot F, 08/08)
+# ══════════════════════════════════════════════════════════════════
+#
+# ⚠️ CETTE SECTION ROMPT LE COMMENTAIRE DE `supabase_step35…sql`, ET
+# C'EST VOULU. Ce commentaire disait « AUCUN JOB N'ÉCRIT ENCORE ICI, et
+# c'est délibéré […] les seuils ne sont calibrés sur rien ». Yann a
+# tranché le 08/08 au soir, en connaissance de cause : on écrit et on
+# publie, AVEC un drapeau `calibrated: false` qui voyage avec les
+# données jusqu'à l'affichage. Le raisonnement complet est en tête
+# d'`events.py` — il n'est pas recopié ici pour qu'il n'y ait qu'un seul
+# endroit à corriger le jour où les seuils seront mesurés.
+#
+# ⚠️ CE QUE LE DRAPEAU N'AUTORISE PAS : présenter ces chiffres comme
+# calibrés, ici ou dans la PWA.
+
+#: Quorum de balises DISTINCTES pour qu'un événement compte (§3.4).
+#: Une girouette qui tourne peut être une bascule, une rafale, un arbre
+#: qui a poussé ou un roulement mort ; deux balises de la même case fine
+#: qui tournent dans la demi-heure, non.
+EVENT_MIN_STATIONS = 2
+
+#: Quorum d'AFFICHAGE : sous ce nombre d'événements réels (succès +
+#: ratés), un POD vaut 0, 0,5 ou 1 et ne veut rien dire. Même valeur et
+#: même rôle que `S.REGIME_MIN_OCCURRENCES`.
+EVENT_MIN_OCCURRENCES = 8
+
+#: Seuil d'établissement/chute. Constante en attendant `ZONE_THRESHOLDS`,
+#: dont le recalibrage est hors périmètre de ce lot.
+EVENT_ONSET_KMH = 12
+
+#: Les familles qu'on PUBLIE. `reversal` est détecté, apparié et écrit en
+#: base comme les autres — mais pas publié, et voici pourquoi.
+#:
+#: ⚠️ MESURÉ LE 08/08, PAS SUPPOSÉ. Au premier run réel, `reversal`
+#: sortait 40 ratés, 0 succès, 0 fausse alarme : aucun des dix modèles
+#: n'avait prévu une seule bascule. Avant de publier « POD = 0 » pour
+#: tout le monde, on a cherché si c'était de la météo ou un artefact, en
+#: dégradant les VRAIES balises à une mesure par heure, comme un modèle :
+#:
+#:     balises réelles à ~4 min .................. 34 bascules
+#:     les mêmes, dégradées à 1 h ................  0 bascule
+#:
+#: Ce n'est pas de la météo. `hold_ms` vaut 45 min, soit MOINS que le pas
+#: horaire d'un modèle : les fenêtres « avant » et « après » ne peuvent
+#: jamais contenir deux valeurs horaires distinctes, et la rotation
+#: mesurée vaut exactement 0°. Le balayage confirme le seuil net —
+#: 45 min : 0 · 60 min : 31 · 75 min : 51 · 90 min : 22 (obs dégradées),
+#: contre 34 · 37 · 42 · 42 à pleine cadence.
+#:
+#: Le défaut est dans `windEvents.ts` autant qu'ici : le portage est
+#: fidèle, et le banc de parité le prouve. Publier ce POD dirait « aucun
+#: modèle ne prévoit jamais de bascule » alors que la vérité est « notre
+#: détecteur ne sait pas voir une bascule dans une série horaire » — une
+#: cécité de l'outil attribuée aux modèles. C'est exactement le genre de
+#: chiffre que ce chantier refuse d'afficher.
+#:
+#: ⚠️ ON NE CORRIGE PAS `hold_ms` ICI, ET C'EST DÉLIBÉRÉ. C'est un seuil
+#: de détection, donc une décision de calibration : la changer en douce
+#: pour faire apparaître des chiffres serait précisément la faute contre
+#: laquelle tout le reste de ce fichier met en garde. Arbitrage laissé à
+#: Yann, avec les mesures ci-dessus. Les lignes continuent d'être
+#: écrites en base pendant ce temps : l'archive R2 permet de tout
+#: rejouer le jour où le seuil sera tranché.
+EVENT_PUBLISHABLE_TYPES = ("onset", "drop", "ramp", "breeze_yield")
+
+#: ⚠️ VOYAGE JUSQU'AU JSON PUBLIÉ. Passera à `True` le jour où la boucle
+#: de calibration (`find-episodes.ts` → `episodeReview.ts`) aura tourné
+#: sur quelques dizaines de journées étiquetées en aveugle — pas avant,
+#: et surtout pas parce que les chiffres « ont l'air bons ».
+EVENTS_CALIBRATED = False
+
+
+def _series_of(row: dict, day_start_ms: int, aloft: bool = False):
+    """Une série de prévision, restreinte à la journée notée.
+
+    ⚠️ ON DÉCOUPE LES DEUX CÔTÉS DE LA MÊME FAÇON, et c'est la raison
+    d'être de cette fonction. L'archive d'observations couvre exactement
+    la journée UTC ; une prévision, elle, déborde des deux côtés. Si on
+    laissait la prévision déborder, le modèle pourrait « voir » une
+    bascule à 23 h 50 que l'observation, tronquée, ne peut plus détecter
+    faute de fenêtre — et récolterait une fausse alarme pour une
+    prévision peut-être juste. Le découpage symétrique fait perdre les
+    événements des ~45 premières et dernières minutes de la journée UTC
+    des DEUX côtés, ce qui, pour des sites français, tombe au milieu de
+    la nuit : aucune brise n'y bascule.
+
+    `aloft=True` rend la série de crête, qui n'est PAS découpée : elle
+    n'est jamais détectée, seulement interrogée par `crest_at` avec sa
+    propre tolérance de ±90 min, qui a besoin des voisins.
+    """
+    times = fcst_times_ms(row)
+    sp = row.get("aloft_speed" if aloft else "speed") or []
+    di = row.get("aloft_dir" if aloft else "dir") or []
+    out = []
+    for i, t in enumerate(times):
+        if not aloft and not (day_start_ms <= t < day_start_ms + DAY_MS):
+            continue
+        s = sp[i] if i < len(sp) else None
+        d = di[i] if i < len(di) else None
+        out.append(EV.CrestSample(t=t, speed_kmh=s, dir_deg=d) if aloft
+                   else S.ObsSample(t=t, speed=s, dir=d))
+    return out
+
+
+def station_events(series, crest, utc_offset_s: int) -> list[EV.WindEvent]:
+    """Tous les événements d'UNE série : E1-E3, plus `breeze_yield`.
+
+    ⚠️ LA MÊME DÉTECTION DES DEUX CÔTÉS, observations comme prévisions.
+    Détecter les bascules réelles avec un algorithme et les bascules
+    prévues avec un autre mesurerait l'écart entre deux algorithmes, pas
+    la qualité du modèle.
+
+    ⚠️ `breeze_yield` reste un mécanisme SÉPARÉ (`detect_conflicts`), pas
+    une famille de plus dans `detect_all` : il exige une entrée que
+    `windEvents` n'a pas (le vent de crête) et un critère que les autres
+    n'ont pas (la stabilité du flux). La conversion en `WindEvent` qui
+    suit est une mise en forme pour passer par le même appariement, pas
+    une fusion des deux détecteurs.
+    """
+    out = EV.detect_all(series, EVENT_ONSET_KMH)
+    if crest:
+        out = out + EV.conflicts_as_events(
+            EV.detect_conflicts(series, crest,
+                                EV.conflict_params(utc_offset_s)))
+    out.sort(key=lambda e: e.t)
+    return out
+
+
+def event_rows(day: datetime, snapshots: dict[int, list[dict]],
+               obs_day: list[dict], zone_of: dict[str, dict],
+               utc_offset_s: int):
+    """Rend (lignes `model_verif_event`, bilan lisible du tri).
+
+    ⚠️ TOUT SE JOUE À L'ÉCHELON DE LA CASE FINE (`zone_id`), et les
+    événements y sont CONSOLIDÉS PAR LE RÉSEAU avant d'être appariés. On
+    ne remonte JAMAIS la chaîne de repli pour consolider : fusionner les
+    détections de deux vallées distantes de 200 km fabriquerait des
+    « événements » qui n'ont eu lieu nulle part. Les échelons supérieurs
+    se construisent plus tard, en SOMMANT DES COMPTEURS (ce qui est
+    licite : les cases sont disjointes), jamais en fusionnant des
+    détections.
+
+    ⚠️ LE VENT DE CRÊTE VIENT D'UN SEUL MODÈLE DE RÉFÉRENCE, le même
+    pour tout le monde — même raison que `day_regime` : si chaque modèle
+    apportait son propre décor, il pourrait choisir les journées où on
+    le juge sur `breeze_yield`.
+    """
+    day_start_ms = int(day.replace(tzinfo=timezone.utc).timestamp()) * 1000
+    obs_by_st: dict[str, list[S.ObsSample]] = {}
+    for r in obs_day:
+        key = f"{r['source']}:{r['station_id']}"
+        if key not in zone_of:
+            continue
+        obs_by_st[key] = [o for o in to_obs_samples(r)
+                          if day_start_ms <= o.t < day_start_ms + DAY_MS]
+
+    crest_by_st: dict[str, list[EV.CrestSample]] = {}
+    for row in snapshots.get(0, []):
+        if "aloft_speed" not in row:
+            continue
+        key = f"{row['source']}:{row['station_id']}"
+        if key in obs_by_st and key not in crest_by_st:
+            crest_by_st[key] = _series_of(row, day_start_ms, aloft=True)
+
+    # ── 1. observé, consolidé par case fine ──
+    obs_by_zone: dict[str, list[tuple[str, list[EV.WindEvent]]]] = defaultdict(list)
+    for key, samples in obs_by_st.items():
+        obs_by_zone[zone_of[key]["zone_id"]].append(
+            (key, station_events(samples, crest_by_st.get(key), utc_offset_s)))
+    observed = {zid: EV.consolidate_network(items, EVENT_MIN_STATIONS)
+                for zid, items in obs_by_zone.items()}
+
+    # ── 2. prévu, consolidé de la même façon, par modèle et échéance ──
+    fcst: dict[tuple, list[tuple[str, list[EV.WindEvent]]]] = defaultdict(list)
+    for offset, lead_h in LEAD_BY_OFFSET.items():
+        for row in snapshots.get(offset, []):
+            key = f"{row['source']}:{row['station_id']}"
+            if key not in obs_by_st:
+                continue
+            series = _series_of(row, day_start_ms)
+            if len(series) < MIN_HOURS_DAILY:
+                continue
+            fcst[(zone_of[key]["zone_id"], row["model"], lead_h)].append(
+                (key, station_events(series, crest_by_st.get(key), utc_offset_s)))
+
+    # ── 3. apparier et écrire une ligne PAR ÉVÉNEMENT ──
+    rows: list[dict] = []
+    for (zid, model, lead_h), items in sorted(fcst.items()):
+        ob = observed.get(zid, [])
+        fc = EV.consolidate_network(items, EVENT_MIN_STATIONS)
+        if not ob and not fc:
+            continue
+        for m in EV.match_events(ob, fc):
+            rows.append({
+                "day": day.strftime("%Y-%m-%d"),
+                "zone_id": zid, "model": model, "lead_h": lead_h,
+                "event_type": m.type,
+                "threshold_kmh": (None if m.threshold is None
+                                  else int(round(m.threshold))),
+                "outcome": m.outcome,
+                "timing_err_min": m.timing_err_min,
+                "obs_t": _iso(m.obs_t), "fcst_t": _iso(m.fcst_t),
+            })
+
+    solo = sum(1 for zid, items in obs_by_zone.items() if len(items) < EVENT_MIN_STATIONS)
+    bilan = (f"{len(obs_by_st)} balises zonées, {len(obs_by_zone)} cases fines, "
+             f"dont {solo} à moins de {EVENT_MIN_STATIONS} balises (aucun "
+             f"événement retenu, faute de confirmation réseau)")
+    return rows, bilan
+
+
+def event_scores(events: list[dict], zone_of: dict[str, dict]):
+    """Agrège `model_verif_event` en POD / FAR / décalage médian.
+
+    ⚠️ ON SOMME DES COMPTEURS POUR REMONTER LA CHAÎNE DE REPLI, on ne
+    refait aucune détection. Les cases fines sont disjointes, donc les
+    hits, ratés et fausses alarmes de deux vallées d'un même massif
+    s'additionnent sans double compte. C'est la seule opération licite
+    pour changer d'échelon ici — refaire une consolidation réseau à
+    l'échelle du massif fusionnerait des bascules qui n'ont rien à voir.
+
+    ⚠️ POURQUOI PAS UN ACCUMULATEUR `model_character`. Les trois sommes
+    de `S.Accumulator` décrivent une grandeur CONTINUE (une erreur, un
+    ratio) : elles ne savent pas compter des succès et des ratés. Le
+    schéma l'a d'ailleurs déjà prévu, en réservant `metric in
+    ('timing','frequency')` avec un `event_type` — ce sont les deux
+    seules grandeurs d'événement qui soient continues, et donc les deux
+    seules qui aient leur place dans un accumulateur. Les compteurs de
+    contingence, eux, se recomptent chaque nuit depuis les lignes
+    brutes, exactement comme `rolling_scores` recompte depuis
+    `model_verif_daily`. Le brancher sur les accumulateurs est un lot à
+    part, pas un raccourci à prendre ici.
+
+    ⚠️ QUORUM RESPECTÉ, ET LES REJETS SONT COMPTÉS. Une troncature
+    silencieuse se lit comme « on a tout couvert » ; le nombre de
+    combinaisons écartées faute d'événements part dans le JSON.
+    """
+    zone_by_id: dict[str, dict] = {}
+    for z in zone_of.values():
+        zone_by_id.setdefault(z["zone_id"], z)
+
+    buckets: dict[tuple, list[EV.EventMatch]] = defaultdict(list)
+    inconnues = 0
+    non_publiables = 0
+    for e in events:
+        if e["event_type"] not in EVENT_PUBLISHABLE_TYPES:
+            # Écrit en base, pas publié — cf. EVENT_PUBLISHABLE_TYPES.
+            # Compté, jamais tu : une troncature silencieuse se lit comme
+            # « on a tout couvert ».
+            non_publiables += 1
+            continue
+        zone = zone_by_id.get(e["zone_id"])
+        if zone is None:
+            # Une zone présente en base mais plus rattachée à aucune
+            # balise : ses lignes restent lisibles, on ne les invente pas
+            # une chaîne de repli.
+            inconnues += 1
+            chain = [(e["zone_id"], "unknown")]
+        else:
+            chain = fallback_chain(zone)
+        m = EV.EventMatch(type=e["event_type"], outcome=e["outcome"],
+                          timing_err_min=e.get("timing_err_min"),
+                          obs_t=None, fcst_t=None,
+                          threshold=e.get("threshold_kmh"))
+        for zid, level in chain:
+            buckets[(zid, level, e["model"], e["lead_h"], e["event_type"],
+                     e.get("threshold_kmh"))].append(m)
+
+    out: list[dict] = []
+    rejets = 0
+    for (zid, level, model, lead_h, etype, thr), matches in sorted(
+            buckets.items(), key=lambda kv: [str(x) for x in kv[0]]):
+        sc = EV.score_events(matches)
+        if sc.hits + sc.misses < EVENT_MIN_OCCURRENCES:
+            rejets += 1
+            continue
+        out.append({
+            "zone_id": zid, "agg_level": level, "model": model,
+            "lead_h": lead_h, "event_type": etype, "threshold_kmh": thr,
+            "hits": sc.hits, "misses": sc.misses, "false_alarms": sc.false_alarms,
+            # `n` est le nombre d'événements RÉELS, seul dénominateur qui
+            # ait un sens pour un POD. Il est publié à côté de chaque
+            # chiffre, jamais sous-entendu.
+            "n": sc.hits + sc.misses,
+            "pod": _r(sc.pod), "far": _r(sc.far), "csi": _r(sc.csi),
+            "frequency_bias": _r(sc.frequency_bias),
+            "timing_err_med_min": sc.timing_err_med_min,
+            "timing_iqr_min": sc.timing_iqr_min,
+        })
+    return out, rejets, inconnues, non_publiables
+
+
+def _publish_events(st, rows: list[dict], as_of: datetime, rejets: int,
+                    non_publiables: int, dry_run: bool):
+    """Publie `model_events.json` — le JSON que lira la PWA.
+
+    ⚠️ LE DRAPEAU `calibrated` EST DANS LE FICHIER, pas dans une note de
+    session. Il voyage avec les données jusqu'à l'affichage, parce que
+    c'est le seul endroit où il ne peut pas se perdre.
+
+    Mêmes règles d'affichage que tout le chantier : pas de feu
+    tricolore, pas de recommandation, chaque chiffre avec son n et son
+    échelon d'agrégation.
+    """
+    body = {
+        "as_of": as_of.strftime("%Y-%m-%d"),
+        "window_days": ROLLING_DAYS,
+        "min_occurrences": EVENT_MIN_OCCURRENCES,
+        "min_stations": EVENT_MIN_STATIONS,
+        "dropped_below_quorum": rejets,
+        "published_types": list(EVENT_PUBLISHABLE_TYPES),
+        "withheld_rows": non_publiables,
+        # ⚠️ Un fichier doit dire ce qu'il NE contient PAS. Sans cette
+        # ligne, un lecteur conclurait que les bascules n'ont jamais eu
+        # lieu, alors qu'elles sont en base et que c'est le détecteur qui
+        # ne sait pas les voir dans une série horaire.
+        "withheld_note": (
+            "`reversal` est détecté, apparié et stocké dans "
+            "model_verif_event, mais PAS publié ici : le détecteur est "
+            "structurellement aveugle aux bascules sur une série horaire "
+            "(hold_ms = 45 min < pas horaire de 60 min). Mesuré le 08/08 : "
+            "les mêmes balises réelles donnent 34 bascules à ~4 min de "
+            "cadence et 0 dégradées à l'heure. Publier ce POD imputerait "
+            "aux modèles une cécité qui est celle de l'outil. "
+            "Voir EVENT_PUBLISHABLE_TYPES dans score.py."),
+        "calibrated": EVENTS_CALIBRATED,
+        "calibration_note": (
+            "Seuils de détection RAISONNÉS, jamais mesurés : aucune journée "
+            "étiquetée n'a encore servi à les régler. Les décalages de timing "
+            "sont donc lisibles comme des ordres de grandeur, pas comme des "
+            "valeurs calibrées. Décision assumée du 08/08 — voir events.py."),
+        "events": rows,
+    }
+    if st is None or dry_run:
+        print("  ⓘ publication R2 sautée (pas de storage, ou dry-run)")
+        return
+    from storage import CACHE_REECRIT             # type: ignore
+    raw = json.dumps(body, separators=(",", ":")).encode("utf-8")
+    st.put("model_events.json", raw, cache_control=CACHE_REECRIT)
+    print(f"  → model_events.json publié ({len(raw) / 1024:.0f} Ko)")
+
+
+def _iso(ms) -> str | None:
+    """Un instant en ms vers un `timestamptz`, ou None.
+
+    La consolidation réseau prend la MÉDIANE des instants d'une grappe,
+    qui peut tomber sur une demi-milliseconde quand la grappe est paire.
+    On tronque : une demi-milliseconde sur une bascule de brise n'a
+    aucun sens physique, et la garder ferait échouer le format ISO.
+    """
+    if ms is None:
+        return None
+    return datetime.fromtimestamp(int(ms) // 1000, timezone.utc).isoformat()
+
+
 METRICS = ("errKmh", "speedRatio", "dirOffset", "mseModel", "msePersist")
 
 
@@ -956,7 +1408,12 @@ def main() -> int:
         print(f"  → model_verif_daily : {n} lignes")
 
     # ── 4-5. zones, accumulateurs, scores ────────────────────────
-    zones_raw = sb.select("station_zone")
+    # ⚠️ Chaque `select` passe la clé primaire de sa table en `order` :
+    # c'est ce qui rend la pagination cohérente (cf. `Supabase.select`).
+    # `station_zone` tenait sous les 1 000 lignes (647 le 08/08) et
+    # n'était donc pas tronquée — mais rien ne garantit qu'elle y reste,
+    # et un plafond qu'on ne franchit pas encore reste un plafond.
+    zones_raw = sb.select("station_zone", order="source,station_id")
     zone_of = {f"{z['source']}:{z['station_id']}": z for z in zones_raw}
     if not zone_of:
         print("  ⓘ `station_zone` est vide : aucune balise n'est encore")
@@ -968,7 +1425,9 @@ def main() -> int:
         if needed:
             sb.upsert("model_zone", needed, "zone_id")
 
-        current_raw = sb.select("model_character")
+        current_raw = sb.select(
+            "model_character",
+            order="zone_id,model,lead_h,regime,band,metric,event_type")
         current = {}
         for a in current_raw:
             last = a.get("last_day")
@@ -985,15 +1444,56 @@ def main() -> int:
                           "zone_id,model,lead_h,regime,band,metric,event_type")
             print(f"  → model_character : {n} accumulateurs avancés")
 
+        # ── 4 bis. événements (lot F) ────────────────────────────
+        # ⚠️ Après les zones, jamais avant : `model_verif_event.zone_id`
+        # porte une clé étrangère, et un événement sans case fine n'a de
+        # toute façon aucun sens — la confirmation réseau se fait entre
+        # balises d'une MÊME case.
+        ev_rows, bilan = event_rows(day, snapshots, obs_day, zone_of, utc_offset_s)
+        print(f"  événements : {bilan}")
+        # Purge d'abord : la table n'a pas de clé d'unicité (une ligne par
+        # événement individuel), donc seule la réécriture complète de la
+        # journée rend le run rejouable sans doubler les lignes.
+        sb.delete("model_verif_event", f"?day=eq.{day:%Y-%m-%d}")
+        if ev_rows:
+            n = sb.insert("model_verif_event", ev_rows)
+            par_type = defaultdict(int)
+            for r in ev_rows:
+                par_type[r["event_type"]] += 1
+            detail = ", ".join(f"{k} {v}" for k, v in sorted(par_type.items()))
+            print(f"  → model_verif_event : {n} lignes ({detail})")
+        else:
+            print("  → model_verif_event : aucune ligne (aucun événement "
+                  "confirmé par le réseau cette journée)")
+
+        since_ev = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
+        ev_all = sb.select("model_verif_event", f"?day=gte.{since_ev}",
+                           order="id")
+        ev_scores, rejets, inconnues, retenues = event_scores(ev_all, zone_of)
+        if inconnues:
+            print(f"  ⚠️ {inconnues} lignes d'événement sur une zone qui n'a "
+                  f"plus aucune balise rattachée : publiées telles quelles, "
+                  f"sans chaîne de repli.")
+        if retenues:
+            print(f"  ⓘ {retenues} lignes NON publiées (familles hors "
+                  f"{', '.join(EVENT_PUBLISHABLE_TYPES)}) : elles restent en "
+                  f"base et le JSON dit pourquoi.")
+        print(f"  événements notés : {len(ev_scores)} combinaisons publiables, "
+              f"{rejets} écartées sous le quorum de {EVENT_MIN_OCCURRENCES}")
+        _publish_events(st, ev_scores, as_of, rejets, retenues, args.dry_run)
+
         since = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
-        daily = sb.select("model_verif_daily", f"?day=gte.{since}")
+        daily = sb.select("model_verif_daily", f"?day=gte.{since}",
+                          order="day,source,station_id,model,lead_h,fcst_src")
         scores = rolling_scores(daily, zone_of, as_of)
-        accs = sb.select("model_character")
+        accs = sb.select("model_character",
+                         order="zone_id,model,lead_h,regime,band,metric,event_type")
         # `model_zone` est relue APRÈS l'upsert des échelons 2 et 4, pour
         # que `agg_level` soit littéralement le `kind` de la zone et non
         # une déduction faite sur la forme de son identifiant. Une table
         # de quelques centaines de lignes, une fois par nuit.
-        kind_of = {r["zone_id"]: r["kind"] for r in sb.select("model_zone")}
+        kind_of = {r["zone_id"]: r["kind"]
+                   for r in sb.select("model_zone", order="zone_id")}
         scores += regime_scores(accs, as_of, kind_of)
         if scores:
             n = sb.upsert("model_score_zone", scores,

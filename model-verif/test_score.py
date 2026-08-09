@@ -567,10 +567,107 @@ def test_score_par_regime():
           (True, "insufficient"))
 
 
+def test_familles_publiees():
+    """`reversal` va en base, jamais dans le JSON — tant que `hold_ms`
+    n'est pas tranché.
+
+    ⚠️ CE BANC PROTÈGE UNE DÉCISION, PAS UN CALCUL. Le jour où quelqu'un
+    remettra `reversal` dans `EVENT_PUBLISHABLE_TYPES` sans avoir touché
+    à `hold_ms`, ce banc rougira et rappellera pourquoi : le détecteur ne
+    voit aucune bascule dans une série horaire, et publier POD = 0
+    imputerait aux modèles une cécité qui est celle de l'outil.
+    """
+    print("── familles publiées ──")
+    zone = {"source": "pioupiou", "station_id": "1", "zone_id": "b1:valley",
+            "basin_id": "b1", "massif_id": "alpes-nord", "landform": "valley"}
+    zone_of = {"pioupiou:1": zone}
+
+    def ligne(etype, outcome, timing=None):
+        return {"day": "2026-08-07", "zone_id": "b1:valley", "model": "icon_d2",
+                "lead_h": 6, "event_type": etype, "threshold_kmh": None,
+                "outcome": outcome, "timing_err_min": timing}
+
+    # 12 bascules ratées : largement au-dessus du quorum de 8.
+    bascules = [ligne("reversal", "miss") for _ in range(12)]
+    # 12 établissements, dont 6 vus : publiables, eux.
+    etablis = ([ligne("onset", "hit", -20) for _ in range(6)]
+               + [ligne("onset", "miss") for _ in range(6)])
+
+    rows, rejets, inconnues, retenues = J.event_scores(bascules, zone_of)
+    check("12 bascules au-dessus du quorum ne produisent AUCUNE ligne publiée",
+          [len(rows), retenues], [0, 12])
+
+    rows2, _, _, retenues2 = J.event_scores(bascules + etablis, zone_of)
+    check("les établissements passent, les bascules restent retenues",
+          [sorted({r["event_type"] for r in rows2}), retenues2],
+          [["onset"], 12])
+    check("le POD publié porte bien sur les seuls établissements",
+          [r["pod"] for r in rows2 if r["agg_level"] == "basin_landform"],
+          [0.5])
+    check("`reversal` est absent de la liste des familles publiables",
+          "reversal" in J.EVENT_PUBLISHABLE_TYPES, False)
+
+
+def test_lecture_paginee():
+    """Le défaut du 08/08 : `select` rendait 1 000 lignes et se taisait.
+
+    ⚠️ CE BANC EXISTE PARCE QUE LE DÉFAUT ÉTAIT INVISIBLE. Rien ne
+    plantait, aucun banc ne rougissait, et `model_character` repartait
+    de zéro chaque nuit — 81 960 accumulateurs dont la mémoire longue,
+    seule raison d'être, n'a jamais rien mémorisé. On simule donc un
+    serveur qui plafonne, et on exige que le client aille chercher la
+    suite.
+    """
+    print("── lecture paginée (plafond PostgREST) ──")
+    import io
+    import json as JSON
+    import urllib.request as U
+
+    total = 2_346                       # ni un multiple de 1 000, ni rond
+    vus: list[tuple[str, str]] = []     # (url, en-tête Range) par appel
+
+    class _Rep(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def faux_urlopen(req, timeout=None):
+        vus.append((req.full_url, req.get_header("Range")))
+        deb, fin = (int(x) for x in req.get_header("Range").split("-"))
+        page = [{"id": i} for i in range(deb, min(fin + 1, total))]
+        return _Rep(JSON.dumps(page).encode())
+
+    sb = J.Supabase.__new__(J.Supabase)
+    sb.url, sb.key, sb.dry_run, sb.ecritures = "http://x", "k", False, 0
+    vrai, U.urlopen = U.urlopen, faux_urlopen
+    try:
+        rows = sb.select("model_character", order="zone_id")
+    finally:
+        U.urlopen = vrai
+
+    check("toutes les lignes sont lues, pas seulement la première page",
+          len(rows), total)
+    check("les identifiants ne sont ni dupliqués ni sautés",
+          (rows[0]["id"], rows[-1]["id"], len({r["id"] for r in rows})),
+          (0, total - 1, total))
+    check("une page incomplète arrête la boucle (pas d'appel de trop)",
+          [len(vus), [r for _, r in vus]],
+          [3, ["0-999", "1000-1999", "2000-2999"]])
+    # ⚠️ Sans `ORDER BY`, PostgreSQL peut rendre deux pages dans des
+    # ordres incompatibles : une ligne deux fois, une autre jamais. Le
+    # tri n'est donc pas un confort de lecture, c'est ce qui rend la
+    # pagination correcte.
+    check("l'ordre explicite part dans CHAQUE page, pas seulement la première",
+          all("order=zone_id" in u for u, _ in vus), True)
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
-               test_scores_de_zone, test_score_par_regime):
+               test_scores_de_zone, test_score_par_regime,
+               test_familles_publiees, test_lecture_paginee):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0

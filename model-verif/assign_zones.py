@@ -96,12 +96,19 @@ def compter(sb: J.Supabase) -> dict[str, int]:
     for t in ("station_zone", "model_zone"):
         # ⚠️ Le « ? » est obligatoire : `Supabase.select` ne l'ajoute que
         # lorsque la requête ne contient pas déjà « select= ».
-        rows = sb.select(t, "?select=source" if t == "station_zone" else "?select=zone_id")
-        # ⚠️ PostgREST plafonne une réponse à 1 000 lignes. À 647 balises
-        # et ~310 zones on est loin du plafond, mais un compte qui vaut
-        # exactement 1 000 est un compte tronqué, pas un compte.
-        if len(rows) == 1000:
-            print(f"  ⚠️ {t} : 1 000 lignes lues — plafond PostgREST, compte tronqué")
+        # ⚠️ CE FICHIER SAVAIT, ET C'EST LÀ LA LEÇON DU 08/08. Le lot C
+        # avait bien vu que PostgREST plafonne une réponse à 1 000 lignes
+        # et posait ici un garde-fou. Mais le garde-fou est resté LOCAL :
+        # `Supabase.select` continuait de tronquer en silence pour tout
+        # le monde, et `model_character` (81 960 lignes) y perdait sa
+        # mémoire chaque nuit. Une connaissance rangée dans un seul
+        # fichier ne protège que ce fichier.
+        #
+        # Depuis le lot F, `select` pagine et l'ordre est explicite. Le
+        # compte ci-dessous est donc complet, et le garde-fou n'a plus
+        # lieu d'être — on garde la trace de son existence, pas le test.
+        rows = sb.select(t, "?select=source" if t == "station_zone" else "?select=zone_id",
+                         order="source,station_id" if t == "station_zone" else "zone_id")
         out[t] = len(rows)
     return out
 
@@ -138,10 +145,15 @@ def main() -> int:
         apres = compter(sb)
         print(f"  `station_zone` : {avant['station_zone']} → {apres['station_zone']}")
         print(f"  `model_zone`   : {avant['model_zone']} → {apres['model_zone']}")
-        kinds = collections.Counter(r["kind"] for r in sb.select("model_zone", "?select=kind"))
+        kinds = collections.Counter(
+            r["kind"] for r in sb.select("model_zone", "?select=kind,zone_id",
+                                         order="zone_id"))
         print("  `model_zone` par kind : "
               + ", ".join(f"{k} {v}" for k, v in sorted(kinds.items())))
-        zones = sb.select("station_zone", "?select=zone_id,basin_id,landform,basin_uncertain")
+        zones = sb.select(
+            "station_zone",
+            "?select=source,station_id,zone_id,basin_id,landform,basin_uncertain",
+            order="source,station_id")
         b = collections.Counter(z["basin_id"] for z in zones if z["basin_id"])
         print(f"  en base : {len(zones)} balises, {len(b)} bassins distincts, "
               f"{sum(1 for z in zones if z['basin_uncertain'])} incertaines")
