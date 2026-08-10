@@ -1522,6 +1522,16 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict],
             # Une balise dont le bassin est indéterminé (§16.4, défaut
             # n°2) est EXCLUE, pas rangée de travers.
             continue
+        if z.get("position_suspecte"):
+            # Coordonnées contredites par une source indépendante du
+            # lieu nommé (étape 42, 10/08 — inspection des 18 balises à
+            # >300 m d'écart z_modele/z_nom). Même traitement que
+            # `basin_uncertain` : EXCLUE, pas rangée de travers. Posé
+            # UNIQUEMENT quand une source tierce situe le lieu ailleurs,
+            # jamais sur le seul écart modèle/nom (14 des 18 grands
+            # écarts inspectés étaient de vrais sommets rabotés par la
+            # maille — cf. claude/inspection-18-balises-ecart-resultats-10-08.md).
+            continue
         for zid, _level in fallback_chain(z):
             for metric in METRICS:
                 v = b.get(metric)
@@ -1589,6 +1599,10 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
     for d in units:
         z = zone_of.get(d["unit"])
         if z is None or z.get("basin_uncertain"):
+            continue
+        if z.get("position_suspecte"):
+            # Même exclusion qu'accumulator_updates — voir le
+            # commentaire là-bas (étape 42, 10/08).
             continue
         if d.get("err_vec_med") is None:
             continue

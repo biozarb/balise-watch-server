@@ -389,6 +389,12 @@ def test_accumulateurs():
         "pioupiou:999": {"zone_id": "b2:slope", "landform": "slope",
                          "basin_id": "b2", "massif_id": "alpes-nord",
                          "basin_uncertain": True},
+        # Étape 42 (10/08) : coordonnées contredites par une source
+        # indépendante — même exclusion que basin_uncertain, testée à
+        # part pour ne pas dépendre du même chemin de code par hasard.
+        "pioupiou:997": {"zone_id": "b3:ridge", "landform": "ridge",
+                         "basin_id": "b3", "massif_id": "alpes-nord",
+                         "basin_uncertain": False, "position_suspecte": True},
     }
     banded = [
         {"key": "pioupiou:835", "model": "icon_d2", "lead_h": 24,
@@ -404,6 +410,11 @@ def test_accumulateurs():
          "regime": "fluxN", "band": "strong", "errKmh": 99.0,
          "speedRatio": 9.9, "dirOffset": 99.0,
          "mseModel": 99.0, "msePersist": 1.0},
+        # Position suspecte : idem, ne doit peser nulle part.
+        {"key": "pioupiou:997", "model": "icon_d2", "lead_h": 24,
+         "regime": "fluxN", "band": "strong", "errKmh": 88.0,
+         "speedRatio": 8.8, "dirOffset": 88.0,
+         "mseModel": 88.0, "msePersist": 1.0},
     ]
     up = J.accumulator_updates(banded, zone_of, DAY, {})
     par_cle = {(u["zone_id"], u["metric"], u["band"]): u for u in up}
@@ -415,6 +426,8 @@ def test_accumulateurs():
 
     check("un bassin indéterminé n'entre dans AUCUNE case",
           any(u["zone_id"].startswith("b2") for u in up), False)
+    check("une position suspecte n'entre dans AUCUNE case",
+          any(u["zone_id"].startswith("b3") for u in up), False)
     check("… et sa valeur aberrante ne contamine pas le réseau entier",
           par_cle[("*:*", "errKmh", "strong")]["sum_wx"], 5.0)
 
