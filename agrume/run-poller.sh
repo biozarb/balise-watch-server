@@ -38,13 +38,28 @@ fi
 # ⚠️ LE DÉCLENCHEMENT EST OPTIONNEL, ET SON ABSENCE SE DIT.
 # `AGRUME_DISPATCH` (posé dans le .env, par exemple
 # `biozarb/balise-watch-server:agrume-colonnes.yml`) fait déclencher
-# l'Action dès que les quatre paquets sont publiés. Sans lui, le poller
+# l'Action dès que les paquets guettés sont publiés. Sans lui, le poller
 # DATE les runs sans rien lancer — mode de fonctionnement légitime, mais
 # à ne pas confondre avec « la chaîne tourne ». Le poller le dit
 # lui-même dans ses logs si `GITHUB_DISPATCH_TOKEN` manque.
-if [ -n "${AGRUME_DISPATCH:-}" ]; then
+#
+# ⚠️⚠️ MAIS SEULES LES SOURCES QUI CONDITIONNENT L'INGESTION DÉCLENCHENT.
+# Le `.env` est LU PAR TOUS LES SERVICES : poser `AGRUME_DISPATCH` dedans
+# le rend visible aussi bien du guet AROME-PI que de celui des paquets
+# AROME. Or le produit A ne dépend QUE des quatre paquets AROME —
+# laisser PI déclencher lancerait un run de 7 Go **vingt-quatre fois par
+# jour** pour rien, et réécrirait indéfiniment les mêmes archives.
+# (Défaut introduit puis corrigé le 10/08, avant qu'un seul run ne parte.)
+# Le composite PI, lui, est l'étape 9 : il aura sa propre chaîne et son
+# propre déclencheur le jour où il existera.
+case "$SOURCE" in
+  arome|arome-paquets) DECLENCHE="${AGRUME_DISPATCH:-}" ;;
+  *)                   DECLENCHE="" ;;
+esac
+
+if [ -n "$DECLENCHE" ]; then
   exec python3 -u "$ICI/poller.py" --source "$SOURCE" --boucle \
-       --dispatch "$AGRUME_DISPATCH"
+       --dispatch "$DECLENCHE"
 fi
 
 exec python3 -u "$ICI/poller.py" --source "$SOURCE" --boucle
