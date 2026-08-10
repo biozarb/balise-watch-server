@@ -154,9 +154,98 @@ def sonder(prefixe=PREFIXE, log=print):
     return ok, d
 
 
+def sonder_purge(prefixe=PREFIXE, log=print):
+    """⚠️ LE DROIT DE SUPPRIMER NE PROUVE PAS QUE LA PURGE PURGE.
+
+    `sonder()` répond à « le jeton peut-il supprimer ? ». Cette seconde
+    sonde répond à la question qui compte en production : **le câblage
+    index → calcul → suppression fait-il disparaître le bon objet, et
+    LUI SEUL ?**
+
+    `test_grille.py` couvre la logique hors-ligne ; il ne peut rien dire
+    du câblage. Et le câblage réel ne s'exerce qu'au QUATRIÈME run de
+    production — donc des heures après la mise en ligne, et une seule
+    fois. *Un banc ne remplace pas une exécution : les trois défauts du
+    poller sont tombés à la première minute de fonctionnement, après
+    trente vérifications au vert.*
+
+    On rejoue donc quatre runs SYNTHÉTIQUES sous un préfixe jetable, avec
+    les fonctions de PRODUCTION (`index_apres`, `index_apres_purge`,
+    `verifier_prefixe`), et on vérifie les DEUX faces : le plus ancien a
+    disparu, **et les trois autres sont toujours là**. Ne vérifier que la
+    disparition laisserait passer une purge qui supprime tout — ce qui
+    est le pire des deux défauts possibles, et le plus facile à écrire.
+    """
+    if DRY_RUN:
+        raise Abort("DRY_RUN=1 — voir `sonder()`. Une purge à blanc "
+                    "« réussit » toujours : `get` rend None sans appeler "
+                    "personne.")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from grille import (RETENTION_RUNS, index_apres,  # noqa: PLC0415
+                        index_apres_purge, verifier_prefixe)
+    from storage import CACHE_REECRIT  # noqa: PLC0415
+
+    base = f"{prefixe}/purge"
+    # ⚠️ Des runs de 2026-01 : hors de toute fenêtre de production, donc
+    # aucune confusion possible avec un vrai run dans un listing.
+    runs = ["2026-01-01T00:00:00Z", "2026-01-01T03:00:00Z",
+            "2026-01-01T06:00:00Z", "2026-01-01T09:00:00Z"]
+    cle_de = {r: f"{base}/{r}/objet.bin" for r in runs}
+    store = Storage("agrume-sonde-purge", "AGRUME_BUCKET", "wind-grid",
+                    plafond=20)
+
+    index, echecs = dict(runs=[], restes=[]), []
+    for r in runs:
+        store.put(cle_de[r], f"sonde purge · run {r}".encode(),
+                  cache_control=CACHE_REECRIT, content_type="text/plain")
+        index, a_sup = index_apres(index, r, [cle_de[r]])
+        if a_sup:
+            # ⚠️ Le garde-fou de préfixe est celui de la production, avec
+            # SON préfixe à lui : la sonde ne doit pas pouvoir toucher
+            # `agrume/grille/`, et la production ne doit pas pouvoir
+            # toucher ici.
+            verifier_prefixe(a_sup, prefixe=f"{base}/")
+            for c in a_sup:
+                if not store.delete(c):
+                    echecs.append(c)
+        index = index_apres_purge(index, echecs)
+
+    coupe = len(runs) - RETENTION_RUNS
+    doit_partir = [cle_de[r] for r in runs[:coupe]]
+    doit_rester = [cle_de[r] for r in runs[coupe:]]
+    partis = [c for c in doit_partir if store.get(c) is None]
+    restants = [c for c in doit_rester if store.get(c) is not None]
+    ok_partis, ok_restants = partis == doit_partir, restants == doit_rester
+
+    log(f"  ▶ {len(runs)} runs synthétiques, rétention {RETENTION_RUNS}, "
+        f"index en fin de course : {len(index['runs'])} run(s)")
+    log(f"  {'✅' if ok_partis else '⛔'} le plus ancien a DISPARU "
+        f"({len(partis)}/{len(doit_partir)})")
+    log(f"  {'✅' if ok_restants else '⛔'} les {RETENTION_RUNS} récents "
+        f"sont TOUJOURS LÀ ({len(restants)}/{len(doit_rester)}) — sans "
+        f"cette moitié-là, une purge qui supprime TOUT passerait pour un "
+        f"succès")
+    if echecs:
+        log(f"  ⛔ {len(echecs)} suppression(s) en échec : {echecs}")
+
+    # Ménage : une sonde ne laisse rien derrière elle.
+    restes = [c for c in doit_rester if not store.delete(c)]
+    log(f"  {'✅' if not restes else '⚠️'} ménage : "
+        f"{len(doit_rester) - len(restes)}/{len(doit_rester)} objet(s) "
+        f"de sonde retirés")
+    store.bilan(log)
+    return bool(ok_partis and ok_restants and not echecs and not restes), \
+        dict(partis=partis, restants=restants, echecs=echecs,
+             non_nettoyes=restes)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--prefixe", default=PREFIXE)
+    p.add_argument("--avec-purge", action="store_true",
+                   help="rejoue en plus QUATRE runs synthétiques et "
+                        "vérifie que la purge supprime le bon objet, et "
+                        "lui seul")
     a = p.parse_args(argv)
 
     print("┌─ SONDE DES DROITS R2 ────────────────────────────────────")
@@ -170,12 +259,45 @@ def main(argv=None):
         print(f"❌ {e}", file=sys.stderr)
         return 2
 
+    ok_purge, d_purge = None, None
+    if ok and a.avec_purge:
+        print("\n┌─ SONDE DU CÂBLAGE DE LA PURGE ───────────────────────────")
+        print("│ ⚠️ Ce n'est PAS la même question que ci-dessus : on ne")
+        print("│    demande plus si le jeton PEUT supprimer, mais si la")
+        print("│    purge supprime le BON objet, et lui seul.")
+        print("└──────────────────────────────────────────────────────────")
+        try:
+            ok_purge, d_purge = sonder_purge(a.prefixe)
+        except Exception as e:                              # noqa: BLE001
+            ok_purge, d_purge = False, {"exception": f"{type(e).__name__}: {e}"}
+            print(f"  ⛔ {type(e).__name__} — {e}", file=sys.stderr)
+    elif a.avec_purge:
+        print("\n⚠️ Sonde de purge SAUTÉE : les droits de base ne passent "
+              "déjà pas. La faire tourner ne dirait rien de plus.",
+              file=sys.stderr)
+
     print()
-    if ok:
+    if ok and ok_purge is not False:
         print("✅ VERDICT : PutObject, GetObject et DeleteObject sont tous "
               "accordés, et la suppression est RÉELLE (constatée par "
-              "relecture). La purge à 3 runs du produit B peut être écrite.")
+              "relecture).")
+        if ok_purge:
+            print("✅ ET le câblage de la purge fait disparaître le bon "
+                  "objet, et lui seul — vérifié sur R2, pas seulement au "
+                  "banc.")
+        else:
+            print("ⓘ Le CÂBLAGE de la purge n'a pas été sondé "
+                  "(`--avec-purge` pour le faire) : le droit de supprimer "
+                  "ne prouve pas qu'on supprime la bonne clé.")
         return 0
+    if ok and ok_purge is False:
+        print("⛔ VERDICT : le jeton a bien les droits, mais LA PURGE NE "
+              "FAIT PAS CE QU'ELLE DOIT.", file=sys.stderr)
+        print(f"   détail : {d_purge}", file=sys.stderr)
+        print("   ⚠️ C'est plus grave qu'un droit manquant : un droit qui "
+              "manque se voit dans les logs, une purge qui supprime le "
+              "mauvais objet ne se voit qu'après.", file=sys.stderr)
+        return 4
     print("⛔ VERDICT : le jeton ne fait pas ce que la purge exige.",
           file=sys.stderr)
     print(f"   détail : {d}", file=sys.stderr)
