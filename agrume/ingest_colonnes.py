@@ -69,6 +69,7 @@ from colonnes import (PARAM_ALTITUDE, PARAMS_001, PARAMS_0025,  # noqa: E402
                       index_plats, quantifier, verifier_grille)
 from domaine import (G, GRID_3D, GRID_FINE, MAX_HOURS,  # noqa: E402
                      MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES)
+from grille import Grille, axes_depuis_orographie, decouper  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
                    est_fichier_horaire, s3_objets)
@@ -180,10 +181,26 @@ def parcourir(chemin, veut, sur_champ, steps_voulus):
     ⚠️ Les messages dont les clés attendues manquent sont IGNORÉS, pas
     fatals — `SP3` en contient au moins un, et ça a cassé un run de
     production le 21/07.
+
+    ⚠️⚠️ MAIS CE `except` NE COUVRAIT PAS QUE LA LECTURE DES CLÉS : il
+    engloutissait aussi TOUTE exception levée par `sur_champ`, c'est-à-dire
+    par le traitement lui-même. Une erreur de forme, un indice hors
+    bornes, une conversion ratée — rien ne s'allumait, et le compteur
+    `decodes` se contentait de ne pas monter. Constaté le 10/08 en
+    branchant le produit B : une fenêtre de la mauvaise maille posée dans
+    la grille aurait échoué **sans un mot**.
+
+    On ne rend pas ça fatal — l'archive du produit A est définitive et
+    l'interrompre coûterait un run entier pour un message. Mais on
+    COMPTE, et on renvoie le premier incident : un run qui perd des
+    champs doit se voir dans le bilan, pas se deviner dans un
+    remplissage. *Un `pass` qui protège d'un cas connu finit toujours
+    par en cacher un inconnu.*
     """
     from eccodes import (codes_get, codes_get_values,
                          codes_grib_new_from_file, codes_release)
     lus = decodes = 0
+    incidents = []
     with open(chemin, "rb") as f:
         while True:
             gid = codes_grib_new_from_file(f)
@@ -212,9 +229,15 @@ def parcourir(chemin, veut, sur_champ, steps_voulus):
                 if isinstance(e, Abort):
                     codes_release(gid)
                     raise
-                pass                    # message sans les clés attendues
+                # ⚠️ Toujours non fatal — mais plus muet. Un message sans
+                # les clés attendues est attendu (`SP3`) ; une erreur de
+                # traitement ne l'est pas, et rien ici ne peut faire la
+                # différence. On garde donc les DEUX, et le bilan les
+                # montre : c'est au lecteur de trancher, pas au `pass`.
+                if len(incidents) < 5:
+                    incidents.append(f"{type(e).__name__}: {e}")
             codes_release(gid)
-    return lus, decodes
+    return lus, decodes, incidents
 
 
 def filtre_0025(paquet):
@@ -283,8 +306,29 @@ def filtre_001(paquet):
 
 # ══════════════════════════════════════════════════════════════════════
 def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
-            limite_fichiers=None):
+            limite_fichiers=None, avec_grille=True):
     col = Colonnes(ref, balises, steps)
+
+    # ── Le produit B, dans la MÊME passe ──────────────────────────────
+    # ⚠️ C'est ici que l'étape 6 devient presque gratuite : les messages
+    # sont déjà téléchargés et déjà décodés pour le produit A. Découper
+    # en plus la fenêtre du domaine coûte une vue numpy — la mesure du
+    # 10/08 donne 7,6 s avec découpe contre 7,9 s sans, sur un bundle de
+    # 818 Mo. Le budget de 2,9 min du §4.2 supposait une chaîne séparée
+    # qui retéléchargerait tout ; elle n'a plus lieu d'être.
+    #
+    # ⚠️ La fenêtre vient de l'orographie 0,025°, pas d'un `fenetre()`
+    # rejoué : le sol et la colonne doivent tomber sur les mêmes points
+    # par construction (cf. l'en-tête de `grille.py`).
+    gr = None
+    if avec_grille:
+        o3d = paire_orog[GRID_3D]
+        lats, lons = axes_depuis_orographie(o3d)
+        gr = Grille(ref, steps, lats, lons, o3d.z)
+        crier(f"▶ produit B : grille {len(lats)}×{len(lons)} × "
+              f"{gr.h0025.shape[0]} paramètres × {gr.h0025.shape[1]} niveaux "
+              f"× {len(steps)} échéances = {gr.octets() / 1e6:.1f} Mo en "
+              f"mémoire (float16)")
     par_nom_0025 = {p["nom"]: p for p in PARAMS_0025}
     par_nom_001 = {p["nom"]: p for p in PARAMS_001}
     par_nom_iso = {p["nom"]: p for p in PARAMS_ISO}
@@ -300,7 +344,8 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
         idx[grille] = indices
 
     octets = pic_disque = 0
-    compte = dict(fichiers=0, messages=0, decodes=0)
+    compte = dict(fichiers=0, messages=0, decodes=0, incidents=0,
+                  incidents_vus=[])
     t_dl = t_parse = 0.0
 
     for grille, paquet in PAQUETS:
@@ -336,6 +381,23 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                     if not _iso:
                         col.poser(_g, nom, niveau, step,
                                   quantifier(brut, _t[nom]))
+                        # ── produit B, sur le MÊME message décodé ─────
+                        # ⚠️⚠️ `_g == GRID_3D` N'EST PAS REDONDANT AVEC
+                        # `accepte()`, ET L'OUBLIER CASSE EN SILENCE. La
+                        # maille fine porte elle aussi des champs nommés
+                        # `u` et `v`, aux niveaux 10, 20, 50 et 100 m —
+                        # QUATRE NIVEAUX QUI SONT TOUS DANS LES 25 DU
+                        # 0,025°. `accepte()` les accepterait donc, et on
+                        # poserait une fenêtre 0,01° de 151×211 dans un
+                        # tableau de 61×85. Pire : `parcourir` avale les
+                        # exceptions de ce callback, donc rien ne
+                        # s'allumerait — la grille se remplirait de
+                        # travers ou pas du tout, sans un mot.
+                        if (gr is not None and _g == GRID_3D
+                                and gr.accepte(nom, niveau, step)):
+                            gr.poser(nom, niveau, step,
+                                     quantifier(decouper(values, meta, _o),
+                                                _t[nom]))
                         return
                     if nom == "zp":
                         # ⚠️ `z` est un GÉOPOTENTIEL en m²/s², pas une
@@ -353,11 +415,16 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                                           quantifier(brut, _t[nom]))
 
                 t1 = time.time()
-                lus, dec = parcourir(chemin, veut, sur_champ, steps_set)
+                lus, dec, incidents = parcourir(chemin, veut, sur_champ,
+                                                steps_set)
                 t_parse += time.time() - t1
                 compte["messages"] += lus
                 compte["decodes"] += dec
                 compte["fichiers"] += 1
+                compte["incidents"] += len(incidents)
+                for m in incidents:
+                    if m not in compte["incidents_vus"]:
+                        compte["incidents_vus"].append(m)
             finally:
                 # ⚠️ UN SEUL FICHIER SUR LE DISQUE À LA FOIS. Le `finally`
                 # n'est pas une politesse : une exception qui laisserait
@@ -367,8 +434,89 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
             crier(f"    {cle.split('/')[-1][-28:]} · {taille / 1e6:.0f} Mo · "
                   f"{dec} champs retenus sur {lus}")
 
-    return col, dict(octets=octets, pic_disque=pic_disque, t_dl=t_dl,
-                     t_parse=t_parse, **compte)
+    return col, gr, dict(octets=octets, pic_disque=pic_disque, t_dl=t_dl,
+                         t_parse=t_parse, **compte)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Publication du produit B — APRÈS le produit A, et sans jamais
+#  mettre le produit A en danger
+# ══════════════════════════════════════════════════════════════════════
+def publier_grille(p_npz, p_man, manifeste, ref, crier=journal_horodate):
+    """Monte la grille sur R2, met l'index à jour, purge les runs sortis.
+
+    ⚠️⚠️ CETTE FONCTION NE DOIT JAMAIS FAIRE ÉCHOUER LE RUN, ET C'EST LA
+    RAISON D'ÊTRE DE L'`except` LARGE QUI L'ENVELOPPE. Le produit A est une archive
+    DÉFINITIVE, déjà écrite quand on arrive ici ; le produit B est
+    jetable et sera régénéré au run suivant, une heure ou trois plus
+    tard. Faire tomber le run — donc le voyant healthchecks, donc
+    l'alerte — pour un produit qui se répare tout seul serait apprendre
+    à ignorer le voyant. C'est le même arbitrage que la purge du 30/07.
+
+    ⓘ En contrepartie, l'échec est CRIÉ et compté : un produit B qui ne
+    monte plus doit se lire dans les logs, même si le run est vert.
+    """
+    from grille import (CLE_INDEX, INDEX_VIDE, RETENTION_RUNS,  # noqa: PLC0415
+                        cles_du_run, index_apres, index_apres_purge,
+                        verifier_prefixe)
+    from storage import (CACHE_IMMUABLE, CACHE_REECRIT,  # noqa: PLC0415
+                         Storage, verifier_dimensionnement)
+
+    mo = (p_npz.stat().st_size + p_man.stat().st_size) / 1e6
+    # ⚠️ On déclare le stockage STATIONNAIRE (rétention × taille), pas la
+    # taille d'un run. Pour un produit purgé c'est le seul chiffre qui
+    # veut dire quelque chose : c'est ce qui reste sur la facture.
+    plafond = verifier_dimensionnement(
+        "agrume-grille", objets_par_run=4, runs_par_jour=8,
+        mo_par_run=round(mo * RETENTION_RUNS, 2))
+    store = Storage("agrume-grille", "AGRUME_BUCKET", "wind-grid", plafond)
+
+    # ── 1. l'index précédent — 1 GetObject, Class B ───────────────────
+    index = store.get_json(CLE_INDEX) or dict(INDEX_VIDE)
+    crier(f"▶ index : {len(index.get('runs') or [])} run(s) en ligne"
+          + (f", {len(index.get('restes') or [])} reste(s) à supprimer"
+             if index.get("restes") else ""))
+
+    # ── 2. les objets du run ──────────────────────────────────────────
+    cles = cles_du_run(ref)
+    store.put(cles[0], p_npz.read_bytes(), cache_control=CACHE_IMMUABLE,
+              content_type="application/octet-stream")
+    store.put(cles[1], json.dumps(manifeste, ensure_ascii=False).encode(),
+              cache_control=CACHE_IMMUABLE)
+
+    # ── 3. l'index NOUVEAU, avant toute suppression ───────────────────
+    nouveau, a_supprimer = index_apres(index, ref, cles)
+    nouveau["ecrit_le"] = datetime.now(timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    store.put(CLE_INDEX, json.dumps(nouveau, ensure_ascii=False).encode(),
+              cache_control=CACHE_REECRIT)
+
+    # ── 4. la purge ───────────────────────────────────────────────────
+    echecs = []
+    if a_supprimer:
+        # ⚠️ Le garde-fou de préfixe LÈVE plutôt que de purger « ce qui
+        # est légitime » : le produit A vit dans le même bucket, sous
+        # `agrume/colonnes/`, et il est irremplaçable.
+        verifier_prefixe(a_supprimer)
+        for c in a_supprimer:
+            if not store.delete(c):
+                echecs.append(c)
+        crier(f"▶ purge : {len(a_supprimer) - len(echecs)}/"
+              f"{len(a_supprimer)} objet(s) supprimé(s)"
+              + (f" — ⚠️ {len(echecs)} échec(s), réessayés au run suivant"
+                 if echecs else ""))
+    else:
+        crier("▶ purge : rien à supprimer "
+              f"(moins de {RETENTION_RUNS} runs en ligne)")
+
+    # ── 5. l'index FINAL : `restes` = ce qui a échoué ─────────────────
+    if nouveau.get("restes") != echecs:
+        store.put(CLE_INDEX,
+                  json.dumps(index_apres_purge(nouveau, echecs),
+                             ensure_ascii=False).encode(),
+                  cache_control=CACHE_REECRIT)
+    store.bilan()
+    return True
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -395,6 +543,12 @@ def main(argv=None):
                    help="banc d'essai : n premiers fichiers par paquet")
     p.add_argument("--sans-ecriture", action="store_true",
                    help="ingère et chiffre, n'écrit rien sur R2")
+    # ⚠️ Le produit B se DÉSACTIVE, il ne se réactive pas : il est là par
+    # défaut parce qu'il ne coûte ni téléchargement ni minute de runner.
+    # Un drapeau `--avec-grille` aurait fait de la gratuité une option
+    # qu'on oublie d'activer.
+    p.add_argument("--sans-grille", action="store_true",
+                   help="n'ingère PAS le produit B (grille 3D du domaine)")
     p.add_argument("--sortie", default=None,
                    help="dossier local où déposer npz + manifeste")
     a = p.parse_args(argv)
@@ -463,8 +617,9 @@ def main(argv=None):
                 journal_horodate(f"  ⚠️ points de radiosondage SANS SOL : {e}")
 
         ref, run, steps = choisir_run(a.max_heures)
-        col, mesures = ingerer(ref, run, steps, balises, paire,
-                               limite_fichiers=a.limite_fichiers)
+        col, gr, mesures = ingerer(ref, run, steps, balises, paire,
+                                   limite_fichiers=a.limite_fichiers,
+                                   avec_grille=not a.sans_grille)
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
         return 2
@@ -488,6 +643,11 @@ def main(argv=None):
             messages_decodes=mesures["decodes"],
             secondes_reseau=round(mesures["t_dl"], 1),
             secondes_parsing=round(mesures["t_parse"], 1),
+            # ⚠️ Publié dans le manifeste, pas seulement journalisé : un
+            # log de runner disparaît au bout de 90 jours, une archive
+            # définitive se relit dans cinq ans. Si un run a perdu des
+            # champs en silence, il faut que l'archive elle-même le dise.
+            incidents=mesures["incidents"],
             debit_mo_s=round(mesures["octets"] / 1e6 / max(mesures["t_dl"], 1e-6), 1))))
 
     print()
@@ -522,8 +682,25 @@ def main(argv=None):
                      f"{mesures['pic_disque'] / 1e6:.0f} Mo "
                      f"(un fichier à la fois ; plafond du lot "
                      f"{PLAFOND_DISQUE_GO:.0f} Go)")
+    if gr is not None:
+        journal_horodate(f"│ produit B (grille)  : "
+                         f"{gr.h0025.shape[3]}×{gr.h0025.shape[4]} points × "
+                         f"{gr.h0025.shape[1]} niveaux × {len(steps)} "
+                         f"échéances · remplissage "
+                         f"{gr.remplissage() * 100:.1f} %")
+        journal_horodate("│   par paramètre     : "
+                         + " · ".join(f"{n} {v * 100:.0f}%" for n, v
+                                      in gr.remplissage_par_parametre().items()))
     journal_horodate(f"│ durée totale        : {duree_min:.1f} min "
                      f"(alerte au-delà de {ALERTE_DUREE_MIN})")
+    # ⚠️ Un incident n'est pas fatal, mais il ne doit pas être muet — cf.
+    # `parcourir`. Zéro incident est le cas normal ; toute autre valeur
+    # veut dire que des champs ont été perdus sans qu'on sache lesquels.
+    if mesures["incidents"]:
+        journal_horodate(f"│ ⚠️ INCIDENTS         : {mesures['incidents']} "
+                         f"message(s) ont levé pendant le traitement")
+        for m in mesures["incidents_vus"][:3]:
+            journal_horodate(f"│     {m[:90]}")
     journal_horodate("└──────────────────────────────────────────────────")
     if duree_min > ALERTE_DUREE_MIN:
         print(f"⚠️ ALERTE DURÉE : {duree_min:.1f} min > {ALERTE_DUREE_MIN} min "
@@ -542,6 +719,30 @@ def main(argv=None):
                      encoding="utf-8")
     journal_horodate(f"▶ {p_npz.name} : {p_npz.stat().st_size / 1024:.0f} Ko · "
                      f"{p_man.name} : {p_man.stat().st_size / 1024:.0f} Ko")
+
+    # ── Le produit B, écrit localement lui aussi ──────────────────────
+    # ⚠️ Écrit AVANT le test `--sans-ecriture` : c'est ce qui permet de
+    # MESURER la taille réelle de la grille sans rien monter sur R2. Le
+    # §4.1 annonce 32 Mo/run ; ce chiffre venait d'une extrapolation, et
+    # il n'a de valeur que confronté au fichier produit.
+    g_npz = g_man = man_grille = None
+    if gr is not None:
+        man_grille = gr.manifeste(dict(
+            genere_le=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            orographie=dict(run_source=man_orog["run_source"],
+                            sha256=man_orog["grilles"][GRID_3D]["sha256"][:16]),
+            mesures=dict(duree_min=round(duree_min, 2),
+                         incidents=mesures["incidents"])))
+        g_npz = dossier / f"agrume-grille-{ref.replace(':', '')}.npz"
+        g_man = dossier / f"agrume-grille-{ref.replace(':', '')}.json"
+        gr.ecrire_npz(g_npz)
+        g_man.write_text(
+            json.dumps(man_grille, ensure_ascii=False, indent=1) + "\n",
+            encoding="utf-8")
+        journal_horodate(
+            f"▶ {g_npz.name} : {g_npz.stat().st_size / 1e6:.1f} Mo "
+            f"(brut float16 : {gr.octets() / 1e6:.1f} Mo) · "
+            f"{g_man.name} : {g_man.stat().st_size / 1024:.0f} Ko")
 
     if a.sans_ecriture:
         journal_horodate("▶ --sans-ecriture : rien n'est monté sur R2")
@@ -568,6 +769,32 @@ def main(argv=None):
               json.dumps(manifeste, ensure_ascii=False).encode(),
               cache_control=CACHE_IMMUABLE)
     store.bilan()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  LE PRODUIT B — APRÈS, ET SOUS FILET
+    #
+    #  ⚠️ L'ordre n'est pas un détail de mise en page : à ce point,
+    #  l'archive DÉFINITIVE du produit A est écrite et hors de danger.
+    #  Tout ce qui suit concerne un produit qui ne survit pas à trois
+    #  runs et que le prochain réseau régénérera.
+    #
+    #  ⛔ D'où l'`except Exception` — le seul du fichier, et il est
+    #  volontaire. Le run reste VERT si la grille échoue : faire tomber
+    #  le voyant healthchecks pour un produit jetable apprendrait à
+    #  l'ignorer, et le projet a déjà eu deux faux verts. L'échec est
+    #  crié, il se lit dans les logs, et il ne coûte rien de plus qu'un
+    #  cycle d'attente.
+    # ══════════════════════════════════════════════════════════════════
+    if g_npz is not None:
+        try:
+            publier_grille(g_npz, g_man, man_grille, ref)
+        except Exception as e:                              # noqa: BLE001
+            print(f"⚠️ PRODUIT B NON PUBLIÉ : {type(e).__name__} — {e}\n"
+                  f"   Le produit A est écrit et intact ; le run reste "
+                  f"vert. La grille sera régénérée au prochain réseau. "
+                  f"⚠️ Si ça se répète, ce n'est plus un incident : "
+                  f"regarder les droits R2 avec "
+                  f"`agrume-sonde-r2.yml`.", file=sys.stderr)
     return 0
 
 

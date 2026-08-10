@@ -1,4 +1,4 @@
-name: AGRUME — colonnes verticales aux balises (produit A)
+name: AGRUME — colonnes aux balises (produit A) + grille 3D (produit B)
 
 # ══════════════════════════════════════════════════════════════════════
 #  ⚠️ QUI DÉCIDE QUAND, ET QUI FAIT LE TRAVAIL — ce n'est pas le même.
@@ -24,6 +24,16 @@ name: AGRUME — colonnes verticales aux balises (produit A)
 #  pas de TROU dans une archive qui est définitive. ⚠️ Écrire deux fois
 #  le même run est sans danger : la clé porte le run, donc on réécrit le
 #  même objet au même endroit.
+#
+#  ── DEUX PRODUITS, UNE SEULE PASSE (étape 6, 10/08) ──────────────────
+#  Le produit B (grille 3D du domaine, 61 × 85) se découpe dans les
+#  MÊMES messages, déjà téléchargés et déjà décodés pour le produit A.
+#  Il ne coûte donc ni octet de réseau ni minute de runner — seulement du
+#  stockage, et il ne garde que ses trois derniers runs.
+#  ⚠️ L'ordre est un contrat : le produit A, DÉFINITIF, s'écrit d'abord ;
+#  le produit B ensuite, sous filet. Un échec de la grille laisse le run
+#  VERT — faire tomber le voyant pour un produit régénéré au réseau
+#  suivant apprendrait à l'ignorer.
 #
 #  ── CE QUE CE RUN NE FAIT PAS ────────────────────────────────────────
 #  Il ne régénère NI l'orographie NI l'axe des balises. Les deux sont des
@@ -89,6 +99,7 @@ jobs:
           python3 tools/test_mf_s3.py
           python3 agrume/test_orographie.py
           python3 agrume/test_colonnes.py
+          python3 agrume/test_grille.py
 
       - name: Ingérer les colonnes
         env:
