@@ -268,6 +268,19 @@ def main(argv=None):
         print("└──────────────────────────────────────────────────────────")
         try:
             ok_purge, d_purge = sonder_purge(a.prefixe)
+        # ⚠️ L'IMPORT RATÉ N'EST PAS UN DÉFAUT DE LA PURGE, et les
+        # confondre coûte cher. Au premier essai, le workflow n'installait
+        # que boto3 ; la sonde a conclu « la purge ne fait pas ce qu'elle
+        # doit » pour un `import numpy` manquant. Un diagnostic qui
+        # désigne le mauvais coupable est pire qu'une absence de
+        # diagnostic : on va corriger ce qui n'est pas cassé.
+        except ImportError as e:
+            ok_purge, d_purge = None, {"import": str(e)}
+            print(f"\n⚠️ Sonde de purge IMPOSSIBLE, pas en échec : {e}\n"
+                  f"   Il manque une dépendance à l'environnement "
+                  f"d'exécution, pas un droit et pas une ligne de code. "
+                  f"La purge n'est donc NI vérifiée NI démentie.",
+                  file=sys.stderr)
         except Exception as e:                              # noqa: BLE001
             ok_purge, d_purge = False, {"exception": f"{type(e).__name__}: {e}"}
             print(f"  ⛔ {type(e).__name__} — {e}", file=sys.stderr)
@@ -285,6 +298,10 @@ def main(argv=None):
             print("✅ ET le câblage de la purge fait disparaître le bon "
                   "objet, et lui seul — vérifié sur R2, pas seulement au "
                   "banc.")
+        elif d_purge and "import" in d_purge:
+            print("⚠️ Le CÂBLAGE de la purge n'a PAS pu être sondé — "
+                  "dépendance manquante, voir stderr. Ni vérifié, ni "
+                  "démenti : ne pas lire ce ✅ comme une purge validée.")
         else:
             print("ⓘ Le CÂBLAGE de la purge n'a pas été sondé "
                   "(`--avec-purge` pour le faire) : le droit de supprimer "
