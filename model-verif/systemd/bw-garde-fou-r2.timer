@@ -1,0 +1,16 @@
+[Unit]
+Description=Balise Watch — jauge R2 nocturne
+
+[Timer]
+# 04:30 UTC : APRÈS la collecte (03:15) et la notation (03:55), donc la
+# mesure inclut ce que la nuit vient d'écrire. Mesurer avant donnerait
+# une photo systématiquement en retard d'un jour — et sur une pente,
+# un décalage constant se voit à peine tout en faussant l'échéance.
+OnCalendar=*-*-* 04:30:00 UTC
+# Une nuit sautée (VPS éteint, redémarrage) doit se rattraper : c'est la
+# CONTINUITÉ de l'historique qui donne la pente, et un trou la dégrade.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

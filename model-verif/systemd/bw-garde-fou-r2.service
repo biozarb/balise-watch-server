@@ -1,0 +1,58 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-garde-fou-r2.service — la jauge R2 (10/08/2026)
+#
+#  ⚠️ POURQUOI CE JOB EXISTE. R2 n'a pas de coupe-circuit : dépasser le
+#  palier gratuit ne bloque rien, ça facture. Les deux dépassements du
+#  30/07 (Supabase, Fair Use Policy) ont été découverts par un MAIL DU
+#  FOURNISSEUR, pas par le projet. Ce service est la seule chose qui
+#  fasse que le prochain soit vu d'abord ici.
+#
+#  ⚠️ IL NE SUPPRIME RIEN. Lecture seule, sans option pour faire autre
+#  chose. Les purges sont ailleurs et séparées exprès
+#  (`tools/purge_isobars_orphans.py`, `tools/purge_windgrid_orphans.py`).
+#
+#  ⚠️ IL N'A BESOIN NI DE SUPABASE NI D'ÉCRITURE R2 — seulement des
+#  trois variables R2_* de `~/.balise-watch-r2.env`, en lecture. Si le
+#  jeton n'a pas le droit `ListBuckets`, `audit_r2.py` s'arrête en le
+#  disant plutôt que d'auditer un bucket sur trois : le palier gratuit
+#  est PAR COMPTE, un audit partiel rassurerait à tort.
+#
+#  Calqué sur `bw-model-score.service`, mêmes corrections déjà payées :
+#  chemins réels du VPS, utilisateur `debian`, et pas d'EnvironmentFile
+#  (le .env est en `export VAR=…`, que systemd ne sait pas lire — c'est
+#  `run.sh` qui le source).
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — jauge R2 (stockage, pente, échéance du palier)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/tools/audit_r2.py
+After=network-online.target bw-model-score.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh garde-fou-r2
+# Large : le job est un listing, il dure quelques secondes. On veut que
+# ce soit `run.sh` qui constate un blocage et alerte, pas systemd qui
+# tue tout sans que personne ne l'apprenne.
+TimeoutStartSec=15min
+Nice=15
+
+# ── Cloisonnement, calqué sur bw-model-score.service ─────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

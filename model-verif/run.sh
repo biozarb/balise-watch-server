@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════
-#  run.sh — l'enveloppe des deux jobs nocturnes (07/08/2026)
+#  run.sh — l'enveloppe des jobs nocturnes (07/08/2026,
+#           3e mode « garde-fou-r2 » ajouté le 10/08/2026)
 #
-#  Usage :  run.sh collect   |   run.sh score
+#  Usage :  run.sh collect  |  run.sh score  |  run.sh garde-fou-r2
 #
 #  ═══ POURQUOI UNE ENVELOPPE, ET PAS UN EnvironmentFile ═══
 #
@@ -49,11 +50,34 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|score) ;;
-  *) echo "usage: run.sh collect|score" >&2; exit 2 ;;
+  collect|score|garde-fou-r2) ;;
+  *) echo "usage: run.sh collect|score|garde-fou-r2" >&2; exit 2 ;;
 esac
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Où vit le job de ce mode (10/08/2026) ────────────────────────────
+# Ajouté avec le garde-fou R2. Les deux premiers modes sont des jobs
+# `model-verif` et vivent à côté de ce script ; la jauge R2 n'a rien à
+# voir avec le score des modèles et vit dans `tools/`, avec les autres
+# outils d'infrastructure (`audit_storage.py`, `purge_*.py`).
+#
+# ⚠️ On étend cette enveloppe plutôt que d'en écrire une deuxième. Tout
+# ce qui suit — verrou expirant, rotation de journal, chargement des
+# .env dans le bon ordre, comptage des échecs consécutifs, ping
+# Healthchecks, e-mail au sujet translittéré — a été payé au prix de
+# plusieurs pannes. Le recopier pour un troisième job, c'est s'engager
+# à corriger deux fois chaque bug suivant.
+# `LIBELLE` sert de sujet d'alerte. Sans lui, une jauge R2 qui déborde
+# enverrait un mail intitulé « score modèles » — et on chercherait le
+# problème dans la mauvaise moitié du projet.
+case "$MODE" in
+  collect|score)  SCRIPT="$ICI/$MODE.py";               LIBELLE="score modeles" ;;
+  garde-fou-r2)   SCRIPT="$ICI/../tools/audit_r2.py";   LIBELLE="garde-fou R2" ;;
+esac
+if [[ ! -f "$SCRIPT" ]]; then
+  echo "job introuvable : $SCRIPT" >&2; exit 2
+fi
 ENV_FILE="${BW_ENV_FILE:-$HOME/.balise-watch-r2.env}"
 ALERTES_FILE="${BW_ALERTES_FILE:-$HOME/.balise-watch-alertes.env}"
 SUPA_FILE="${BW_MODEL_VERIF_ENV_FILE:-$HOME/.balise-watch-model-verif.env}"
@@ -80,6 +104,17 @@ if [[ "$MODE" == "collect" ]]; then
   # poller Infoclimat, où un cycle raté se rattrape cinq minutes plus
   # tard.
   SEUIL_ALERTE=1
+elif [[ "$MODE" == "garde-fou-r2" ]]; then
+  # Un listing complet des buckets, rien de plus. 10 min est déjà très
+  # large ; si un jour ça dépasse, c'est que le compte a explosé — et
+  # c'est précisément ce que ce job est censé annoncer.
+  MAX_MINUTES="${BW_GARDE_FOU_R2_MAX_MINUTES:-10}"
+  # ⚠️ SEUIL_ALERTE=1 : un seuil de stockage franchi n'est PAS un
+  # incident passager qu'on peut attendre de voir se répéter. Chaque
+  # nuit d'attente est une nuit de facturation, et la valeur de ce job
+  # est de prévenir tôt. Attendre un second échec annulerait sa raison
+  # d'être.
+  SEUIL_ALERTE=1
 else
   MAX_MINUTES="${BW_MODEL_VERIF_MAX_MINUTES:-25}"
   # La notation, elle, se rejoue sur l'archive autant de fois qu'on veut
@@ -91,7 +126,12 @@ fi
 # enjeux, deux durées et deux façons de tomber. Réutiliser un seul check
 # ferait passer l'un au rouge pour la faute de l'autre — la règle posée
 # en tête de `balise-infoclimat.service`, qui vaut ici aussi.
-PING_VAR="BW_MODEL_$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')_PING_URL"
+# ⚠️ Les tirets sont translittérés en `_` (10/08/2026, ajout du mode
+# `garde-fou-r2`). Sans ça, `${!PING_VAR}` porterait sur
+# `BW_MODEL_GARDE-FOU-R2_PING_URL`, qui n'est pas un nom de variable
+# shell valide : l'expansion rendrait vide, le job pinguerait dans le
+# vide, et il aurait exactement l'allure d'un job surveillé.
+PING_VAR="BW_MODEL_$(printf '%s' "$MODE" | tr '[:lower:]-' '[:upper:]_')_PING_URL"
 
 mkdir -p "$ETAT" 2>/dev/null || true
 dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
@@ -125,7 +165,7 @@ alerter() {
     sujet_h=$(printf '%s' "$sujet" \
       | { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; } \
       | LC_ALL=C tr -cd '\40-\176')
-    [[ -z "$sujet_h" ]] && sujet_h="score modeles"
+    [[ -z "$sujet_h" ]] && sujet_h="balise watch"
     printf 'To: %s\nSubject: [Balise Watch] %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\nMachine : %s\nJournal : %s\n' \
       "$BW_ALERTE_MAIL" "$sujet_h" "$corps" "$(hostname)" "$LOG" \
       | msmtp --read-recipients >/dev/null 2>&1 \
@@ -157,7 +197,7 @@ fi
 
 # ── Environnement ────────────────────────────────────────────────────
 if [[ ! -f "$ENV_FILE" ]]; then
-  alerter "score modèles ($MODE)" "fichier $ENV_FILE absent — rien ne peut tourner"
+  alerter "$LIBELLE ($MODE)" "fichier $ENV_FILE absent — rien ne peut tourner"
   exit 1
 fi
 set -a
@@ -192,14 +232,14 @@ if [[ "$MODE" == "score" ]]; then
   done
 fi
 if (( ${#manque[@]} )); then
-  alerter "score modèles ($MODE)" \
+  alerter "$LIBELLE ($MODE)" \
     "variables absentes : ${manque[*]} — voir $SUPA_FILE et $ENV_FILE"
   exit 1
 fi
 
 PYTHON="${BW_PYTHON:-$(command -v python3)}"
 if [[ ! -x "$PYTHON" ]]; then
-  alerter "score modèles ($MODE)" \
+  alerter "$LIBELLE ($MODE)" \
     "python3 introuvable ($PYTHON) — définir BW_PYTHON dans $ENV_FILE"
   exit 1
 fi
@@ -208,7 +248,7 @@ fi
 # sans lui, donc on le constate ici, une fois, plutôt que de le
 # découvrir au milieu d'une collecte.
 if ! "$PYTHON" -c "import boto3" >/dev/null 2>&1; then
-  alerter "score modèles ($MODE)" \
+  alerter "$LIBELLE ($MODE)" \
     "boto3 absent de $PYTHON — l'archive R2 ne peut pas s'écrire"
   exit 1
 fi
@@ -230,11 +270,11 @@ dire "▶ $MODE — bucket R2 « $BUCKET », python $PYTHON"
 # celui de `tee`, qui réussit toujours.
 if command -v timeout >/dev/null 2>&1; then
   timeout --signal=TERM --kill-after=60s "${MAX_MINUTES}m" \
-    "$PYTHON" "$ICI/$MODE.py" --out "$ETAT" "${@:2}" 2>&1 | tee -a "$LOG"
+    "$PYTHON" "$SCRIPT" --out "$ETAT" "${@:2}" 2>&1 | tee -a "$LOG"
   code=${PIPESTATUS[0]}
 else
   dire "⚠️ timeout absent — run sans chien de garde (seul TimeoutStartSec borne)"
-  "$PYTHON" "$ICI/$MODE.py" --out "$ETAT" "${@:2}" 2>&1 | tee -a "$LOG"
+  "$PYTHON" "$SCRIPT" --out "$ETAT" "${@:2}" 2>&1 | tee -a "$LOG"
   code=${PIPESTATUS[0]}
 fi
 duree=$(( $(date +%s) - debut ))
@@ -259,7 +299,7 @@ n=$(( $(cat "$ECHECS" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$ECHECS"
 dire "run $MODE en ÉCHEC (code $code, ${duree}s) — $n consécutif(s)"
 if (( n >= SEUIL_ALERTE )); then
-  alerter "score modeles ($MODE) en echec" \
+  alerter "$LIBELLE ($MODE) en echec" \
     "$n run(s) consécutif(s) en échec (code $code, ${duree}s). Dernières lignes :
 $(tail -n 25 "$LOG")"
 fi
