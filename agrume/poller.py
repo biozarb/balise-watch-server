@@ -127,19 +127,36 @@ class SourceS3(Source):
     latences très différentes, et c'est la première qu'on cherche.
     """
 
-    nom = "arome"
     pas_h = 3
 
-    def __init__(self, paquet="HP1", grille="0025", echeance=0):
+    def __init__(self, paquet="HP1", grille="0025", echeance=0, modele="arome"):
         self.paquet, self.grille, self.echeance = paquet, grille, echeance
+        self.modele = modele
+        # ⚠️ Le nom porte le PAQUET, pas seulement le modèle. Sans ça, les
+        # quatre paquets dont AGRUME a besoin se mélangeraient dans une
+        # seule série de latences — et c'est justement leur ÉCART qu'on
+        # cherche à mesurer.
+        self.nom = f"{modele}:{grille}/{paquet}"
 
     def publie(self, run):
         ref = run.strftime("%Y-%m-%dT%H:00:00Z")
         return bool(covered_steps(ref, self.paquet, self.grille,
-                                  [self.echeance], model="arome"))
+                                  [self.echeance], model=self.modele))
 
     def __str__(self):
-        return f"S3 arome/{self.grille}/{self.paquet} (échéance {self.echeance})"
+        return (f"S3 {self.modele}/{self.grille}/{self.paquet} "
+                f"(échéance {self.echeance})")
+
+
+# ⚠️ LES QUATRE PAQUETS DONT LE PRODUIT A A BESOIN — et `choisir_run`
+# exige leur couverture COMMUNE, donc l'ingestion avance au rythme du
+# PLUS LENT des quatre. Lequel est-ce ? **Ce n'est pas mesuré**, et ça
+# décide pourtant de la fraîcheur réelle d'AGRUME : si un seul paquet
+# traîne d'une heure, il traîne toute la chaîne. Guetter les quatre
+# séparément ne coûte que quatre listings S3 par cycle — quelques
+# kilo-octets, aucun téléchargement.
+PAQUETS_PRODUIT_A = (("0025", "HP1"), ("0025", "HP2"),
+                     ("001", "HP1"), ("001", "SP1"))
 
 
 class SourcePortail(Source):
@@ -317,6 +334,120 @@ def guetter(source, run, journal_entrees, chemin_journal=JOURNAL_DEFAUT,
         dormir(periode)
 
 
+def guetter_plusieurs(sources, run, journal_entrees, chemin_journal=JOURNAL_DEFAUT,
+                      crier=print, dormir=time.sleep, maintenant=None,
+                      abandon_min=ABANDON_MIN):
+    """Guette PLUSIEURS cibles sur le MÊME run, en une seule passe.
+
+    ⚠️ POURQUOI PAS QUATRE POLLERS SÉPARÉS. Ce qu'on veut mesurer n'est
+    pas la latence de chaque paquet dans l'absolu — c'est leur ÉCART. Or
+    deux processus indépendants n'interrogent pas aux mêmes instants :
+    une partie de l'écart mesuré viendrait alors de la désynchronisation
+    des guets, pas de la publication. Ici les quatre sont interrogés dans
+    le même cycle, donc l'écart mesuré est celui des paquets.
+
+    ⚠️ Interrogation SÉQUENTIELLE dans le cycle, jamais en parallèle. Le
+    portail coupe la connexion sous forte concurrence (mesuré : 102
+    resets sur 200 requêtes à 40 fils), et rien ne dit que le miroir S3
+    soit plus tolérant. Quatre listings de quelques kilo-octets ne
+    justifient aucun parallélisme.
+
+    Chaque cible garde son propre `t_absent` et son propre compteur, et
+    sort de la ronde dès qu'elle est vue — les autres continuent.
+    """
+    now = maintenant or (lambda: datetime.now(timezone.utc))
+    run_iso = run.strftime("%Y-%m-%dT%H:00:00Z")
+    restantes = [s for s in sources if not deja_vu(journal_entrees, s.nom, run_iso)]
+    if not restantes:
+        return []
+    etat = {s.nom: dict(t_absent=None, n=0) for s in restantes}
+    periode = float(PERIODE_FINE_S)
+    ecrites = []
+
+    depart = min(debut_de_guet_min(journal_entrees, s.nom) for s in restantes)
+    t0 = now()
+    ecoulees = (t0 - run).total_seconds() / 60.0
+    if ecoulees < depart:
+        crier(f"  ⏸ {run_iso} : rien avant H+{depart} min sur aucune des "
+              f"{len(restantes)} cibles — sieste "
+              f"{(depart - ecoulees):.0f} min")
+        dormir((depart - ecoulees) * 60)
+
+    while restantes:
+        t = now()
+        ecoulees = (t - run).total_seconds() / 60.0
+        if ecoulees > abandon_min:
+            for s in restantes:
+                e = dict(source=s.nom, run=run_iso, etat="abandon",
+                         vu_a=t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                         interrogations=etat[s.nom]["n"],
+                         apres_min=round(ecoulees, 1),
+                         note=f"toujours absent {abandon_min} min après "
+                              f"l'heure du run")
+                ecrire_journal(e, chemin_journal)
+                ecrites.append(e)
+                crier(f"  ⛔ {s.nom} {run_iso} : ABANDON après "
+                      f"{ecoulees:.0f} min")
+            return ecrites
+
+        encore = []
+        for s in restantes:
+            etat[s.nom]["n"] += 1
+            if not s.publie(run):
+                etat[s.nom]["t_absent"] = t
+                encore.append(s)
+                continue
+            ta = etat[s.nom]["t_absent"]
+            lat_min = (ta - run).total_seconds() / 60.0 if ta else None
+            e = dict(source=s.nom, run=run_iso, etat="publie",
+                     vu_a=t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     interrogations=etat[s.nom]["n"],
+                     latence_max_min=round(ecoulees, 1),
+                     latence_min_min=(round(lat_min, 1)
+                                      if lat_min is not None else None),
+                     incertitude_min=(round(ecoulees - lat_min, 1)
+                                      if lat_min is not None else None),
+                     cible=str(s))
+            ecrire_journal(e, chemin_journal)
+            ecrites.append(e)
+            if lat_min is None:
+                crier(f"  ✅ {s.nom} {run_iso} : déjà là — ≤ {ecoulees:.0f} min "
+                      f"(borne, pas mesure)")
+            else:
+                crier(f"  ✅ {s.nom} {run_iso} : entre H+{lat_min:.0f} et "
+                      f"H+{ecoulees:.0f} min")
+        restantes = encore
+        if not restantes:
+            break
+        if ecoulees > FENETRE_FINE_MIN:
+            periode = min(periode * FACTEUR_BACKOFF, PERIODE_MAX_S)
+        dormir(periode)
+
+    if len(ecrites) > 1:
+        vus = [e for e in ecrites if e["etat"] == "publie"]
+        if len(vus) > 1:
+            hautes = [e["latence_max_min"] for e in vus]
+            crier(f"  ⓘ écart entre le premier et le dernier paquet publié : "
+                  f"{max(hautes) - min(hautes):.0f} min "
+                  f"({min(vus, key=lambda e: e['latence_max_min'])['source']} "
+                  f"→ {max(vus, key=lambda e: e['latence_max_min'])['source']})")
+    return ecrites
+
+
+def tour_paquets(sources, chemin_journal=JOURNAL_DEFAUT, crier=print,
+                 dormir=time.sleep, profondeur=3):
+    """Un tour sur le run le plus ancien encore incomplet."""
+    entrees = lire_journal(chemin_journal)
+    for run in reversed(sources[0].runs_recents(profondeur)):
+        run_iso = run.strftime("%Y-%m-%dT%H:00:00Z")
+        if all(deja_vu(entrees, s.nom, run_iso) for s in sources):
+            continue
+        return guetter_plusieurs(sources, run, entrees, chemin_journal,
+                                 crier, dormir)
+    crier("  · rien de nouveau à guetter")
+    return []
+
+
 def tour(source, chemin_journal=JOURNAL_DEFAUT, crier=print, dormir=time.sleep,
          profondeur=4):
     """Un tour : rattrape les runs récents non encore datés, puis guette
@@ -378,7 +509,51 @@ def rapport(chemin_journal=JOURNAL_DEFAUT, crier=print):
             crier(f"  ⛔ {len(aband)} runs jamais apparus dans la fenêtre")
         crier(f"  → prochain guet à partir de H+"
               f"{debut_de_guet_min(entrees, s)} min")
+    rapport_ecart_paquets(entrees, crier)
     return 0
+
+
+def rapport_ecart_paquets(entrees, crier=print):
+    """⚠️ LE CHIFFRE QUI DÉCIDE DE LA FRAÎCHEUR D'AGRUME.
+
+    `ingest_colonnes.choisir_run()` exige la couverture COMMUNE aux
+    quatre paquets : l'ingestion avance donc au rythme du PLUS LENT. Si
+    un seul paquet traîne d'une heure, il traîne toute la chaîne — et on
+    ne le verrait nulle part ailleurs, puisque le run finit par être
+    complet et que tout a l'air normal.
+
+    On ne compare QUE des cibles vues dans le même run et dans le même
+    cycle de guet : comparer des paquets datés par des processus
+    différents mélangerait l'écart de publication avec l'écart des guets.
+    """
+    par_run = {}
+    for e in entrees:
+        s = e.get("source", "")
+        if e.get("etat") != "publie" or ":" not in s:
+            continue
+        par_run.setdefault(e["run"], {})[s] = e["latence_max_min"]
+    complets = {r: d for r, d in par_run.items() if len(d) > 1}
+    if not complets:
+        return
+    crier(f"\n── ÉCART DE PUBLICATION ENTRE PAQUETS ({len(complets)} runs) ──")
+    noms = sorted({s for d in complets.values() for s in d})
+    for nom in noms:
+        vals = sorted(d[nom] for d in complets.values() if nom in d)
+        crier(f"  {nom:<22} borne haute médiane {vals[len(vals) // 2]:6.0f} min "
+              f"(n = {len(vals)})")
+    ecarts = sorted(max(d.values()) - min(d.values()) for d in complets.values())
+    med = ecarts[len(ecarts) // 2]
+    crier(f"  → écart premier/dernier paquet : médiane {med:.0f} min · "
+          f"max {ecarts[-1]:.0f} min")
+    lents = {}
+    for d in complets.values():
+        lents[max(d, key=d.get)] = lents.get(max(d, key=d.get), 0) + 1
+    crier("  → le plus lent est " + ", ".join(
+        f"{k} ({v}×)" for k, v in sorted(lents.items(), key=lambda x: -x[1])))
+    if all(e == 0 for e in ecarts):
+        crier("  ⚠️ écart nul partout : soit les paquets sortent vraiment "
+              "ensemble, soit la période de guet est trop grossière pour les "
+              "séparer. Un zéro n'est pas une mesure de simultanéité.")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -417,6 +592,8 @@ def dispatch_github(depot, workflow, ref="main", entrees=None, crier=print):
 def fabriquer_source(nom, journal=print):
     if nom == "arome":
         return SourceS3()
+    if nom == "arome-paquets":
+        return [SourceS3(paquet=p, grille=g) for g, p in PAQUETS_PRODUIT_A]
     if nom == "aromepi":
         return SourcePortail(SERVICE_AROMEPI, "0025", journal=journal)
     if nom == "arome-wcs":
@@ -430,7 +607,7 @@ def fabriquer_source(nom, journal=print):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--source", default="aromepi",
-                   choices=("aromepi", "arome", "arome-wcs"))
+                   choices=("aromepi", "arome", "arome-wcs", "arome-paquets"))
     p.add_argument("--journal", default=str(JOURNAL_DEFAUT))
     p.add_argument("--une-fois", action="store_true",
                    help="guette un seul run puis sort (mode cron)")
@@ -447,6 +624,21 @@ def main(argv=None):
         return rapport(a.journal)
 
     source = fabriquer_source(a.source)
+    if isinstance(source, list):
+        print("▶ guet simultané de " + ", ".join(s.nom for s in source))
+        while True:
+            ecrites = tour_paquets(source, a.journal)
+            # ⚠️ Le dispatch n'a lieu que quand TOUS les paquets sont là :
+            # `choisir_run()` exige leur couverture commune, déclencher
+            # plus tôt donnerait un run que l'ingestion refuserait.
+            if a.dispatch and ecrites and all(e.get("etat") == "publie"
+                                              for e in ecrites):
+                depot, _, wf = a.dispatch.partition(":")
+                dispatch_github(depot, wf, entrees={"run": ecrites[0]["run"]})
+            if a.une_fois or not a.boucle:
+                return 0
+            time.sleep(PERIODE_FINE_S)
+
     print(f"▶ guet : {source}")
     while True:
         entree = tour(source, a.journal)

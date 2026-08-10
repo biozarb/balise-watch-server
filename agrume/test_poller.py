@@ -275,6 +275,84 @@ def main():
     verifier("un seul run témoin qui répond suffit à valider le champ",
              temoin.endswith("06:00:00Z"), temoin)
 
+    print("\n── ⚠️ Guet SIMULTANÉ des quatre paquets du produit A ──────")
+    # `choisir_run()` exige la couverture COMMUNE aux quatre : l'ingestion
+    # avance au rythme du plus lent. C'est leur ÉCART qu'on mesure, donc
+    # ils doivent être interrogés dans le MÊME cycle — sinon une part de
+    # l'écart viendrait de la désynchronisation des guets.
+    verifier("les quatre paquets du produit A sont déclarés",
+             P.PAQUETS_PRODUIT_A == (("0025", "HP1"), ("0025", "HP2"),
+                                     ("001", "HP1"), ("001", "SP1")))
+    quatre = P.fabriquer_source("arome-paquets")
+    verifier("`arome-paquets` fabrique bien quatre cibles distinctes",
+             len({s.nom for s in quatre}) == 4,
+             ", ".join(s.nom for s in quatre))
+    verifier("le nom porte le paquet, pas seulement le modèle",
+             quatre[0].nom == "arome:0025/HP1", quatre[0].nom)
+    verifier("les quatre suivent la grille de runs à 3 h",
+             all(s.pas_h == 3 for s in quatre))
+
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        h = Horloge(run)
+        # HP1 sort à +30, SP1 à +34, HP2 à +52, 001/HP1 à +58.
+        retards = {"arome:0025/HP1": 30, "arome:001/SP1": 34,
+                   "arome:0025/HP2": 52, "arome:001/HP1": 58}
+        cibles = [SourceFactice(h, run + timedelta(minutes=m), nom=n)
+                  for n, m in retards.items()]
+        ecrites = P.guetter_plusieurs(cibles, run, [], j,
+                                      crier=lambda *a: None, dormir=h.dormir,
+                                      maintenant=h.maintenant)
+        verifier("les quatre sont datés en une seule ronde",
+                 len(ecrites) == 4 and all(e["etat"] == "publie" for e in ecrites))
+        par_nom = {e["source"]: e for e in ecrites}
+        verifier("chacun est encadré autour de son vrai retard",
+                 all(par_nom[n]["latence_min_min"] <= m <= par_nom[n]["latence_max_min"]
+                     for n, m in retards.items()),
+                 " · ".join(f"{n.split('/')[-1]} "
+                            f"{par_nom[n]['latence_min_min']:.0f}-"
+                            f"{par_nom[n]['latence_max_min']:.0f}"
+                            for n in retards))
+        verifier("⚠️ le plus lent est bien identifié (c'est lui qui bride "
+                 "toute la chaîne)",
+                 max(par_nom, key=lambda n: par_nom[n]["latence_max_min"])
+                 == "arome:001/HP1")
+        vus = sorted(e["latence_max_min"] for e in ecrites)
+        verifier("l'écart premier/dernier est retrouvé (28 min attendus)",
+                 abs((vus[-1] - vus[0]) - 28) <= P.PERIODE_FINE_S / 60,
+                 f"{vus[-1] - vus[0]:.0f} min")
+        verifier("une cible vue tôt cesse d'être interrogée",
+                 par_nom["arome:0025/HP1"]["interrogations"]
+                 < par_nom["arome:001/HP1"]["interrogations"],
+                 f"{par_nom['arome:0025/HP1']['interrogations']} contre "
+                 f"{par_nom['arome:001/HP1']['interrogations']}")
+        # Un second passage ne doit rien redater.
+        verifier("un tour de rattrapage ne redate pas ce qui est déjà daté",
+                 P.guetter_plusieurs(cibles, run, P.lire_journal(j), j,
+                                     crier=lambda *a: None, dormir=h.dormir,
+                                     maintenant=h.maintenant) == [])
+
+        lignes = []
+        P.rapport_ecart_paquets(P.lire_journal(j), crier=lignes.append)
+        texte = "\n".join(lignes)
+        verifier("le rapport nomme le paquet le plus lent",
+                 "le plus lent est arome:001/HP1" in texte)
+        verifier("le rapport donne la médiane de l'écart",
+                 "écart premier/dernier paquet" in texte)
+
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        h = Horloge(run)
+        memes = [SourceFactice(h, run + timedelta(minutes=40), nom=f"arome:g/p{k}")
+                 for k in range(3)]
+        P.guetter_plusieurs(memes, run, [], j, crier=lambda *a: None,
+                            dormir=h.dormir, maintenant=h.maintenant)
+        lignes = []
+        P.rapport_ecart_paquets(P.lire_journal(j), crier=lignes.append)
+        verifier("⚠️ un écart nul est signalé comme AMBIGU, pas comme une "
+                 "preuve de simultanéité",
+                 any("n'est pas une mesure de simultanéité" in x for x in lignes))
+
     print("\n── Le rapport ne fabrique rien ───────────────────────────")
     lignes = []
     with tempfile.TemporaryDirectory() as d:
