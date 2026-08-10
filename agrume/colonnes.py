@@ -184,12 +184,30 @@ def balises_du_domaine(stations, suspectes=()):
     sus = set(str(x) for x in suspectes)
     out = []
     for s in stations:
-        if not dans_domaine(s["lat"], s["lon"]):
+        # ⚠️ Les points de RADIOSONDAGE sont hors du domaine par
+        # construction (cf. `domaine.py`) : ce sont les seuls points de
+        # l'axe qui ne soient pas des balises, et c'est leur `source` qui
+        # les fait entrer, pas leur position. Rien d'autre ne change pour
+        # eux : `index_plats()` indexe la grille NATIVE, donc leur colonne
+        # s'extrait exactement comme les autres.
+        if (s.get("source") != "radiosondage"
+                and not dans_domaine(s["lat"], s["lon"])):
             continue
         out.append(dict(id=str(s["id"]), lat=float(s["lat"]),
                         lon=float(s["lon"]), nom=s.get("name", ""),
                         source=s.get("source", ""),
                         position_suspecte=str(s["id"]) in sus))
+    # ⚠️ C'EST CE TRI-CI QUI DÉFINIT L'AXE DE L'ARCHIVE — pas celui de
+    # `freeze_balises.py`, qui ne range que le fichier figé pour qu'il se
+    # relise. Les deux existent et n'ont PAS la même clé (chaîne ici,
+    # numérique là-bas) : constaté le 10/08, laissé en l'état parce que
+    # changer celui-ci changerait l'ordre des archives à venir sans
+    # changer celui des archives déjà écrites.
+    # ⓘ Effet de bord heureux : « RS-06610 » se range après tous les
+    # identifiants numériques ('R' > '9' en ASCII), donc les points de
+    # radiosondage arrivent EN FIN d'axe et ne décalent aucune balise
+    # existante. C'est ce qu'on veut — mais c'est une propriété du tri
+    # ASCII, pas une garantie écrite : `test_radiosondage.py` la vérifie.
     return sorted(out, key=lambda b: b["id"])
 
 

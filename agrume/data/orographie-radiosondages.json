@@ -1,0 +1,162 @@
+{
+  "produit": "AGRUME — orographie sous les points de radiosondage, figée",
+  "ecrit_le": "2026-08-10T12:35:16Z",
+  "run_source": "2026-08-10T09:00:00Z",
+  "eccodes": "2.43.0",
+  "demi_fenetre_deg": 0.25,
+  "accord_production": {
+    "n_points_communs": 3042,
+    "ecart_max_m": 0.0,
+    "run_source_production": "2026-08-10T03:00:00Z"
+  },
+  "stations": {
+    "06610": {
+      "nom": "Payerne",
+      "pays": "CH",
+      "lat": 46.813,
+      "lon": 6.943,
+      "sol_station_m": 491,
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T09:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 834,
+          "i0": 1869,
+          "nj": 51,
+          "ni": 51,
+          "sha256": "98d57d521c327eb7700205ae241d67c2fa0ceaac94f1bb7fcab0327cf479fb69",
+          "z_station": 474.4,
+          "ecart_sol_station_m": -16.6
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T09:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 333,
+          "i0": 748,
+          "nj": 21,
+          "ni": 21,
+          "sha256": "35749966bd7464658136be9956a8e718ec04408d03df1e39c768ce00a511f3f4",
+          "z_station": 455.5,
+          "ecart_sol_station_m": -35.5
+        }
+      }
+    },
+    "16064": {
+      "nom": "Cameri (Novara)",
+      "pays": "IT",
+      "lat": 45.52,
+      "lon": 8.65,
+      "sol_station_m": 211,
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T09:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 963,
+          "i0": 2040,
+          "nj": 51,
+          "ni": 51,
+          "sha256": "3da2231d329ef3cf0769f2402fe005c8ec41d362feecc36ae084379eac68ae62",
+          "z_station": 169.4,
+          "ecart_sol_station_m": -41.6
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T09:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 385,
+          "i0": 816,
+          "nj": 21,
+          "ni": 21,
+          "sha256": "912b677ceeafa4f4fcfbd181b2f9754130df827fb4fce939ba065b8de57ff716",
+          "z_station": 169.9,
+          "ecart_sol_station_m": -41.1
+        }
+      }
+    },
+    "TEMOIN": {
+      "nom": "témoin (centre du domaine)",
+      "pays": "FR",
+      "lat": 45.55,
+      "lon": 6.55,
+      "sol_station_m": null,
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T09:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 960,
+          "i0": 1830,
+          "nj": 51,
+          "ni": 51,
+          "sha256": "e089f5e208ac326110c1c479f03164ba6ef2060c4f33d151c127f2e817427d84",
+          "z_station": 1903.1,
+          "ecart_sol_station_m": null
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T09:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 384,
+          "i0": 732,
+          "nj": 21,
+          "ni": 21,
+          "sha256": "92e6b030e0381595f92ad33f443f1d83dbf6f231a6b0a6bf91b5fe8855624757",
+          "z_station": 1903.0,
+          "ecart_sol_station_m": null
+        }
+      }
+    }
+  },
+  "note": "⚠️ Artefact de VÉRIFICATION, pas de production. Aucune colonne servie à un pilote n'en dépend : il ne donne un sol qu'aux points marqués `source = \"radiosondage\"` dans l'axe des balises. La production (`orographie-nord-alpes.*`) n'est PAS touchée, donc son sha256 non plus. Régénérer avec `python3 agrume/freeze_orographie.py --radiosondages`."
+}

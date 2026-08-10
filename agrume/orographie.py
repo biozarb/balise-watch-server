@@ -337,15 +337,113 @@ def lire_champ_h(chemin):
     return values, meta
 
 
-def decouper(values, meta, grille):
+def decouper(values, meta, grille, bornes=None):
     """Découpe le champ France entière au domaine Nord-Alpes.
 
     ✅ Mesuré le 10/08 : la découpe est GRATUITE (7,6 s contre 7,9 s sans
     découpe, à la marge du bruit). Le coût est dans `codes_get_values()` ;
     le `reshape` + slice numpy derrière ne se voit pas. On décode donc la
     France entière et on découpe, sans chercher à être malin.
+
+    `bornes` permet de découper AILLEURS que sur le domaine — la seule
+    utilisation légitime est la fenêtre de vérification des radiosondages
+    (`domaine.fenetre_autour`). ⚠️ Ne pas s'en servir pour fabriquer un
+    second domaine de produit : la note de `domaine.py` explique
+    pourquoi le choix a été de garder la production intacte.
     """
-    j0, j1, i0, i1 = fenetre(meta)
+    j0, j1, i0, i1 = fenetre(meta) if bornes is None else bornes
     grille2d = np.asarray(values, dtype=np.float32).reshape(meta["Nj"], meta["Ni"])
     z = np.ascontiguousarray(grille2d[j0:j1 + 1, i0:i1 + 1])
     return Orographie(grille, z, meta, j0, i0)
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ARTEFACT DE VÉRIFICATION — le sol sous les points de radiosondage
+#
+#  ⚠️ SECOND artefact, volontairement séparé du premier. Les stations de
+#  radiosondage sont HORS du domaine Nord-Alpes ; leur donner une
+#  altitude de sol demandait soit d'élargir la production — donc de
+#  changer son sha256 et de rompre la continuité de toutes les archives
+#  déjà écrites — soit d'écrire à côté. On écrit à côté.
+#
+#  ⚠️ Ce fichier ne sert QU'À la vérification. Aucune colonne servie à un
+#  pilote n'en dépend, et `ingest_colonnes.py` ne le charge que pour les
+#  points marqués `source = "radiosondage"`. Le jour où quelqu'un voudra
+#  en faire un domaine de produit, il faudra le décider, pas le laisser
+#  arriver.
+# ══════════════════════════════════════════════════════════════════════
+ARTEFACT_VERIF_NPZ = (Path(__file__).resolve().parent / "data"
+                      / "orographie-radiosondages.npz")
+ARTEFACT_VERIF_JSON = (Path(__file__).resolve().parent / "data"
+                       / "orographie-radiosondages.json")
+
+
+def charger_artefact_verif(npz=ARTEFACT_VERIF_NPZ, js=ARTEFACT_VERIF_JSON):
+    """{wmo: {grille: Orographie}}, sha256 revérifié comme pour la
+    production — même raison : c'est un binaire commité, invisible au
+    diff."""
+    npz, js = Path(npz), Path(js)
+    if not npz.exists() or not js.exists():
+        raise Abort(f"artefact de vérification absent ({npz.name}) — le "
+                    f"générer avec `python3 agrume/freeze_orographie.py "
+                    f"--radiosondages`")
+    man = json.loads(js.read_text(encoding="utf-8"))
+    out = {}
+    with np.load(npz) as z:
+        for wmo, entrees in man["stations"].items():
+            out[wmo] = {}
+            for grille, e in entrees["grilles"].items():
+                arr = z[f"z_{wmo}_{grille}"]
+                obtenu = _sha256(arr)
+                if obtenu != e["sha256"]:
+                    raise Abort(
+                        f"orographie de vérification {wmo}/{grille} CORROMPUE "
+                        f"(sha256 {obtenu[:12]}… au lieu de {e['sha256'][:12]}…)")
+                out[wmo][grille] = Orographie(
+                    grille, arr, {k: e["meta"][k] for k in CLES_META},
+                    e["j0"], e["i0"])
+    return out, man
+
+
+def ecrire_artefact_verif(par_station, manifeste,
+                          npz=ARTEFACT_VERIF_NPZ, js=ARTEFACT_VERIF_JSON):
+    npz, js = Path(npz), Path(js)
+    npz.parent.mkdir(parents=True, exist_ok=True)
+    tableaux = {f"z_{wmo}_{g}": o.z
+                for wmo, paire in par_station.items()
+                for g, o in paire.items()}
+    np.savez_compressed(npz, **tableaux)
+    js.write_text(json.dumps(manifeste, indent=2, ensure_ascii=False) + "\n",
+                  encoding="utf-8")
+    return npz.stat().st_size, js.stat().st_size
+
+
+def accord_avec_production(par_station, paire_prod, pas=1):
+    """⚠️ LE GARDE-FOU DES DEUX FENÊTRES.
+
+    Deux fenêtres découpées dans le même champ statique doivent donner
+    EXACTEMENT la même altitude là où elles se recouvrent. Si ce n'est
+    pas le cas, « deux fenêtres » est devenu « deux orographies » — et
+    une colonne de vérification ne reposerait plus sur le même sol que la
+    production qu'elle prétend vérifier.
+
+    Renvoie (n_communs, ecart_max_m). ⚠️ `ecart_max_m` doit valoir
+    exactement 0,0 : ce n'est pas une tolérance, c'est le même octet lu
+    deux fois. Une valeur non nulle veut dire que les deux artefacts
+    viennent de runs différents, ou qu'un indice est décalé.
+    """
+    n, pire = 0, 0.0
+    for paire in par_station.values():
+        for grille, o in paire.items():
+            prod = paire_prod.get(grille)
+            if prod is None:
+                continue
+            for j in range(0, o.z.shape[0], pas):
+                for i in range(0, o.z.shape[1], pas):
+                    lat, lon = o.coords(j, i)
+                    a = prod.z_at(lat, lon)
+                    if a is None:
+                        continue
+                    n += 1
+                    pire = max(pire, abs(a - float(o.z[j, i])))
+    return n, pire

@@ -1,13 +1,13 @@
 {
  "produit": "AGRUME — axe des balises du domaine Nord-Alpes, figé",
- "ecrit_le": "2026-08-10T10:40:07Z",
+ "ecrit_le": "2026-08-10T12:35:44Z",
  "domaine": {
   "latmin": 44.8,
   "latmax": 46.3,
   "lonmin": 5.5,
   "lonmax": 7.6
  },
- "n": 125,
+ "n": 127,
  "note": "Fusion À AJOUT SEUL : une balise hors ligne n'est jamais retirée, sinon l'axe de l'archive se décalerait et son historique deviendrait orphelin. Régénérer avec `python3 agrume/freeze_balises.py`.",
  "balises": [
   {
@@ -1257,6 +1257,24 @@
    "lon": 6.2146,
    "name": "Windbird 2338",
    "seen_at": "2026-08-07",
+   "position_suspecte": false,
+   "vue_le": "2026-08-10"
+  },
+  {
+   "id": "RS-06610",
+   "source": "radiosondage",
+   "lat": 46.813,
+   "lon": 6.943,
+   "name": "Radiosondage Payerne (06610)",
+   "position_suspecte": false,
+   "vue_le": "2026-08-10"
+  },
+  {
+   "id": "RS-16064",
+   "source": "radiosondage",
+   "lat": 45.52,
+   "lon": 8.65,
+   "name": "Radiosondage Cameri (Novara) (16064)",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
   }

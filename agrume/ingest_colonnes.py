@@ -72,7 +72,7 @@ from domaine import (G, GRID_3D, GRID_FINE, MAX_HOURS,  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
                    est_fichier_horaire, s3_objets)
-from orographie import charger_artefact  # noqa: E402
+from orographie import charger_artefact, charger_artefact_verif  # noqa: E402
 
 # ⚠️ Alerte de durée : la MOITIÉ du timeout de 60 min, et six fois le
 # budget mesuré. Si on l'atteint, ce n'est pas « c'était un peu long »,
@@ -431,6 +431,37 @@ def main(argv=None):
                 z = o.z_at(b["lat"], b["lon"])
                 b[f"z_{g}"] = None if z is None else round(z, 1)
 
+        # ── Le sol des points de RADIOSONDAGE ─────────────────────────
+        # ⚠️ Ils sont hors du domaine, donc hors de l'orographie de
+        # PRODUCTION : `z_at` y renvoie None et leur colonne serait
+        # extraite sans plancher, donc inexploitable. Leur sol vient du
+        # second artefact, celui de vérification — et de lui seul.
+        #
+        # ⚠️ Son absence n'ARRÊTE PAS l'ingestion. C'est un appareil de
+        # mesure, pas le produit : casser la production de 125 colonnes
+        # parce qu'un artefact de vérification manque serait le mauvais
+        # arbitrage. On crie, on continue, et le manifeste dira que ces
+        # points n'ont pas de sol.
+        rs = [b for b in balises if b.get("source") == "radiosondage"]
+        verif_manifeste = None
+        if rs:
+            try:
+                par_station, man_verif = charger_artefact_verif()
+                verif_manifeste = dict(
+                    run_source=man_verif["run_source"],
+                    demi_fenetre_deg=man_verif["demi_fenetre_deg"])
+                for b in rs:
+                    wmo = str(b["id"]).replace("RS-", "")
+                    for g, o in par_station.get(wmo, {}).items():
+                        z = o.z_at(b["lat"], b["lon"])
+                        b[f"z_{g}"] = None if z is None else round(z, 1)
+                journal_horodate(
+                    f"▶ {len(rs)} point(s) de radiosondage — sol lu dans "
+                    f"l'artefact de vérification du run "
+                    f"{man_verif['run_source']}")
+            except Abort as e:
+                journal_horodate(f"  ⚠️ points de radiosondage SANS SOL : {e}")
+
         ref, run, steps = choisir_run(a.max_heures)
         col, mesures = ingerer(ref, run, steps, balises, paire,
                                limite_fichiers=a.limite_fichiers)
@@ -445,6 +476,9 @@ def main(argv=None):
         orographie=dict(run_source=man_orog["run_source"],
                         sha256={g: man_orog["grilles"][g]["sha256"][:16]
                                 for g in man_orog["grilles"]}),
+        # ⚠️ Publié pour qu'on sache, en relisant une archive, si les
+        # points de radiosondage avaient un sol ce jour-là — et lequel.
+        orographie_radiosondages=verif_manifeste,
         mesures=dict(
             duree_min=round(duree_min, 2),
             octets_telecharges=mesures["octets"],

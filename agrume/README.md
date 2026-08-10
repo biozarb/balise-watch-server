@@ -192,3 +192,81 @@ acquis :
   fort avant d'en conclure quoi que ce soit.
 - **Le raccord hauteur/isobares** (§3.3 du lot) : pas encore implémenté,
   donc pas encore vérifié.
+
+---
+
+## La confrontation au ballon (étape 5 bis, 10/08/2026)
+
+Jusqu'ici le profil n'était vérifié que **contre lui-même** :
+`ecart_recouvrement()` mesure si les deux sources d'AROME se contredisent
+dans la zone de mélange. C'est un excellent détecteur de conversion
+fausse. Ce n'est **pas** une mesure d'exactitude.
+
+    python3 agrume/freeze_orographie.py --radiosondages   # une fois
+    python3 agrume/freeze_balises.py --radiosondages-seulement
+    python3 agrume/confronter_sondage.py --run <run> --station 06610 \
+            --date 2026-08-10 --heure 12
+
+⚠️ **LE CHIFFRE À RETENIR, ET IL EST INCONFORTABLE.** Sur la colonne de
+Payerne du run 09 Z + 3 h :
+
+| | écart |
+|---|---|
+| contrôle interne (`ecartRecouvrementMs`) | **0,04 m/s** |
+| contre le ballon, même colonne, même instant | **1,73 m/s** (médiane) |
+
+**Un facteur ~40.** Le contrôle interne n'a jamais prétendu mesurer
+l'exactitude — mais tant qu'il était le seul chiffre publié, il était le
+seul qu'on pouvait citer. Il ne l'est plus.
+
+### Ce qui a été mesuré le 10/08 (n = 2 profils, vent faible)
+
+| | Payerne (06610) | Cameri (16064) |
+|---|---|---|
+| sol modèle − sol station | −36 m | −41 m |
+| hauteur seule | 1,70 m/s (n = 10) | 1,84 (n = 13) |
+| **mélange (raccord)** | **1,67** (n = 9) | **2,23** (n = 9) |
+| isobares seules | 2,34 (n = 6) | 4,09 (n = 7) |
+| tout le profil | 1,73 · d9 2,59 · max 4,66 | 2,00 · d9 4,16 · max 7,20 |
+| écart de température | +0,2 °C | +0,2 °C |
+
+✅ **Le raccord n'ajoute pas d'erreur.** C'était la question du lot, et à
+Payerne la tranche de mélange fait *mieux* que les deux tranches pures.
+⚠️ n = 9 points, un profil : ça oriente, ça ne conclut pas.
+
+⚠️ **La tranche isobare est la pire des trois, et on ne sait pas
+pourquoi.** Trois causes s'y superposent et aucune n'est isolable en
+l'état : c'est là que le ballon a le plus dérivé (11 à 15 km), c'est là
+que le modèle est le plus haut, et à Cameri c'est là que le sondage est
+le plus creux (69 niveaux contre 2 848 à Payerne). **Ne pas conclure que
+le modèle est mauvais en altitude.**
+
+### Ce que cette comparaison ne prouvera jamais
+
+- **Les deux stations sont en plaine** (491 et 211 m). Elles vérifient
+  l'air libre et le raccord, **pas** la couche limite de montagne — qui
+  est justement ce qu'AGRUME apporte. Un bon accord à Payerne ne dit rien
+  du profil au-dessus d'un décollage à 2 000 m.
+- **Le ballon dérive.** Mesuré, pas supposé : 1,0 km à 2 000 m, 2,6 à
+  4 000, 7,8 à 8 000 — avec une vitesse d'ascension **supposée** de
+  5 m/s, que Wyoming ne publie pas. C'est bien moins que redouté (sous la
+  maille 0,025° jusqu'à 2 000 m), mais c'était un jour de vent faible.
+- **n restera petit** : deux lâchers par jour et par station.
+
+### Deux défauts trouvés en chemin
+
+⚠️ **Les vents des radiosondages étaient affichés à 51 % de leur valeur.**
+Wyoming publie `SPED` en **m/s** et l'écrit dans sa ligne d'unités ;
+`index.js` la rangeait dans `speedKt` et le client faisait `× 1,852`.
+27,7 km/h à 850 hPa s'affichaient 14,3. Corrigé des deux côtés : l'unité
+est désormais **lue**, et un format non reconnu fait échouer le parsing
+plutôt qu'inventer une conversion.
+
+⚠️ **8 des 18 stations proposées aux pilotes n'ont aucune donnée** —
+404 sur les trois créneaux testés le 10/08 : Nîmes, Cuneo, A Coruña,
+Zaragoza, Barcelone, Madrid, Palma, Lisbonne. Cuneo était la seconde
+station du plan de ce lot. Le produit, pas AGRUME — mais c'est le même
+constat qui a fait passer le lot de Cuneo à Cameri.
+ⓘ **Piste** : Innsbruck (11120) répond, en haute résolution, et c'est une
+station **de vallée alpine** — exactement ce qui manque ici. Deux
+requêtes sur trois ont expiré : fiabilité à mesurer avant d'y compter.

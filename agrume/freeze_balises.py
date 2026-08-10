@@ -116,7 +116,12 @@ def fusionner(existantes, candidates, crier=print):
     connues = {b["id"]: dict(b) for b in existantes}
     ajouts, deplacements = 0, []
     for c in candidates:
-        if not dans_domaine(c["lat"], c["lon"]):
+        # ⚠️ Les points de RADIOSONDAGE sont volontairement HORS du
+        # domaine (Payerne est 0,51° au nord de `latmax`). Ils ne sont
+        # pas des balises : ils portent `source = "radiosondage"`, et
+        # c'est ce marqueur — pas leur position — qui les fait entrer.
+        # Aucun score de balise ne doit les avaler par erreur.
+        if c.get("source") != "radiosondage" and not dans_domaine(c["lat"], c["lon"]):
             continue
         ancienne = connues.get(c["id"])
         if ancienne is None:
@@ -129,8 +134,56 @@ def fusionner(existantes, candidates, crier=print):
         if d > SEUIL_DEPLACEMENT_M:
             deplacements.append((c["id"], ancienne["name"], round(d)))
         ancienne["name"] = c["name"] or ancienne["name"]
-    return sorted(connues.values(), key=lambda b: int(b["id"])
-                  if b["id"].isdigit() else 0), ajouts, deplacements
+    return sorted(connues.values(), key=_rang), ajouts, deplacements
+
+
+def _rang(b):
+    """Position d'un point dans l'axe.
+
+    ⚠️ CE QUE CET AXE GARANTIT, ET CE QU'IL NE GARANTIT PAS — constaté le
+    10/08 en y ajoutant les radiosondages.
+
+    L'en-tête de ce fichier dit que « l'axe des balises doit être STABLE
+    d'un run à l'autre, sinon concaténer deux runs demande de remapper
+    les indices ». La discipline d'ajout seul garantit qu'aucune balise ne
+    DISPARAÎT. Elle ne garantit PAS que les positions ne bougent pas :
+    l'axe est trié par identifiant, donc une nouvelle balise Pioupiou
+    d'identifiant plus petit qu'une balise existante DÉCALE toutes celles
+    qui la suivent. Ça n'a rien cassé jusqu'ici parce que chaque archive
+    porte SA propre liste `balises` dans son manifeste et que
+    `sonder.py::trouver_balise` cherche par identifiant — mais empiler
+    deux runs sur l'indice, comme la promesse le suggère, serait faux.
+    À traiter comme une décision à part ; ici on se contente de ne PAS
+    aggraver.
+
+    D'où le premier terme du tri : les points de radiosondage passent
+    APRÈS toutes les balises, quoi qu'il arrive. Sans lui, un
+    identifiant non numérique comme « RS-06610 » tomberait en TÊTE de ce
+    fichier (`int(...) if isdigit() else 0`), ce qui se lit très mal.
+
+    ⚠️ Et ce tri-ci ne range QUE le fichier figé. L'axe réel de l'archive
+    est trié ailleurs, par `colonnes.balises_du_domaine()`, et sur la
+    CHAÎNE de l'identifiant. Deux tris pour une même notion, c'est un de
+    trop — c'est écrit des deux côtés en attendant qu'on tranche.
+    """
+    radiosondage = 1 if b.get("source") == "radiosondage" else 0
+    return (radiosondage,
+            int(b["id"]) if str(b["id"]).isdigit() else 0,
+            str(b["id"]))
+
+
+def points_radiosondage():
+    """Les stations actives, en candidates pour l'axe.
+
+    ⚠️ `source = "radiosondage"` est le marqueur qui les distingue d'une
+    balise partout ailleurs dans la chaîne : ce ne sont pas des
+    anémomètres, elles n'ont pas de mesure à comparer, et aucun score ne
+    doit les traiter comme des balises."""
+    from radiosondage import STATIONS
+    return [dict(id=f"RS-{s['wmo']}", source="radiosondage",
+                 lat=s["lat"], lon=s["lon"],
+                 name=f"Radiosondage {s['nom']} ({s['wmo']})")
+            for s in STATIONS if s["active"]]
 
 
 def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print):
@@ -138,7 +191,12 @@ def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print):
         existantes, _ = charger_artefact(chemin)
     except Abort:
         existantes = []
-    balises, ajouts, deplacements = fusionner(existantes, candidates, crier)
+    # Les points de radiosondage entrent à CHAQUE gel, comme les balises
+    # du catalogue : la discipline d'ajout seul s'occupe de ne pas les
+    # dupliquer, et une station qu'on désactive dans `radiosondage.py`
+    # n'est pas retirée de l'axe pour autant — sinon l'axe se décalerait.
+    balises, ajouts, deplacements = fusionner(
+        existantes, list(candidates) + points_radiosondage(), crier)
     sus = {str(x) for x in suspectes}
     for b in balises:
         if b["id"] in sus:
@@ -185,6 +243,9 @@ def main(argv=None):
     p.add_argument("--catalogue", action="store_true",
                    help="interroger le catalogue live de Pioupiou")
     p.add_argument("--suspectes", default=None)
+    p.add_argument("--radiosondages-seulement", action="store_true",
+                   help="ajoute uniquement les points de radiosondage, sans "
+                        "toucher aux balises")
     p.add_argument("--verifier", action="store_true")
     a = p.parse_args(argv)
 
@@ -196,13 +257,20 @@ def main(argv=None):
             sus = [b for b in balises if b.get("position_suspecte")]
             print(f"  {len(sus)} à position suspecte (marquées, pas retirées)")
             return 0
-        if a.stations:
+        if a.radiosondages_seulement:
+            # ⚠️ N'ajoute QUE les points de radiosondage. Sans ça, il
+            # faudrait passer par le catalogue live, qui ajouterait aussi
+            # les balises Pioupiou apparues depuis le dernier gel — et
+            # mélangerait deux changements d'axe dans un seul commit.
+            candidates = []
+        elif a.stations:
             candidates = json.loads(
                 Path(a.stations).read_text(encoding="utf-8"))
         elif a.catalogue:
             candidates = depuis_catalogue()
         else:
-            raise Abort("préciser --stations <fichier> ou --catalogue")
+            raise Abort("préciser --stations <fichier>, --catalogue ou "
+                        "--radiosondages-seulement")
         suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                      if a.suspectes else [])
         geler(candidates, suspectes)

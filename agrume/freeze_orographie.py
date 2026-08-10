@@ -41,11 +41,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from domaine import DOMAINE, GRID_3D, GRID_FINE, PAQUET_OROGRAPHIE  # noqa: E402
+from domaine import (DEMI_FENETRE_VERIF_DEG, DOMAINE, GRID_3D,  # noqa: E402
+                     GRID_FINE, PAQUET_OROGRAPHIE, TEMOIN_VERIF,
+                     fenetre_autour)
 from mf_s3 import download_tmp, s3_keys, s3_objets  # noqa: E402
-from orographie import (ARTEFACT_JSON, ARTEFACT_NPZ, Abort,  # noqa: E402
-                        CLES_META, _sha256, charger_artefact, decouper,
-                        ecart_grilles, ecrire_artefact, lire_champ_h)
+from orographie import (ARTEFACT_JSON, ARTEFACT_NPZ,  # noqa: E402
+                        ARTEFACT_VERIF_JSON, ARTEFACT_VERIF_NPZ, Abort,
+                        CLES_META, _sha256, accord_avec_production,
+                        charger_artefact, charger_artefact_verif, decouper,
+                        ecart_grilles, ecrire_artefact, ecrire_artefact_verif,
+                        lire_champ_h)
+from radiosondage import STATIONS  # noqa: E402
 
 
 def runs_candidats(n=8):
@@ -192,12 +198,147 @@ def verifier():
     return 0
 
 
+def geler_radiosondages():
+    """Le SECOND artefact : une petite fenêtre de sol autour de chaque
+    station de radiosondage active.
+
+    ⚠️ Écrit à côté de la production, jamais à sa place. Cf. la note de
+    `domaine.py` : élargir l'artefact de production aurait changé son
+    sha256, donc rompu la comparabilité de toutes les archives déjà
+    écrites, pour un besoin qui ne concerne que la vérification.
+    """
+    import eccodes
+
+    actives = [s for s in STATIONS if s["active"]]
+    if not actives:
+        raise Abort("aucune station de radiosondage active")
+    # ⚠️ Le témoin est découpé AVEC les stations, dans le même run et le
+    # même passage : c'est ce qui rend le garde-fou non vide (cf. la note
+    # de `domaine.py`). Il n'entre jamais dans l'axe des balises.
+    cibles = actives + [TEMOIN_VERIF]
+    ref, objets = trouver_run_complet()
+    print(f"▶ run retenu : {ref} — {len(actives)} station(s) : "
+          + ", ".join(f"{s['nom']} ({s['wmo']})" for s in actives)
+          + f" · + 1 témoin en {TEMOIN_VERIF['lat']}/{TEMOIN_VERIF['lon']}")
+
+    par_station = {s["wmo"]: {} for s in cibles}
+    manifeste_stations = {s["wmo"]: dict(
+        nom=s["nom"], pays=s["pays"], lat=s["lat"], lon=s["lon"],
+        sol_station_m=s["sol_station_m"], grilles={}) for s in cibles}
+
+    for grille in (GRID_FINE, GRID_3D):
+        cle, taille = objets[grille]
+        paquet, _ = PAQUET_OROGRAPHIE[grille]
+        chemin = download_tmp(cle)
+        try:
+            valeurs, meta = lire_champ_h(chemin)
+        finally:
+            os.unlink(chemin)          # ménage : jamais de GRIB qui traîne
+        print(f"\n── grille {grille} · paquet {paquet} "
+              f"({taille / 1e6:.1f} Mo) ──")
+        for s in cibles:
+            bornes = fenetre_autour(meta, s["lat"], s["lon"])
+            orog = decouper(valeurs, meta, grille, bornes)
+            par_station[s["wmo"]][grille] = orog
+            z_s = orog.z_at(s["lat"], s["lon"])
+            if z_s is None:
+                raise Abort(f"{s['nom']} tombe hors de sa propre fenêtre — "
+                            f"la station est-elle dans la grille AROME ?")
+            nj, ni = orog.z.shape
+            # ⚠️ L'écart au sol RÉEL de la station est publié ici parce
+            # qu'il conditionne la lecture de toute la confrontation : un
+            # modèle qui place Payerne 40 m trop haut décale la colonne
+            # entière avant même qu'on parle de météo.
+            sol = s["sol_station_m"]
+            print(f"  {s['nom']:<28} {nj}×{ni} pts · sol modèle {z_s:7.1f} m"
+                  + ("" if sol is None else
+                     f" · station {sol:>4} m · écart {z_s - sol:+7.1f} m"))
+            manifeste_stations[s["wmo"]]["grilles"][grille] = dict(
+                paquet=paquet, cle_s3=cle,
+                meta={k: (float(meta[k]) if isinstance(meta[k], float)
+                          else int(meta[k])) for k in CLES_META},
+                j0=orog.j0, i0=orog.i0, nj=nj, ni=ni,
+                sha256=_sha256(orog.z),
+                z_station=round(float(z_s), 1),
+                ecart_sol_station_m=(None if sol is None
+                                     else round(float(z_s) - sol, 1)))
+
+    # ── Le garde-fou des deux fenêtres ────────────────────────────────
+    paire_prod, man_prod = charger_artefact()
+    n_communs, pire = accord_avec_production(par_station, paire_prod)
+    print(f"\n── ACCORD AVEC LA PRODUCTION : {n_communs} points communs, "
+          f"écart max {pire:.4f} m ──")
+    if n_communs and pire > 0.0:
+        raise Abort(
+            f"⚠️ les deux artefacts NE DISENT PAS LA MÊME CHOSE là où ils se "
+            f"recouvrent (écart max {pire:.3f} m). Ce n'est pas une "
+            f"tolérance : c'est le même champ statique lu deux fois. Les "
+            f"deux artefacts viennent-ils du même run, ou un indice "
+            f"est-il décalé ?")
+    if not n_communs:
+        print("  ⓘ aucun point commun : les fenêtres de vérification sont "
+              "entièrement hors du domaine Nord-Alpes. C'est attendu pour "
+              "Payerne et Cameri — le garde-fou ne peut alors rien dire, et "
+              "il le dit plutôt que de rendre un ✓ vide.")
+
+    manifeste = dict(
+        produit="AGRUME — orographie sous les points de radiosondage, figée",
+        ecrit_le=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        run_source=ref,
+        eccodes=eccodes.codes_get_api_version(),
+        demi_fenetre_deg=DEMI_FENETRE_VERIF_DEG,
+        accord_production=dict(n_points_communs=n_communs,
+                               ecart_max_m=round(float(pire), 4),
+                               run_source_production=man_prod["run_source"]),
+        stations=manifeste_stations,
+        note=("⚠️ Artefact de VÉRIFICATION, pas de production. Aucune colonne "
+              "servie à un pilote n'en dépend : il ne donne un sol qu'aux "
+              "points marqués `source = \"radiosondage\"` dans l'axe des "
+              "balises. La production (`orographie-nord-alpes.*`) n'est PAS "
+              "touchée, donc son sha256 non plus. Régénérer avec "
+              "`python3 agrume/freeze_orographie.py --radiosondages`."))
+
+    o_npz, o_json = ecrire_artefact_verif(par_station, manifeste)
+    print(f"\n▶ {ARTEFACT_VERIF_NPZ.name} : {o_npz / 1024:.0f} Ko · "
+          f"{ARTEFACT_VERIF_JSON.name} : {o_json / 1024:.0f} Ko")
+    return 0
+
+
+def verifier_radiosondages():
+    par_station, man = charger_artefact_verif()
+    print(f"▶ artefact de vérification du {man['ecrit_le']}, run source "
+          f"{man['run_source']}, demi-fenêtre {man['demi_fenetre_deg']}°")
+    for wmo, entree in sorted(man["stations"].items()):
+        sol = entree["sol_station_m"]
+        print(f"  {entree['nom']} ({wmo})"
+              + ("" if sol is None else f" — sol station {sol} m"))
+        for grille, g in sorted(entree["grilles"].items()):
+            ec = g["ecart_sol_station_m"]
+            print(f"     {grille} : {g['nj']}×{g['ni']} pts · modèle "
+                  f"{g['z_station']:7.1f} m"
+                  + ("" if ec is None else f" · écart {ec:+7.1f} m")
+                  + " · sha256 ✓")
+    a = man["accord_production"]
+    print(f"  accord production : {a['n_points_communs']} points communs, "
+          f"écart max {a['ecart_max_m']} m")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--verifier", action="store_true",
                    help="relit l'artefact existant sans rien retélécharger")
+    p.add_argument("--radiosondages", action="store_true",
+                   help="gèle le SECOND artefact, autour des stations de "
+                        "radiosondage (la production n'est pas touchée)")
+    p.add_argument("--verifier-radiosondages", action="store_true",
+                   help="relit l'artefact de vérification")
     a = p.parse_args(argv)
     try:
+        if a.verifier_radiosondages:
+            return verifier_radiosondages()
+        if a.radiosondages:
+            return geler_radiosondages()
         return verifier() if a.verifier else geler()
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)

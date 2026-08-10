@@ -180,6 +180,68 @@ DOMAINE = dict(latmin=44.8, latmax=46.3, lonmin=5.5, lonmax=7.6)
 #   0,025° → 2,78 × 1,95 km = 5,43 km²
 MAILLE_KM2 = {GRID_FINE: 0.87, GRID_3D: 5.43}
 
+# ── Les points de RADIOSONDAGE, et pourquoi ils ne sont pas dans le ───
+#    domaine
+#
+# Le profil d'AGRUME n'était jusqu'ici vérifié que contre lui-même. Deux
+# stations de radiosondage tombent à portée du domaine sans y être :
+# Payerne (46,813 / 6,943 — 0,51° au nord de `latmax`) et Cameri
+# (45,52 / 8,65 — 1,05° à l'est de `lonmax`). Elles donnent une vérité
+# verticale RÉELLE, deux fois par jour. Cf. `agrume/radiosondage.py`.
+#
+# ⚠️ TROIS VOIES ÉTAIENT POSSIBLES, ET LE CHOIX SE PAIE PLUS TARD :
+#
+#   1. élargir `DOMAINE` → ~44,4–47,0 N × 5,4–8,8 E. Cohérent, mais
+#      TRIPLE le produit B et fait entrer des balises suisses et
+#      italiennes dans l'axe : rupture de l'axe des balises EN PLUS de
+#      celle de l'orographie.
+#   2. élargir la seule fenêtre d'orographie de production. Un seul
+#      artefact, mais son sha256 change → toutes les archives d'avant ne
+#      se rapportent plus au même fichier.
+#   3. ✅ RETENU : un SECOND artefact d'orographie, minuscule, dédié à la
+#      vérification, une petite fenêtre autour de chaque station.
+#
+# La 3 gagne parce qu'elle isole l'appareil de mesure du produit mesuré :
+# la production ne bouge pas, son sha256 non plus, et la continuité des
+# archives est intacte. Elle introduit bien deux notions de fenêtre —
+# l'objection est réelle — mais la seconde n'est PAS un domaine de
+# produit : aucune colonne servie à un pilote n'en dépend, et
+# `freeze_orographie.py --radiosondages` l'écrit séparément.
+# ⓘ Garde-fou : `--verifier-radiosondages` contrôle que les deux
+# artefacts sont IDENTIQUES au point de grille près là où ils se
+# recouvrent — sinon « deux fenêtres » deviendrait « deux orographies ».
+#
+# ⚠️ Rien de tout cela n'était nécessaire pour EXTRAIRE les colonnes :
+# `colonnes.index_plats()` indexe la grille NATIVE (France entière), pas
+# la fenêtre. C'est l'ALTITUDE DU SOL qui manquait, et elle seule.
+# Demi-fenêtre en degrés autour de chaque station. 0,25° ≈ 28 km, choisi
+# sur une MESURE et pas sur une intuition : la dérive du ballon, intégrée
+# sur les deux sondages réels de Payerne du 10/08, vaut 1,0 km à 2 000 m,
+# 2,6 km à 4 000 et 7,8 km à 8 000 (ascension supposée 5 m/s). 28 km
+# laisse donc de la marge même pour un jour de vent fort, tout en ne
+# coûtant que ~24 Ko pour les deux stations et les deux mailles.
+DEMI_FENETRE_VERIF_DEG = 0.25
+
+# ⚠️ LE TÉMOIN — sans lui, le garde-fou des deux fenêtres ne prouve RIEN.
+#
+# L'idée du garde-fou est de vérifier que les deux artefacts donnent la
+# MÊME altitude là où ils se recouvrent. Or Payerne et Cameri sont
+# entièrement hors du domaine : le recouvrement est vide, et un contrôle
+# sur zéro point rend un ✓ qui ne dit rien — exactement le genre de test
+# qui rassure sans rien garantir.
+#
+# On découpe donc en plus une fenêtre CENTRÉE SUR LE DOMAINE, qui ne sert
+# à aucune station et n'existe que pour être comparée à la production.
+# Elle coûte quelques kilo-octets et transforme un contrôle vide en
+# contrôle réel : même run, même champ, même indice, même octet.
+TEMOIN_VERIF = dict(
+    wmo="TEMOIN", nom="témoin (centre du domaine)", pays="FR",
+    lat=round((DOMAINE["latmin"] + DOMAINE["latmax"]) / 2, 4),
+    lon=round((DOMAINE["lonmin"] + DOMAINE["lonmax"]) / 2, 4),
+    sol_station_m=None, active=True, resolution=None,
+    mesure="Point de contrôle, pas une station. N'entre jamais dans "
+           "l'axe des balises.")
+
 # ── Horizon ───────────────────────────────────────────────────────────
 # 0–24 h pour AGRUME, et c'est un choix de BUDGET, pas de physique.
 # Mesuré : 0–51 h coûterait 5,98 Go (HP1) + 4,11 Go (HP2) par run contre
@@ -225,9 +287,32 @@ HYBRIDE = True
 RACCORD_HYBRIDE_M = 100   # au-dessus : 0,025° ; à 100 m et en dessous : 0,01°
 
 
-def fenetre(meta, marge=0):
+def _j_de_lat(meta, lat):
+    return (round((meta["lat0"] - lat) / meta["dj"]) if meta["jScan"] != 1
+            else round((lat - meta["lat0"]) / meta["dj"]))
+
+
+def fenetre_autour(meta, lat, lon, demi_deg=None):
+    """Fenêtre (j0, j1, i0, i1) centrée sur un point, pour la vérification.
+
+    ⚠️ Ce n'est PAS un domaine de produit. Sert uniquement à donner une
+    altitude de sol aux points de radiosondage, qui sont hors du domaine
+    Nord-Alpes (cf. la note plus haut). Aucune colonne servie à un pilote
+    ne dépend de cette fenêtre.
+    """
+    d = DEMI_FENETRE_VERIF_DEG if demi_deg is None else demi_deg
+    return fenetre(meta, domaine=dict(latmin=lat - d, latmax=lat + d,
+                                      lonmin=lon - d, lonmax=lon + d))
+
+
+def fenetre(meta, marge=0, domaine=None):
     """Indices (j0, j1, i0, i1) — bornes INCLUSIVES — du domaine dans la
     grille décrite par `meta` (mêmes clés que `parse_grib`).
+
+    `domaine` vaut le domaine Nord-Alpes par défaut. Il n'est explicité
+    que par la fenêtre de vérification des radiosondages : partout
+    ailleurs, passer un autre domaine serait le début d'une seconde
+    définition du produit.
 
     ⚠️ Les indices se DÉDUISENT des métadonnées du GRIB, ils ne sont
     jamais codés en dur : Météo-France peut déplacer le coin de grille
@@ -240,14 +325,12 @@ def fenetre(meta, marge=0):
     utile pour une interpolation bilinéaire ultérieure, qui a besoin des
     voisins des points de bord.
     """
-    def _j(lat):
-        return (round((meta["lat0"] - lat) / meta["dj"]) if meta["jScan"] != 1
-                else round((lat - meta["lat0"]) / meta["dj"]))
-
-    j_a, j_b = _j(DOMAINE["latmax"]), _j(DOMAINE["latmin"])
+    dom = DOMAINE if domaine is None else domaine
+    j_a = _j_de_lat(meta, dom["latmax"])
+    j_b = _j_de_lat(meta, dom["latmin"])
     j0, j1 = (j_a, j_b) if j_a <= j_b else (j_b, j_a)
-    i0 = round((DOMAINE["lonmin"] - meta["lon0"]) / meta["di"])
-    i1 = round((DOMAINE["lonmax"] - meta["lon0"]) / meta["di"])
+    i0 = round((dom["lonmin"] - meta["lon0"]) / meta["di"])
+    i1 = round((dom["lonmax"] - meta["lon0"]) / meta["di"])
     j0, i0 = max(0, j0 - marge), max(0, i0 - marge)
     j1 = min(meta["Nj"] - 1, j1 + marge)
     i1 = min(meta["Ni"] - 1, i1 + marge)
