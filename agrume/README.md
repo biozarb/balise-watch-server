@@ -51,6 +51,8 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `orographie.py` | le sol du modèle, chargé depuis l'artefact figé — et le refus de deviner le paquet |
 | `freeze_orographie.py` | extrait les deux orographies **une fois**, les découpe, les versionne |
 | `data/orographie-nord-alpes.{npz,json}` | l'artefact figé (94 Ko) et son manifeste |
+| `freeze_balises.py` | fige l'**axe des balises** de l'archive, en ajout seul |
+| `data/balises-nord-alpes.json` | les 125 balises du domaine (26 Ko) |
 | `portail.py` | client WCS, avec les six pièges du portail traités |
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
 | `colonnes.py` | le produit A : conteneur, quantification, disposition |
@@ -100,6 +102,17 @@ en silence.
 La seule propriété unique du VPS est d'être **allumé en permanence** :
 une Action est un cron, elle ne peut pas guetter. Le VPS **décide
 quand**, l'Action **fait le travail**. Le VPS ne touche jamais un GRIB.
+
+⚠️ **C'est pour ça que l'axe des balises et les orographies sont des
+artefacts COMMITÉS** et non des fichiers du VPS : l'Action n'a accès ni
+à `/var/lib/bw-model-verif`, ni au VPS, ni à Supabase. Un run
+d'ingestion est ainsi **autonome et reproductible** — rejouer un run
+d'il y a un mois donne le même axe et le même sol qu'à l'époque.
+
+Le cron du workflow (`agrume-colonnes.yml`) n'est qu'un **filet** : il
+est calé très tard, et n'existe que pour qu'une panne du VPS ne laisse
+pas de trou dans une archive qui est définitive. Réécrire le même run
+est sans danger — la clé porte le run.
 
 ⚠️ La clé Météo-France vit sur le VPS (`~/.balise-watch-model-verif.env`,
 mode 600) et **n'en sort pas**. Le miroir S3, lui, est sans clé — d'où la

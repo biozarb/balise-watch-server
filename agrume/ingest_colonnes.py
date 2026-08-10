@@ -68,6 +68,7 @@ from colonnes import (PARAMS_001, PARAMS_0025, Abort, Colonnes,  # noqa: E402
                       balises_du_domaine, index_plats, quantifier,
                       verifier_grille)
 from domaine import GRID_3D, GRID_FINE, MAX_HOURS, MODEL_DIR  # noqa: E402
+from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
                    est_fichier_horaire, s3_objets)
 from orographie import charger_artefact  # noqa: E402
@@ -320,9 +321,19 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
 # ══════════════════════════════════════════════════════════════════════
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--stations", default=os.path.join(
-        os.environ.get("BW_MODEL_VERIF_ETAT", "/var/lib/bw-model-verif"),
-        "stations.json"))
+    # ⚠️ PAR DÉFAUT, L'AXE DES BALISES VIENT DE L'ARTEFACT COMMITÉ, pas
+    # d'un fichier du VPS ni d'un appel réseau. Deux raisons :
+    #   • l'archive est disposée en (balise, …) : l'axe doit être STABLE
+    #     d'un run à l'autre, sinon empiler deux runs demande de remapper
+    #     des indices — et ça ne se verrait qu'après des semaines ;
+    #   • l'ingestion tourne sur GitHub Actions, qui n'a accès ni au VPS
+    #     ni à /var/lib/bw-model-verif. Un artefact commité rend le run
+    #     autonome ET reproductible : rejouer un run d'il y a un mois
+    #     donne le même axe qu'à l'époque.
+    # `--stations` reste là pour un rejeu ponctuel sur une autre liste.
+    p.add_argument("--stations", default=None,
+                   help="référentiel alternatif (défaut : l'axe figé de "
+                        "agrume/data/balises-nord-alpes.json)")
     p.add_argument("--suspectes", default=None,
                    help="fichier JSON [ids] des balises position_suspecte "
                         "(elles sont MARQUÉES, pas retirées)")
@@ -341,16 +352,21 @@ def main(argv=None):
         journal_horodate(f"▶ orographie figée du run {man_orog['run_source']} "
                          f"({', '.join(sorted(paire))})")
 
-        stations = json.loads(Path(a.stations).read_text(encoding="utf-8"))
         suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                      if a.suspectes else [])
-        balises = balises_du_domaine(stations, suspectes)
+        if a.stations:
+            stations = json.loads(Path(a.stations).read_text(encoding="utf-8"))
+            balises = balises_du_domaine(stations, suspectes)
+            origine = f"référentiel {Path(a.stations).name} " \
+                      f"({len(stations)} balises)"
+        else:
+            figees, man_bal = charger_balises()
+            balises = balises_du_domaine(figees, suspectes)
+            origine = f"axe figé du {man_bal['ecrit_le'][:10]}"
         if not balises:
-            raise Abort(f"aucune des {len(stations)} balises du référentiel ne "
-                        f"tombe dans le domaine Nord-Alpes")
+            raise Abort("aucune balise ne tombe dans le domaine Nord-Alpes")
         marquees = sum(1 for b in balises if b["position_suspecte"])
-        journal_horodate(f"▶ {len(balises)} balises dans le domaine "
-                         f"(sur {len(stations)} au référentiel)"
+        journal_horodate(f"▶ {len(balises)} balises — {origine}"
                          + (f", dont {marquees} à position suspecte (marquées, "
                             f"pas retirées)" if marquees else ""))
 

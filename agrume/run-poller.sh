@@ -35,4 +35,16 @@ elif [ "$SOURCE" != "arome" ] && [ "$SOURCE" != "arome-paquets" ]; then
   exit 78   # EX_CONFIG
 fi
 
+# ⚠️ LE DÉCLENCHEMENT EST OPTIONNEL, ET SON ABSENCE SE DIT.
+# `AGRUME_DISPATCH` (posé dans le .env, par exemple
+# `biozarb/balise-watch-server:agrume-colonnes.yml`) fait déclencher
+# l'Action dès que les quatre paquets sont publiés. Sans lui, le poller
+# DATE les runs sans rien lancer — mode de fonctionnement légitime, mais
+# à ne pas confondre avec « la chaîne tourne ». Le poller le dit
+# lui-même dans ses logs si `GITHUB_DISPATCH_TOKEN` manque.
+if [ -n "${AGRUME_DISPATCH:-}" ]; then
+  exec python3 -u "$ICI/poller.py" --source "$SOURCE" --boucle \
+       --dispatch "$AGRUME_DISPATCH"
+fi
+
 exec python3 -u "$ICI/poller.py" --source "$SOURCE" --boucle

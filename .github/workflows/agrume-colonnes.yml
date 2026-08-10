@@ -1,0 +1,120 @@
+name: AGRUME — colonnes verticales aux balises (produit A)
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⚠️ QUI DÉCIDE QUAND, ET QUI FAIT LE TRAVAIL — ce n'est pas le même.
+#
+#  Le VPS DÉCIDE : `bw-agrume-poller-paquets` guette les quatre paquets
+#  du produit A sur le miroir S3 et déclenche ce workflow (`--dispatch`)
+#  dès qu'ils sont TOUS publiés. C'est sa seule propriété unique : il est
+#  allumé en permanence, une Action ne l'est pas. Un cron calé sur une
+#  heure fixe part soit trop tôt (404) soit trop tard (fraîcheur perdue),
+#  et la doc Météo-France se contredit elle-même sur ces heures.
+#
+#  L'ACTION FAIT LE TRAVAIL : ~7,4 Go de GRIB téléchargés et décodés par
+#  run. Sur le VPS ce serait le mauvais endroit — 2 vCores partagés avec
+#  `collect` et `score`, 40 Go de disque, et 23 Go/jour de trafic. Ici
+#  c'est gratuit et sans limite de minutes (dépôt public, confirmé par le
+#  changelog GitHub du 16/12/2025), avec 4 vCores et 14 Go de disque
+#  éphémère. **Le VPS ne touche jamais un GRIB.**
+#
+#  ── LE CRON N'EST QU'UN FILET ────────────────────────────────────────
+#  Il est calé TARD volontairement : si le poller du VPS a fait son
+#  travail, le run est déjà archivé et l'ingestion le reverra simplement
+#  comme déjà couvert. Le filet existe pour qu'une panne du VPS ne laisse
+#  pas de TROU dans une archive qui est définitive. ⚠️ Écrire deux fois
+#  le même run est sans danger : la clé porte le run, donc on réécrit le
+#  même objet au même endroit.
+#
+#  ── CE QUE CE RUN NE FAIT PAS ────────────────────────────────────────
+#  Il ne régénère NI l'orographie NI l'axe des balises. Les deux sont des
+#  artefacts commités (`agrume/data/`), et c'est le point : un socle qui
+#  se régénère tout seul n'est plus un socle. Ils changent dans un
+#  commit, à la main, ou pas du tout.
+# ══════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "Run AROME visé (ex. 2026-08-10T09:00:00Z) — indicatif, l'ingestion revérifie la couverture réelle"
+        required: false
+        type: string
+      max_heures:
+        description: "Horizon en heures (défaut 24)"
+        required: false
+        default: "24"
+        type: string
+  schedule:
+    # Filet de sécurité : ~5 h après chaque réseau AROME, largement après
+    # la publication observée. Le chemin normal reste le dispatch du VPS.
+    - cron: "20 5,8,11,14,17,20,23,2 * * *"   # UTC
+
+concurrency:
+  # ⚠️ `cancel-in-progress: false` : un run d'ingestion écrit une archive
+  # DÉFINITIVE. L'annuler à mi-parcours laisserait un objet partiel sur
+  # R2 — pire qu'un run manquant, parce que ça ressemble à un run réussi.
+  group: agrume-colonnes
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    # Budget MESURÉ : 2,9 min sur 0–6 h, ~9 min extrapolées sur 0–24 h.
+    # Le script alerte lui-même au-delà de 30 min (la moitié du timeout).
+    # Les 60 min ne sont donc pas une contrainte, c'est une ceinture.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Installer eccodes et numpy
+        run: pip install --quiet eccodes eccodeslib numpy boto3
+
+      - name: Vérifier les artefacts figés AVANT de télécharger 7 Go
+        # ⚠️ Le sha256 des deux orographies est revérifié ici, et l'axe
+        # des balises est relu. Si l'un des deux est corrompu ou figé sur
+        # un autre domaine, on le sait en deux secondes plutôt qu'après
+        # sept gigaoctets et neuf minutes.
+        run: |
+          python3 agrume/freeze_orographie.py --verifier
+          python3 agrume/freeze_balises.py --verifier
+
+      - name: Bancs hors-ligne
+        # Trois secondes, aucun réseau. Ils attrapent ce qui casse en
+        # silence : deux fois la même orographie, une grille déplacée,
+        # une température quantifiée en kelvins, un trou à 10 m.
+        run: |
+          python3 tools/test_mf_s3.py
+          python3 agrume/test_orographie.py
+          python3 agrume/test_colonnes.py
+
+      - name: Ingérer les colonnes
+        env:
+          # Sans ça, `print()` est bufferisé par blocs de 8 Ko quand la
+          # sortie ne va pas vers un terminal : les logs n'apparaissent
+          # qu'À LA FIN, d'un coup. Or le cadre DIMENSIONNEMENT est le
+          # garde-fou qui permet de COUPER avant d'écrire — le lire après
+          # coup, sur un run qui a déjà écrit, ne sert à rien.
+          PYTHONUNBUFFERED: "1"
+          # ⚠️ AGRUME écrit sur R2 uniquement. Pas de Supabase : le quota
+          # Storage y a déjà cassé le projet le 30/07, et cette archive
+          # CROÎT par construction.
+          STORAGE_BACKEND: r2
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET_WIND }}
+        run: |
+          python3 agrume/ingest_colonnes.py \
+            --max-heures "${{ inputs.max_heures || '24' }}" \
+            --sortie "$RUNNER_TEMP/agrume"
+
+      - name: Disque restant après le run
+        # ⚠️ Le critère d'acceptation du lot exige que le disque du runner
+        # ne dépasse jamais 10 Go occupés. Le script journalise son PIC ;
+        # cette ligne dit ce qu'il RESTE, ce qui n'est pas la même chose
+        # et se lit d'un coup d'œil dans les logs.
+        if: always()
+        run: df -h / | tail -1
