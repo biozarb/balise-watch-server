@@ -209,6 +209,9 @@ def main():
                       dormir=h.dormir, maintenant=h.maintenant)
         verifier("un run qui n'arrive jamais finit en `abandon` écrit",
                  e["etat"] == "abandon", f"{e['apres_min']:.0f} min")
+        verifier("⚠️ l'abandon dit qu'on a INTERROGÉ, pas qu'on a supposé",
+                 "interrogé et ABSENT" in e["note"] and e["interrogations"] > 1,
+                 f"{e['interrogations']} interrogations")
         verifier("l'abandon tombe bien à la limite annoncée",
                  P.ABANDON_MIN <= e["apres_min"] <= P.ABANDON_MIN + 20)
         verifier("le back-off est BORNÉ",
@@ -220,6 +223,40 @@ def main():
                  h.dormi[-1] > h.dormi[0])
         verifier("l'abandon est relu comme tel",
                  P.lire_journal(j)[0]["etat"] == "abandon")
+
+    # ⚠️ LE CAS QUI A MORDU LE 10/08 : un poller démarré longtemps après
+    # l'heure du run. Une première version testait la fenêtre d'abandon
+    # EN TÊTE de boucle et journalisait « toujours absent » un run publié
+    # depuis des heures — sans l'avoir interrogé une seule fois.
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        h = Horloge(run + timedelta(minutes=442))     # démarrage très tardif
+        src = SourceFactice(h, run, nom="tardif")     # publié depuis longtemps
+        e = P.guetter(src, run, [], j, crier=lambda *a: None,
+                      dormir=h.dormir, maintenant=h.maintenant)
+        verifier("⚠️ un run déjà publié n'est JAMAIS journalisé « abandon », "
+                 "même découvert 442 min trop tard",
+                 e["etat"] == "publie", e["etat"])
+        verifier("il ne donne qu'une borne très lâche — mais une borne vraie",
+                 e["latence_min_min"] is None and e["latence_max_min"] == 442.0,
+                 f"≤ {e['latence_max_min']:.0f} min")
+
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        h = Horloge(run + timedelta(minutes=442))
+        cibles = [SourceFactice(h, run, nom="a"),
+                  SourceFactice(h, run + timedelta(days=9), nom="b")]
+        ecrites = P.guetter_plusieurs(cibles, run, [], j,
+                                      crier=lambda *a: None, dormir=h.dormir,
+                                      maintenant=h.maintenant)
+        etats = {e["source"]: e["etat"] for e in ecrites}
+        verifier("en guet simultané aussi : le publié est publié, "
+                 "l'absent est abandonné",
+                 etats == {"a": "publie", "b": "abandon"}, str(etats))
+        verifier("le run trop vieux ne fait pas boucler : une passe suffit",
+                 len(ecrites) == 2 and all(x["interrogations"] == 1
+                                           for x in ecrites),
+                 str([x["interrogations"] for x in ecrites]))
 
     print("\n── La grille des runs théoriques ─────────────────────────")
     t = datetime(2026, 8, 10, 9, 47, tzinfo=timezone.utc)

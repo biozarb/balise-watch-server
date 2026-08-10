@@ -25,8 +25,9 @@ if [ -r "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
-elif [ "$SOURCE" != "arome" ]; then
-  # ⚠️ Seule la source `arome` (miroir S3) se passe de clé. Pour le
+elif [ "$SOURCE" != "arome" ] && [ "$SOURCE" != "arome-paquets" ]; then
+  # ⚠️ Seules les sources qui passent par le MIROIR S3 (`arome`,
+  # `arome-paquets`) se passent de clé — le miroir est public. Pour le
   # portail, mieux vaut refuser de démarrer que tourner en boucle sur
   # des erreurs d'authentification : un service qui redémarre toutes
   # les cinq secondes ressemble à un service qui marche.

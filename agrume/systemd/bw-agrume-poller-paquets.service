@@ -1,0 +1,60 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-poller-paquets.service — quel paquet AROME bride la chaîne
+#                                                        (10/08/2026)
+#
+#  ⚠️ CE QU'IL MESURE, ET POURQUOI ÇA N'EST PAS COSMÉTIQUE.
+#  `ingest_colonnes.choisir_run()` exige la couverture COMMUNE aux quatre
+#  paquets du produit A (0025/HP1, 0025/HP2, 001/HP1, 001/SP1) :
+#  l'ingestion avance donc au rythme du PLUS LENT. Si un seul paquet
+#  traîne d'une heure, il traîne toute la chaîne — et ça ne se verrait
+#  NULLE PART, puisque le run finit par être complet et que tout a l'air
+#  normal. Ce service date les quatre séparément, dans le même cycle.
+#
+#  ⚠️ AUCUNE CLÉ. Il passe par le miroir S3 public, en listing seul :
+#  quatre requêtes de quelques kilo-octets par cycle, aucun GRIB.
+#  Il peut donc tourner même si la clé Météo-France est indisponible.
+#
+#  ⓘ Il écrit dans le MÊME journal que `bw-agrume-poller` — les séries
+#  sont distinguées par le champ `source` (`arome:0025/HP1`, etc.), et
+#  `poller.py --rapport` les compare. Deux services, un seul journal :
+#  c'est voulu, la comparaison n'a de sens que sur un fichier unique.
+#
+#  Installation :
+#    sudo cp agrume/systemd/bw-agrume-poller-paquets.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-agrume-poller-paquets
+#    python3 ~/balise-watch/balise-watch-server/agrume/poller.py --rapport
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — guet des 4 paquets AROME du produit A (écart de publication)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/agrume/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/agrume
+ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-poller.sh arome-paquets
+Restart=always
+RestartSec=60
+RestartPreventExitStatus=78
+Nice=15
+
+# ── Cloisonnement, calqué sur bw-agrume-poller.service ───────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

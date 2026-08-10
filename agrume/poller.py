@@ -288,20 +288,31 @@ def guetter(source, run, journal_entrees, chemin_journal=JOURNAL_DEFAUT,
     while True:
         t = now()
         ecoulees = (t - run).total_seconds() / 60.0
-        if ecoulees > abandon_min:
+
+        # ⚠️ ON INTERROGE AVANT DE RENONCER, TOUJOURS. Le 10/08, une
+        # première version testait la fenêtre d'abandon EN TÊTE de
+        # boucle : au démarrage du service, un run vieux de 442 min a été
+        # journalisé « toujours absent » — alors qu'il était publié
+        # depuis des heures et qu'il venait de servir à une ingestion.
+        # Le poller écrivait une affirmation qu'il n'avait jamais
+        # vérifiée. Un run trop vieux ne donne qu'une borne très lâche,
+        # mais une borne lâche reste vraie ; une absence inventée, non.
+        interrogations += 1
+        present = source.publie(run)
+
+        if not present and ecoulees > abandon_min:
             entree = dict(
                 source=source.nom, run=run_iso, etat="abandon",
                 vu_a=t.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 interrogations=interrogations,
                 apres_min=round(ecoulees, 1),
-                note=f"toujours absent {abandon_min} min après l'heure du run")
+                note=f"interrogé et ABSENT {abandon_min} min après l'heure "
+                     f"du run")
             ecrire_journal(entree, chemin_journal)
             crier(f"  ⛔ {source.nom} {run_iso} : ABANDON après "
                   f"{ecoulees:.0f} min et {interrogations} interrogations")
             return entree
 
-        interrogations += 1
-        present = source.publie(run)
         if present:
             latence_max = ecoulees
             latence_min = ((t_absent - run).total_seconds() / 60.0
@@ -376,26 +387,29 @@ def guetter_plusieurs(sources, run, journal_entrees, chemin_journal=JOURNAL_DEFA
     while restantes:
         t = now()
         ecoulees = (t - run).total_seconds() / 60.0
-        if ecoulees > abandon_min:
-            for s in restantes:
-                e = dict(source=s.nom, run=run_iso, etat="abandon",
-                         vu_a=t.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                         interrogations=etat[s.nom]["n"],
-                         apres_min=round(ecoulees, 1),
-                         note=f"toujours absent {abandon_min} min après "
-                              f"l'heure du run")
-                ecrire_journal(e, chemin_journal)
-                ecrites.append(e)
-                crier(f"  ⛔ {s.nom} {run_iso} : ABANDON après "
-                      f"{ecoulees:.0f} min")
-            return ecrites
+        trop_tard = ecoulees > abandon_min
 
         encore = []
         for s in restantes:
             etat[s.nom]["n"] += 1
+            # ⚠️ Interroger AVANT de renoncer — cf. la note dans
+            # `guetter()`. Écrire « absent » sans avoir demandé, c'est
+            # inventer une mesure, et c'est arrivé.
             if not s.publie(run):
                 etat[s.nom]["t_absent"] = t
-                encore.append(s)
+                if trop_tard:
+                    e = dict(source=s.nom, run=run_iso, etat="abandon",
+                             vu_a=t.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             interrogations=etat[s.nom]["n"],
+                             apres_min=round(ecoulees, 1),
+                             note=f"interrogé et ABSENT {abandon_min} min "
+                                  f"après l'heure du run")
+                    ecrire_journal(e, chemin_journal)
+                    ecrites.append(e)
+                    crier(f"  ⛔ {s.nom} {run_iso} : ABANDON après "
+                          f"{ecoulees:.0f} min")
+                else:
+                    encore.append(s)
                 continue
             ta = etat[s.nom]["t_absent"]
             lat_min = (ta - run).total_seconds() / 60.0 if ta else None
