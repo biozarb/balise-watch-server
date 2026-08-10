@@ -82,6 +82,15 @@ from portail import (SERVICE_AROMEPI, CouvertureAbsente,  # noqa: E402
 # un budget.
 ALERTE_MINUTES = 12
 
+# ── Les codes de sortie, et ce qu'ils veulent dire pour le VOYANT ─────
+#   0  un run a été ingéré ET écrit          → ping de succès
+#   3  rien de neuf à ingérer                → aucun ping (cas nominal)
+#   1  erreur, ou run explicite incomplet    → ping d'échec
+#   78 fichier d'environnement illisible     → ping d'échec (dans le .sh)
+# ⚠️ La distinction 0/3 est TOUT l'intérêt : sans elle, le voyant
+# surveillerait « le timer tourne » au lieu de « l'archive grossit ».
+CODE_RIEN_A_FAIRE = 3
+
 
 def crier(msg=""):
     print(msg, flush=True)
@@ -477,7 +486,14 @@ def main(argv=None):
         run, recul = dernier_run_utile(portail, params[0]["wcs"], deja=deja)
         if run is None:
             crier(f"  {portail.bilan()}")
-            return 0
+            # ⚠️ 3 et non 0 : « rien à faire » n'est PAS un succès à
+            # signaler. Le timer repasse toutes les 10 min et PI ne sort
+            # qu'une fois par heure — cinq passages sur six tombent ici.
+            # Si le voyant pinguait au vert à chaque passage, il resterait
+            # vert pendant que la chaîne aurait cessé d'écrire depuis des
+            # jours. C'est le faux vert que ce projet a déjà eu deux fois.
+            # `run-ingest-pi.sh` ne pingue donc RIEN sur ce code.
+            return CODE_RIEN_A_FAIRE
     crier(f"  run retenu : {run}"
           + (f" (COMPLET, {recul} h de recul)" if recul is not None else ""))
 

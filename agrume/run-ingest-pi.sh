@@ -2,41 +2,66 @@
 # ══════════════════════════════════════════════════════════════════════
 #  run-ingest-pi.sh — lance l'ingestion AROME-PI sur le VPS (10/08/2026)
 #
-#  Étape 8 bis. Même motif que `run-poller.sh`, et pour la même raison
-#  déjà payée deux fois : `~/.balise-watch-*.env` est écrit en
-#  `export VAR=…`, une syntaxe que systemd NE SAIT PAS lire dans un
-#  EnvironmentFile. **C'est le script qui source, pas l'unité.**
+#  Étape 8 bis. Même motif que `run-poller.sh` et `model-verif/run.sh`,
+#  et pour la même raison déjà payée deux fois : `~/.balise-watch-*.env`
+#  est écrit en `export VAR=…`, une syntaxe que systemd NE SAIT PAS lire
+#  dans un EnvironmentFile. **C'est le script qui source, pas l'unité.**
 #
-#  ⚠️ DEUX fichiers d'environnement ici, et c'est nouveau :
-#      ~/.balise-watch-model-verif.env  →  METEOFRANCE_API_KEY
-#      ~/.balise-watch-r2.env           →  R2_* (écriture sur wind-grid)
-#  Le second n'existait que pour LIRE : jusqu'au 10/08 le jeton R2 du
-#  VPS ne pouvait ni lire ni écrire `wind-grid` (AccessDenied sur les
-#  trois opérations, sondé). L'étape 8 bis a demandé un jeton élargi.
+#  ⚠️ TROIS fichiers d'environnement, et l'ORDRE compte (voir plus bas).
+#  ⚠️ AUCUNE CLÉ NE S'AFFICHE. Pas de `set -x`, et rien n'est imprimé,
+#  pas même tronqué.
 #
-#  ⚠️ AUCUNE CLÉ NE S'AFFICHE. Pas de `set -x`, et le script ne les
-#  imprime pas, pas même tronquées.
-#
-#  Usage :  ./run-ingest-pi.sh              # dernier run publié
+#  Usage :  ./run-ingest-pi.sh              # dernier run complet publié
 #           ./run-ingest-pi.sh --tke        # arguments passés tels quels
+#           ./run-ingest-pi.sh --run 2026-08-10T17:00:00Z
 # ══════════════════════════════════════════════════════════════════════
-set -euo pipefail
+set -uo pipefail
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${BW_PYTHON:-$HOME/venv-balise/bin/python}"
+ALERTES_FILE="${BW_ALERTES_ENV:-$HOME/.balise-watch-alertes.env}"
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⚠️ LES ALERTES SE CHARGENT EN PREMIER — leçon du 03/08
+#  Le tout premier échec possible est « un fichier d'environnement est
+#  absent ». Si le canal d'alerte vivait DANS l'un de ces fichiers,
+#  cette alerte-là partirait dans le vide, et la panne aurait exactement
+#  l'allure d'un service qui marche.
+# ══════════════════════════════════════════════════════════════════════
+# shellcheck source=/dev/null
+[ -r "$ALERTES_FILE" ] && . "$ALERTES_FILE"
+
+PING="${BW_AGRUME_PI_PING_URL:-}"
+
+dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
+
+pinguer() {
+  # $1 = "" pour un succès, "/fail" pour un échec ; $2 = corps éventuel.
+  [ -n "$PING" ] || return 0
+  curl -fsS -m 10 --retry 2 --data-binary "${2:-}" "${PING}$1" >/dev/null 2>&1 \
+    || dire "⚠️ ping '$1' non parti (réseau ?) — le check passera en retard"
+}
+
+if [ -z "$PING" ]; then
+  # ⚠️ Un job qui pingue dans le vide a EXACTEMENT l'allure d'un job
+  # surveillé. La panne ne se verrait que le jour où l'on irait chercher
+  # des colonnes qui n'existent pas.
+  dire "⚠️ BW_AGRUME_PI_PING_URL absente de $ALERTES_FILE — PERSONNE NE SURVEILLE CETTE CHAÎNE"
+fi
 
 charger() {
-  local f="$1" quoi="$2"
+  f="$1"; quoi="$2"
   if [ -r "$f" ]; then
     set -a
-    # shellcheck disable=SC1090
+    # shellcheck source=/dev/null
     . "$f"
     set +a
   else
     # ⚠️ Refuser de démarrer plutôt que tourner en boucle sur des erreurs
     # d'authentification : un service qui redémarre toutes les cinq
     # secondes RESSEMBLE à un service qui marche.
-    echo "❌ $f illisible — l'ingestion PI a besoin de $quoi" >&2
+    dire "❌ $f illisible — l'ingestion PI a besoin de $quoi"
+    pinguer /fail "fichier d'environnement illisible : $f ($quoi)"
     exit 78   # EX_CONFIG
   fi
 }
@@ -49,7 +74,7 @@ charger "${BW_R2_ENV:-$HOME/.balise-watch-r2.env}" "R2_ACCOUNT_ID"
 # `~/.balise-watch-r2.env` porte le jeton des PACKS, qui sait écrire
 # `balise-watch-packs` et `model-verif` et **rien d'autre** (sondé le
 # 10/08 : AccessDenied sur `balise-watch-grids`). Le jeton d'AGRUME,
-# lui, ne saura écrire QUE `balise-watch-grids`.
+# lui, ne sait écrire QUE `balise-watch-grids`.
 #
 # Remplacer les `R2_*` du premier fichier par ceux du second CASSERAIT
 # `balise-entretien`, `balise-infoclimat` et `bw-model-*`, qui le
@@ -63,6 +88,7 @@ charger "${BW_AGRUME_R2_ENV:-$HOME/.balise-watch-agrume-r2.env}" \
 # Supabase a déjà cassé le projet le 30/07, et cette archive CROÎT par
 # construction — 24 runs par jour.
 export STORAGE_BACKEND=r2
+
 # ⚠️⚠️ DEUX NOMS POUR LE MÊME MAGASIN, ET ILS NE SE RESSEMBLENT PAS.
 # Le code d'AGRUME porte partout le défaut `"wind-grid"` : c'est le nom
 # du bucket **Supabase**, hérité de la chaîne d'origine. Côté **R2**, le
@@ -74,8 +100,8 @@ export STORAGE_BACKEND=r2
 #
 # ⚠️ Et `~/.balise-watch-r2.env` pose `R2_BUCKET=balise-watch-packs`
 # pour les packs. Sans la ligne ci-dessous, les colonnes PI —
-# DÉFINITIVES — partiraient dans le mauvais compartiment, et personne
-# ne le verrait avant que le composite ne trouve rien à lire.
+# DÉFINITIVES — partiraient dans le mauvais compartiment, et personne ne
+# le verrait avant que le composite ne trouve rien à lire.
 #
 # ⓘ C'est aussi ce qui m'a fait publier un mauvais diagnostic : une
 # sonde d'écriture sur `wind-grid` rend `AccessDenied`, exactement comme
@@ -88,4 +114,44 @@ export R2_BUCKET="${AGRUME_R2_BUCKET:-balise-watch-grids}"
 # coup — donc trop tard pour voir un run qui dérape.
 export PYTHONUNBUFFERED=1
 
-exec "$PY" "$ICI/ingest_pi.py" "$@"
+# ══════════════════════════════════════════════════════════════════════
+#  ⚠️⚠️ CE QUE LE VOYANT SURVEILLE, ET CE QU'IL NE SURVEILLE PAS
+#
+#  Le timer repasse toutes les 10 minutes, mais PI ne sort qu'une fois
+#  par heure : **cinq passages sur six n'ont RIEN à faire.** Pinguer à
+#  chaque passage garderait le voyant au vert pendant que la chaîne
+#  aurait cessé d'ÉCRIRE depuis des jours — c'est le « faux vert » que
+#  ce projet a déjà eu deux fois (quotas du 30/07, découverts par un
+#  mail du fournisseur).
+#
+#  On ne pingue donc AU SUCCÈS que lorsqu'un run a été RÉELLEMENT INGÉRÉ
+#  ET ÉCRIT (code 0). « Rien à faire » (code 3) ne pingue rien et ne
+#  compte pas non plus comme un échec : c'est le cas nominal, cinq fois
+#  sur six.
+#
+#  ⓘ Réglage du check, côté healthchecks.io :
+#     période 1 h (PI sort 24 fois par jour) · grâce 1 h
+#  → alerte après ~2 h de silence, soit deux runs manqués. Assez lâche
+#  pour absorber la latence de complétion mesurée (entre +24 et +52 min),
+#  assez serré pour ne pas laisser passer une demi-journée.
+#
+#  Ce voyant s'allume en rouge dans trois cas, tous légitimes : le timer
+#  ne tourne plus, le portail ne répond plus (clé expirée comprise), ou
+#  R2 refuse l'écriture.
+# ══════════════════════════════════════════════════════════════════════
+"$PY" "$ICI/ingest_pi.py" "$@"
+code=$?
+
+case "$code" in
+  0)
+    pinguer "" "run ingéré et écrit"
+    ;;
+  3)
+    dire "rien à faire (code 3) — aucun ping, c'est le cas nominal"
+    ;;
+  *)
+    pinguer /fail "ingest_pi.py a rendu le code $code"
+    ;;
+esac
+
+exit "$code"
