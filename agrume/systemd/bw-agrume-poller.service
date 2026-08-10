@@ -1,0 +1,59 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-poller.service — le guet de run AGRUME    (10/08/2026)
+#
+#  ⚠️ CE N'EST PAS UN TIMER, ET C'EST TOUT L'INTÉRÊT. La seule propriété
+#  unique du VPS face à une GitHub Action, c'est d'être ALLUMÉ EN
+#  PERMANENCE. Une Action est un cron : elle part à heure fixe, alors que
+#  Météo-France ne publie pas à heure fixe — et sa propre documentation
+#  se contredit sur le délai (5 h 05 pour le run 06, 3 h 30 pour le 09).
+#  Un service qui guette récupère 20 à 40 minutes de fraîcheur par run.
+#
+#  ⚠️ IL NE TÉLÉCHARGE AUCUN GRIB. Quelques centaines d'octets par
+#  interrogation (`DescribeCoverage` = 593 o quand le run est absent).
+#  Le décodage reste sur GitHub Actions, gratuit sur dépôt public.
+#
+#  Installation (à faire par Yann, ce script ne s'installe pas seul) :
+#    sudo cp agrume/systemd/bw-agrume-poller.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-agrume-poller
+#    journalctl -u bw-agrume-poller -f
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — guet de run AGRUME (AROME-PI, latence réelle)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/agrume/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/agrume
+ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-poller.sh aromepi
+# ⚠️ Le guet doit survivre à une coupure réseau : c'est la CONTINUITÉ de
+# la série de latences qui a de la valeur, un trou la dégrade. Mais pas
+# de redémarrage en rafale — une erreur de configuration (clé absente,
+# nom de champ faux) doit se voir dans le journal, pas se noyer.
+Restart=always
+RestartSec=60
+# `run-poller.sh` sort en 78 (EX_CONFIG) si la clé est illisible :
+# inutile d'insister, ça ne se réparera pas tout seul.
+RestartPreventExitStatus=78
+Nice=15
+
+# ── Cloisonnement, calqué sur bw-garde-fou-r2.service ────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
