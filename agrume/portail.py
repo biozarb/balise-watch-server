@@ -247,6 +247,32 @@ class Portail:
                     time.sleep(20)
                     continue
 
+                # ⚠️⚠️ 502 / 503 / 504 — MESURÉ LE 10/08, ET ÇA COÛTAIT DES
+                # TROUS DÉFINITIFS. Le premier run d'ingestion PI écrit sur
+                # R2 a rendu **297 champs sur 300** : trois `HTTP 502 Bad
+                # Gateway`, à trois niveaux et trois échéances sans rapport
+                # entre eux (v/50 m/360 min, v/100 m/240 min,
+                # v/250 m/225 min). Deux portaient un corps `mw:fault` du
+                # framework MetWork, un portait la page nginx nue.
+                #
+                # Ce sont des incidents de PASSERELLE, de la même famille
+                # que le 500 SUSPENDED — le portail est là, son
+                # intermédiaire hoquette. Le module savait déjà que « à
+                # forte concurrence, le portail COUPE LA CONNEXION (102
+                # ConnectionResetError et UN 502 sur 200 requêtes) » : le
+                # 502 était donc DÉJÀ observé, et traité comme définitif.
+                #
+                # ⛔ Or les colonnes PI sont DÉFINITIVES. Un 502 non
+                # retenté, c'est un trou permanent dans une archive qu'on
+                # ne peut pas reconstituer — la rétention du portail est de
+                # 4,25 jours.
+                if e.code in (502, 503, 504):
+                    self.compteur[f"http_{e.code}_retente"] += 1
+                    self._crier(f"    {e.code} (passerelle) — on retente "
+                                f"[essai {essai + 1}/{essais}]")
+                    time.sleep(1.5 * (essai + 1))
+                    continue
+
                 if e.code == 500 and "SUSPENDED" in texte:
                     # Mesuré : le retry immédiat passe.
                     self.compteur["500_suspended"] += 1
@@ -439,6 +465,8 @@ class Portail:
                 + (f", {c['500_suspended']} × 500 SUSPENDED"
                    if c["500_suspended"] else "")
                 + (f", {c['reseau']} incidents réseau" if c["reseau"] else "")
+                + "".join(f", {c[f'http_{k}_retente']} × {k} retentés"
+                          for k in (502, 503, 504) if c[f"http_{k}_retente"])
                 + (f", {c['attente_quota']} attentes de quota"
                    if c["attente_quota"] else ""))
 

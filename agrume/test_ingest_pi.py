@@ -10,8 +10,9 @@ L'ingestion PI n'a qu'un seul client : le composite de l'étape 9, qui
 calcule `Δ = PI − AROME` point à point. **Une erreur ici ne produit pas
 une panne, elle produit un delta.** Et un delta faux est lisse,
 plausible, tracé sans broncher — c'est exactement le genre de défaut que
-ce projet met des jours à voir. Sept façons de casser en silence, une
-par section :
+ce projet met des jours à voir. Dix façons de casser en silence, une par
+section — et les trois dernières ne viennent pas d'une relecture, elles
+viennent de runs réels qui ont mal tourné :
 
   1. **Deux découpes qui se ressemblent.** Le WCS choisit SA fenêtre à
      partir de la boîte lat/lon ; l'orographie a la sienne, héritée de
@@ -40,6 +41,16 @@ par section :
   7. **Une purge qui déborde.** Les colonnes PI sont DÉFINITIVES et la
      rétention du portail est de 4,25 jours : ce qui est détruit ici
      n'est pas régénérable.
+  8. **Un niveau qu'on croit commun.** Les 6 niveaux de PI sont dans les
+     25 d'AROME, mais `u`/`v` d'AROME n'existent qu'à partir de 20 m.
+  9. **⚠️ Un run « publié » qui n'est pas complet.** MESURÉ : à 17:23:51
+     UTC le run 17 Z répondait au `DescribeCoverage` et servait 2 de ses
+     5 échéances sondées. Archiver ça, c'est perdre 76 % d'un run pour
+     toujours — et le produit serait dentelé, pas franchement tronqué.
+ 10. **⚠️ Un 502 pris pour un refus.** MESURÉ : le premier run écrit sur
+     R2 a rendu 297 champs sur 300, trois `HTTP 502 Bad Gateway` sans
+     rapport entre eux. Un hoquet de passerelle laissait trois trous
+     PERMANENTS dans une archive irremplaçable.
 
 Aucun réseau, aucune clé, aucun GRIB.
 """
@@ -303,6 +314,153 @@ def main():
              "DÉCROISSANTES" in g.manifeste()["axes"]["sens"])
     verifier("il dit que la fenêtre est réalignée sur le GRIB reçu",
              "réalignée" in g.manifeste()["fenetre"])
+
+    print("\n── 9. ⚠️⚠️ « Publié » ne veut pas dire « complet » ──")
+    # MESURÉ le 10/08 à 17:23:51 UTC : le run 17 Z répondait au
+    # DescribeCoverage et servait ses échéances 0 et 90 min ; les
+    # échéances 180, 270 et 360 min n'existaient pas. Les runs 16 Z et
+    # 15 Z étaient complets. **PI publie ses échéances au fil de l'eau.**
+    # Sans le contrôle ci-dessous, l'ingestion archivait un run à 24 %
+    # dans une archive DÉFINITIVE, et l'index disait « fait ».
+    import ingest_pi as IP
+
+    class PortailFactice:
+        """⚠️ Le faux portail reproduit le comportement MESURÉ, pas celui
+        qu'on aurait supposé : un run peut répondre `existe` et n'avoir
+        que ses premières échéances."""
+
+        def __init__(self, publies, complets):
+            self.publies, self.complets = set(publies), set(complets)
+            self.vus = []
+
+        def existe(self, champ, run):
+            self.vus.append(("existe", run))
+            return run in self.publies
+
+        def get_coverage(self, champ, run, instant, niveau, domaine, **kw):
+            self.vus.append(("get", run, instant))
+            if run in self.complets:
+                return b"x" * 8000
+            raise IP.CouvertureAbsente("échéance absente", code=404)
+
+        def bilan(self):
+            return "factice"
+
+    maintenant = __import__("datetime").datetime(2026, 8, 10, 17, 23, 51,
+                                                 tzinfo=__import__("datetime").timezone.utc)
+    p1 = PortailFactice(publies=["2026-08-10T17:00:00Z", "2026-08-10T16:00:00Z"],
+                        complets=["2026-08-10T16:00:00Z"])
+    run, recul = IP.dernier_run_utile(p1, "CHAMP", deja=set(),
+                                      maintenant=maintenant, journal=lambda m: None)
+    verifier("⛔ un run publié mais INCOMPLET est écarté, on prend le "
+             "précédent", run == "2026-08-10T16:00:00Z" and recul == 1, str(run))
+
+    p2 = PortailFactice(publies=["2026-08-10T17:00:00Z", "2026-08-10T16:00:00Z"],
+                        complets=["2026-08-10T16:00:00Z"])
+    run2, _ = IP.dernier_run_utile(p2, "CHAMP", deja={"2026-08-10T16:00:00Z"},
+                                   maintenant=maintenant, journal=lambda m: None)
+    verifier("rien à faire si le dernier run complet est déjà archivé",
+             run2 is None)
+    verifier("⚠️ et on s'arrête là : aucune requête sur les heures "
+             "antérieures (le quota n'est pas gratuit)",
+             all(v[1] >= "2026-08-10T16:00:00Z" for v in p2.vus), str(p2.vus))
+
+    p3 = PortailFactice(publies=["2026-08-10T17:00:00Z"],
+                        complets=["2026-08-10T17:00:00Z"])
+    run3, recul3 = IP.dernier_run_utile(p3, "CHAMP", deja=set(),
+                                        maintenant=maintenant,
+                                        journal=lambda m: None)
+    verifier("un run frais ET complet est pris tout de suite",
+             run3 == "2026-08-10T17:00:00Z" and recul3 == 0)
+    verifier("⚠️ la sonde porte sur la DERNIÈRE échéance (360 min), celle "
+             "qui arrive en dernier",
+             any(v[0] == "get" and v[2].endswith("T23:00:00Z") for v in p3.vus),
+             str(p3.vus[-1]))
+
+    print("\n── 10. ⚠️⚠️ Un 502 est un hoquet, pas un refus ──")
+    # MESURÉ : le premier run PI écrit sur R2 a rendu 297 champs sur 300.
+    # Trois `HTTP 502 Bad Gateway`, à trois niveaux et trois échéances
+    # sans rapport entre eux. Le client les traitait comme définitifs —
+    # et les colonnes PI sont DÉFINITIVES, donc c'étaient trois trous
+    # permanents dans une archive irremplaçable.
+    import urllib.error as _ue
+    import urllib.request as _ur
+
+    import portail as PO
+
+    vrai_urlopen = _ur.urlopen
+
+    class _Reponse:
+        def __init__(self, corps):
+            self.corps = corps
+
+        def read(self):
+            return self.corps
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def faux_urlopen(codes, corps=b"G" * 9000):
+        suite = list(codes)
+
+        def _ouvrir(req, timeout=None):
+            if suite:
+                code = suite.pop(0)
+                raise _ue.HTTPError(req.full_url, code, "boum", {},
+                                    __import__("io").BytesIO(b"<html>502</html>"))
+            return _Reponse(corps)
+        return _ouvrir
+
+    p = PO.Portail(PO.SERVICE_AROMEPI, "0025", cle="factice", journal=None)
+    try:
+        _ur.urlopen = faux_urlopen([502])
+        corps = p._http("https://exemple/x")
+        verifier("⛔ un 502 est RETENTÉ, et la requête aboutit",
+                 len(corps) == 9000)
+        verifier("et il est compté comme retenté, pas comme un échec",
+                 p.compteur["http_502_retente"] == 1,
+                 str(dict(p.compteur)))
+
+        _ur.urlopen = faux_urlopen([503, 504])
+        p2 = PO.Portail(PO.SERVICE_AROMEPI, "0025", cle="factice", journal=None)
+        verifier("503 et 504 aussi — même famille de passerelle",
+                 len(p2._http("https://exemple/x")) == 9000)
+
+        # ⚠️ Mais un 502 PERMANENT doit finir par lever : un client qui
+        # retenterait indéfiniment ressemblerait à un client qui marche.
+        _ur.urlopen = faux_urlopen([502, 502, 502, 502, 502, 502])
+        p3 = PO.Portail(PO.SERVICE_AROMEPI, "0025", cle="factice", journal=None)
+        try:
+            p3._http("https://exemple/x", essais=3)
+            verifier("⚠️ un 502 permanent finit par lever", False,
+                     "n'a rien levé")
+        except PO.ErreurPortail:
+            verifier("⚠️ un 502 permanent finit par lever, il ne boucle pas",
+                     True)
+
+        # ⓘ Et le 404 `NoSuchCoverage`, lui, n'est PAS retenté : c'est une
+        # réponse, pas un incident. Le retenter brûlerait du quota pour
+        # apprendre trois fois la même chose.
+        def _404(req, timeout=None):
+            raise _ue.HTTPError(
+                req.full_url, 404, "nope", {},
+                __import__("io").BytesIO(
+                    b'<ExceptionReport><Exception exceptionCode="NoSuchCoverage">'
+                    b'<ExceptionText>absent</ExceptionText></Exception></ExceptionReport>'))
+        _ur.urlopen = _404
+        p4 = PO.Portail(PO.SERVICE_AROMEPI, "0025", cle="factice", journal=None)
+        try:
+            p4._http("https://exemple/x", essais=4)
+            verifier("ⓘ un NoSuchCoverage lève tout de suite", False)
+        except PO.CouvertureAbsente:
+            verifier("ⓘ un NoSuchCoverage lève TOUT DE SUITE, sans retenter "
+                     "(c'est une réponse, pas un incident)",
+                     p4.compteur["requetes"] == 1, str(p4.compteur["requetes"]))
+    finally:
+        _ur.urlopen = vrai_urlopen
 
     print("\n  ingestion PI :",
           "OK" if not echecs else f"ÉCHEC ({len(echecs)})")

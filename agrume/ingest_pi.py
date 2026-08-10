@@ -271,6 +271,51 @@ def ingerer(run, params, orog, balises, portail, limite_champs=None,
             journal(f"    {param['nom']} · {niveau:>4} m : "
                     f"{faits}/{attendus} champs "
                     f"({time.monotonic() - t0:.0f} s)")
+    # ── ⚠️⚠️ LA SECONDE PASSE — ET ELLE VIENT D'UN VRAI TROU ──────────
+    # Le premier run écrit sur R2 a rendu **297 champs sur 300** : trois
+    # `HTTP 502 Bad Gateway`, à trois niveaux et trois échéances sans
+    # rapport (v/50 m/360 min, v/100 m/240 min, v/250 m/225 min). Les
+    # quatre tentatives internes de `_http` ne s'appliquaient pas au 502,
+    # traité comme définitif — c'est corrigé dans `portail.py`.
+    #
+    # ⛔ Mais un retry immédiat ne suffit pas à lui seul : les colonnes
+    # sont DÉFINITIVES, et un trou y est permanent — la rétention du
+    # portail est de 4,25 jours. On repasse donc sur les manquants À LA
+    # FIN, c'est-à-dire une à trois minutes plus tard, ce qui laisse le
+    # temps à un hoquet de passerelle de se dissiper.
+    #
+    # ⓘ Le coût est proportionnel aux trous, pas au run : trois requêtes
+    # pour trois manquants. Sur un run parfait, cette passe ne coûte rien.
+    #
+    # ⚠️ ON ÉCRIT QUAND MÊME S'IL EN RESTE. Refuser d'écrire perdrait le
+    # run ENTIER : `dernier_run_utile()` s'arrête au premier run archivé,
+    # donc un run sauté ne serait jamais repris une fois le suivant écrit.
+    # Entre 1 % de trous DÉCLARÉS dans le manifeste et 100 % de perte
+    # silencieuse, le choix se fait sans hésiter.
+    if colonnes.manquants:
+        restants, reussis = [], 0
+        journal(f"  ⟳ seconde passe sur {len(colonnes.manquants)} champs "
+                f"manquants")
+        for m in colonnes.manquants:
+            param = next(p for p in params if p["nom"] == m["param"])
+            k = ECHEANCES_MIN.index(m["minute"])
+            try:
+                octets = portail.get_coverage(
+                    param["wcs"], run, instants[k], m["niveau"], DOMAINE)
+                champ, meta = lire_grib_2d(octets)
+            except (ErreurPortail, CouvertureAbsente, Abort) as e:
+                m["cause_2"] = f"{type(e).__name__}: {e}"[:200]
+                restants.append(m)
+                continue
+            aligne = aligner_sur_axes(champ, meta, lats, lons)
+            grille.poser(param, m["niveau"], m["minute"], aligne)
+            colonnes.poser_depuis_champ(param, m["niveau"], m["minute"], aligne)
+            faits += 1
+            reussis += 1
+        colonnes.manquants = restants
+        journal(f"  ⟳ {reussis} récupérés, {len(restants)} définitivement "
+                f"manquants")
+
     grille.manquants = colonnes.manquants
     return colonnes, grille, _bilan(t0, faits, attendus, hors)
 
