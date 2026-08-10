@@ -4529,24 +4529,75 @@ function evictSoundingCacheIfNeeded() {
   if (oldestKey) soundingCache.delete(oldestKey);
 }
 
-// Parse le <PRE> de données du HTML Wyoming (type=TEXT:LIST) : colonnes
-// fixes PRES HGHT TEMP DWPT RELH MIXR DRCT SKNT ... — on ignore l'en-tête/
-// séparateur et on split sur les espaces (les valeurs sont toujours
-// numériques, pas de risque de collision avec le format à espaces
-// multiples de ce texte).
+// Parse le <PRE> de données du HTML Wyoming (type=TEXT:LIST).
+//
+// ⚠️⚠️ CORRIGÉ LE 10/08/2026 — L'UNITÉ DE LA VITESSE ÉTAIT SUPPOSÉE, ET
+// ELLE ÉTAIT FAUSSE. La version précédente rangeait la 8ᵉ colonne dans
+// `speedKt` en supposant des NŒUDS (`SKNT`, format historique du vieux
+// `cgi-bin/sounding`). Or l'endpoint réellement appelé ici est
+// `wsgi/sounding`, et il publie `SPED` **en m/s** — c'est écrit DANS le
+// fichier, sur la ligne d'unités que ce parseur sautait :
+//
+//     PRES   HGHT   TEMP   DWPT   RELH   MIXR   DRCT   SPED   THTA …
+//      hPa      m      C      C      %   g/kg    deg    m/s      K …
+//
+// Conséquence mesurée sur Payerne le 10/08 : `web/src/lib/soundings.ts`
+// faisait `speedKt * 1.852`, donc affichait 1,852/3,6 = **0,514 fois** la
+// vitesse réelle. Un vent de 50 km/h à 3 000 m s'affichait à 26. Sur un
+// outil de sécurité, l'erreur allait dans le pire sens : plus calme que
+// la réalité. Les barbules du SkewT étaient fausses du même facteur.
+//
+// ⚠️ On ne devine donc plus : l'unité est LUE dans l'en-tête, et un
+// format non reconnu fait ÉCHOUER le parsing plutôt que d'inventer une
+// conversion. Mieux vaut « pas de sondage » qu'un sondage à moitié
+// vitesse — c'est précisément parce que la supposition était silencieuse
+// qu'elle a tenu si longtemps.
+//
+// ⓘ On publie `speedMs` (canonique) ET `speedKt` (vrais nœuds), pour que
+// les clients déjà déployés qui font `speedKt * 1.852` redeviennent
+// justes sans attendre leur propre mise à jour.
+const WYOMING_MS_PAR_UNITE = { 'm/s': 1, 'knot': 0.514444, 'kt': 0.514444, 'knots': 0.514444 };
+
 function parseWyomingSounding(html) {
   const preBlocks = [...html.matchAll(/<PRE>([\s\S]*?)<\/PRE>/gi)].map(m => m[1]);
   if (!preBlocks.length) return null;
-  const dataBlock = preBlocks[0];
-  const lines = dataBlock.split('\n').map(l => l.trimEnd());
+  const lines = preBlocks[0].split('\n').map(l => l.trimEnd());
+
+  // ── L'en-tête : où est la vitesse, et dans quelle unité ────────────
+  let colVitesse = -1, facteurMs = null;
+  for (let k = 0; k < lines.length - 1; k++) {
+    const noms = lines[k].trim().split(/\s+/);
+    if (!(noms.includes('PRES') && noms.includes('HGHT'))) continue;
+    const iv = noms.findIndex(n => n === 'SPED' || n === 'SKNT');
+    if (iv < 0) break;
+    const unites = lines[k + 1].trim().split(/\s+/);
+    const u = (unites[iv] || '').toLowerCase();
+    if (WYOMING_MS_PAR_UNITE[u] === undefined) break;
+    colVitesse = iv;
+    facteurMs = WYOMING_MS_PAR_UNITE[u];
+    break;
+  }
+  if (colVitesse < 0 || facteurMs === null) {
+    console.error('parseWyomingSounding: en-tête/unité de vitesse non reconnue '
+      + '— sondage IGNORÉ plutôt que converti au hasard (cf. le défaut du 10/08)');
+    return null;
+  }
+
   const levels = [];
   for (const line of lines) {
     const cols = line.trim().split(/\s+/);
     if (cols.length < 8) continue;
     const nums = cols.map(Number);
     if (nums.some(n => Number.isNaN(n))) continue; // saute en-tête/séparateurs (texte)
-    const [pres, hght, temp, dwpt, relh, , drct, sknt] = nums;
-    levels.push({ pressureHpa: pres, heightM: hght, tempC: temp, dewpointC: dwpt, rh: relh, dirDeg: drct, speedKt: sknt });
+    const [pres, hght, temp, dwpt, relh, , drct] = nums;
+    const speedMs = nums[colVitesse] * facteurMs;
+    levels.push({
+      pressureHpa: pres, heightM: hght, tempC: temp, dewpointC: dwpt,
+      rh: relh, dirDeg: drct,
+      speedMs: Math.round(speedMs * 100) / 100,
+      // ⚠️ Vrais nœuds, cette fois. C'est ce champ qui était faux.
+      speedKt: Math.round(speedMs * 1.943844 * 100) / 100,
+    });
   }
   return levels.length ? levels : null;
 }
