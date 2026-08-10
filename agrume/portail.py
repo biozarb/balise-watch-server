@@ -70,6 +70,22 @@ COUVERTURES = {
 # `application/wmo-grib` (l'autre format offert étant `image/tiff`).
 FORMAT_GRIB = "application/wmo-grib"
 
+# ── Le nom de l'axe vertical : LU, jamais supposé ─────────────────────
+# ✅ Mesuré le 10/08 sur `aromepi/0025` : les axes déclarés par le
+# `DescribeCoverage` sont `height`, `lat`, `long`, `time`.
+# ⚠️ Cette liste sert à RECONNAÎTRE l'axe dans ce qui est déclaré, pas à
+# en choisir un par défaut : `axe_vertical()` lève si aucun ne
+# correspond, parce qu'une mauvaise étiquette d'axe rend un HTTP 404
+# impossible à distinguer d'un run non publié (piège nº 2).
+AXES_VERTICAUX_CONNUS = ("height", "z", "elevation", "vertical", "depth")
+
+# Plancher de plausibilité d'un GRIB2. ⚠️ Il ne protège pas d'un GRIB
+# corrompu — il protège du cas VRAIMENT vicieux : HTTP 200, corps vide
+# ou tronqué. Le champ deviendrait alors une nappe de NaN, indiscernable
+# d'un trou légitime. L'en-tête GRIB2 seul fait déjà 16 octets, et le
+# plus petit champ réel mesuré sur ce domaine en fait 7 957.
+MIN_OCTETS_GRIB = 256
+
 # ── Le quota, MESURÉ et non lu ────────────────────────────────────────
 # Rafale de 150 requêtes à 404 req/min → premier HTTP 429 à la requête
 # 105. La limite annoncée de 100 req/min est donc réelle et elle mord.
@@ -167,6 +183,9 @@ class Portail:
         self.quota_par_min = quota_par_min
         self.pool = "commun" if POOL_COMMUN else service
         self.compteur = collections.Counter()
+        # Nom de l'axe vertical par champ, lu une fois (cf.
+        # `axe_vertical`). C'est une propriété du service, pas du run.
+        self._axes: dict[str, str] = {}
 
     # ── Quota ─────────────────────────────────────────────────────────
     def _attendre_son_tour(self):
@@ -323,6 +342,96 @@ class Portail:
             f"run absent et pour un champ inexistant. Vérifier le nom dans "
             f"le GetCapabilities avant de relancer.")
 
+    # ── GetCoverage — la primitive qui rapporte de la DONNÉE ──────────
+    def axe_vertical(self, champ, run_iso):
+        """Le nom de l'axe vertical, **LU** dans le `DescribeCoverage`.
+
+        ⚠️ ON NE LE DEVINE PAS. Le WCS 2.0.1 laisse le serveur nommer ses
+        axes comme il veut, et se tromper de nom ne rend pas une erreur
+        franche : le portail répond en **HTTP 404** (piège nº 2),
+        c'est-à-dire exactement ce que rend un run absent. Un client qui
+        supposerait `z` attendrait donc la publication d'un run déjà
+        publié, pour toujours.
+
+        ✅ Mesuré le 10/08 sur `aromepi/0025` : `height`, `lat`, `long`,
+        `time`. ⓘ Noter au passage que la longitude s'appelle **`long`**
+        et non `lon` — `subset_boite()` le sait déjà.
+
+        Le résultat est mémorisé : une requête de plus par champ serait
+        payée sur le quota pour une propriété qui ne change pas.
+        """
+        if champ in self._axes:
+            return self._axes[champ]
+        arbre = self.describe(champ, run_iso)
+        vus = set()
+        for el in arbre.iter():
+            for cle in ("axisLabels", "axisLabel"):
+                if cle in el.attrib:
+                    vus.update(el.attrib[cle].split())
+            if el.tag.endswith("axisLabels"):
+                vus.update((el.text or "").split())
+        axe = next((a for a in sorted(vus)
+                    if a.lower() in AXES_VERTICAUX_CONNUS), None)
+        if axe is None:
+            raise ErreurPortail(
+                f"aucun axe vertical reconnu dans le DescribeCoverage de "
+                f"{champ!r} — axes déclarés : {sorted(vus) or 'aucun'}. "
+                f"⚠️ Ne PAS replier sur une valeur par défaut : une "
+                f"mauvaise étiquette d'axe rend un HTTP 404 impossible à "
+                f"distinguer d'un run non publié.")
+        self._axes[champ] = axe
+        return axe
+
+    def get_coverage(self, champ, run_iso, instant_iso, niveau, domaine,
+                     axe=None, timeout=60):
+        """Un champ 2D en GRIB2 : UN paramètre × UN niveau × UNE échéance
+        × UNE boîte. Renvoie les octets bruts — le décodage appartient à
+        l'appelant, pour que ce module reste sans dépendance lourde.
+
+        ⛔ **Le grain n'est pas un choix de ce code, c'est le serveur.**
+        Toute tentative de groupement est refusée :
+
+            Slicing on height is mandatory : only a 2D coverage can be downloaded
+            Slicing on time   is mandatory : only a 2D coverage can be downloaded
+
+        D'où un compte de requêtes non négociable : **6 niveaux ×
+        2 paramètres × 25 échéances = 300 requêtes par run de PI.**
+        Toutes les variantes d'intervalle ont été essayées le 10/08, sur
+        AROME comme sur AROME-PI, et rejetées.
+
+        ⚠️ Piège nº 4 : le format s'écrit `application/wmo-grib`.
+        `application/wmo-grib2` rend un HTTP 400 — et le « 2 » est
+        exactement ce qu'on ajoute d'instinct, puisque le fichier reçu
+        EST du GRIB2.
+
+        ⓘ Mesuré : 7 957 octets par champ en 0,025° sur la boîte
+        Nord-Alpes, **constant quel que soit le niveau**, et 0,180 s par
+        requête hors attente de quota.
+        """
+        axe = axe or self.axe_vertical(champ, run_iso)
+        cid = self.id_couverture(champ, run_iso)
+        boite = subset_boite(domaine["latmin"], domaine["latmax"],
+                             domaine["lonmin"], domaine["lonmax"])
+        url = (f"{self.base}/GetCoverage?service=WCS&version=2.0.1"
+               f"&coverageid={urllib.parse.quote(cid)}"
+               f"&subset={subset_temps(instant_iso)}"
+               f"&subset={subset_niveau(axe, niveau)}"
+               f"&subset={boite}"
+               f"&format={FORMAT_GRIB}")
+        octets = self._http(url, timeout=timeout)
+        self.compteur["octets"] += len(octets)
+        # ⚠️ Un corps vide n'est PAS une erreur HTTP : le portail a
+        # répondu 200. Sans ce contrôle, il traverserait le décodeur et
+        # deviendrait une nappe de NaN — c'est-à-dire un trou qui
+        # ressemble à une donnée manquante légitime, et qui se
+        # propagerait jusque dans le delta du composite.
+        if len(octets) < MIN_OCTETS_GRIB:
+            raise ErreurPortail(
+                f"GetCoverage a rendu {len(octets)} octets pour {champ} au "
+                f"niveau {niveau} à {instant_iso} — trop court pour un "
+                f"GRIB2. ⚠️ Le portail a pourtant répondu HTTP 200.")
+        return octets
+
     def bilan(self):
         c = self.compteur
         return (f"{self.service}/{self.grille} : {c['requetes']} requêtes"
@@ -365,6 +474,14 @@ def subset_temps(instant_iso):
     Sans guillemets, ça passe — alors que la syntaxe WCS 2.0.1 les admet.
     Cette fonction existe pour que personne ne les remette."""
     return f"time({instant_iso})"
+
+
+def subset_niveau(axe, niveau):
+    """⚠️ Le niveau est un ENTIER sans unité, et l'axe porte le nom que
+    le serveur lui donne (`axe_vertical()`). Écrire `height(100 m)` ou
+    `height(100.0)` n'a pas été essayé et n'a pas à l'être : la forme
+    ci-dessous est celle qui a rendu 150 champs sans un refus."""
+    return f"{axe}({int(niveau)})"
 
 
 def subset_boite(latmin, latmax, lonmin, lonmax):

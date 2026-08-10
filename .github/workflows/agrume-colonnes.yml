@@ -109,6 +109,12 @@ jobs:
           python3 agrume/test_profil.py
           python3 agrume/test_radiosondage.py
           python3 agrume/test_transect.py
+          # ⚠️ Celui-ci ne protège pas non plus l'ingestion faite ICI : il
+          # protège l'ingestion AROME-PI, qui tourne sur le VPS (étape
+          # 8 bis). Il est quand même dans cette liste parce que c'est la
+          # SEULE CI du dépôt — et qu'un banc qu'on ne lance jamais cesse
+          # de protéger quoi que ce soit. Il est hors-ligne et sans clé.
+          python3 agrume/test_ingest_pi.py
 
       - name: Ingérer les colonnes
         env:

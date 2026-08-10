@@ -1,0 +1,56 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-ingest-pi.service — l'ingestion AROME-PI   (10/08/2026)
+#
+#  Étape 8 bis. ⚠️ C'EST UN TIMER, ET C'EST L'INVERSE DU POLLER — qui est
+#  un service permanent, lui, et volontairement. La différence tient en
+#  une phrase : le poller doit voir la publication À LA MINUTE pour
+#  mesurer une latence ; l'ingestion, elle, a juste besoin de passer
+#  assez souvent pour ne rater aucun run. Un service permanent qui
+#  dormirait entre deux runs n'apporterait rien et survivrait moins bien
+#  à une mise à jour.
+#
+#  ⚠️ POURQUOI SUR LE VPS ET PAS SUR UNE GITHUB ACTION. Parce que la clé
+#  Météo-France vit ici et n'en sort pas — c'est écrit dans le message
+#  d'erreur de `portail.py` lui-même. Et parce que le goulot de cette
+#  chaîne n'est PAS la bande passante (2,4 Mo par run) mais le QUOTA du
+#  portail : les 4 vCores et les 14 Go de disque d'un runner ne servent à
+#  rien ici. C'est exactement le raisonnement inverse du produit A, qui
+#  tire 7,4 Go et vit donc sur GitHub.
+#
+#  Installation (à faire par Yann — ce fichier ne s'installe pas seul) :
+#    sudo cp agrume/systemd/bw-agrume-ingest-pi.{service,timer} /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-agrume-ingest-pi.timer
+#    journalctl -u bw-agrume-ingest-pi -f
+#
+#  ⚠️ PRÉREQUIS : `~/.balise-watch-r2.env` doit porter un jeton qui SAIT
+#  ÉCRIRE dans `wind-grid`. Sondé le 10/08, l'ancien ne le pouvait pas
+#  (AccessDenied en lecture, écriture ET suppression). `run-ingest-pi.sh`
+#  refuse de démarrer si le fichier est illisible, mais il ne peut pas
+#  deviner qu'un jeton lisible est trop étroit : ça, seul le premier run
+#  le dira.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — ingestion AROME-PI (étape 8 bis, produits colonnes + grille)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/agrume/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/agrume
+ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-ingest-pi.sh
+# ⚠️ Le budget MESURÉ est de ~1 min pour 300 requêtes (le quota, pas le
+# réseau, fixe la durée). 15 min est une ceinture, pas une contrainte :
+# si on l'atteint, c'est que le portail rame ou que le quota est
+# partagé — et le script le crie lui-même dès 12 min.
+TimeoutStartSec=900
+# Pas de Restart : un run manqué est rattrapé par le passage suivant du
+# timer, dix minutes plus tard. Réessayer en boucle sur une erreur de
+# configuration brûlerait du quota pour rien.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

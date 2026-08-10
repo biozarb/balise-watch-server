@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-ingest-pi.timer — toutes les 10 minutes    (10/08/2026)
+#
+#  ⚠️ POURQUOI 10 MIN ET PAS 60, ALORS QUE PI NE SORT QU'UNE FOIS PAR
+#  HEURE. Parce qu'aucune heure de mise à disposition n'est codée en dur
+#  — la doc Météo-France se contredit elle-même et ne dit même pas si ses
+#  heures sont UTC ou légales. Un timer horaire calé sur une minute fixe
+#  partirait soit trop tôt (404) soit trop tard (fraîcheur perdue), et
+#  perdrait un run entier à chaque décalage de la chaîne amont.
+#
+#  ⚠️ ET POURQUOI PAS 2 MIN. Parce que chaque passage à vide coûte du
+#  QUOTA. `ingest_pi.py` regarde d'abord l'INDEX (gratuit, Class B) et
+#  sort sans toucher au portail si le run de l'heure est déjà archivé —
+#  mais tant qu'il ne l'est pas, chaque passage dépense ~3 requêtes de
+#  détection. À 10 min c'est ~18 requêtes/heure ; à 2 min ce serait 90,
+#  soit presque une minute entière de quota par heure brûlée à demander
+#  « c'est prêt ? ».
+#
+#  ⓘ Le pire cas est donc de 10 min de fraîcheur perdue sur un produit
+#  qui décrit les 6 heures à venir au pas de 15 min. C'est acceptable ;
+#  ça ne le serait pas pour le poller, dont le métier EST la latence.
+#
+#  ⚠️ `Persistent=true` volontairement ABSENT : après un redémarrage,
+#  rattraper un passage manqué ne sert à rien — le run visé serait de
+#  toute façon le dernier publié, que le passage suivant prendra dans
+#  moins de dix minutes. Et la rétention du portail est de 4,25 jours :
+#  ce qui est vraiment perdu ne se rattrape pas par un timer.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — déclenche l'ingestion AROME-PI toutes les 10 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+# Désynchronise les passages : sans ça, tous les VPS du monde qui
+# tournent sur un timer à 10 min tapent le portail à la même seconde.
+RandomizedDelaySec=90
+AccuracySec=30s
+Unit=bw-agrume-ingest-pi.service
+
+[Install]
+WantedBy=timers.target
