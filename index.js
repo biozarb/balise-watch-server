@@ -3016,6 +3016,92 @@ function windsmobiIsDuplicate(grid, lat, lon) {
   return false;
 }
 
+// ── Dédoublonnage INTERNE à winds.mobi (10/08/2026) ─────────────────
+//
+// LE TROU DE windsmobiIsDuplicate CI-DESSUS : son référentiel
+// (`windsmobiKnownGrid`) ne contient QUE les autres sources — Pioupiou,
+// MF, AEMET, Infoclimat, METAR, SMN. Deux réseaux winds.mobi qui
+// relaient la MÊME station physique ne se voient donc jamais. Remonté
+// par Yann le 10/08 sur Tarerach, servie à la fois par `ffvl-5065`
+// (42.6872, 2.48804) et `iweathar-1081` (42.687, 2.488) — 22 m d'écart,
+// deux marqueurs côte à côte sur la carte.
+//
+// ⚠️ POURQUOI PAS À L'INGESTION, dans la boucle de refresh. Les deux
+// cadences (rapide/lente) appellent la même fonction et se croisent :
+// un réseau dédoublonné contre le contenu du cache À CET INSTANT
+// gagnerait ou perdrait selon l'ordre d'arrivée, et le marqueur
+// changerait d'identifiant d'un cycle à l'autre. C'est la variante
+// exacte du piège déjà payé le 07/08 (cf. le bloc « ÉCRITURE EN PLACE »
+// plus haut), et ce serait pire ici : `user_watched.beacon_id` pointe
+// sur un id précis, une balise surveillée qui clignote est bien plus
+// grave qu'un doublon affiché.
+//
+// D'où : le cache garde TOUT, et l'arbitrage se fait à la PUBLICATION,
+// sur l'ensemble du cache, avec un ordre fixe. Conséquences voulues :
+//   · le résultat ne dépend pas de l'ordre des polls ;
+//   · `releves` (donc les alertes) continue de lire le cache complet —
+//     un pilote qui surveillait déjà le doublon perdant garde ses
+//     alertes, il ne retrouve simplement plus la balise sur la carte.
+//     Le contraire aurait cassé une surveillance en silence.
+//
+// L'ordre fixe est celui des deux listes de réseaux, rapides d'abord :
+// ce sont les réseaux de vol libre (holfuy, ffvl), ceux qui portent la
+// vraie balise de déco et son lien vers la page d'origine. Un relais
+// d'appoint ne doit jamais l'emporter sur eux.
+const WINDSMOBI_PROVIDER_RANK = new Map(
+  [...WINDSMOBI_PROVIDERS_FAST, ...WINDSMOBI_PROVIDERS_SLOW].map((p, i) => [p, i])
+);
+
+let windsmobiSelfDedupIds = new Set();
+let windsmobiSelfDedupAt = -1; // `windsmobiFetchedAt` du calcul mémorisé
+
+/** Ids winds.mobi masqués parce qu'un réseau mieux placé sert déjà la
+ *  même station physique. Recalculé une fois par rafraîchissement, pas
+ *  une fois par requête. */
+function windsmobiSelfDuplicates() {
+  if (windsmobiSelfDedupAt === windsmobiFetchedAt) return windsmobiSelfDedupIds;
+
+  // Même maillage que windsmobiIsDuplicate : cellules de 0,1° (~11 km),
+  // très au-dessus des 180 m cherchés, donc la cellule et ses 8 voisines
+  // suffisent.
+  const grid = new Map();
+  const drop = new Set();
+  const entries = [...windsmobiObsCache.entries()].sort((a, b) => {
+    const ra = WINDSMOBI_PROVIDER_RANK.get(a[1].reseau) ?? 99;
+    const rb = WINDSMOBI_PROVIDER_RANK.get(b[1].reseau) ?? 99;
+    // À réseau égal, l'id tranche : sans ce second critère l'ordre du
+    // Map ferait foi, et il dépend de l'ordre d'insertion — donc des
+    // polls, ce que tout ce bloc cherche justement à éviter.
+    if (ra !== rb) return ra - rb;
+    return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0;
+  });
+
+  for (const [id, o] of entries) {
+    if (!Number.isFinite(o.lat) || !Number.isFinite(o.lon)) continue;
+    const clat = Math.round(o.lat * 10), clon = Math.round(o.lon * 10);
+    let dup = false;
+    for (let dlat = -1; dlat <= 1 && !dup; dlat++) {
+      for (let dlon = -1; dlon <= 1 && !dup; dlon++) {
+        const cell = grid.get(`${clat + dlat},${clon + dlon}`);
+        if (!cell) continue;
+        for (const [klat, klon] of cell) {
+          if (fwHaversineKm(o.lat, o.lon, klat, klon) * 1000 < WINDSMOBI_DEDUP_M) { dup = true; break; }
+        }
+      }
+    }
+    if (dup) { drop.add(id); continue; }
+    const key = `${clat},${clon}`;
+    let cell = grid.get(key);
+    if (!cell) { cell = []; grid.set(key, cell); }
+    cell.push([o.lat, o.lon]);
+  }
+
+  windsmobiSelfDedupIds = drop;
+  windsmobiSelfDedupAt = windsmobiFetchedAt;
+  console.log(`windsmobiSelfDuplicates: ${drop.size} doublon(s) inter-réseaux masqué(s) sur ${windsmobiObsCache.size} balises`);
+  return drop;
+}
+
 async function fetchWindsmobi(path) {
   const r = await fetch(`${WINDSMOBI_API}${path}`, { headers: { 'user-agent': WINDSMOBI_UA } });
   if (!r.ok) {
@@ -5021,7 +5107,12 @@ app.get('/aemet-history/:id', async (req, res) => {
 // refreshWindsmobiProviders.
 function windsmobiStationsPayload() {
   const out = [];
+  // Un même point physique relayé par deux réseaux winds.mobi ne sort
+  // qu'une fois (10/08/2026) — cf. windsmobiSelfDuplicates, qui explique
+  // pourquoi l'arbitrage est ici et pas dans la boucle de refresh.
+  const dup = windsmobiSelfDuplicates();
   for (const [id, obs] of windsmobiObsCache) {
+    if (dup.has(id)) continue;
     if (obs.moy == null) continue;
     out.push({
       id, nom: obs.nom, lat: obs.lat, lon: obs.lon, alt: obs.alt,
