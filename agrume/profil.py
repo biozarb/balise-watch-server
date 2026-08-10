@@ -282,6 +282,28 @@ def _interp_uv(points, altitude):
     return (a["u"] + f * (b["u"] - a["u"]), a["v"] + f * (b["v"] - a["v"]))
 
 
+def decorer_vent(p):
+    """Ajoute `vitesseKmh` et `directionDeg` à un niveau, et arrondit u/v.
+
+    ⚠️ CETTE FONCTION EXISTE POUR N'AVOIR QU'UNE SEULE CONVENTION DE
+    DIRECTION DANS LE PROJET. Elle était écrite DEUX FOIS dans ce fichier
+    (colonne principale et maille fine), et le transect de l'étape 8 en
+    aurait fait une troisième. La convention météo — l'angle est celui
+    D'OÙ VIENT le vent, pas celui vers où il va — est exactement le genre
+    de détail qu'une copie finit par ne plus partager : une coupe et un
+    sondage qui donneraient 180° d'écart sur le même point seraient un
+    défaut long à voir et impossible à ignorer une fois vu.
+
+    Modifie `p` en place et le renvoie, pour pouvoir s'écrire aussi bien
+    sur un niveau qu'on possède que sur une copie (`decorer_vent(dict(p))`).
+    """
+    p["vitesseKmh"] = round(math.hypot(p["u"], p["v"]) * 3.6, 1)
+    p["directionDeg"] = round((270 - math.degrees(
+        math.atan2(p["v"], p["u"]))) % 360) % 360
+    p["u"], p["v"] = round(p["u"], 2), round(p["v"], 2)
+    return p
+
+
 def ecart_recouvrement(hauteur, isobares, z_s):
     """⚠️ LE TEST DE NON-RÉGRESSION DU LOT.
 
@@ -345,12 +367,7 @@ def assembler(hauteur, isobares, z_s):
 
     points.sort(key=lambda p: p["altitudeM"])
     for p in points:
-        spd = math.hypot(p["u"], p["v"])
-        p["vitesseKmh"] = round(spd * 3.6, 1)
-        # Convention météo : la direction D'OÙ VIENT le vent.
-        p["directionDeg"] = round((270 - math.degrees(
-            math.atan2(p["v"], p["u"]))) % 360) % 360
-        p["u"], p["v"] = round(p["u"], 2), round(p["v"], 2)
+        decorer_vent(p)          # convention météo, en UN seul endroit
     return points
 
 
@@ -424,11 +441,7 @@ def sonder(col, manifeste, i_balise, step, altitude_reelle=None):
             note=("maille 0,01° (~1,1 km) sur SON sol, qui n'est pas celui "
                   "de la colonne principale. Vent seul : la maille fine "
                   "n'expose ni température, ni humidité, ni TKE."),
-            points=[dict(p, vitesseKmh=round(math.hypot(p["u"], p["v"]) * 3.6, 1),
-                         directionDeg=round((270 - math.degrees(
-                             math.atan2(p["v"], p["u"]))) % 360) % 360,
-                         u=round(p["u"], 2), v=round(p["v"], 2))
-                    for p in fins]),
+            points=[decorer_vent(dict(p)) for p in fins]),
         # ⚠️ La marche entre les deux mailles, À HAUTEUR-SOL ÉGALE.
         # Publiée dans la réponse et pas seulement dans un banc : c'est
         # le critère d'acceptation de l'hybride, et il n'est pas tenu

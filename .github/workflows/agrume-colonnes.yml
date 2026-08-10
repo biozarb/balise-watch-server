@@ -100,6 +100,15 @@ jobs:
           python3 agrume/test_orographie.py
           python3 agrume/test_colonnes.py
           python3 agrume/test_grille.py
+          # ⚠️ Ces trois-là ne protègent PAS l'ingestion : ils protègent
+          # la LECTURE (profil, coupe, confrontation au ballon). Ils sont
+          # quand même ici parce que ce dépôt n'a pas d'autre CI, et
+          # qu'un banc qu'on ne lance jamais cesse de protéger quoi que
+          # ce soit. Le 10/08, `profil.py` a été refactoré et rien
+          # n'aurait rejoué son banc automatiquement.
+          python3 agrume/test_profil.py
+          python3 agrume/test_radiosondage.py
+          python3 agrume/test_transect.py
 
       - name: Ingérer les colonnes
         env:

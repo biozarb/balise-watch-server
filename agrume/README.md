@@ -9,10 +9,15 @@ provisoire et assumé comme tel.
 > Ouverte 2.0 interdit explicitement d'induire un tiers en erreur sur la
 > source ou la nature de l'information réutilisée.
 
-Ce paquet couvre les **étapes 2 à 4** de la séquence du lot H :
-l'orographie figée, le poller de run, et l'ingestion du produit A.
-Les étapes 5 et suivantes (sondage vertical servi, produit B, transect,
-composite PI) ne sont pas ici.
+Ce paquet couvre les **étapes 2 à 6 et 8** de la séquence du lot H :
+l'orographie figée, le poller de run, l'ingestion du produit A, le
+sondage vertical (et sa confrontation au radiosondage), le produit B, et
+la coupe verticale le long d'un segment.
+
+Ne sont **pas** ici : l'étape 7 (marche au raccord par vent fort —
+`marche_raccord.py` existe, mais la mesure attend un run venté, absent
+jusqu'au 14/08 au moins), le composite PI (9), le détecteur de front en
+altitude (10) et le calque altitude (11).
 
 ---
 
@@ -57,10 +62,15 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
 | `colonnes.py` | le produit A : conteneur, quantification, disposition |
 | `ingest_colonnes.py` | l'ingestion elle-même — un fichier sur le disque à la fois |
+| `grille.py` | le produit B : grille 3D du domaine, index et **purge sans jamais lister** |
 | `profil.py` | **le raccord vertical** : axe altitude-mer, masquage, mélange |
-| `sonder.py` | lire un profil, en tableau ou en JSON |
+| `sonder.py` | lire un profil en un point, en tableau ou en JSON |
+| `transect.py` | **la coupe verticale** le long d'un segment, découpée à la demande dans le produit B |
+| `couper.py` | lire une coupe, en dessin ASCII ou en JSON |
+| `radiosondage.py`, `confronter_sondage.py` | la confrontation au ballon (étape 5 bis) |
 | `marche_raccord.py` | **mesure** la marche entre les deux mailles (critère d'acceptation) |
-| `test_*.py` | cinq bancs hors-ligne, sans réseau ni clé |
+| `sonde_r2.py` | sonde de droits et de purge, sur R2 réel |
+| `test_*.py` | sept bancs hors-ligne, sans réseau ni clé |
 
 ---
 
@@ -72,6 +82,9 @@ python3 agrume/test_orographie.py [--stations /var/lib/bw-model-verif/stations.j
 python3 agrume/test_poller.py
 python3 agrume/test_colonnes.py
 python3 agrume/test_profil.py [--archive <colonnes.npz> <manifeste.json>]
+python3 agrume/test_radiosondage.py
+python3 agrume/test_grille.py
+python3 agrume/test_transect.py
 ```
 
 Tous tournent **sans réseau et sans clé**. Ils ne vérifient pas que le
@@ -95,6 +108,47 @@ en silence.
 - **quantifier l'axe d'altitude en float16** : le pas y vaut 4 m entre
   4 096 et 8 192 m, donc 2 m d'erreur — mesuré — sur l'axe même où l'on
   raccorde deux sources.
+
+---
+
+## La coupe verticale (étape 8, 10/08/2026)
+
+`transect.py` découpe une coupe **à la demande** dans le produit B —
+aucun catalogue n'est pré-calculé, et il n'y en aura pas : 40 transects
+de 200 points font 8 000 colonnes contre 5 185 pour la grille entière du
+domaine. Le catalogue serait plus lourd que la donnée.
+
+```
+python3 agrume/couper.py --archive g.npz g.json \
+        --de 45.60,5.90 --a 45.45,6.60 --echeance 3
+```
+
+**Trois choses à savoir avant de s'en servir :**
+
+- ⛔ **La coupe s'arrête à `solModèle + 3000 m`**, et ce plafond suit le
+  relief. Le produit B ne porte AUCUN niveau isobare — ils n'existent
+  qu'aux balises, dans le produit A.
+- ⚠️ **Plus proche voisin, aucune interpolation horizontale.** Demander
+  200 points sur 50 km donne une courbe lisse reposant sur ~25 colonnes.
+  La réponse porte donc toujours `nbPoints` **et**
+  `nbMaillesDistinctes`, plus le drapeau `escalier`.
+- ⚠️ **Pas de rééchantillonnage vertical.** Chaque colonne est servie sur
+  SON sol ; l'interpolation à altitude-mer constante est le travail du
+  calque altitude (étape 11) et ne sera écrite qu'une fois.
+
+**Vérifié le 10/08 sur le run `2026-08-10T09:00:00Z`** : sur 875
+colonnes (125 balises × 7 échéances, 21 875 niveaux), la colonne lue
+dans le produit B par `transect.colonne()` est **identique à celle du
+produit A** lue par `profil.niveaux_hauteur()`, au même arrondi de
+publication près. Les deux passent par des chemins d'indexation
+totalement différents — indice plat calculé depuis les métadonnées du
+GRIB d'un côté, plus proche voisin sur les axes publiés de l'autre.
+
+ⓘ **Un commentaire démenti par son propre banc** : `point_intermediaire`
+annonçait que l'orthodromie et la droite lat/lon « ne diffèrent que de
+quelques dizaines de mètres ». Mesuré : **1 215 m sur la diagonale du
+domaine** (0,62 maille), 70 m sur 55 km. La réponse publie désormais
+`ecartDroiteLatLonM` pour chaque segment demandé.
 
 ---
 
