@@ -1,0 +1,70 @@
+{
+  "produit": "AGRUME — orographie du modèle, figée",
+  "ecrit_le": "2026-08-10T09:13:34Z",
+  "run_source": "2026-08-10T03:00:00Z",
+  "eccodes": "2.48.0",
+  "domaine": {
+    "latmin": 44.8,
+    "latmax": 46.3,
+    "lonmin": 5.5,
+    "lonmax": 7.6
+  },
+  "grilles": {
+    "001": {
+      "paquet": "SP3",
+      "cle_s3": "pnt/2026-08-10T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T03:00:00Z.grib2",
+      "octets_source": 7506816,
+      "meta": {
+        "Ni": 2801,
+        "Nj": 1791,
+        "lat0": 55.4,
+        "lon0": -12.0,
+        "di": 0.01,
+        "dj": 0.01,
+        "jScan": 0
+      },
+      "j0": 910,
+      "i0": 1750,
+      "nj": 151,
+      "ni": 211,
+      "sha256": "37a204257be84a58c470e364657e624bb06967f50e3ef762c7ef75f859fa6a1c",
+      "z_min": 163.0,
+      "z_med": 1371.7,
+      "z_max": 4220.5
+    },
+    "0025": {
+      "paquet": "SP2",
+      "cle_s3": "pnt/2026-08-10T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T03:00:00Z.grib2",
+      "octets_source": 43398450,
+      "meta": {
+        "Ni": 1121,
+        "Nj": 717,
+        "lat0": 55.4,
+        "lon0": -12.0,
+        "di": 0.025,
+        "dj": 0.025,
+        "jScan": 0
+      },
+      "j0": 364,
+      "i0": 700,
+      "nj": 61,
+      "ni": 85,
+      "sha256": "0fdd9a4bb88ad194b2f42feea553a52bae12122cfcec4434ccd7f46530c57c31",
+      "z_min": 167.9,
+      "z_med": 1368.5,
+      "z_max": 3887.4
+    }
+  },
+  "ecart_0025_moins_001": {
+    "n": 3621,
+    "d1": -169.3,
+    "q1": -64.6,
+    "mediane": -0.0,
+    "q3": 62.2,
+    "d9": 176.4,
+    "abs_median": 63.6,
+    "abs_max": 747.2,
+    "part_au_dela_100m": 36.3
+  },
+  "note": "Champ `h` (surface), STATIQUE. ⚠️ Le paquet CHANGE avec la grille : 001/SP3 mais 0025/SP2 — 0025/SP3 existe et ne contient aucune orographie. Régénérer avec `python3 agrume/freeze_orographie.py`."
+}
