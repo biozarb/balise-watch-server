@@ -26,14 +26,25 @@ signature. La destination se choisit par variable d'environnement :
   WIND_GRID_BUCKET optionnel, défaut wind-grid
   DRY_RUN=1 pour tester le calcul/tuilage sans rien téléverser.
 """
-import os, re, sys, json, math, time, tempfile, urllib.parse, urllib.request
-import xml.etree.ElementTree as ET
+import os, sys, json, math, time
 from datetime import datetime, timezone, timedelta
 from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
                      codes_release)
 
+# 10/08/2026 (lot H) — `http_get`, `s3_keys`, `covered_steps` et
+# `download_tmp` vivaient ICI. Elles sont maintenant dans
+# `tools/mf_s3.py`, À L'IDENTIQUE, parce que le poller de run d'AGRUME en
+# a besoin et que la consigne du lot est « étendre, ne pas réécrire ».
+# Même motif que `tools/storage.py` le 03/08 (cinq copies de sb_upload
+# réunies en un module). Aucun appelant de ce fichier ne change.
+# ⚠️ `S3` reste importé sous son nom historique : plusieurs commentaires
+# et le message de log y font référence.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "tools"))
+from mf_s3 import (S3, bornes_echeances, covered_steps,   # noqa: E402,F401
+                   download_tmp, est_fichier_horaire, http_get, s3_keys)
+
 # ── Config (à garder synchronisé avec web/src/lib/config.ts) ──────────
-S3         = "https://meteofrance-pnt.s3.rbx.io.cloud.ovh.net"
 MODEL_DIR  = "arome"
 # Grilles AROME différenciées (retour Yann 19/07, "épouser le relief") :
 #  - sol : grille 001 = 0,01° (~1,1 km), la HAUTE RÉSOLUTION AROME. C'est
@@ -211,33 +222,7 @@ BUCKET  = os.environ.get("WIND_GRID_BUCKET", "wind-grid")
 # construit en tête de `main()`, juste après le dimensionnement.
 
 # ── HTTP / S3 helpers ─────────────────────────────────────────────────
-def http_get(url, timeout=180):
-    req = urllib.request.Request(url, headers={"User-Agent": "balise-watch-arome/1"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
-
-def s3_keys(prefix):
-    """Liste les clés d'objets sous un préfixe (S3 ListObjectsV2)."""
-    url = f"{S3}/?list-type=2&prefix={urllib.parse.quote(prefix)}&max-keys=1000"
-    root = ET.fromstring(http_get(url, 60))
-    return [e.text for e in root.iter() if e.tag.split('}')[-1] == "Key"]
-
-def covered_steps(ref, pkg, grid, steps_needed):
-    """Sous-ensemble de `steps_needed` réellement couvert par les fichiers
-    DÉJÀ PUBLIÉS du paquet `pkg`/grille `grid` pour ce run. Simple listing
-    S3 (quelques ko), aucun téléchargement — c'est ce qui rend pick_run()
-    abordable (même helper que arome-thermal/ingest.py::pick_run,
-    25/07/2026)."""
-    want = set(steps_needed)
-    covered = set()
-    for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{grid}/{pkg}/"):
-        m = re.search(r"__(\d+)H(?:(\d+)H)?__", k)
-        if not m:
-            continue
-        start = int(m.group(1))
-        end = int(m.group(2)) if m.group(2) else start
-        covered |= {h for h in want if start <= h <= end}
-    return covered
+# (déplacés dans `tools/mf_s3.py`, cf. l'import en tête de fichier)
 
 def pick_run():
     """Run AROME offrant le PLUS d'échéances réellement publiées, à la fois
@@ -302,16 +287,20 @@ def files_for(ref, pkg, grid):
     (`__00H06H__`), la grille 001 publie UN FICHIER PAR HEURE (`__06H__`).
     Pour cette dernière on ne télécharge que les échéances effectivement
     gardées (keep_step) — sinon on tirerait 49 fichiers de ~23 Mo pour n'en
-    exploiter que 25, soit ~550 Mo de trafic pour rien."""
+    exploiter que 25, soit ~550 Mo de trafic pour rien.
+
+    10/08/2026 : le décodage du nom de fichier passe par
+    `mf_s3.bornes_echeances()` — une seule expression régulière pour tout
+    le projet, au lieu d'une par appelant."""
     out = []
     for k in s3_keys(f"pnt/{ref}/{MODEL_DIR}/{grid}/{pkg}/"):
-        m = re.search(r"__(\d+)H(?:(\d+)H)?__", k)
-        if not m:
+        b = bornes_echeances(k)
+        if b is None:
             continue
-        start, end = int(m.group(1)), m.group(2)
+        start, end = b
         if start > MAX_HOURS:
             continue
-        if end is None and not keep_step(start):
+        if est_fichier_horaire(k) and not keep_step(start):
             continue                       # fichier horaire non retenu
         out.append(k)
     return sorted(out)
@@ -481,8 +470,6 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
 # laisserait un navigateur — ou un edge CDN, hors de portée du client —
 # servir une grille périmée bien après un nouveau run, hard-refresh sans
 # effet (cf. BUGS.md, session 23-24/07).
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                os.pardir, "tools"))
 from storage import (Storage, verifier_dimensionnement, Abort,   # noqa: E402
                      CACHE_REECRIT, CACHE_IMMUABLE)
 
@@ -493,23 +480,6 @@ STORE = None
 
 def sb_upload(path, body, cache_control=CACHE_REECRIT):
     return STORE.put(path, body, cache_control=cache_control)
-
-def download_tmp(key):
-    """Télécharge un objet S3 (gros GRIB) vers un fichier temporaire."""
-    url = f"{S3}/{urllib.parse.quote(key)}"
-    fd, path = tempfile.mkstemp(suffix=".grib2")
-    os.close(fd)
-    t0 = time.time()
-    with urllib.request.urlopen(urllib.request.Request(
-            url, headers={"User-Agent": "balise-watch-arome/1"}), timeout=300) as r, \
-            open(path, "wb") as out:
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                break
-            out.write(chunk)
-    print(f"  ↓ {key.split('/')[-1]} ({os.path.getsize(path)//(1<<20)} Mo, {time.time()-t0:.1f}s)")
-    return path
 
 def merge_parse(files, want):
     merged, meta = {}, None
