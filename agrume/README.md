@@ -16,8 +16,14 @@ la coupe verticale le long d'un segment.
 
 Ne sont **pas** ici : l'étape 7 (marche au raccord par vent fort —
 `marche_raccord.py` existe, mais la mesure attend un run venté, absent
-jusqu'au 14/08 au moins), le composite PI (9), le détecteur de front en
-altitude (10) et le calque altitude (11).
+jusqu'au 14/08 au moins), le composite PI (9) et le calque altitude (11).
+
+⚠️ **L'étape 10 y est à moitié seulement, et c'est délibéré.** Le
+détecteur de front n'est PAS dans ce paquet : il vit dans `gust-front.js`
+et il n'a pas été réécrit. `front_altitude.py` lui fabrique une entrée
+par niveau, `tools/gust-front-altitude-replay.js` le rejoue. Deux
+implémentations d'un même fit divergeraient — c'est le défaut payé deux
+fois le 10/08.
 
 ---
 
@@ -70,7 +76,8 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `radiosondage.py`, `confronter_sondage.py` | la confrontation au ballon (étape 5 bis) |
 | `marche_raccord.py` | **mesure** la marche entre les deux mailles (critère d'acceptation) |
 | `sonde_r2.py` | sonde de droits et de purge, sur R2 réel |
-| `test_*.py` | sept bancs hors-ligne, sans réseau ni clé |
+| `front_altitude.py` | **étape 10** : fabrique, pour un niveau AGL donné, la grille au format que `gfDetectModel` attend — et ne détecte rien lui-même |
+| `test_*.py` | huit bancs hors-ligne, sans réseau ni clé |
 
 ---
 

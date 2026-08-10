@@ -132,5 +132,36 @@ check('front sans convection typé synoptique',
   synRes.front != null && synRes.front.kind === 'synoptique',
   synRes.front ? synRes.front.kind : 'non détecté');
 
+// ── Les seuils surchargeables (étape 10) NE CHANGENT RIEN par défaut ─
+//  ⚠️ C'est le seul contrôle qui protège la PRODUCTION du travail de
+//  l'étape 10. `gfDetectModel` accepte désormais un troisième argument
+//  pour rejouer le détecteur sur un niveau où la rafale n'existe pas.
+//  Un défaut qui aurait glissé ne se verrait nulle part : le détecteur
+//  continuerait de tourner, en détectant simplement autre chose.
+const memeQueDefaut = gf.gfDetectModel(grid, NOW, {});
+check('opts vide = comportement par défaut, au R² près',
+  memeQueDefaut.front != null && Math.abs(memeQueDefaut.front.r2 - f.r2) < 1e-12,
+  memeQueDefaut.front ? memeQueDefaut.front.r2.toFixed(6) : 'non détecté');
+check('les trois seuils par défaut valent ceux du module',
+  (() => {
+    const a = gf.gfDetectModel(grid, NOW,
+      { gustMinKmh: 45, dvMinKmh: 15, dthetaMinDeg: 40 });
+    return a.front != null && a.front.stationCount === f.stationCount;
+  })(), `${f.stationCount} points`);
+// Et la surcharge doit VRAIMENT agir, sinon le contrôle ci-dessus
+// passerait aussi pour un paramètre ignoré.
+const verrouille = gf.gfDetectModel(grid, NOW, { gustMinKmh: 10000 });
+check('un verrou rafale inatteignable éteint la détection',
+  verrouille.front === null, `raison : ${verrouille.reason}`);
+// ⓘ Les trois seuils ensemble : la journée calme du contrôle précédent
+// est sous les 45 km/h de rafale PARTOUT, donc ouvrir les seuls seuils
+// de vent ne changerait rien — le verrou rafale bloquerait d'abord, et
+// ce contrôle passerait au vert sans rien avoir prouvé.
+const ouvert = gf.gfDetectModel(calm, NOW,
+  { gustMinKmh: 0, dvMinKmh: 0, dthetaMinDeg: 0 });
+check('des seuils nuls ouvrent la détection là où le défaut refusait',
+  (ouvert.candidates || []).length > (calmRes.candidates || []).length,
+  `${(calmRes.candidates || []).length} → ${(ouvert.candidates || []).length} candidats`);
+
 console.log(`\n${failures === 0 ? 'Tous les contrôles passent.' : `${failures} contrôle(s) en échec.`}\n`);
 process.exit(failures === 0 ? 0 : 1);

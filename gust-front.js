@@ -666,10 +666,26 @@ function med3(a, b, c) {
  * @param {{lats:number[],lons:number[],times:string[],vars:object}} grid
  * @param {number} now epoch ms
  */
-function gfDetectModel(grid, now) {
+function gfDetectModel(grid, now, opts = {}) {
   if (!grid || !Array.isArray(grid.times) || !grid.times.length) {
     return { front: null, reason: 'no_grid', candidates: [] };
   }
+  // ⚠️ ÉTAPE 10 du lot H — le verrou rafale est un SEUIL, pas une donnée.
+  // Il est surchargeable parce que la rafale n'existe QU'À 10 m (mesuré,
+  // partout) : rejouer ce détecteur sur le vent à 1 000 m/sol demande de
+  // pouvoir dire « ne me bloque pas sur un champ que ce niveau ne porte
+  // pas ». Le défaut est INCHANGÉ et aucun appelant de production ne
+  // passe `opts` ; `tools/gust-front-model-selftest.js` le vérifie.
+  const gustMin = opts.gustMinKmh ?? GF_MODEL_GUST_KMH;
+  // ⚠️ ET LE MÊME RAISONNEMENT POUR LE SAUT DE VENT, qui est le piège de
+  // l'étape 10 : à 1 000 m/sol le vent est plus fort qu'à 10 m, donc un
+  // seuil ABSOLU de 15 km/h s'y franchit plus souvent — à organisation
+  // du champ strictement identique. Sans pouvoir balayer ce seuil, on
+  // lirait « le signal est plus propre en altitude » là où il n'y aurait
+  // que « le vent y est plus fort ». C'est la leçon de l'étape 7, écart
+  // ABSOLU contre écart RELATIF, appliquée ici.
+  const dvMin = opts.dvMinKmh ?? GF_MODEL_DV_KMH;
+  const dthetaMin = opts.dthetaMinDeg ?? GF_MODEL_DTHETA_DEG;
   const { lats, lons, times, vars } = grid;
   const nLon = lons.length;
   const stepMs = times.map(t => Date.parse(t));
@@ -706,7 +722,7 @@ function gfDetectModel(grid, now) {
       const dir = vars.dir[s]?.[k];
       const gust = vars.gust[s]?.[k];
       if (spd == null || dir == null || gust == null) continue;
-      if (gust < GF_MODEL_GUST_KMH) continue;
+      if (gust < gustMin) continue;
 
       const base = med3(vars.spd[s - 1]?.[k], vars.spd[s - 2]?.[k], vars.spd[s - 3]?.[k]);
       const prevDir = vars.dir[s - 1]?.[k];
@@ -714,7 +730,7 @@ function gfDetectModel(grid, now) {
 
       const dV = spd - base;
       const dTheta = angDiff(dir, prevDir);
-      if (dV < GF_MODEL_DV_KMH || Math.abs(dTheta) < GF_MODEL_DTHETA_DEG) continue;
+      if (dV < dvMin || Math.abs(dTheta) < dthetaMin) continue;
 
       // Bonus non bloquants — ils ne conditionnent pas la détection, ils
       // renseignent la confiance et le typage.
@@ -754,7 +770,11 @@ function gfDetectModel(grid, now) {
     minPoints: GF_MODEL_MIN_POINTS,
   });
   if (!built.front) {
-    return { front: null, reason: built.reason, candidates, count: built.count };
+    // `r2` est remonté même en échec : c'est LE chiffre que l'étape 10
+    // compare d'un niveau à l'autre, et un `poor_fit` sans son R² ne dit
+    // pas si le fit a raté de peu ou de tout.
+    return { front: null, reason: built.reason, candidates,
+             count: built.count, r2: built.r2 ?? null };
   }
 
   const f = built.front;
