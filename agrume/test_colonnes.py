@@ -40,7 +40,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 import colonnes as C  # noqa: E402
 import ingest_colonnes as I  # noqa: E402
-from domaine import GRID_3D, GRID_FINE, NIVEAUX_H_001, NIVEAUX_H_0025  # noqa: E402
+from domaine import (GRID_3D, GRID_FINE, NIVEAUX_H_001,  # noqa: E402
+                     NIVEAUX_H_0025, NIVEAUX_P, NIVEAUX_P_TOUS)
 
 echecs = []
 
@@ -254,6 +255,75 @@ def main():
         taille = p.stat().st_size
         verifier("une archive de 3 balises tient en quelques kilo-octets",
                  taille < 50_000, f"{taille / 1024:.1f} Ko")
+
+    print("\n── ⚠️ L'ALTITUDE DES ISOBARES NE PASSE PAS PAR LE float16 ──")
+    # Le float16 a un pas RELATIF de ~0,05 % : à 7 000 m ça fait 8 m. Or
+    # cet axe porte le raccord et sert à discuter d'écarts d'orographie de
+    # quelques dizaines de mètres. Et contrairement aux kelvins, aucun
+    # décalage ne sauve : une altitude va de 0 à 7 000 m.
+    alt = rng.uniform(0, 7500, 20000)
+    e16 = C.erreur_quantification(alt, C.PARAM_ALTITUDE, np.float16)
+    e32 = C.erreur_quantification(alt, C.PARAM_ALTITUDE, np.float32)
+    # ⓘ 2,00 m exactement, et ce n'est pas un hasard : entre 4 096 et
+    # 8 192 m le pas du float16 vaut 4 m, donc l'arrondi coûte au pire la
+    # moitié. Le seuil est posé sous cette valeur pour que le test dise
+    # « des mètres » et pas « exactement 2,00 », qui serait un test de
+    # l'implémentation du float16 plutôt que de notre choix.
+    verifier("en float16, l'altitude perd des MÈTRES",
+             e16 >= 1.0, f"{e16:.2f} m")
+    verifier("en float32, elle perd un millimètre au plus",
+             e32 < 0.01, f"{e32 * 1000:.3f} mm")
+    verifier("⚠️ le float32 fait au moins 20 fois mieux — c'est ce qui "
+             "justifie les 175 Ko de plus par run",
+             e16 / max(e32, 1e-12) > 20,
+             f"rapport ×{e16 / max(e32, 1e-12):.0f}")
+    verifier("le plafond physique attrape une altitude absurde",
+             bool(np.isnan(C.quantifier(np.array([1e6]), C.PARAM_ALTITUDE,
+                                        np.float32)[0])))
+
+    print("\n── Les isobares dans le conteneur ─────────────────────────")
+    col2 = C.Colonnes("R", b, [0, 1])
+    verifier("ciso en float16, ziso en float32",
+             col2.ciso.dtype == np.float16 and col2.ziso.dtype == np.float32,
+             f"{col2.ciso.dtype} / {col2.ziso.dtype}")
+    verifier("14 niveaux isobares retenus sur les 24 publiés",
+             col2.ciso.shape[2] == 14 and len(NIVEAUX_P_TOUS) == 24)
+    verifier("⚠️ la bande monte à 400 hPa, pas 500 — sinon les balises "
+             "les plus hautes n'auraient RIEN au-dessus de z_s + 3000",
+             min(NIVEAUX_P) == 400)
+    j = NIVEAUX_P.index(700)
+    col2.poser_isobare("zp", 700, 0, np.array([1000.0, 2000.0, 3000.0]))
+    verifier("`zp` va dans ziso…",
+             list(np.asarray(col2.ziso[:, j, 0])) == [1000.0, 2000.0, 3000.0])
+    verifier("…et NULLE PART dans ciso (l'axe ne passe pas par le float16)",
+             not np.isfinite(np.asarray(col2.ciso, dtype=np.float32)).any())
+    col2.poser_isobare("u", 700, 0, np.array([5.0, 6.0, 7.0], dtype=np.float16))
+    verifier("les autres paramètres vont dans ciso",
+             float(col2.ciso[0, 0, j, 0]) == 5.0)
+    m2 = col2.manifeste()
+    verifier("le manifeste porte les niveaux isobares",
+             m2["niveaux"]["isobares_hPa"] == list(NIVEAUX_P))
+    verifier("il dit que les niveaux souterrains sont archivés mais à masquer",
+             "masqués à la lecture" in m2["avertissement"])
+    verifier("le remplissage distingue les isobares de leur altitude",
+             "isobares" in m2["remplissage"]
+             and "altitude_iso" in m2["remplissage"])
+
+    with tempfile.TemporaryDirectory() as d:
+        p2 = Path(d) / "c.npz"
+        col2.ecrire_npz(p2)
+        relu, _ = C.Colonnes.lire_npz(p2, m2)
+        verifier("l'altitude isobare survit au disque SANS perte",
+                 float(relu.ziso[1, j, 0]) == 2000.0)
+        # Une archive écrite avant l'étape 5 n'a ni ciso ni ziso.
+        p3 = Path(d) / "vieux.npz"
+        np.savez_compressed(p3, c0025=col2.c0025, c001=col2.c001,
+                            echeances=np.asarray(col2.steps, dtype=np.int16))
+        vieux, _ = C.Colonnes.lire_npz(p3, m2)
+        verifier("⚠️ une archive d'AVANT les isobares se relit quand même",
+                 vieux.c0025.shape == col2.c0025.shape
+                 and not np.isfinite(np.asarray(vieux.ziso,
+                                                dtype=np.float32)).any())
 
     print("\n── ⚠️ Le vent se compare par u/v, JAMAIS par l'angle ──────")
     # Critère d'acceptation du lot : « vérifié sur une colonne traversant

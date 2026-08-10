@@ -55,7 +55,8 @@ import json
 
 import numpy as np
 
-from domaine import (GRID_3D, GRID_FINE, NIVEAUX_H_001, NIVEAUX_H_0025,
+from domaine import (GRID_3D, GRID_FINE, NIVEAUX_P,  # noqa: F401
+                     NIVEAUX_H_001, NIVEAUX_H_0025,
                      dans_domaine)
 
 
@@ -115,9 +116,53 @@ PARAMS_001 = (
          unite="m/s", decalage=0.0, tolerance=0.02),
 )
 
+# ── Les paramètres isobares ───────────────────────────────────────────
+# Mêmes cinq champs que sur les niveaux hauteur, plus l'altitude — qui
+# est ici une VARIABLE et non une constante : un niveau « 700 hPa » n'est
+# pas à la même altitude d'un point à l'autre ni d'une heure à l'autre.
+# C'est `z` qui porte l'axe vertical de toute la moitié haute du profil.
+PARAMS_ISO = (
+    dict(nom="u", court="u", court_10m=None, paquet="IP1", unite="m/s",
+         decalage=0.0, tolerance=0.02),
+    dict(nom="v", court="v", court_10m=None, paquet="IP1", unite="m/s",
+         decalage=0.0, tolerance=0.02),
+    dict(nom="t", court="t", court_10m=None, paquet="IP1", unite="°C",
+         decalage=-273.15, tolerance=0.05),
+    dict(nom="r", court="r", court_10m=None, paquet="IP1", unite="%",
+         decalage=0.0, tolerance=0.05),
+)
+
+# ⚠️⚠️ L'ALTITUDE DES NIVEAUX ISOBARES EST STOCKÉE EN float32, PAS EN
+# float16, ET C'EST LE MÊME PIÈGE QUE LES KELVINS EN PIRE.
+#
+# Le float16 a 10 bits de mantisse, donc un pas RELATIF de ~0,1 %. Entre
+# 4 096 et 8 192 m, le pas vaut **4 mètres**, soit une erreur d'arrondi
+# pouvant atteindre **2 m** — mesuré, pas déduit : `test_colonnes.py`
+# donne 2,00 m d'erreur maximale sur 20 000 tirages entre 0 et 7 500 m,
+# contre 0,24 millimètre en float32.
+#
+# ⚠️ Deux mètres, ce n'est pas énorme dans l'absolu — mais cet axe est
+# celui sur lequel on RACCORDE deux sources et sur lequel on discute
+# d'écarts d'orographie de quelques dizaines de mètres. Y mettre du bruit
+# de quantification, c'est en mettre exactement là où on cherche du
+# signal. Et contrairement à la température, aucun décalage ne sauve :
+# une altitude va de 0 à 7 500 m, on ne peut pas la recentrer.
+#
+# Le coût de la précision est dérisoire : 14 niveaux × 125 balises ×
+# 25 échéances × 4 o = **175 Ko par run**. `test_colonnes.py` mesure
+# l'erreur des deux dtypes et échoue si float32 ne fait pas au moins
+# vingt fois mieux (mesuré : ×8 192).
+DTYPE_ALTITUDE = "float32"
+
 SENTINELLE = 9999.0     # eccodes marque ainsi les points manquants
 PLAFOND_PHYSIQUE = {"u": 200.0, "v": 200.0, "t": 100.0, "r": 110.0,
-                    "tke": 500.0}
+                    "tke": 500.0, "zp": 20000.0}
+
+# Paramètre fictif décrivant l'altitude géopotentielle, pour que
+# `quantifier()` lui applique les mêmes garde-fous qu'aux autres (NaN,
+# sentinelle, plafond physique) sans la faire passer par le float16.
+PARAM_ALTITUDE = dict(nom="zp", court="z", court_10m=None, paquet="IP1",
+                      unite="m", decalage=0.0, tolerance=0.5)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -200,7 +245,7 @@ def verifier_grille(meta_attendue, meta_recue, quoi):
 # ══════════════════════════════════════════════════════════════════════
 #  Quantification
 # ══════════════════════════════════════════════════════════════════════
-def quantifier(valeurs, param):
+def quantifier(valeurs, param, dtype=np.float16):
     """float64 (unité GRIB) → float16 (unité d'archive), avec décalage.
 
     Les points manquants (NaN, ou la sentinelle 9999 d'eccodes) et les
@@ -218,14 +263,16 @@ def quantifier(valeurs, param):
     if plafond is not None:
         mauvais |= np.abs(a) > plafond
     a = np.where(mauvais, np.nan, a)
-    return a.astype(np.float16)
+    return a.astype(dtype)
 
 
-def erreur_quantification(valeurs, param):
-    """Erreur maximale introduite par le float16, dans l'unité d'archive.
-    Sert au banc : on MESURE la perte plutôt que de la supposer."""
+def erreur_quantification(valeurs, param, dtype=np.float16):
+    """Erreur maximale introduite par la quantification, dans l'unité
+    d'archive. Sert au banc : on MESURE la perte plutôt que de la
+    supposer — c'est ainsi qu'on a vu qu'une température en kelvins perd
+    un facteur 8, et qu'une altitude en float16 perd 8 mètres à 7 000."""
     a = np.asarray(valeurs, dtype=np.float64) + param["decalage"]
-    return float(np.nanmax(np.abs(a - a.astype(np.float16).astype(np.float64))))
+    return float(np.nanmax(np.abs(a - a.astype(dtype).astype(np.float64))))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -243,13 +290,24 @@ class Colonnes:
         c001  : (balise, paramètre, niveau, échéance)  float16
                 paramètres = PARAMS_001 (u, v)
                 niveaux    = NIVEAUX_H_001 (4 : 10, 20, 50, 100 m/sol)
+        ciso  : (balise, paramètre, niveau, échéance)  float16
+                paramètres = PARAMS_ISO (u, v, t, r)
+                niveaux    = NIVEAUX_P (14, de 1000 à 400 hPa)
+        ziso  : (balise, niveau, échéance)             **float32**
+                l'ALTITUDE-MER de chaque niveau isobare, en mètres
 
-    ⚠️ Les niveaux sont AGL — au-dessus du sol DU MODÈLE. L'axe
+    ⚠️ Les niveaux hauteur sont AGL — au-dessus du sol DU MODÈLE. L'axe
     altitude-mer se reconstruit avec `z_001` / `z_0025`, qui sont dans le
     manifeste, balise par balise :
         altitude_ASL = z_<maille>[balise] + niveau
     Servir un niveau sans dire à quel sol il se rapporte serait faux de
     plusieurs centaines de mètres en montagne.
+
+    ⚠️ Les niveaux ISOBARES, eux, sont déjà absolus — mais leur altitude
+    est une VARIABLE, pas une constante : « 700 hPa » n'est pas à la même
+    altitude d'un point à l'autre ni d'une heure à l'autre. D'où `ziso`,
+    qui est le seul tableau en float32 de toute l'archive (cf.
+    `DTYPE_ALTITUDE`).
     """
 
     def __init__(self, run, balises, steps):
@@ -261,10 +319,15 @@ class Colonnes:
                              np.nan, dtype=np.float16)
         self.c001 = np.full((nb, len(PARAMS_001), len(NIVEAUX_H_001), ns),
                             np.nan, dtype=np.float16)
+        self.ciso = np.full((nb, len(PARAMS_ISO), len(NIVEAUX_P), ns),
+                            np.nan, dtype=np.float16)
+        self.ziso = np.full((nb, len(NIVEAUX_P), ns), np.nan, dtype=np.float32)
         self.i_niveau_0025 = {n: k for k, n in enumerate(NIVEAUX_H_0025)}
         self.i_niveau_001 = {n: k for k, n in enumerate(NIVEAUX_H_001)}
+        self.i_niveau_p = {n: k for k, n in enumerate(NIVEAUX_P)}
         self.i_param_0025 = {p["nom"]: k for k, p in enumerate(PARAMS_0025)}
         self.i_param_001 = {p["nom"]: k for k, p in enumerate(PARAMS_001)}
+        self.i_param_iso = {p["nom"]: k for k, p in enumerate(PARAMS_ISO)}
         self.i_step = {s: k for k, s in enumerate(self.steps)}
 
     def poser(self, grille, param_nom, niveau, step, valeurs_balises):
@@ -275,6 +338,15 @@ class Colonnes:
             self.c001[:, self.i_param_001[param_nom],
                       self.i_niveau_001[niveau], self.i_step[step]] = valeurs_balises
 
+    def poser_isobare(self, param_nom, niveau, step, valeurs_balises):
+        """⚠️ `zp` va dans `ziso` (float32) et NULLE PART ailleurs : c'est
+        l'axe vertical, il ne passe pas par le float16."""
+        if param_nom == "zp":
+            self.ziso[:, self.i_niveau_p[niveau], self.i_step[step]] = valeurs_balises
+        else:
+            self.ciso[:, self.i_param_iso[param_nom],
+                      self.i_niveau_p[niveau], self.i_step[step]] = valeurs_balises
+
     # ── Complétude ────────────────────────────────────────────────────
     def remplissage(self):
         """Part de cases NON vides, par maille. Un run partiel n'est pas
@@ -283,7 +355,8 @@ class Colonnes:
         score faussé des semaines plus tard."""
         def part(a):
             return float(np.isfinite(a.astype(np.float32)).mean()) if a.size else 0.0
-        return {GRID_3D: part(self.c0025), GRID_FINE: part(self.c001)}
+        return {GRID_3D: part(self.c0025), GRID_FINE: part(self.c001),
+                "isobares": part(self.ciso), "altitude_iso": part(self.ziso)}
 
     def remplissage_par_parametre(self):
         """Le même compte, paramètre par paramètre — et c'est celui qui
@@ -298,11 +371,14 @@ class Colonnes:
         """
         def part(a):
             return round(float(np.isfinite(a.astype(np.float32)).mean()), 4)
-        out = {GRID_3D: {}, GRID_FINE: {}}
+        out = {GRID_3D: {}, GRID_FINE: {}, "isobares": {}}
         for k, p in enumerate(PARAMS_0025):
             out[GRID_3D][p["nom"]] = part(self.c0025[:, k])
         for k, p in enumerate(PARAMS_001):
             out[GRID_FINE][p["nom"]] = part(self.c001[:, k])
+        for k, p in enumerate(PARAMS_ISO):
+            out["isobares"][p["nom"]] = part(self.ciso[:, k])
+        out["isobares"]["altitude"] = part(self.ziso)
         return out
 
     # ── Sérialisation ─────────────────────────────────────────────────
@@ -311,15 +387,23 @@ class Colonnes:
             produit="AGRUME produit A — colonnes verticales aux balises",
             run=self.run,
             echeances=self.steps,
-            niveaux={GRID_3D: list(NIVEAUX_H_0025), GRID_FINE: list(NIVEAUX_H_001)},
+            niveaux={GRID_3D: list(NIVEAUX_H_0025),
+                     GRID_FINE: list(NIVEAUX_H_001),
+                     "isobares_hPa": list(NIVEAUX_P)},
             parametres={
                 GRID_3D: [dict(nom=p["nom"], unite=p["unite"],
                                paquet=p["paquet"]) for p in PARAMS_0025],
                 GRID_FINE: [dict(nom=p["nom"], unite=p["unite"],
-                                 paquet=p["paquet"]) for p in PARAMS_001]},
-            disposition="(balise, parametre, niveau, echeance) en float16",
-            reference_verticale=("niveaux AGL au-dessus du sol MODÈLE ; "
-                                 "altitude_ASL = z_<maille>[balise] + niveau"),
+                                 paquet=p["paquet"]) for p in PARAMS_001],
+                "isobares": [dict(nom=p["nom"], unite=p["unite"],
+                                  paquet=p["paquet"]) for p in PARAMS_ISO]},
+            disposition=("(balise, parametre, niveau, echeance) en float16 ; "
+                         "ziso = (balise, niveau, echeance) en float32"),
+            reference_verticale=("niveaux hauteur AGL au-dessus du sol "
+                                 "MODÈLE : altitude_ASL = z_<maille>[balise] "
+                                 "+ niveau. Niveaux isobares déjà absolus, "
+                                 "leur altitude est dans `ziso` (m, float32) "
+                                 "et varie dans le temps et l'espace."),
             balises=self.balises,
             remplissage=self.remplissage(),
             remplissage_par_parametre=self.remplissage_par_parametre(),
@@ -329,13 +413,17 @@ class Colonnes:
                 "de lecture : sa marche n'est pas encore mesurée (point 7 de "
                 "la séquence du lot H). 35 m et 75 m n'existent PAS en "
                 "maille fine. La TKE n'existe PAS à l'échéance 0 (mesuré) : "
-                "un remplissage < 100 % sur elle seule est normal."))
+                "un remplissage < 100 % sur elle seule est normal. Les "
+                "niveaux isobares sous le sol du modèle sont ARCHIVÉS mais "
+                "physiquement vides de sens : ils doivent être masqués à la "
+                "lecture (altitude < z_<maille>[balise])."))
         if extra:
             m.update(extra)
         return m
 
     def ecrire_npz(self, chemin):
         np.savez_compressed(chemin, c0025=self.c0025, c001=self.c001,
+                            ciso=self.ciso, ziso=self.ziso,
                             echeances=np.asarray(self.steps, dtype=np.int16))
 
     @staticmethod
@@ -346,4 +434,11 @@ class Colonnes:
             c = Colonnes(man["run"], man["balises"], list(man["echeances"]))
             c.c0025 = z["c0025"]
             c.c001 = z["c001"]
+            # ⚠️ Les archives écrites AVANT l'étape 5 n'ont pas d'isobares.
+            # On les relit quand même, avec des tableaux vides plutôt
+            # qu'une exception : une archive ancienne reste une archive
+            # valide pour ce qu'elle contient, et le remplissage le dira.
+            if "ciso" in z:
+                c.ciso = z["ciso"]
+                c.ziso = z["ziso"]
         return c, man

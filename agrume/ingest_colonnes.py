@@ -64,10 +64,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from colonnes import (PARAMS_001, PARAMS_0025, Abort, Colonnes,  # noqa: E402
-                      balises_du_domaine, index_plats, quantifier,
-                      verifier_grille)
-from domaine import GRID_3D, GRID_FINE, MAX_HOURS, MODEL_DIR  # noqa: E402
+from colonnes import (PARAM_ALTITUDE, PARAMS_001, PARAMS_0025,  # noqa: E402
+                      PARAMS_ISO, Abort, Colonnes, balises_du_domaine,
+                      index_plats, quantifier, verifier_grille)
+from domaine import (G, GRID_3D, GRID_FINE, MAX_HOURS,  # noqa: E402
+                     MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES)
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
                    est_fichier_horaire, s3_objets)
@@ -95,6 +96,12 @@ PAQUETS = (
     (GRID_3D, "HP2"),
     (GRID_FINE, "HP1"),      # hybride : u/v à 20, 50, 100 m
     (GRID_FINE, "SP1"),      # hybride : 10u/10v à 10 m
+    # Étape 5 : le haut du profil. ⚠️ `IP1` porte u, v, t, r ET le
+    # géopotentiel `z` — les cinq dans le même paquet, mesuré le 10/08.
+    # Les quatre autres paquets IP* ne contiennent rien dont le raccord
+    # ait besoin. +1,73 Go sur 0–24 h, bundles de 496 Mo au plus (donc
+    # sous le pic de 815 Mo déjà atteint par HP1 : le disque ne bouge pas).
+    (GRID_3D, PAQUET_ISOBARES),
 )
 
 
@@ -233,6 +240,30 @@ def filtre_0025(paquet):
     return veut
 
 
+def filtre_iso():
+    """Ce qu'on retient dans `0025/IP1`.
+
+    ⚠️ LE `typeOfLevel` FAIT PARTIE DU FILTRE, PAS DE LA DÉCORATION. Le
+    géopotentiel `z` existe aussi dans `IP5`, mais sur des niveaux de
+    **vorticité potentielle** (1500 et 2000) — mesuré le 10/08. Un filtre
+    sur le seul `shortName` ramasserait ces messages-là et fabriquerait
+    des altitudes absurdes au milieu du profil, sans rien casser de
+    visible. On ne lit `IP5` nulle part, mais la règle vaut d'être écrite :
+    ce jour où quelqu'un ajoutera un paquet, elle sera déjà là.
+    """
+    voulus = {p["court"]: p["nom"] for p in PARAMS_ISO}
+    niveaux = set(NIVEAUX_P)
+
+    def veut(sn, tol, lvl):
+        if tol != "isobaricInhPa" or lvl not in niveaux:
+            return None
+        if sn == "z":
+            return (PARAM_ALTITUDE["nom"], lvl)
+        nom = voulus.get(sn)
+        return (nom, lvl) if nom else None
+    return veut
+
+
 def filtre_001(paquet):
     """Ce qu'on retient en maille fine — 4 niveaux, pas un de plus.
     ⛔ Rien n'existe au-dessus de 100 m dans cette grille."""
@@ -256,6 +287,8 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     col = Colonnes(ref, balises, steps)
     par_nom_0025 = {p["nom"]: p for p in PARAMS_0025}
     par_nom_001 = {p["nom"]: p for p in PARAMS_001}
+    par_nom_iso = {p["nom"]: p for p in PARAMS_ISO}
+    par_nom_iso[PARAM_ALTITUDE["nom"]] = PARAM_ALTITUDE
     steps_set = set(steps)
 
     idx = {}
@@ -277,9 +310,12 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
         total_mo = sum(t for _, t in fichiers) / 1e6
         crier(f"── {grille}/{paquet} : {len(fichiers)} fichiers, "
               f"{total_mo:.0f} Mo")
-        veut = (filtre_0025(paquet) if grille == GRID_3D
+        isobare = paquet == PAQUET_ISOBARES
+        veut = (filtre_iso() if isobare
+                else filtre_0025(paquet) if grille == GRID_3D
                 else filtre_001(paquet))
-        table = par_nom_0025 if grille == GRID_3D else par_nom_001
+        table = (par_nom_iso if isobare
+                 else par_nom_0025 if grille == GRID_3D else par_nom_001)
         orog = paire_orog[grille]
         indices = idx[grille]
         valides = indices >= 0
@@ -292,12 +328,29 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
             octets += os.path.getsize(chemin)
             try:
                 def sur_champ(k, step, values, meta, _g=grille, _o=orog,
-                              _i=indices, _v=valides, _t=table):
+                              _i=indices, _v=valides, _t=table, _iso=isobare):
                     verifier_grille(_o.meta, meta, f"{_g}/{paquet}")
                     nom, niveau = k
                     brut = np.full(len(_i), np.nan)
                     brut[_v] = np.asarray(values)[_i[_v]]
-                    col.poser(_g, nom, niveau, step, quantifier(brut, _t[nom]))
+                    if not _iso:
+                        col.poser(_g, nom, niveau, step,
+                                  quantifier(brut, _t[nom]))
+                        return
+                    if nom == "zp":
+                        # ⚠️ `z` est un GÉOPOTENTIEL en m²/s², pas une
+                        # hauteur. Sans la division par g, les altitudes
+                        # sortent ~9,8 fois trop grandes — ce qui se voit.
+                        # Diviser deux fois donnerait des altitudes
+                        # plausibles au premier coup d'œil, ce qui ne se
+                        # voit pas : la conversion est écrite ICI et
+                        # nulle part ailleurs.
+                        col.poser_isobare(nom, niveau, step,
+                                          quantifier(brut / G, _t[nom],
+                                                     dtype=np.float32))
+                    else:
+                        col.poser_isobare(nom, niveau, step,
+                                          quantifier(brut, _t[nom]))
 
                 t1 = time.time()
                 lus, dec = parcourir(chemin, veut, sur_champ, steps_set)
@@ -410,13 +463,18 @@ def main(argv=None):
                      f"{col.c0025.shape[1]}×{col.c0025.shape[2]} (0025) + "
                      f"{col.c001.shape[1]}×{col.c001.shape[2]} (001)")
     journal_horodate(f"│ remplissage         : 0025 {remp[GRID_3D] * 100:.1f} % · "
-                     f"001 {remp[GRID_FINE] * 100:.1f} %")
+                     f"001 {remp[GRID_FINE] * 100:.1f} % · "
+                     f"isobares {remp['isobares'] * 100:.1f} % · "
+                     f"altitude iso {remp['altitude_iso'] * 100:.1f} %")
     detail = col.remplissage_par_parametre()
     journal_horodate("│   par paramètre     : "
                      + " · ".join(f"{n} {v * 100:.0f}%"
                                   for n, v in detail[GRID_3D].items())
                      + "  |  fine " + " · ".join(
                          f"{n} {v * 100:.0f}%" for n, v in detail[GRID_FINE].items()))
+    journal_horodate("│   isobares          : "
+                     + " · ".join(f"{n} {v * 100:.0f}%"
+                                  for n, v in detail["isobares"].items()))
     if detail[GRID_3D].get("tke", 1.0) < 1.0 and steps and steps[0] == 0:
         journal_horodate("│   ⓘ la TKE manque à l'échéance 0 — MESURÉ le "
                          "10/08, ce n'est pas un défaut d'ingestion")

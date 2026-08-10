@@ -57,8 +57,10 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
 | `colonnes.py` | le produit A : conteneur, quantification, disposition |
 | `ingest_colonnes.py` | l'ingestion elle-même — un fichier sur le disque à la fois |
+| `profil.py` | **le raccord vertical** : axe altitude-mer, masquage, mélange |
+| `sonder.py` | lire un profil, en tableau ou en JSON |
 | `marche_raccord.py` | **mesure** la marche entre les deux mailles (critère d'acceptation) |
-| `test_*.py` | quatre bancs hors-ligne, sans réseau ni clé |
+| `test_*.py` | cinq bancs hors-ligne, sans réseau ni clé |
 
 ---
 
@@ -69,6 +71,7 @@ python3 tools/test_mf_s3.py
 python3 agrume/test_orographie.py [--stations /var/lib/bw-model-verif/stations.json]
 python3 agrume/test_poller.py
 python3 agrume/test_colonnes.py
+python3 agrume/test_profil.py [--archive <colonnes.npz> <manifeste.json>]
 ```
 
 Tous tournent **sans réseau et sans clé**. Ils ne vérifient pas que le
@@ -85,7 +88,39 @@ en silence.
   mesure le facteur 8 que ça fait gagner ;
 - **laisser un trou en bas de colonne**, parce que le vent n'est servi
   qu'à partir de 20 m sur les niveaux hauteur et que les 10 m viennent
-  des champs dédiés `10u`/`10v`.
+  des champs dédiés `10u`/`10v` ;
+- **servir de l'air souterrain** — dans les Alpes, 1000, 950 et 925 hPa
+  sont sous le terrain à peu près partout, et le modèle y met des valeurs
+  extrapolées parfaitement crédibles à l'affichage ;
+- **quantifier l'axe d'altitude en float16** : le pas y vaut 4 m entre
+  4 096 et 8 192 m, donc 2 m d'erreur — mesuré — sur l'axe même où l'on
+  raccorde deux sources.
+
+---
+
+## Le profil vertical, et la seule règle qui le tient
+
+**Une colonne repose sur UN seul sol.** C'est le 0,025°, parce que c'est
+la seule maille qui la porte entière.
+
+⚠️ La maille fine n'est **pas** insérée dedans, et ce n'est pas un oubli.
+Mesuré sur une colonne réelle : `100 m/sol` en maille fine tombe à 604 m
+ASL, `35 m/sol` en 0,025° tombe à 677 m — parce que les deux sols
+diffèrent de 138 m ici, de 75 m en médiane, de 643 m au pire. Fusionner
+ferait apparaître « 35 m au-dessus du sol » **plus haut** que « 100 m
+au-dessus du sol ». La maille fine est donc servie **à côté**
+(`profilMailleFine`), avec son propre sol annoncé, et l'écart entre les
+deux est **mesuré et publié** (`marcheHybride`) plutôt que dissous dans
+un tri par altitude.
+
+Le raccord hauteur ↔ isobares, lui, se fait par mélange à poids linéaire
+entre `z_s + 1000` et `z_s + 3000`, par composantes u/v. Et
+`ecart_recouvrement()` mesure le désaccord des deux sources **avant** tout
+mélange : c'est le test de non-régression du lot, parce qu'**une marche
+ne vient jamais de la météo** — elle vient d'une conversion fausse.
+
+✅ Mesuré sur **100 colonnes réelles** (run 06 Z) : écart médian
+**0,23 m/s**, d9 0,62, max 1,16 — le critère du lot demande < 1 m/s.
 
 ---
 

@@ -71,6 +71,43 @@ NIVEAUX_H_001 = (10, 20, 50, 100)
 # celle d'AROME 0025. Le composite du §4.3 ne demande donc NI
 # interpolation verticale, NI rééchantillonnage horizontal.
 NIVEAUX_H_AROMEPI = (10, 20, 50, 100, 250, 500)
+
+# ── Les niveaux ISOBARES, et pourquoi on n'en garde que 14 sur 24 ─────
+# Inventaire eccodes du 10/08 sur `0025/IP1` : 24 niveaux, de 1000 à
+# 100 hPa. ⚠️ Ils n'existent QU'EN 0,025° — la grille fine n'expose aucun
+# isobare (vérifié).
+NIVEAUX_P_TOUS = (1000, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
+                  500, 450, 400, 350, 300, 275, 250, 225, 200, 175, 150,
+                  125, 100)
+
+# Ce qu'on archive : la bande 1000 → 400 hPa.
+#
+# ⚠️ LE HAUT EST FIXÉ PAR LE RACCORD, PAS PAR LE PLAFOND DU PILOTE. La
+# tentation est de couper à 500 hPa (~5 600 m), « bien au-dessus du
+# plafond parapente » — c'est le raisonnement qui a fait retirer 600 et
+# 500 hPa du calque vent le 30/07. **Il serait faux ici.** Le raccord du
+# §3.3 sert les isobares SEULES au-dessus de `z_s + 3000 m`, et la balise
+# la plus haute du domaine a un sol modèle à ~3 200 m : sa bande
+# « isobares seules » commence donc vers 6 200 m, soit ~440 hPa. Couper à
+# 500 laisserait un TROU en haut des colonnes les plus hautes — et
+# seulement sur celles-là, donc invisible sur un échantillon de plaine.
+# 400 hPa (~7 200 m) couvre `z_s + 3000` pour toutes les balises du
+# domaine, avec de la marge pour le mélange.
+#
+# Le bas descend à 1000 hPa alors que ces niveaux sont sous le terrain
+# partout dans les Alpes : c'est volontaire. On ARCHIVE tout et on masque
+# à la LECTURE — même principe que les deux mailles. Un niveau souterrain
+# archivé permet de vérifier que le masquage fonctionne ; un niveau
+# souterrain jeté à l'ingestion ne permet plus rien.
+NIVEAUX_P = (1000, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550,
+             500, 450, 400)
+assert set(NIVEAUX_P) <= set(NIVEAUX_P_TOUS)
+
+# g normalisé (m/s²) — `z` est un GÉOPOTENTIEL en m²/s², pas une hauteur.
+# altitude_ASL = z / G. Oublier la division donne des altitudes ~9,8 fois
+# trop grandes, ce qui se voit ; l'inverse (diviser deux fois) donne des
+# altitudes plausibles au premier coup d'œil, ce qui ne se voit pas.
+G = 9.80665
 assert set(NIVEAUX_H_AROMEPI) <= set(NIVEAUX_H_0025), (
     "les niveaux d'AROME-PI doivent être un sous-ensemble de ceux d'AROME "
     "— sinon la jonction PI ↔ AROME demande une interpolation verticale, "
@@ -106,6 +143,22 @@ PAQUET_OROGRAPHIE = {
     GRID_FINE: ("SP3", "__00H__"),
     GRID_3D:   ("SP2", "__00H06H__"),
 }
+
+# ── Où vivent les isobares : TOUT est dans IP1 ────────────────────────
+# Inventaire eccodes du 10/08 sur les cinq paquets IP :
+#   IP1 (3,60 Go) : u v t r **z**      ← tout ce dont le raccord a besoin
+#   IP2 (0,97 Go) : cc ciwc clwc crwc cswc
+#   IP3 (5,72 Go) : dpt pv q w wdir ws wz
+#   IP4 (0,44 Go) : tke (isobares !)
+#   IP5 (1,15 Go) : absv papt vo — et `z` sur des niveaux de VORTICITÉ
+#
+# ⚠️ LE PIÈGE EST DANS IP5. Le géopotentiel `z` y existe aussi, mais sur
+# `typeOfLevel = potentialVorticity` (niveaux 1500 et 2000), qui n'a
+# strictement rien à voir. Un filtre sur le seul `shortName == "z"`
+# ramasserait ces deux messages et fabriquerait des altitudes absurdes
+# au milieu du profil. **Le `typeOfLevel` fait partie du filtre, pas de
+# la décoration.**
+PAQUET_ISOBARES = "IP1"
 
 # ── Le domaine Nord-Alpes ─────────────────────────────────────────────
 # ⚠️ Ce n'est pas un choix de confort, c'est ce qui rend le produit B
