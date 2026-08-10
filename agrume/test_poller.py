@@ -141,9 +141,14 @@ def main():
         e = P.lire_journal(j)
         verifier("une ligne abîmée ne fait pas perdre les autres",
                  len(e) == 3, f"{len(e)} entrées relues")
-        verifier("deja_vu ne confond pas publie et abandon",
-                 P.deja_vu(e, "aromepi", "R1")
-                 and not P.deja_vu(e, "aromepi", "R2"))
+        verifier("deja_vu = DÉCIDÉ : publié ou abandonné, pas seulement publié",
+                 P.deja_vu(e, "aromepi", "R1") and P.deja_vu(e, "aromepi", "R2"),
+                 "un abandon non compté ferait re-guetter le run à chaque "
+                 "cycle — c'est arrivé le 10/08")
+        verifier("un run jamais rencontré n'est pas « déjà vu »",
+                 not P.deja_vu(e, "aromepi", "R-inconnu"))
+        verifier("les sources ne se contaminent pas",
+                 not P.deja_vu(e, "arome:0025/HP1", "R1"))
         verifier("les latences sont lues par source",
                  P.latences_observees(e, "aromepi") == [42.0])
         verifier("journal absent → liste vide, pas d'exception",
@@ -257,6 +262,17 @@ def main():
                  len(ecrites) == 2 and all(x["interrogations"] == 1
                                            for x in ecrites),
                  str([x["interrogations"] for x in ecrites]))
+        # ⚠️ LE SECOND DÉFAUT DU 10/08 : un abandon n'était pas compté
+        # comme « déjà vu », donc le tour de rattrapage reprenait le run à
+        # chaque cycle et réécrivait un abandon toutes les deux minutes.
+        # Le journal s'est rempli de doublons en quelques minutes.
+        for _ in range(3):
+            P.guetter_plusieurs(cibles, run, P.lire_journal(j), j,
+                                crier=lambda *a: None, dormir=h.dormir,
+                                maintenant=h.maintenant)
+        verifier("⚠️ un ABANDON ne se réécrit pas au cycle suivant",
+                 len(P.lire_journal(j)) == 2,
+                 f"{len(P.lire_journal(j))} entrées après 3 tours de plus")
 
     print("\n── La grille des runs théoriques ─────────────────────────")
     t = datetime(2026, 8, 10, 9, 47, tzinfo=timezone.utc)

@@ -228,8 +228,20 @@ def ecrire_journal(entree, chemin=JOURNAL_DEFAUT):
 
 
 def deja_vu(journal, source, run_iso):
+    """Ce couple (source, run) est-il DÉCIDÉ — publié ou abandonné ?
+
+    ⚠️ Il ne suffit PAS de compter les `publie`. Le 10/08, la version qui
+    ne regardait que ceux-là a fait boucler le guet des paquets : un run
+    abandonné n'étant jamais « déjà vu », le tour de rattrapage le
+    reprenait à chaque cycle et réécrivait un abandon toutes les deux
+    minutes. Le journal s'est rempli de doublons en quelques minutes, et
+    la statistique qu'il porte s'en trouvait faussée d'autant.
+
+    Un abandon est une décision, pas un échec à réessayer : le run est
+    trop vieux pour être daté utilement, on l'a écrit, on passe.
+    """
     return any(e.get("source") == source and e.get("run") == run_iso
-               and e.get("etat") == "publie" for e in journal)
+               and e.get("etat") in ("publie", "abandon") for e in journal)
 
 
 def latences_observees(journal, source):
