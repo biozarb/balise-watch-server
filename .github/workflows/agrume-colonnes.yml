@@ -115,6 +115,12 @@ jobs:
           # SEULE CI du dépôt — et qu'un banc qu'on ne lance jamais cesse
           # de protéger quoi que ce soit. Il est hors-ligne et sans clé.
           python3 agrume/test_ingest_pi.py
+          # Étape 9. ⚠️ Sa vérification centrale est un INVARIANT :
+          # aux niveaux communs et tant que w_PI = 1, le composite
+          # reproduit PI exactement. Un composite qui dérive de PI a
+          # inventé une valeur là où PI en donnait une — et ça ne se
+          # voit sur aucune courbe.
+          python3 agrume/test_composite.py
 
       - name: Ingérer les colonnes
         env:
