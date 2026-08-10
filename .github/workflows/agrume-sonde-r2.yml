@@ -1,0 +1,63 @@
+name: AGRUME — sonde des droits R2 (diagnostic, à la main)
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⚠️ CE WORKFLOW N'INGÈRE RIEN ET NE PRODUIT RIEN. Il répond à UNE
+#  question, avec le VRAI jeton, dans le VRAI environnement :
+#
+#      le jeton R2 des Actions a-t-il le droit de SUPPRIMER ?
+#
+#  Le produit B (étape 6 du lot H) est le premier produit du projet à
+#  purger : il ne garde que les trois derniers runs. Et le projet a déjà
+#  été mordu par un droit R2 supposé — piège nº 9 du lot : « le jeton R2
+#  du VPS ne lit pas le bucket wind-grid ». Écrire la purge d'abord et
+#  découvrir ensuite, ce serait laisser le produit grossir en silence :
+#  une purge ne fait JAMAIS échouer un run (correctif du 30/07), donc
+#  son échec ne s'allume nulle part.
+#
+#  ⓘ Il reste dans le dépôt après avoir répondu, et c'est volontaire :
+#  le jour où le jeton sera tourné, la question se reposera à
+#  l'identique. Une sonde qu'on supprime est une sonde qu'on réécrit.
+#
+#  ⛔ Aucun `schedule` : ce workflow ne se déclenche qu'à la main.
+#  ⛔ Aucun ping healthchecks : ce n'est pas un maillon de la chaîne.
+# ══════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      prefixe:
+        description: "Préfixe de la clé jetable (défaut agrume/_sonde)"
+        required: false
+        default: "agrume/_sonde"
+        type: string
+
+concurrency:
+  group: agrume-sonde-r2
+  cancel-in-progress: false
+
+jobs:
+  sonde:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Installer boto3
+        run: pip install --quiet boto3
+
+      - name: Sonder les droits
+        env:
+          PYTHONUNBUFFERED: "1"
+          # ⚠️ EXACTEMENT le même bloc que `agrume-colonnes.yml` — c'est
+          # tout l'intérêt. Sonder avec d'autres identifiants que ceux de
+          # la production ne prouverait rien sur la production.
+          STORAGE_BACKEND: r2
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET_WIND }}
+        run: |
+          python3 agrume/sonde_r2.py --prefixe "${{ inputs.prefixe || 'agrume/_sonde' }}"
