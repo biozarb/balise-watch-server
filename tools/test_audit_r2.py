@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audit_r2 import (  # noqa: E402
     GO, PALIER_STOCKAGE_GO, agreger, charger_historique, jours_avant,
-    pente_go_par_mois, prefixe_de, verdict,
+    meme_perimetre, pente_go_par_mois, prefixe_de, verdict,
 )
 
 T0 = datetime(2026, 8, 1, 3, 0, tzinfo=timezone.utc)
@@ -195,6 +195,45 @@ class Verdict(unittest.TestCase):
         # Au-delà du palier, l'échéance n'a plus de sens : un seul motif.
         v = verdict(self.inv(12.0), 3.0, seuil_go=7.0, horizon=60)
         self.assertEqual(len(v["motifs"]), 1)
+
+
+class Perimetre(unittest.TestCase):
+    """⚠️ LA PANNE DU 10/08, REJOUÉE. Le matin la jauge voyait 2 buckets
+    (0,031 Go) ; à midi le jeton d'audit est arrivé et elle en a vu 3
+    (0,815 Go). Dans un historique commun, la régression y lisait
+    +587 Go/mois et annonçait le palier « dans 0 jours ». Une marche de
+    périmètre n'est pas une croissance."""
+
+    def rel(self, jour, go, buckets):
+        return {"t": (T0 + timedelta(days=jour)).isoformat(timespec="seconds"),
+                "octets": int(go * GO),
+                "buckets": {b: 0 for b in buckets}}
+
+    def test_la_marche_de_perimetre_ne_fabrique_plus_de_pente(self):
+        deux, trois = ("a", "b"), ("a", "b", "c")
+        serie = [self.rel(0, 0.031, deux), self.rel(0.01, 0.031, deux),
+                 self.rel(0.02, 0.031, deux), self.rel(0.03, 0.815, trois)]
+        p_naif = pente_go_par_mois(serie)                    # sans filtre
+        p_filtre = pente_go_par_mois(serie, frozenset(trois))
+        self.assertGreater(p_naif, 100, "le cas de la panne doit bien exploser")
+        self.assertIsNone(p_filtre, "un seul relevé comparable => pas de pente")
+
+    def test_pente_juste_une_fois_le_perimetre_stable(self):
+        trois = ("a", "b", "c")
+        serie = [self.rel(0, 1.0, trois), self.rel(15, 2.0, trois),
+                 self.rel(30, 3.0, trois)]
+        self.assertAlmostEqual(pente_go_par_mois(serie, frozenset(trois)),
+                               2.0, places=6)
+
+    def test_sans_perimetre_rien_ne_change(self):
+        # Compatibilité : appelé sans périmètre, le calcul est l'ancien.
+        self.assertAlmostEqual(pente_go_par_mois(hist((0, 1.0), (15, 2.0),
+                                                      (30, 3.0))), 2.0, places=6)
+
+    def test_releve_sans_buckets_est_ecarte(self):
+        # Les relevés d'avant l'ajout du champ ne doivent pas polluer.
+        self.assertFalse(meme_perimetre({"t": "x", "octets": 1},
+                                        frozenset(("a",))))
 
 
 class CouverturePartielle(unittest.TestCase):

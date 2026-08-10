@@ -149,8 +149,32 @@ def agreger(objets) -> dict:
             "par_bucket": par_bucket, "par_prefixe": par_prefixe}
 
 
-def pente_go_par_mois(historique) -> float | None:
-    """Moindres carrés sur (jours, Go) de l'historique.
+def meme_perimetre(releve: dict, perimetre) -> bool:
+    """Ce relevé porte-t-il sur exactement les mêmes buckets ?
+
+    ⚠️ AJOUTÉ APRÈS COUP, LE 10/08, PARCE QUE ÇA A MENTI EN VRAI. Le
+    matin, la jauge tournait en couverture PARTIELLE (2 buckets, 0,031 Go).
+    À midi, le jeton d'audit est arrivé et elle a vu les 3 buckets
+    (0,815 Go). Les deux relevés sont allés dans le même historique, et
+    la régression y a lu une marche de +0,78 Go en trente minutes :
+    **+587 Go/mois, palier atteint dans 0 jours**. Alerte parfaitement
+    absurde, et elle serait partie par mail.
+
+    Une marche due à un changement de PÉRIMÈTRE n'est pas une croissance.
+    La pente ne se calcule donc qu'entre relevés comparables : mêmes
+    buckets, même couverture. Un bucket ajouté demain remettra le
+    compteur à zéro — c'est voulu, mieux vaut « pas de pente » que « une
+    pente fausse ».
+    """
+    if perimetre is None:
+        return True
+    b = releve.get("buckets")
+    return b is not None and frozenset(b.keys()) == perimetre
+
+
+def pente_go_par_mois(historique, perimetre=None) -> float | None:
+    """Moindres carrés sur (jours, Go) de l'historique, à périmètre
+    constant (voir `meme_perimetre`).
 
     ⚠️ Une simple différence entre le premier et le dernier point serait
     fausse ici : le volume oscille d'un run à l'autre (une chaîne à
@@ -160,7 +184,9 @@ def pente_go_par_mois(historique) -> float | None:
     une oscillation.
     """
     pts = [(datetime.fromisoformat(h["t"]), h["octets"] / GO)
-           for h in historique if h.get("t") and h.get("octets") is not None]
+           for h in historique
+           if h.get("t") and h.get("octets") is not None
+           and meme_perimetre(h, perimetre)]
     if len(pts) < 3:
         return None
     t0 = pts[0][0]
@@ -445,7 +471,13 @@ def main(argv=None) -> int:
             print(f"⚠️ historique non écrit ({e}) — pente indisponible demain",
                   file=sys.stderr)
 
-    pente = pente_go_par_mois(historique + [releve])
+    perimetre = frozenset(inv["par_bucket"].keys())
+    serie = historique + [releve]
+    comparables = [h for h in serie if meme_perimetre(h, perimetre)]
+    if len(comparables) < len(serie):
+        print(f"  ⓘ {len(serie) - len(comparables)} relevé(s) d'un autre "
+              f"périmètre écarté(s) du calcul de pente")
+    pente = pente_go_par_mois(serie, perimetre)
     v = verdict(inv, pente, a.seuil_go, a.horizon_jours,
                 couverture_partielle=not couverture_complete)
 
