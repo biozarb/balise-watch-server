@@ -197,6 +197,38 @@ class Verdict(unittest.TestCase):
         self.assertEqual(len(v["motifs"]), 1)
 
 
+class CouverturePartielle(unittest.TestCase):
+    """⚠️ Relevé au déploiement du 10/08 : le jeton R2 du VPS ne lit que
+    2 buckets sur 3, et pas le plus gros. Un total partiel comparé à un
+    palier donne un feu vert qui ne vaut rien — il doit donc alerter,
+    même quand tous les chiffres sont bas."""
+
+    def inv(self, go):
+        return {"octets": int(go * GO), "objets": 1,
+                "par_bucket": {}, "par_prefixe": {}}
+
+    def test_couverture_partielle_alerte_meme_a_vide(self):
+        v = verdict(self.inv(0.2), 0.0, couverture_partielle=True)
+        self.assertTrue(v["alerte"])
+        self.assertIn("COUVERTURE PARTIELLE", v["motifs"][0])
+
+    def test_couverture_complete_ne_dit_rien(self):
+        v = verdict(self.inv(0.2), 0.0, couverture_partielle=False)
+        self.assertFalse(v["alerte"])
+
+    def test_le_drapeau_est_dans_le_verdict(self):
+        # Il doit ressortir en JSON : c'est ce que relit le lendemain
+        # celui qui se demande si le chiffre d'hier valait quelque chose.
+        self.assertTrue(verdict(self.inv(1), None,
+                                couverture_partielle=True)["couverture_partielle"])
+
+    def test_partielle_n_efface_pas_les_autres_motifs(self):
+        v = verdict(self.inv(11.0), None, couverture_partielle=True)
+        self.assertEqual(len(v["motifs"]), 2)
+        self.assertIn("COUVERTURE PARTIELLE", v["motifs"][0])
+        self.assertIn("facture", v["motifs"][1])
+
+
 class Historique(unittest.TestCase):
     def test_fichier_absent(self):
         with tempfile.TemporaryDirectory() as d:

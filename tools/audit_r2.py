@@ -194,14 +194,26 @@ def jours_avant(total_octets: int, pente_mois: float | None,
 
 def verdict(inventaire: dict, pente_mois: float | None,
             seuil_go: float = SEUIL_ALERTE_GO,
-            horizon: int = HORIZON_ALERTE_JOURS) -> dict:
+            horizon: int = HORIZON_ALERTE_JOURS,
+            couverture_partielle: bool = False) -> dict:
     """Décide, et dit POURQUOI. Le motif compte autant que le booléen :
     c'est lui qui part dans le mail, et un mail qui dit seulement
     « seuil dépassé » oblige à rouvrir un terminal pour savoir quoi
-    faire."""
+    faire.
+
+    ⚠️ `couverture_partielle` n'est PAS un détail de journal. Un total
+    calculé sur une partie des buckets est un total FAUX, et un total
+    faux comparé à un palier donne un feu vert qui ne vaut rien. Quand
+    la couverture est partielle, ça devient un motif à part entière :
+    le rapport ne peut alors jamais ressembler à un bilan propre.
+    """
     go = inventaire["octets"] / GO
     j_palier = jours_avant(inventaire["octets"], pente_mois, PALIER_STOCKAGE_GO)
     motifs = []
+    if couverture_partielle:
+        motifs.append(f"COUVERTURE PARTIELLE — les {go:.2f} Go mesurés ne "
+                      f"couvrent pas tout le compte ; le palier peut être "
+                      f"franchi sans que ce job le voie")
     if go >= PALIER_STOCKAGE_GO:
         motifs.append(f"palier gratuit DÉPASSÉ : {go:.2f} Go sur "
                       f"{PALIER_STOCKAGE_GO:.0f} Go — R2 facture déjà")
@@ -213,7 +225,8 @@ def verdict(inventaire: dict, pente_mois: float | None,
                       f"atteint dans {j_palier:.0f} jours")
     return {"alerte": bool(motifs), "motifs": motifs,
             "go": go, "pente_go_mois": pente_mois,
-            "jours_avant_palier": j_palier}
+            "jours_avant_palier": j_palier,
+            "couverture_partielle": couverture_partielle}
 
 
 def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
@@ -235,6 +248,9 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
             f"(~{cible:%Y-%m-%d})")
     log(f"│ seuil d'alerte            : {SEUIL_ALERTE_GO:8.1f} Go   "
         f"· seuil d'arrêt chaîne {SEUIL_STOCKAGE_GO:.0f} Go")
+    log("│ couverture                : "
+        + ("PARTIELLE ⚠️  (total sous-estimé)" if v.get("couverture_partielle")
+           else "complète (tous les buckets du compte)"))
     log("├─ par bucket ─────────────────────────────────────────────────")
     for nom, e in sorted(inventaire["par_bucket"].items(),
                          key=lambda kv: -kv[1]["octets"]):
@@ -258,23 +274,43 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
 #  PARTIE E/S
 # ══════════════════════════════════════════════════════════════════════
 def client():
+    """⚠️ Un jeu d'identifiants DÉDIÉ À L'AUDIT est préféré s'il existe.
+
+    Relevé le 10/08/2026 au déploiement : le jeton R2 du VPS ne peut lire
+    que `model-verif` et `balise-watch-packs`. `balise-watch-grids` — le
+    plus gros, écrit par les GitHub Actions avec un autre jeton — lui rend
+    AccessDenied. Un audit avec ce jeton-là ne peut pas voir le compte.
+
+    La bonne réponse n'est pas d'élargir le jeton d'ÉCRITURE du VPS (on
+    ajouterait du pouvoir de nuire pour un besoin de lecture), mais un
+    second jeton **lecture seule, portée compte, avec ListBuckets**.
+    D'où ces trois variables séparées, qui retombent sur les `R2_*` tant
+    qu'elles n'existent pas.
+    """
     try:
         import boto3  # noqa: PLC0415
     except ImportError:
         raise Abort("boto3 absent — lancer avec BW_PYTHON "
                     "(/home/debian/venv-balise/bin/python3)")
-    for v in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
-        if not os.environ.get(v):
-            raise Abort(f"{v} absente — `set -a; . ~/.balise-watch-r2.env; set +a`")
+
+    def var(nom):
+        return (os.environ.get("BW_R2_AUDIT_" + nom)
+                or os.environ.get("R2_" + nom) or "")
+
+    manque = [n for n in ("ACCOUNT_ID", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY")
+              if not var(n)]
+    if manque:
+        raise Abort("identifiants R2 absents (" + ", ".join(manque) + ") — "
+                    "`set -a; . ~/.balise-watch-r2.env; set +a`")
     return boto3.client(
         "s3",
-        endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        endpoint_url="https://%s.r2.cloudflarestorage.com" % var("ACCOUNT_ID"),
+        aws_access_key_id=var("ACCESS_KEY_ID"),
+        aws_secret_access_key=var("SECRET_ACCESS_KEY"),
         region_name="auto")
 
 
-def lister_buckets(c, log=print) -> list[str]:
+def lister_buckets(c, log=print) -> tuple[list[str], bool]:
     """Tous les buckets du compte — parce que le palier est par compte.
 
     ⚠️ Un jeton R2 peut être limité à un bucket : `ListBuckets` rend
@@ -287,7 +323,7 @@ def lister_buckets(c, log=print) -> list[str]:
         r = c.list_buckets()
         noms = sorted(b["Name"] for b in r.get("Buckets", []))
         if noms:
-            return noms
+            return noms, True
         raise Abort("le compte ne rend aucun bucket — jeton sur le mauvais compte ?")
     except Abort:
         raise
@@ -303,9 +339,9 @@ def lister_buckets(c, log=print) -> list[str]:
                 f"balise-watch-packs\" dans ~/.balise-watch-r2.env, ou donner "
                 f"le droit ListBuckets au jeton.")
         log(f"⚠️ ListBuckets refusé ({type(e).__name__}) — repli sur "
-            f"BW_R2_BUCKETS : {', '.join(repli)}. Ce audit ne couvre QUE "
+            f"BW_R2_BUCKETS : {', '.join(repli)}. Cet audit ne couvre QUE "
             f"ces buckets ; un bucket créé plus tard passerait inaperçu.")
-        return repli
+        return repli, False
 
 
 def parcourir(c, buckets, log=print):
@@ -386,7 +422,7 @@ def main(argv=None) -> int:
 
     try:
         c = client()
-        buckets = lister_buckets(c)
+        buckets, couverture_complete = lister_buckets(c)
         objets, requetes = parcourir(c, buckets)
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
@@ -398,7 +434,8 @@ def main(argv=None) -> int:
 
     releve = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "octets": inv["octets"], "objets": inv["objets"],
-              "buckets": {k: v["octets"] for k, v in inv["par_bucket"].items()}}
+              "buckets": {k: v["octets"] for k, v in inv["par_bucket"].items()},
+              "couverture_complete": couverture_complete}
     # On écrit AVANT de juger : si le verdict lève, le relevé du jour est
     # quand même dans l'historique, et la pente de demain reste juste.
     if not a.sans_historique:
@@ -409,7 +446,8 @@ def main(argv=None) -> int:
                   file=sys.stderr)
 
     pente = pente_go_par_mois(historique + [releve])
-    v = verdict(inv, pente, a.seuil_go, a.horizon_jours)
+    v = verdict(inv, pente, a.seuil_go, a.horizon_jours,
+                couverture_partielle=not couverture_complete)
 
     if a.json:
         print(json.dumps({"releve": releve, "verdict": v,
