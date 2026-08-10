@@ -118,3 +118,57 @@ jobs:
         # et se lit d'un coup d'œil dans les logs.
         if: always()
         run: df -h / | tail -1
+
+      # ══════════════════════════════════════════════════════════════
+      #  ⚠️ LE VOYANT NE SURVEILLE PAS « L'ARCHIVE GROSSIT », IL
+      #     SURVEILLE « LE CHEMIN FRAIS EST VIVANT ».
+      #
+      #  On ne ping QUE sur `workflow_dispatch`, c'est-à-dire quand le
+      #  guet du VPS a déclenché. Le cron du workflow, lui, est un FILET :
+      #  s'il tourne seul, l'archive se remplit quand même — mais on a
+      #  perdu les 20 à 40 minutes de fraîcheur que le guet apporte, et
+      #  personne ne s'en apercevrait. Pinger sur les deux garderait le
+      #  voyant au vert pendant que le jeton GitHub est expiré depuis
+      #  trois semaines. Ce serait un faux vert, et le projet en a déjà
+      #  eu deux (quotas du 30/07, découverts par un mail du fournisseur).
+      #
+      #  Ce voyant s'allume donc en rouge dans DEUX cas, tous deux
+      #  légitimes : plus rien ne tourne du tout, ou le VPS ne déclenche
+      #  plus. Le second se lit aussi dans l'onglet Actions — colonne
+      #  « Event » : si elle ne dit plus que `schedule`, le guet est mort.
+      #
+      #  Réglage conseillé du check : période 3 h (AROME sort 8 fois par
+      #  jour), grâce 3 h — donc alerte après ~6 h de silence, soit deux
+      #  réseaux manqués. Assez lâche pour ne pas crier sur un run tardif,
+      #  assez serré pour ne pas laisser passer une demi-journée.
+      #
+      #  ⚠️ L'URL de ping contient un UUID qui suffit à SIMULER un succès.
+      #  Elle vit dans les secrets du dépôt (Settings → Secrets and
+      #  variables → Actions → `HEALTHCHECK_AGRUME_URL`), jamais dans le
+      #  code, jamais dans un log.
+      # ══════════════════════════════════════════════════════════════
+      - name: Voyant healthchecks — succès
+        if: success() && github.event_name == 'workflow_dispatch'
+        env:
+          HC: ${{ secrets.HEALTHCHECK_AGRUME_URL }}
+        run: |
+          if [ -z "$HC" ]; then
+            echo "⚠️ HEALTHCHECK_AGRUME_URL absent — AUCUNE surveillance."
+            echo "   Le run a réussi, mais rien ne le saura si le suivant échoue."
+            exit 0
+          fi
+          curl -fsS -m 10 --retry 3 -o /dev/null "$HC"
+          echo "voyant : ping de succès envoyé"
+
+      - name: Voyant healthchecks — échec
+        # ⚠️ `failure()` seulement : un run ANNULÉ n'est pas un échec de la
+        # chaîne, c'est une décision humaine. Le signaler en rouge
+        # apprendrait à ignorer le voyant, ce qui est pire que pas de
+        # voyant du tout.
+        if: failure() && github.event_name == 'workflow_dispatch'
+        env:
+          HC: ${{ secrets.HEALTHCHECK_AGRUME_URL }}
+        run: |
+          [ -n "$HC" ] || exit 0
+          curl -fsS -m 10 --retry 3 -o /dev/null "$HC/fail" || true
+          echo "voyant : ping d'échec envoyé"
