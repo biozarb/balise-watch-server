@@ -1542,6 +1542,36 @@ let mfStationsListFetchedAt = 0;
 let mfObsCache = new Map(); // id_station -> {dd, ff, ddraf10, raf10, pres, pmer, validityTime}
 let mfObsCacheFetchedAt = 0;
 
+// Débogage 11/08/2026 — combien de temps on garde une station MF qui ne
+// transmet plus. Depuis que le cache est FUSIONNÉ et non plus remplacé
+// (cf. refreshMfObs), une station muette ne disparaît plus de la carte :
+// elle y reste avec son dernier relevé connu, que le client grise via sa
+// propre logique de fraîcheur.
+//
+// 12 h et pas 3 h : aligné sur MF_PRESSURE_ONLY_RETENTION_H, et surtout
+// sur le principe déjà tenu pour winds.mobi (« une balise en panne DOIT
+// rester visible — c'est justement l'information qu'un pilote vient
+// chercher quand il ne comprend pas pourquoi son déco est vide »).
+// Repère concret : LEUCATE 11202001 était muette depuis 3 h 12 au moment
+// du correctif ; à 3 h de rétention, elle aurait déjà disparu — alors
+// que SpotAiR, lui, l'affichait toujours avec son relevé de 07:36. Une
+// journée de rétention couvre une panne de transmission d'une matinée
+// sans laisser un fantôme éternel sur une station retirée du réseau.
+// Coût mémoire borné par la taille du réseau (~2150 entrées).
+const MF_OBS_RETENTION_MS = 12 * 60 * 60 * 1000;
+
+// Dernier validityTime déjà écrit dans mf_station_history, par station —
+// borné par la taille du réseau MF (~2150 entrées de chaîne courte).
+// Cf. son usage dans pollAndNotify : évite de persister six fois la même
+// observation depuis que le cache est fusionné.
+const mfLastPersistedValidity = new Map();
+
+/** Heure de validité d'une observation MF en ms epoch (0 si inconnue). */
+function mfObsTime(obs) {
+  const t = obs?.validityTime ? Date.parse(obs.validityTime) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
 // Parse minimal d'un CSV ';' avec en-tête — suffisant pour la forme
 // stable de /liste-stations (pas de valeur contenant ';' ou de guillemets
 // dans ce jeu de données, vérifié sur un extrait en direct le 11/07).
@@ -1568,28 +1598,70 @@ async function refreshMfStationsList() {
 // Date alignée sur un multiple de 6 min avec ~12 min de marge (pipeline
 // MF pas instantané — vérifié en direct : une marge de 6 min pile peut
 // renvoyer un paquet encore incomplet, 12 min est fiable).
-function mfPaquetDateParam() {
-  const now = new Date(Date.now() - 12 * 60 * 1000);
-  const m = Math.floor(now.getUTCMinutes() / 6) * 6;
-  now.setUTCMinutes(m, 0, 0);
-  return now.toISOString().replace(/\.\d{3}Z$/, 'Z');
+//
+// Débogage 11/08/2026 — « 12 min est fiable » était FAUX, et mesuré comme
+// tel. Le paquet infrahoraire-6m ne sort pas complet : il se REMPLIT
+// pendant une vingtaine de minutes après son heure de validité. Mesure
+// faite en une seule passe à 08:22 UTC, donc à latence réseau constante,
+// sur des créneaux d'âges croissants :
+//
+//     âge du paquet | entrées | stations avec vent
+//         10 min    |  1763   |  659
+//         16 min    |  1841   |  674
+//         22 min    |  1853   |  683   ← plateau
+//         28→70 min |  1853   |  683
+//
+// Pire, une lecture réelle à ~13 min sur le créneau 08:00 n'a rendu que
+// 509 stations avec vent, contre 683 pour le MÊME créneau relu 9 minutes
+// plus tard. La prod servait 511 stations ce matin-là au lieu de ~685 :
+// un quart du réseau MF manquant, et pas le même quart d'un cycle à
+// l'autre (retour Yann : « des balises qui disparaissent parfois »).
+//
+// Corrigé sans sacrifier la fraîcheur : on lit MF_PAQUET_SLOTS créneaux
+// consécutifs à chaque cycle plutôt qu'un seul. Le plus récent apporte la
+// fraîcheur, les précédents apportent la complétude — une station absente
+// du créneau frais est rattrapée par un créneau plus vieux mais complet,
+// avec son VRAI validityTime (jamais celui du créneau lu). Trois créneaux
+// couvrent 12→30 min d'âge, donc tout le plateau.
+const MF_PAQUET_SLOTS = 3;
+function mfPaquetDateParams(n = MF_PAQUET_SLOTS) {
+  const base = new Date(Date.now() - 12 * 60 * 1000);
+  base.setUTCMinutes(Math.floor(base.getUTCMinutes() / 6) * 6, 0, 0);
+  const out = [];
+  // Du plus ANCIEN au plus RÉCENT : l'ordre d'écriture dans la Map fait
+  // que le créneau le plus frais écrase le plus vieux pour une station
+  // présente dans les deux, sans avoir à comparer les validityTime.
+  for (let k = n - 1; k >= 0; k--) {
+    const d = new Date(base.getTime() - k * 6 * 60 * 1000);
+    out.push(d.toISOString().replace(/\.\d{3}Z$/, 'Z'));
+  }
+  return out;
 }
 
 async function refreshMfObs() {
   if (!METEOFRANCE_API_KEY) return;
   try {
-    const url = `${MF_PAQUET_URL}?date=${mfPaquetDateParam()}&format=json`;
-    const r = await fetch(url, { headers: { apikey: METEOFRANCE_API_KEY } });
-    if (!r.ok) return; // échec ponctuel : on garde l'ancien paquet plutôt que de le vider
-    const data = await r.json();
-    if (!Array.isArray(data)) return;
+    // Les créneaux sont lus EN SÉQUENCE, du plus vieux au plus récent.
+    // Un échec ponctuel sur l'un d'eux ne fait pas perdre les autres :
+    // on `continue`, on ne `return` pas (une station rattrapée par un
+    // créneau plus vieux vaut mieux qu'un cycle blanc).
+    const rows = [];
+    for (const dateParam of mfPaquetDateParams()) {
+      try {
+        const r = await fetch(`${MF_PAQUET_URL}?date=${dateParam}&format=json`, { headers: { apikey: METEOFRANCE_API_KEY } });
+        if (!r.ok) continue;
+        const data = await r.json();
+        if (Array.isArray(data)) rows.push(...data);
+      } catch (e) { console.error(`refreshMfObs slot ${dateParam}:`, e.message); }
+    }
+    if (!rows.length) return; // aucun créneau lu : on garde l'ancien paquet plutôt que de le vider
     const next = new Map();
-    for (const s of data) {
+    for (const s of rows) {
       const id = s?.geo_id_insee;
       if (!id) continue;
       // Conversion en unités natives de l'app (km/h, hPa) dès l'ingestion —
       // le reste du code (comme Pioupiou) travaille déjà dans ces unités.
-      next.set(id, {
+      const entry = {
         dd: s.dd ?? null,
         ff: s.ff != null ? s.ff * 3.6 : null,
         ddraf10: s.ddraf10 ?? null,
@@ -1605,11 +1677,59 @@ async function refreshMfObs() {
         // Météo-France soient converties EN UN SEUL ENDROIT.
         temp: s.t != null ? s.t - 273.15 : null,
         validityTime: s.validity_time ?? null,
-      });
+      };
+      // On lit plusieurs créneaux : une même station peut arriver deux
+      // fois. Départager sur le validityTime RÉEL plutôt que sur l'ordre
+      // de lecture — un créneau frais peut contenir une ligne encore
+      // incomplète (ff null) pour une station dont le créneau précédent
+      // portait déjà une mesure de vent complète.
+      const prev = next.get(id);
+      if (prev && mfObsTime(prev) >= mfObsTime(entry)) continue;
+      next.set(id, entry);
     }
     if (next.size) {
-      mfObsCache = next;
+      // ── Fusion EN PLACE, jamais de remplacement total ─────────────
+      // Débogage 11/08/2026. L'ancien `mfObsCache = next` faisait
+      // DISPARAÎTRE de la carte toute station absente du paquet courant :
+      // ni marqueur, ni grisage, ni dernier relevé — comme si elle
+      // n'existait pas. Deux symptômes pour Yann : « on a perdu la balise
+      // de Leucate » (station 11202001 réellement muette depuis 05:36 UTC
+      // côté MF — SpotAiR, lui, la garde affichée avec son relevé de
+      // 07:36 locale) et « des balises qui ne donnent plus signe de vie
+      // pendant un moment » (le quart du réseau que la lecture trop
+      // précoce du paquet laissait tomber, cf. mfPaquetDateParams).
+      //
+      // Même leçon que le dédoublonnage winds.mobi du 07/08 : une
+      // collection reconstruite de zéro à chaque cycle perd tout ce que
+      // ce cycle-là n'a pas vu. On garde donc le dernier relevé connu de
+      // chaque station, borné par MF_OBS_RETENTION_MS — c'est au client
+      // de dire « donnée non fiable », pas au serveur de faire comme si
+      // la station n'existait plus. Sur une app de sécurité en vol, une
+      // valeur datée et signalée comme telle vaut mieux qu'un trou.
+      //
+      // `fresh` = uniquement les stations dont le validityTime a
+      // réellement avancé. C'est LUI qu'on donne aux consommateurs qui
+      // horodatent à l'heure d'arrivée (historique de pression,
+      // détecteur de front) : leur passer le cache entier réinjecterait
+      // le même relevé à chaque cycle sous une nouvelle heure, donc une
+      // fausse série plate et une fausse stabilité de pression.
+      const fresh = new Map();
+      for (const [id, obs] of next) {
+        const prev = mfObsCache.get(id);
+        if (prev && mfObsTime(obs) <= mfObsTime(prev)) continue;
+        mfObsCache.set(id, obs);
+        fresh.set(id, obs);
+      }
+      const cutoff = Date.now() - MF_OBS_RETENTION_MS;
+      for (const [id, obs] of mfObsCache) {
+        const ts = mfObsTime(obs);
+        if (ts > 0 && ts < cutoff) mfObsCache.delete(id);
+      }
       mfObsCacheFetchedAt = Date.now();
+      // Leçon 3 du 07/08 : le compteur qu'on journalise décide de ce
+      // qu'on voit. Un compteur local ne montre jamais qu'on vient
+      // d'effacer le voisin — d'où le total du cache, en plus du lu.
+      console.log(`🇫🇷 MF obs — ${next.size} stations lues sur ${MF_PAQUET_SLOTS} créneaux, ${fresh.size} nouvelles, cache total ${mfObsCache.size}`);
       // Débogage 12/07/2026 — historique de pression pour les stations MF
       // qui n'ont PAS de vent (obs.ff == null) : les stations AVEC vent
       // sont déjà enregistrées, avec moy/dir/pressure complets, par la
@@ -1651,7 +1771,7 @@ async function refreshMfObs() {
       // un vent nul mesuré.
       const t = Date.now();
       const pressureOnlyRows = [];
-      for (const [id, obs] of next) {
+      for (const [id, obs] of fresh) { // `fresh`, pas `next` : cf. fusion ci-dessus
         if (obs.ff == null && obs.pmer != null) {
           fwRecordHistory(id, { t, pressure: obs.pmer });
           pressureOnlyRows.push({ station_id: id, t, moy: null, dir: null, pressure: obs.pmer });
@@ -1664,7 +1784,11 @@ async function refreshMfObs() {
       // l'intérêt du réseau MF est justement de voir le front ARRIVER,
       // 200-300 km en amont, là où personne ne surveille de balise.
       // Historique en RAM (cf. gust-front.js), aucune écriture en base.
-      gfIngest(next, t);
+      // `fresh` et non `next` (11/08) : gfRecordObs horodate à `t`, donc
+      // rejouer une station inchangée lui ferait voir une mesure stable
+      // là où il n'y a en réalité PLUS de mesure du tout — exactement le
+      // signal qu'un détecteur de front ne doit pas inventer.
+      gfIngest(fresh, t);
     }
   } catch (e) { console.error('refreshMfObs error:', e.message); }
 }
@@ -6019,6 +6143,18 @@ async function pollAndNotify() {
       // MF, cf. commentaire de MF_MINMAX_WINDOW_MIN. Appelé AVANT le
       // fwRecordHistory de la boucle releves ci-dessous : lit encore le
       // buffer RAM tel qu'à l'issue du poll précédent.
+      // Débogage 11/08/2026 — ne persister que les observations dont le
+      // validityTime a réellement avancé. Avant la fusion du cache
+      // (cf. refreshMfObs), une station qui cessait d'émettre sortait du
+      // cache et n'écrivait donc plus rien ; maintenant elle y reste
+      // jusqu'à 30 min (garde DATA-1 ci-dessus), et sans ce test elle
+      // écrirait la MÊME mesure six fois de suite sous six horodatages
+      // de poll différents. Coût en base pour rien, et surtout une fausse
+      // cadence : une station horaire (cas LEUCATE) ressemblerait à une
+      // station 5 min, ce qui fausserait toute mesure d'intervalle.
+      const lastV = mfLastPersistedValidity.get(mfId);
+      if (obs.validityTime && lastV === obs.validityTime) continue;
+      if (obs.validityTime) mfLastPersistedValidity.set(mfId, obs.validityTime);
       mfHistoryRows.push({ station_id: mfId, t: fwPollT, moy: obs.ff, raf: obs.raf10 ?? null, min: fwWindowMinFf(mfId, obs.ff), dir: obs.dd, pressure: obs.pmer ?? null });
     }
     mfPersistHistory(mfHistoryRows); // fire-and-forget — cf. définition, ne bloque/casse jamais la suite du poll
