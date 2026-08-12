@@ -202,12 +202,21 @@ def main():
              bool(np.isnan(float(sentinelle[0]))))
 
     print("\n── 5. L'index et la purge, sans jamais lister ──")
+    # ⚠️ 12/08 : les clés portent le DOMAINE et la rétention se compte
+    # PAR domaine. `STEPS` est court exprès — ce qui est testé ici est
+    # l'index, pas la taille des tampons.
+    STEPS = [0, 1, 2]
+    D = "nord-alpes"
+
+    def cles(r, d=D):
+        return GR.cles_du_run(r, d, STEPS)
+
     index = dict(GR.INDEX_VIDE)
     runs = ["2026-08-10T00:00:00Z", "2026-08-10T03:00:00Z",
             "2026-08-10T06:00:00Z", "2026-08-10T09:00:00Z"]
     supprimes = []
     for r in runs:
-        index, a_sup = GR.index_apres(index, r, GR.cles_du_run(r))
+        index, a_sup = GR.index_apres(index, r, D, cles(r))
         supprimes += a_sup
         index = GR.index_apres_purge(index, [])
     verifier("après 4 runs, il en reste exactement 3 en ligne",
@@ -215,31 +224,81 @@ def main():
     verifier("le plus récent est en tête (tri antichronologique)",
              index["runs"][0]["run"] == runs[-1])
     verifier("c'est bien le PLUS ANCIEN qui a été purgé, et lui seul",
-             supprimes == GR.cles_du_run(runs[0]), str(supprimes))
+             supprimes == cles(runs[0]), str(supprimes))
+    verifier("un run découpé par échéance publie 1 clé par échéance, "
+             "plus le manifeste", len(cles(runs[0])) == len(STEPS) + 1)
     verifier("`restes` est vide quand tout s'est bien supprimé",
              index["restes"] == [])
 
     # Un run rejoué : il ne doit ni se dupliquer, ni se purger lui-même.
-    rejoue, a_sup = GR.index_apres(index, runs[-1], GR.cles_du_run(runs[-1]))
+    rejoue, a_sup = GR.index_apres(index, runs[-1], D, cles(runs[-1]))
     verifier("⚠️ rejouer le même run ne le duplique pas dans l'index",
              len(rejoue["runs"]) == 3
              and len({e["run"] for e in rejoue["runs"]}) == 3)
     verifier("⚠️ et ne demande PAS de supprimer ses propres clés",
-             not any(c in GR.cles_du_run(runs[-1]) for c in a_sup),
-             str(a_sup))
+             not any(c in cles(runs[-1]) for c in a_sup), str(a_sup))
 
     # Un échec de suppression doit survivre au run suivant.
     idx2 = GR.index_apres_purge(index, ["agrume/grille/vieux/grille.npz"])
-    idx3, a_sup3 = GR.index_apres(idx2, "2026-08-10T12:00:00Z",
-                                  GR.cles_du_run("2026-08-10T12:00:00Z"))
+    idx3, a_sup3 = GR.index_apres(idx2, "2026-08-10T12:00:00Z", D,
+                                  cles("2026-08-10T12:00:00Z"))
     verifier("⚠️ une suppression échouée est REPRISE au run suivant "
              "(sans ListObjects, rien d'autre ne saurait qu'elle existe)",
              "agrume/grille/vieux/grille.npz" in a_sup3)
     verifier("et elle n'est comptée qu'une fois",
              a_sup3.count("agrume/grille/vieux/grille.npz") == 1)
 
+    print("\n── 5 bis. DEUX DOMAINES : les compteurs ne se mélangent pas ──")
+    # ⛔ Le défaut que cette section attrape : avec une rétention
+    # GLOBALE, écrire deux domaines par run purgerait chaque domaine au
+    # bout d'un run et demi — et un domaine dont l'ingestion échoue
+    # disparaîtrait entièrement pendant que l'autre garde ses trois runs.
+    idx = dict(GR.INDEX_VIDE)
+    for r in runs:
+        for d in ("nord-alpes", "pyrenees"):
+            idx, _ = GR.index_apres(idx, r, d, cles(r, d))
+            idx = GR.index_apres_purge(idx, [])
+    verifier("deux domaines × 3 runs = 6 entrées, pas 3",
+             len(idx["runs"]) == 6, str(len(idx["runs"])))
+    for d in ("nord-alpes", "pyrenees"):
+        verifier(f"  et chacun garde bien ses 3 runs ({d})",
+                 sum(1 for e in idx["runs"] if e["domaine"] == d) == 3)
+
+    # Un domaine qui n'avance plus ne doit pas être vidé par l'autre.
+    idx4 = dict(idx)
+    for r in ("2026-08-10T12:00:00Z", "2026-08-10T15:00:00Z",
+              "2026-08-10T18:00:00Z", "2026-08-10T21:00:00Z"):
+        idx4, _ = GR.index_apres(idx4, r, "nord-alpes", cles(r))
+        idx4 = GR.index_apres_purge(idx4, [])
+    verifier("⚠️ 4 runs alpins de plus n'effacent PAS les Pyrénées "
+             "(ingestion pyrénéenne en panne)",
+             sum(1 for e in idx4["runs"] if e["domaine"] == "pyrenees") == 3)
+
+    print("\n── 5 ter. Les clés de l'ANCIEN format ne fuient pas ──")
+    # ⛔ Sans `ListObjects`, un objet qui sort de l'index sans être
+    # supprimé devient INVISIBLE et définitivement perdu. Les entrées
+    # d'avant le 12/08 n'ont pas de `domaine` : elles doivent partir à la
+    # suppression, pas à l'oubli.
+    legacy = dict(GR.INDEX_VIDE, runs=[
+        dict(run="2026-08-12T06:00:00Z",
+             cles=["agrume/grille/2026-08-12T06:00:00Z/grille.npz",
+                   "agrume/grille/2026-08-12T06:00:00Z/manifest.json"]),
+        dict(run="2026-08-12T09:00:00Z",
+             cles=["agrume/grille/2026-08-12T09:00:00Z/grille.npz",
+                   "agrume/grille/2026-08-12T09:00:00Z/manifest.json"])])
+    apres, a_sup = GR.index_apres(legacy, "2026-08-12T12:00:00Z", D,
+                                  cles("2026-08-12T12:00:00Z"))
+    verifier("⛔ les 4 clés de l'ancien format partent à la SUPPRESSION, "
+             "pas à l'oubli",
+             all(c in a_sup for e in legacy["runs"] for c in e["cles"]),
+             f"{len(a_sup)} clé(s) à supprimer")
+    verifier("et l'index n'en garde aucune trace muette",
+             all(e.get("domaine") for e in apres["runs"]))
+    verifier("le garde-fou de préfixe les accepte quand même (même "
+             "produit, ancien chemin)", GR.verifier_prefixe(a_sup) is True)
+
     verifier("le garde-fou accepte les clés du produit B",
-             GR.verifier_prefixe(GR.cles_du_run(runs[0])) is True)
+             GR.verifier_prefixe(cles(runs[0])) is True)
     try:
         GR.verifier_prefixe(["agrume/colonnes/2026-08-10T00:00:00Z/colonnes.npz"])
         deborde = True
@@ -248,7 +307,7 @@ def main():
     verifier("⛔ et REFUSE une clé du produit A — archive DÉFINITIVE, "
              "même bucket", not deborde)
     try:
-        GR.verifier_prefixe(GR.cles_du_run(runs[0]) + ["autre/chose.npz"])
+        GR.verifier_prefixe(cles(runs[0]) + ["autre/chose.npz"])
         partiel = True
     except ValueError:
         partiel = False

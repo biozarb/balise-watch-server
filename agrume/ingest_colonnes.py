@@ -307,7 +307,21 @@ def filtre_001(paquet):
 
 # ══════════════════════════════════════════════════════════════════════
 def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
-            limite_fichiers=None, avec_grille=True):
+            limite_fichiers=None, avec_grille=True, orogs_grille=None):
+    """`orogs_grille` : {domaine: orographie 0,025°} — les domaines du
+    produit B.
+
+    ⚠️ 12/08 — CE PARAMÈTRE EST LA SEULE CHOSE QUI SÉPARE « un produit B »
+    DE « autant de produits B que de domaines », et il est distinct de
+    `paire_orog` À DESSEIN. `paire_orog` porte les DEUX MAILLES d'UN
+    domaine (0,01° et 0,025°) et sert le produit A ; `orogs_grille` porte
+    UNE maille (0,025°, la seule où les 25 niveaux existent) pour
+    PLUSIEURS domaines et sert le produit B. Les confondre — ce que le
+    nom `paire` invite à faire — reviendrait à découper la grille 3D sur
+    la maille fine, c'est-à-dire à poser une fenêtre de 151×211 dans un
+    tableau de 61×85. Le commentaire de `_g == GRID_3D`, plus bas, décrit
+    déjà ce que ça donne : rien ne s'allume.
+    """
     col = Colonnes(ref, balises, steps)
 
     # ── Le produit B, dans la MÊME passe ──────────────────────────────
@@ -321,15 +335,26 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     # ⚠️ La fenêtre vient de l'orographie 0,025°, pas d'un `fenetre()`
     # rejoué : le sol et la colonne doivent tomber sur les mêmes points
     # par construction (cf. l'en-tête de `grille.py`).
-    gr = None
+    # ── Le produit B : UNE grille PAR DOMAINE, dans la même passe ─────
+    # ⚠️ 12/08 — les Pyrénées entrent ici. Le surcoût est une DÉCOUPE de
+    # plus par champ décodé : le téléchargement, le décodage eccodes et
+    # le pic disque sont strictement inchangés, puisque les paquets sont
+    # les mêmes et déjà sur le disque. Ce qui change vraiment est la
+    # MÉMOIRE — chaque domaine porte son tableau float16 — et le
+    # stockage R2, chiffré par `verifier_dimensionnement`.
+    grilles = {}
     if avec_grille:
-        o3d = paire_orog[GRID_3D]
-        lats, lons = axes_depuis_orographie(o3d)
-        gr = Grille(ref, steps, lats, lons, o3d.z)
-        crier(f"▶ produit B : grille {len(lats)}×{len(lons)} × "
-              f"{gr.h0025.shape[0]} paramètres × {gr.h0025.shape[1]} niveaux "
-              f"× {len(steps)} échéances = {gr.octets() / 1e6:.1f} Mo en "
-              f"mémoire (float16)")
+        if orogs_grille is None:
+            orogs_grille = {"nord-alpes": paire_orog[GRID_3D]}
+        from domaine import DOMAINES  # noqa: PLC0415
+        for nom_dom, o3d in sorted(orogs_grille.items()):
+            lats, lons = axes_depuis_orographie(o3d, DOMAINES.get(nom_dom))
+            g = Grille(ref, steps, lats, lons, o3d.z, domaine=nom_dom)
+            grilles[nom_dom] = (g, o3d)
+            crier(f"▶ produit B [{nom_dom}] : grille {len(lats)}×{len(lons)} × "
+                  f"{g.h0025.shape[0]} paramètres × {g.h0025.shape[1]} niveaux "
+                  f"× {len(steps)} échéances = {g.octets() / 1e6:.1f} Mo en "
+                  f"mémoire (float16)")
     par_nom_0025 = {p["nom"]: p for p in PARAMS_0025}
     par_nom_001 = {p["nom"]: p for p in PARAMS_001}
     par_nom_iso = {p["nom"]: p for p in PARAMS_ISO}
@@ -394,11 +419,23 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                         # exceptions de ce callback, donc rien ne
                         # s'allumerait — la grille se remplirait de
                         # travers ou pas du tout, sans un mot.
-                        if (gr is not None and _g == GRID_3D
-                                and gr.accepte(nom, niveau, step)):
-                            gr.poser(nom, niveau, step,
-                                     quantifier(decouper(values, meta, _o),
-                                                _t[nom]))
+                        if _g == GRID_3D:
+                            # ⚠️ La découpe est refaite POUR CHAQUE
+                            # DOMAINE, depuis le champ France entière —
+                            # jamais depuis la fenêtre d'un autre
+                            # domaine. Les deux boîtes ne se recouvrent
+                            # pas, mais surtout `decouper` s'appuie sur
+                            # `orog.j0/i0`, qui est propre à l'artefact :
+                            # réutiliser la découpe alpine pour les
+                            # Pyrénées donnerait un tableau de la bonne
+                            # FORME et du mauvais contenu.
+                            for _g_dom, _o_dom in grilles.values():
+                                if _g_dom.accepte(nom, niveau, step):
+                                    _g_dom.poser(
+                                        nom, niveau, step,
+                                        quantifier(
+                                            decouper(values, meta, _o_dom),
+                                            _t[nom]))
                         return
                     if nom == "zp":
                         # ⚠️ `z` est un GÉOPOTENTIEL en m²/s², pas une
@@ -435,58 +472,104 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
             crier(f"    {cle.split('/')[-1][-28:]} · {taille / 1e6:.0f} Mo · "
                   f"{dec} champs retenus sur {lus}")
 
-    return col, gr, dict(octets=octets, pic_disque=pic_disque, t_dl=t_dl,
-                         t_parse=t_parse, **compte)
+    return (col, {d: g for d, (g, _) in grilles.items()},
+            dict(octets=octets, pic_disque=pic_disque, t_dl=t_dl,
+                 t_parse=t_parse, **compte))
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  Publication du produit B — APRÈS le produit A, et sans jamais
 #  mettre le produit A en danger
 # ══════════════════════════════════════════════════════════════════════
-def publier_grille(p_npz, p_man, manifeste, ref, crier=journal_horodate):
-    """Monte la grille sur R2, met l'index à jour, purge les runs sortis.
+def publier_grilles(paquets, ref, crier=journal_horodate):
+    """Monte les grilles sur R2, met l'index à jour, purge les runs sortis.
+
+    `paquets` : [(domaine, Grille, manifeste)] — un par domaine de
+    production.
 
     ⚠️⚠️ CETTE FONCTION NE DOIT JAMAIS FAIRE ÉCHOUER LE RUN, ET C'EST LA
-    RAISON D'ÊTRE DE L'`except` LARGE QUI L'ENVELOPPE. Le produit A est une archive
-    DÉFINITIVE, déjà écrite quand on arrive ici ; le produit B est
-    jetable et sera régénéré au run suivant, une heure ou trois plus
+    RAISON D'ÊTRE DE L'`except` LARGE QUI L'ENVELOPPE. Le produit A est
+    une archive DÉFINITIVE, déjà écrite quand on arrive ici ; le produit B
+    est jetable et sera régénéré au run suivant, une heure ou trois plus
     tard. Faire tomber le run — donc le voyant healthchecks, donc
     l'alerte — pour un produit qui se répare tout seul serait apprendre
     à ignorer le voyant. C'est le même arbitrage que la purge du 30/07.
 
     ⓘ En contrepartie, l'échec est CRIÉ et compté : un produit B qui ne
     monte plus doit se lire dans les logs, même si le run est vert.
+
+    ── CE QUI A CHANGÉ LE 12/08, ET DANS QUEL ORDRE ──────────────────
+    ⛔ L'INDEX EST LU UNE FOIS ET ÉCRIT UNE FOIS POUR TOUS LES DOMAINES.
+    Le boucler par domaine coûterait un `GetObject` et deux `PutObject`
+    de plus par domaine — mais surtout, deux passes sur le même index à
+    clé fixe ouvriraient une fenêtre où l'index publié ne décrit qu'une
+    partie de ce qui est en ligne. Sans `ListObjects`, cette fenêtre-là
+    est exactement celle où un objet devient invisible.
+
+    ⚠️ Les objets d'un domaine sont écrits AVANT que l'index ne le
+    référence, et l'index précède la purge : l'ordre en cinq temps de
+    `grille.py` est conservé mot pour mot, seul son périmètre s'élargit.
     """
     from grille import (CLE_INDEX, INDEX_VIDE, RETENTION_RUNS,  # noqa: PLC0415
-                        cles_du_run, index_apres, index_apres_purge,
-                        verifier_prefixe)
+                        cle_echeance, cles_du_run, index_apres,
+                        index_apres_purge, prefixe_run, verifier_prefixe)
     from storage import (CACHE_IMMUABLE, CACHE_REECRIT,  # noqa: PLC0415
                          Storage, verifier_dimensionnement)
 
-    mo = (p_npz.stat().st_size + p_man.stat().st_size) / 1e6
-    # ⚠️ On déclare le stockage STATIONNAIRE (rétention × taille), pas la
-    # taille d'un run. Pour un produit purgé c'est le seul chiffre qui
-    # veut dire quelque chose : c'est ce qui reste sur la facture.
+    if not paquets:
+        return False
+
+    # ── Le chiffrage, AVANT la première écriture ──────────────────────
+    # ⚠️ Un objet par échéance et par domaine, plus le manifeste, plus
+    # `zsol`. C'est le poste qui a été TRANCHÉ le 12/08 (voir
+    # `grille.cles_du_run`) et c'est celui qu'il faut voir bouger si
+    # quelqu'un remonte `MAX_HOURS` ou ajoute un domaine : à 25
+    # échéances et 2 domaines on est à 56 objets par run ; à 4 domaines
+    # et 48 échéances on serait à 200, et la ligne journalisée le dirait
+    # AVANT la facture.
+    objets = sum(len(cles_du_run(ref, d, g.steps)) + 1 for d, g, _ in paquets)
+    mo = sum((g.octets() / 1e6) for _, g, _ in paquets)
     plafond = verifier_dimensionnement(
-        "agrume-grille", objets_par_run=4, runs_par_jour=8,
+        "agrume-grille", objets_par_run=objets + 2, runs_par_jour=8,
         mo_par_run=round(mo * RETENTION_RUNS, 2))
     store = Storage("agrume-grille", "AGRUME_BUCKET", "wind-grid", plafond)
 
     # ── 1. l'index précédent — 1 GetObject, Class B ───────────────────
     index = store.get_json(CLE_INDEX) or dict(INDEX_VIDE)
-    crier(f"▶ index : {len(index.get('runs') or [])} run(s) en ligne"
+    legs = [e for e in (index.get("runs") or []) if not e.get("domaine")]
+    crier(f"▶ index : {len(index.get('runs') or [])} entrée(s) en ligne"
+          + (f", dont {len(legs)} à l'ANCIEN format (sans domaine) — elles "
+             f"partent à la purge, pas à l'oubli" if legs else "")
           + (f", {len(index.get('restes') or [])} reste(s) à supprimer"
              if index.get("restes") else ""))
 
-    # ── 2. les objets du run ──────────────────────────────────────────
-    cles = cles_du_run(ref)
-    store.put(cles[0], p_npz.read_bytes(), cache_control=CACHE_IMMUABLE,
-              content_type="application/octet-stream")
-    store.put(cles[1], json.dumps(manifeste, ensure_ascii=False).encode(),
-              cache_control=CACHE_IMMUABLE)
+    # ── 2. les objets de chaque domaine ───────────────────────────────
+    a_supprimer, nouveau = [], index
+    for dom, gr, manifeste in paquets:
+        base = prefixe_run(ref, dom)
+        for step in gr.steps:
+            store.put(cle_echeance(ref, dom, step), gr.tampon_echeance(step),
+                      cache_control=CACHE_IMMUABLE,
+                      content_type="application/octet-stream")
+        # ⚠️ `zsol` N'EST PAS DANS LES TAMPONS D'ÉCHÉANCE, et ce n'est pas
+        # un oubli : il ne dépend pas de l'échéance. Le répéter 25 fois
+        # coûterait 525 Ko par run et par domaine pour 21 Ko d'information.
+        # Sans lui en revanche le client ne peut RIEN faire des tampons —
+        # les niveaux sont AGL.
+        store.put(f"{base}/zsol.bin", gr.tampon_zsol(),
+                  cache_control=CACHE_IMMUABLE,
+                  content_type="application/octet-stream")
+        store.put(f"{base}/manifest.json",
+                  json.dumps(manifeste, ensure_ascii=False).encode(),
+                  cache_control=CACHE_IMMUABLE)
+        cles = cles_du_run(ref, dom, gr.steps) + [f"{base}/zsol.bin"]
+        nouveau, sup = index_apres(nouveau, ref, dom, cles)
+        a_supprimer += [c for c in sup if c not in a_supprimer]
+        crier(f"▶ produit B [{dom}] : {len(gr.steps)} tampon(s) + zsol + "
+              f"manifeste, {gr.octets() / 1e6:.1f} Mo")
 
     # ── 3. l'index NOUVEAU, avant toute suppression ───────────────────
-    nouveau, a_supprimer = index_apres(index, ref, cles)
+    nouveau = dict(nouveau, restes=list(a_supprimer))
     nouveau["ecrit_le"] = datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
     store.put(CLE_INDEX, json.dumps(nouveau, ensure_ascii=False).encode(),
@@ -508,7 +591,7 @@ def publier_grille(p_npz, p_man, manifeste, ref, crier=journal_horodate):
                  if echecs else ""))
     else:
         crier("▶ purge : rien à supprimer "
-              f"(moins de {RETENTION_RUNS} runs en ligne)")
+              f"(moins de {RETENTION_RUNS} runs en ligne par domaine)")
 
     # ── 5. l'index FINAL : `restes` = ce qui a échoué ─────────────────
     if nouveau.get("restes") != echecs:
@@ -681,9 +764,22 @@ def main(argv=None):
                 journal_horodate(f"  ⚠️ points de radiosondage SANS SOL : {e}")
 
         ref, run, steps = choisir_run(a.max_heures)
-        col, gr, mesures = ingerer(ref, run, steps, balises, paire,
-                                   limite_fichiers=a.limite_fichiers,
-                                   avec_grille=not a.sans_grille)
+        # ⚠️ 12/08 — LE PRODUIT B COUVRE MAINTENANT TOUS LES DOMAINES QUI
+        # ONT UNE OROGRAPHIE FIGÉE, pas seulement `nord-alpes`. Le
+        # commentaire qui précède `charger_artefacts()` disait « DEUX
+        # DOMAINES DE PRODUCTION, ET UN SEUL PRODUIT B » et redoutait de
+        # « faire grossir le produit B sans que personne l'ait décidé ».
+        # C'est décidé, chiffré et arbitré le 12/08 : ~254 Mo résidents
+        # pour les deux domaines sur un palier de 10 Go, et le
+        # dimensionnement est journalisé à chaque run.
+        # ⛔ `paire` reste STRICTEMENT le Nord-Alpes : c'est le produit A
+        # qu'elle sert, et lui n'a pas changé.
+        orogs_b = {d: pr[GRID_3D] for d, (pr, _m) in artefacts.items()
+                   if GRID_3D in pr}
+        col, grilles, mesures = ingerer(ref, run, steps, balises, paire,
+                                        limite_fichiers=a.limite_fichiers,
+                                        avec_grille=not a.sans_grille,
+                                        orogs_grille=orogs_b)
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
         return 2
@@ -747,8 +843,9 @@ def main(argv=None):
                      f"{mesures['pic_disque'] / 1e6:.0f} Mo "
                      f"(un fichier à la fois ; plafond du lot "
                      f"{PLAFOND_DISQUE_GO:.0f} Go)")
-    if gr is not None:
-        journal_horodate(f"│ produit B (grille)  : "
+    for dom in sorted(grilles):
+        gr = grilles[dom]
+        journal_horodate(f"│ produit B [{dom}] : "
                          f"{gr.h0025.shape[3]}×{gr.h0025.shape[4]} points × "
                          f"{gr.h0025.shape[1]} niveaux × {len(steps)} "
                          f"échéances · remplissage "
@@ -790,24 +887,34 @@ def main(argv=None):
     # MESURER la taille réelle de la grille sans rien monter sur R2. Le
     # §4.1 annonce 32 Mo/run ; ce chiffre venait d'une extrapolation, et
     # il n'a de valeur que confronté au fichier produit.
-    g_npz = g_man = man_grille = None
-    if gr is not None:
-        man_grille = gr.manifeste(dict(
+    paquets = []
+    for dom in sorted(grilles):
+        g = grilles[dom]
+        # ⚠️ Le sha de l'orographie publié est celui du domaine CONCERNÉ.
+        # Publier celui des Alpes dans le manifeste pyrénéen ferait
+        # croire à un consommateur que sa grille repose sur un sol
+        # qu'elle n'a jamais vu — et le manifeste est justement ce qui
+        # permet de rejouer un run à l'identique.
+        man_dom = (artefacts.get(dom) or (None, man_orog))[1]
+        man_grille = g.manifeste(dict(
             genere_le=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            orographie=dict(run_source=man_orog["run_source"],
-                            sha256=man_orog["grilles"][GRID_3D]["sha256"][:16]),
+            orographie=dict(run_source=man_dom["run_source"],
+                            sha256=man_dom["grilles"][GRID_3D]["sha256"][:16]),
             mesures=dict(duree_min=round(duree_min, 2),
                          incidents=mesures["incidents"])))
-        g_npz = dossier / f"agrume-grille-{ref.replace(':', '')}.npz"
-        g_man = dossier / f"agrume-grille-{ref.replace(':', '')}.json"
-        gr.ecrire_npz(g_npz)
+        g_npz = dossier / f"agrume-grille-{dom}-{ref.replace(':', '')}.npz"
+        g_man = dossier / f"agrume-grille-{dom}-{ref.replace(':', '')}.json"
+        g.ecrire_npz(g_npz)
         g_man.write_text(
             json.dumps(man_grille, ensure_ascii=False, indent=1) + "\n",
             encoding="utf-8")
         journal_horodate(
             f"▶ {g_npz.name} : {g_npz.stat().st_size / 1e6:.1f} Mo "
-            f"(brut float16 : {gr.octets() / 1e6:.1f} Mo) · "
+            f"(brut float16 : {g.octets() / 1e6:.1f} Mo · servi en "
+            f"{len(g.steps)} tampons de "
+            f"{len(g.tampon_echeance(g.steps[0])) / 1e6:.2f} Mo) · "
             f"{g_man.name} : {g_man.stat().st_size / 1024:.0f} Ko")
+        paquets.append((dom, g, man_grille))
 
     if a.sans_ecriture:
         journal_horodate("▶ --sans-ecriture : rien n'est monté sur R2")
@@ -850,9 +957,9 @@ def main(argv=None):
     #  crié, il se lit dans les logs, et il ne coûte rien de plus qu'un
     #  cycle d'attente.
     # ══════════════════════════════════════════════════════════════════
-    if g_npz is not None:
+    if paquets:
         try:
-            publier_grille(g_npz, g_man, man_grille, ref)
+            publier_grilles(paquets, ref)
         except Exception as e:                              # noqa: BLE001
             print(f"⚠️ PRODUIT B NON PUBLIÉ : {type(e).__name__} — {e}\n"
                   f"   Le produit A est écrit et intact ; le run reste "

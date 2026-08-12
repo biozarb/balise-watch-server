@@ -95,13 +95,47 @@ RETENTION_RUNS = 3
 CLE_INDEX = "agrume/grille/index.json"
 
 
-def prefixe_run(run):
-    return f"agrume/grille/{run}"
+# ⚠️ 12/08 — LE DOMAINE ENTRE DANS LA CLÉ. Le produit B était strictement
+# Nord-Alpes ; les Pyrénées y entrent avec l'étape 11. Deux domaines qui
+# partageraient un préfixe se purgeraient mutuellement — la rétention est
+# comptée PAR DOMAINE, donc le domaine doit être dans la clé.
+def prefixe_run(run, domaine):
+    return f"agrume/grille/{domaine}/{run}"
 
 
-def cles_du_run(run):
-    b = prefixe_run(run)
-    return [f"{b}/grille.npz", f"{b}/manifest.json"]
+def cle_echeance(run, domaine, step):
+    """⚠️ `{step:02d}` et pas `{step}` : l'index trie ses runs par ordre
+    LEXICOGRAPHIQUE (voir `index_apres`). Une clé `e3` se rangerait entre
+    `e29` et `e30`. Ici ça ne casse rien aujourd'hui — les clés ne sont
+    pas triées — mais la même erreur a déjà coûté ailleurs, et deux
+    chiffres ne coûtent rien."""
+    return f"{prefixe_run(run, domaine)}/e{step:02d}.bin"
+
+
+def cles_du_run(run, domaine, steps):
+    """Les clés d'un run : un tampon par échéance, plus le manifeste.
+
+    ⛔ CE N'EST PLUS `grille.npz`, ET C'EST LA DÉCISION DE L'ÉTAPE 11.
+    L'en-tête de ce fichier annonçait « le jour où le calque altitude
+    demandera de servir un niveau à la fois sans tirer 32 Mo, on
+    découpera ». Ce jour est venu, mais **pas sur l'axe prévu** : mesuré
+    le 12/08, un calque à altitude-mer constante a besoin de 14 à 25 des
+    25 niveaux (parce que `h = A − zsol` s'étale autant que `zsol`, soit
+    3 720 m sur ce domaine). Découper par NIVEAU aurait fait 625 objets
+    par run pour 14 à 25 requêtes par vue — plus cher ET plus lent.
+
+    ✅ On découpe donc PAR ÉCHÉANCE : 25 objets, un objet = toute la pile
+    verticale d'une échéance. Le client tire un objet et balaie ensuite
+    TOUTE la plage d'altitudes sans une requête de plus.
+
+    ⛔ ET LE FORMAT N'EST PLUS UN `.npz` : le navigateur ne sait pas le
+    lire. C'est un tampon BRUT float16, disposition publiée dans le
+    manifeste. Voir `tampon_echeance()` pour pourquoi il n'est pas
+    compressé.
+    """
+    b = prefixe_run(run, domaine)
+    return [cle_echeance(run, domaine, s) for s in steps] + [
+        f"{b}/manifest.json"]
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -226,8 +260,14 @@ class Grille:
     valeurs. 21 Ko contre une ambiguïté verticale de 3 700 m.
     """
 
-    def __init__(self, run, steps, lats, lons, zsol):
+    def __init__(self, run, steps, lats, lons, zsol, domaine="nord-alpes"):
         self.run = run
+        # ⚠️ Défaut `nord-alpes` : ce paramètre arrive le 12/08 avec le
+        # second domaine, et quatre bancs plus trois CLI construisent
+        # déjà des `Grille` sans lui. Un argument obligatoire les aurait
+        # tous cassés d'un coup pour un renseignement que le manifeste
+        # portait déjà implicitement.
+        self.domaine = domaine
         self.steps = list(steps)
         self.lats = np.asarray(lats, dtype=np.float32)
         self.lons = np.asarray(lons, dtype=np.float32)
@@ -275,11 +315,35 @@ class Grille:
 
     # ── Sérialisation ─────────────────────────────────────────────────
     def manifeste(self, extra=None):
+        from domaine import DOMAINES
         m = dict(
-            produit="AGRUME produit B — grille 3D du domaine Nord-Alpes",
+            produit=f"AGRUME produit B — grille 3D du domaine {self.domaine}",
             run=self.run,
+            domaine=self.domaine,
+            bornes=DOMAINES.get(self.domaine),
             echeances=self.steps,
             grille=GRID_3D,
+            # ══ CE QUE LE CLIENT DOIT LIRE POUR SERVIR LE CALQUE ══════
+            # ⚠️ Tout ce bloc existe pour qu'AUCUNE de ces valeurs ne
+            # soit recopiée côté client. Le projet a déjà payé `LEVELS`
+            # dupliqué entre `arome-wind/ingest.py` et
+            # `web/src/lib/config.ts` : « les deux listes doivent bouger
+            # ensemble, sinon le sélecteur d'altitude propose des paliers
+            # dont les tuiles n'existent plus (404 silencieux, calque
+            # vide) ». Un banc côté web échoue si une liste est en dur.
+            service=dict(
+                cle_echeance="agrume/grille/{domaine}/{run}/e{step:02d}.bin",
+                cle_zsol="agrume/grille/{domaine}/{run}/zsol.bin",
+                disposition_tampon=("(parametre, niveau, lat, lon) en float16 "
+                                    "little-endian, C-contigu, SANS en-tête"),
+                encodage="aucun — l'objet est BRUT pour rester Range-able",
+                tranches=self.tranches(),
+                octets_par_echeance=(len(PARAMS_GRILLE) * len(NIVEAUX_H_0025)
+                                     * len(self.lats) * len(self.lons) * 2),
+                note=("`tranches` donne l'offset de chaque paramètre : un "
+                      "calque de vent ne demande que `bytes=<offset u>-"
+                      "<fin de v>`. NE PAS recopier l'ordre des paramètres "
+                      "ni la liste des niveaux côté client — les lire ICI.")),
             niveaux_m_sol=list(NIVEAUX_H_0025),
             parametres=[dict(nom=p["nom"], unite=p["unite"],
                              paquet=p["paquet"]) for p in PARAMS_GRILLE],
@@ -321,9 +385,81 @@ class Grille:
         return m
 
     def ecrire_npz(self, chemin):
+        """L'archive LOCALE, inchangée depuis l'étape 6.
+
+        ⓘ Elle n'est plus ce qui monte sur R2 (voir `tampon_echeance`),
+        mais elle reste ce que `--sortie` dépose et ce que les CLI de
+        lecture (`couper.py`, `composite.py`, `front_altitude.py`,
+        `test_calque.py --archive`) savent relire. La supprimer aurait
+        cassé quatre outils pour un gain nul : ce fichier ne coûte rien,
+        il ne quitte pas le runner.
+        """
         np.savez_compressed(chemin, h0025=self.h0025, zsol=self.zsol,
                             lats=self.lats, lons=self.lons,
                             echeances=np.asarray(self.steps, dtype=np.int16))
+
+    # ── CE QUI MONTE SUR R2 : un tampon brut par échéance ─────────────
+    def tampon_echeance(self, step):
+        """Les octets servis pour une échéance : `(paramètre, niveau,
+        lat, lon)` en float16, C-contigu, SANS en-tête.
+
+        ⛔ PAS DE `.npz` : le navigateur ne sait pas le lire. Pas de
+        JSON non plus — 5 185 × 25 × 5 nombres en texte feraient plus de
+        10 Mo là où le binaire en fait 1,3.
+
+        ⚠️⚠️ ET IL N'EST PAS COMPRESSÉ, DÉLIBÉRÉMENT. Mesuré le 12/08 :
+
+            objet gzippé, tiré en entier       1 045 Ko
+            objet BRUT + Range sur u/v           518 Ko   ← retenu
+            objet brut tiré en entier          1 296 Ko
+
+        `Content-Encoding: gzip` et `Range` ne se combinent pas — un
+        Range porte sur les octets ENCODÉS. En laissant l'objet brut, le
+        calque ne demande que les premiers 518 500 octets : `u` et `v`
+        sont les deux premiers paramètres et la disposition est
+        param-majeure, donc ils sont contigus EN TÊTE. La coupe et le
+        profil, eux, tirent tout. ✅ Vérifié à travers le CDN :
+        `HTTP 206`, `content-range` exact, `accept-ranges: bytes`.
+
+        ⚠️ CE QUE ÇA IMPOSE À QUI TOUCHERA `PARAMS_GRILLE` : réordonner
+        les paramètres, ou en insérer un avant `v`, ferait servir autre
+        chose au client SANS AUCUNE ERREUR. Le manifeste publie donc
+        l'offset et la longueur de chaque paramètre (`tranches`), et le
+        client DOIT les lire. Un banc côté web échoue si une liste est
+        codée en dur.
+
+        ⓘ float16 conservé tel quel : requantifier en int16 aurait rendu
+        le critère d'acceptation du lot (« le niveau BRUT à l'octet
+        près ») invérifiable, puisqu'on aurait comparé à une valeur
+        requantifiée. Le décodage float16 → float32 en JavaScript tient
+        en dix lignes et il est exact.
+        """
+        k = self.i_step[step]
+        return np.ascontiguousarray(
+            self.h0025[:, :, k], dtype=np.float16).tobytes()
+
+    def tampon_zsol(self):
+        """`zsol` en float32 brut, 21 Ko. Servi une fois par run.
+
+        ⚠️ Sans lui, le client ne peut RIEN faire du tampon d'échéance :
+        les niveaux sont AGL, donc `altitude = zsol + niveau`. C'est la
+        même redondance assumée que dans le npz, et pour la même raison.
+        """
+        return np.ascontiguousarray(self.zsol, dtype=np.float32).tobytes()
+
+    def tranches(self):
+        """Offset et longueur de chaque paramètre dans le tampon.
+
+        C'est ce que le client lit pour construire son `Range`. Publié
+        plutôt que déductible : une liste de paramètres recopiée côté
+        client est exactement le défaut que le projet a déjà payé avec
+        `LEVELS` — « les deux listes doivent bouger ensemble, sinon le
+        sélecteur d'altitude propose des paliers dont les tuiles
+        n'existent plus ».
+        """
+        par_param = len(NIVEAUX_H_0025) * len(self.lats) * len(self.lons) * 2
+        return {p["nom"]: dict(offset=k * par_param, octets=par_param)
+                for k, p in enumerate(PARAMS_GRILLE)}
 
     @staticmethod
     def lire_npz(chemin, manifeste):
@@ -378,22 +514,54 @@ INDEX_VIDE = dict(produit="AGRUME produit B — index des runs en ligne",
                   retention_runs=RETENTION_RUNS, runs=[], restes=[])
 
 
-def index_apres(index, run, cles, retention=RETENTION_RUNS):
-    """(index_nouveau, a_supprimer) après l'écriture de `run`.
+def index_apres(index, run, domaine, cles, retention=RETENTION_RUNS):
+    """(index_nouveau, a_supprimer) après l'écriture de `run` sur `domaine`.
 
     ⚠️ Le tri est ANTICHRONOLOGIQUE sur la chaîne du run
     (`2026-08-10T09:00:00Z`), qui est un ISO 8601 en Z à longueur fixe :
     son ordre lexicographique EST son ordre chronologique. Ça vaut d'être
     écrit, parce que ça cesserait d'être vrai le jour où un run porterait
     un décalage horaire (`+02:00`) — et le tri se tromperait en silence.
+
+    ⚠️⚠️ LA RÉTENTION SE COMPTE PAR DOMAINE, ET C'EST LE PIÈGE DE CETTE
+    FONCTION DEPUIS LE 12/08. Avec deux domaines écrits dans le même run
+    et une rétention globale de 3, les deux domaines du run le plus
+    ancien seraient purgés au bout d'un run et demi — ou, si les deux
+    domaines n'avancent pas au même rythme (une ingestion pyrénéenne qui
+    échoue), le domaine lent disparaîtrait entièrement pendant que le
+    rapide garde ses trois runs. On ne mélange pas les compteurs.
+
+    ⛔ ET LA MIGRATION DES CLÉS DE L'ANCIEN FORMAT EST TRAITÉE ICI, PAS
+    À LA MAIN. Les entrées écrites avant le 12/08 n'ont pas de `domaine`
+    et pointent sur `agrume/grille/{run}/grille.npz`. Elles ne peuvent
+    PAS être laissées à l'abandon : `ListObjects` est hors de portée dans
+    ce projet, donc un objet qui sort de l'index devient **invisible et
+    définitivement perdu** — une fuite, pas un déchet. Toute entrée sans
+    `domaine` part donc directement à la suppression, au premier run qui
+    suit le déploiement.
     """
     ancien = list((index or {}).get("runs") or [])
-    garde = [e for e in ancien if e.get("run") != run]
-    garde.insert(0, dict(run=run, cles=list(cles)))
-    garde.sort(key=lambda e: e["run"], reverse=True)
-
-    vivants, sortis = garde[:retention], garde[retention:]
     a_supprimer = list((index or {}).get("restes") or [])
+
+    # ── Les entrées de l'ANCIEN format, avant toute autre chose ───────
+    legs = [e for e in ancien if not e.get("domaine")]
+    for e in legs:
+        a_supprimer.extend(e.get("cles") or [])
+    ancien = [e for e in ancien if e.get("domaine")]
+
+    garde = [e for e in ancien
+             if not (e.get("run") == run and e.get("domaine") == domaine)]
+    garde.insert(0, dict(run=run, domaine=domaine, cles=list(cles)))
+    garde.sort(key=lambda e: (e["domaine"], e["run"]), reverse=True)
+
+    vivants, sortis = [], []
+    par_domaine = {}
+    for e in garde:
+        n = par_domaine.get(e["domaine"], 0)
+        (vivants if n < retention else sortis).append(e)
+        par_domaine[e["domaine"]] = n + 1
+    vivants.sort(key=lambda e: (e["run"], e["domaine"]), reverse=True)
+
     for e in sortis:
         a_supprimer.extend(e.get("cles") or [])
     # Dédoublonnage en gardant l'ordre : un reste peut réapparaître si
