@@ -173,6 +173,84 @@ PAQUET_ISOBARES = "IP1"
 # changement de domaine de Météo-France passerait inaperçu.
 DOMAINE = dict(latmin=44.8, latmax=46.3, lonmin=5.5, lonmax=7.6)
 
+# ── Le SECOND domaine : les Pyrénées (12/08/2026) ─────────────────────
+# ⚠️ CE N'EST PAS UN ÉLARGISSEMENT DU PREMIER, ET LA DIFFÉRENCE EST TOUT.
+# Élargir `DOMAINE` aurait changé le sha256 de l'orographie de production
+# — donc rompu la comparabilité de toutes les archives déjà écrites. Un
+# SECOND domaine laisse le premier strictement intact : même bornes, même
+# artefact, même sha, mêmes colonnes qu'hier.
+#
+# ⛔ ET LES PYRÉNÉES N'ONT PAS LA FORME DES ALPES. Mesuré le 12/08 sur les
+# 648 balises du catalogue : 76 balises dans la bande 42-44 N × −2,5-3,5 E,
+# mais étalées sur 480 km d'est en ouest ET 200 km du nord au sud
+# (piémont, Montagne Noire, arrière-pays basque). Toute boîte qui les
+# couvre TOUTES fait 18 500 colonnes — 3,6 × les Alpes pour 40 % de
+# balises en MOINS, soit 5 fois moins dense. Découper en deux ou trois
+# boîtes ne rend que 22 %, pour deux ou trois orographies, index et purges.
+#
+# ✅ RETENU : une boîte sur la CHAÎNE elle-même. Le coût marginal par
+# balise gagnée explose dès qu'on monte vers le nord — mesuré :
+#     42,40-43,40 N →  8 405 col, 55 balises   (1,62 × les Alpes)
+#     42,40-43,50 N →  9 225 col, 59 balises   (+820 col pour 4 balises)
+#     42,30-43,80 N → 12 505 col, 65 balises   (+4 100 col pour 10)
+#
+# ⚠️ CE QUE LA BOÎTE LAISSE DEHORS : 21 balises de piémont, de Montagne
+# Noire et d'arrière-pays basque. Leur colonne est extractible
+# (l'indexation se fait sur la grille NATIVE, pas sur la fenêtre) — c'est
+# leur SOL qui manquait. ✅ Traité le 12/08 par `ZONES_INTERET` plus bas :
+# elles reçoivent une petite fenêtre de sol et entrent dans l'archive
+# définitive. ⛔ Elles n'entrent PAS dans le produit B pour autant : pas
+# de calque, pas de coupe, hors grille 3D.
+DOMAINE_PYRENEES = dict(latmin=42.40, latmax=43.40, lonmin=-1.80, lonmax=3.30)
+
+# ⚠️ L'ORDRE COMPTE POUR `domaine_de()` — pas pour le résultat (les
+# domaines sont disjoints, `verifier_domaines_disjoints()` l'exige), mais
+# pour la lisibilité des journaux. Nord-Alpes d'abord : c'est le domaine
+# historique, celui dont les archives remontent au 10/08.
+DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES}
+
+# ── LES ZONES D'INTÉRÊT — ⛔ CE NE SONT PAS DES DOMAINES ──────────────
+# Une zone d'intérêt ne découpe AUCUNE grille, ne produit AUCUN artefact
+# de production, et rien de ce qui est servi à un pilote n'en dépend
+# géométriquement. Elle répond à une seule question : **quelles balises
+# méritent qu'on aille leur chercher un sol alors qu'elles tombent hors
+# de toutes les boîtes ?**
+#
+# ⚠️ POURQUOI CETTE NOTION EXISTE, ET POURQUOI ELLE EST DANGEREUSE SANS
+# CE COMMENTAIRE. Les boîtes de production sont dimensionnées par le
+# budget du produit B — la grille jetable. Le produit A, lui, est une
+# archive définitive par balise : `colonnes.index_plats()` indexe la
+# grille NATIVE France entière, donc extraire la colonne d'une balise
+# hors boîte ne coûte rien de plus. Seul son SOL manque. Laisser 21 sites
+# de vol pyrénéens hors de l'archive définitive à cause du budget d'un
+# produit jetable, ce serait laisser le produit jetable commander le
+# produit permanent — exactement l'inverse de l'ordre voulu.
+#
+# ⛔ CE QUE CES BALISES N'ONT PAS, ET IL FAUT LE DIRE : elles auront un
+# profil vertical (produit A), jamais de calque ni de coupe (produit B).
+# Elles sont hors grille 3D, et le resteront tant que la boîte ne bouge
+# pas.
+ZONES_INTERET = {
+    "pyrenees-large": dict(latmin=42.0, latmax=44.0, lonmin=-2.5, lonmax=3.5),
+}
+
+# Demi-fenêtre de sol autour d'une balise isolée. ⚠️ Ce n'est PAS le
+# 0,25° des radiosondages : celui-là était dimensionné sur la dérive
+# mesurée d'un ballon (7,8 km à 8 000 m). Une balise ne dérive pas. On
+# veut la maille qui la contient et ses voisines — 0,05° ≈ 5,5 km, soit
+# cinq mailles de 1,1 km, largement de quoi. Le coût suit : 146 points
+# par balise au lieu de 3 042.
+DEMI_FENETRE_BALISE_DEG = 0.05
+
+
+def dans_zone_interet(lat, lon):
+    """Le point est-il dans une zone d'intérêt ? (hors domaines)"""
+    for d in ZONES_INTERET.values():
+        if (d["latmin"] <= lat <= d["latmax"]
+                and d["lonmin"] <= lon <= d["lonmax"]):
+            return True
+    return False
+
 # Maille réelle au centre du domaine (45,5 °N), pour mémoire — c'est ce
 # qui décide si deux balises d'une même grappe tombent dans la MÊME
 # maille (§6 du lot, vérification par les grappes étagées) :
@@ -336,13 +414,79 @@ def fenetre(meta, marge=0, domaine=None):
     i1 = min(meta["Ni"] - 1, i1 + marge)
     if j0 > j1 or i0 > i1:
         raise ValueError(
-            f"domaine Nord-Alpes hors de la grille reçue "
+            f"domaine {dom['latmin']}-{dom['latmax']} N × "
+            f"{dom['lonmin']}-{dom['lonmax']} E hors de la grille reçue "
             f"({meta['Ni']}×{meta['Nj']}, origine "
             f"{meta['lat0']}/{meta['lon0']}, pas {meta['di']}/{meta['dj']})")
     return j0, j1, i0, i1
 
 
-def dans_domaine(lat, lon):
-    """Le point est-il dans le domaine Nord-Alpes ? (bornes inclusives)"""
-    return (DOMAINE["latmin"] <= lat <= DOMAINE["latmax"]
-            and DOMAINE["lonmin"] <= lon <= DOMAINE["lonmax"])
+def dans_domaine(lat, lon, nom=None):
+    """Le point est-il dans UN domaine de production ? (bornes inclusives)
+
+    ⚠️ 12/08 — LE SENS DE CETTE FONCTION A CHANGÉ, et c'est le seul
+    endroit où ça se voit. Elle testait le domaine Nord-Alpes ; elle teste
+    maintenant l'appartenance à **n'importe lequel** des domaines de
+    `DOMAINES`. Tous ses appelants voulaient déjà dire « ce point est-il
+    servable ? » et non « est-il dans les Alpes ? » — `freeze_balises`
+    filtre les candidates à l'axe, `colonnes` écarte celles qui n'auront
+    pas de sol. Passer `nom` restreint à un domaine précis, pour les rares
+    cas qui veulent vraiment celui-là et pas un autre.
+
+    ⚠️ MESURÉ LE 12/08 — CETTE FONCTION ET `z_at()` PEUVENT SE
+    CONTREDIRE, D'UNE DEMI-MAILLE. Elle teste des BORNES ; la fenêtre
+    réellement découpée par `fenetre()` s'aligne sur les POINTS DE GRILLE
+    (elle arrondit), et `z_at()` cherche le plus proche voisin. Une balise
+    posée à moins d'une demi-maille du bord — 0,0125° en 0,025°, soit
+    1,4 km — est donc « hors bornes » ici et bel et bien DANS la fenêtre
+    là-bas. Un cas réel sur 203 : la balise 1661 (LFMG), à 43,4069 N pour
+    un `latmax` de 43,40.
+    ⓘ Ce n'est pas un défaut à corriger, et surtout pas en rognant la
+    fenêtre : les deux sources rendent le MÊME point de grille et le même
+    sol (395,0 m des deux côtés, écart 0,000 m — vérifié). Ce qui compte
+    est que le SOL soit unique, et il l'est. La règle du projet
+    s'applique : c'est le fichier qui décide, pas la constante — d'où le
+    fait que `ingest_colonnes` attribue les sols par `z_at`, jamais par
+    `domaine_de`.
+    """
+    for cle, d in (DOMAINES.items() if nom is None else [(nom, DOMAINES[nom])]):
+        if (d["latmin"] <= lat <= d["latmax"]
+                and d["lonmin"] <= lon <= d["lonmax"]):
+            return True
+    return False
+
+
+def domaine_de(lat, lon):
+    """Le NOM du domaine qui contient ce point, ou None.
+
+    ⚠️ Les domaines ne se recouvrent pas aujourd'hui, et rien ne l'impose.
+    Le jour où deux se chevaucheraient, cette fonction rendrait le premier
+    déclaré — silencieusement, et l'orographie servie changerait selon
+    l'ordre d'un dictionnaire. `verifier_domaines_disjoints()` refuse ce
+    cas plutôt que de le trancher au hasard.
+    """
+    for cle, d in DOMAINES.items():
+        if (d["latmin"] <= lat <= d["latmax"]
+                and d["lonmin"] <= lon <= d["lonmax"]):
+            return cle
+    return None
+
+
+def verifier_domaines_disjoints():
+    """Lève si deux domaines se recouvrent. Appelée par le banc.
+
+    Deux domaines qui se chevauchent, c'est un point qui a DEUX sols
+    figés — et donc une colonne dont l'altitude dépend de quel artefact a
+    été consulté en premier. Le genre de faute qui ne lève jamais et
+    décale toutes les altitudes servies sur la zone de recouvrement.
+    """
+    noms = list(DOMAINES)
+    for a in range(len(noms)):
+        for b in range(a + 1, len(noms)):
+            x, y = DOMAINES[noms[a]], DOMAINES[noms[b]]
+            if (x["latmin"] <= y["latmax"] and y["latmin"] <= x["latmax"]
+                    and x["lonmin"] <= y["lonmax"] and y["lonmin"] <= x["lonmax"]):
+                raise ValueError(
+                    f"domaines {noms[a]} et {noms[b]} se recouvrent : un "
+                    f"point du recouvrement aurait deux sols figés")
+    return True

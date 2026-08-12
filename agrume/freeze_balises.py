@@ -45,7 +45,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from domaine import DOMAINE, dans_domaine  # noqa: E402
+from domaine import (DOMAINE, DOMAINES, ZONES_INTERET,  # noqa: E402
+                     dans_domaine, dans_zone_interet, domaine_de)
 
 ARTEFACT = Path(__file__).resolve().parent / "data" / "balises-nord-alpes.json"
 PIOUPIOU_LIVE = "https://api.pioupiou.fr/v1/live-with-meta/all"
@@ -94,12 +95,28 @@ def charger_artefact(chemin=ARTEFACT):
         raise Abort(f"artefact de balises absent ({p.name}) — le régénérer "
                     f"avec `python3 agrume/freeze_balises.py`")
     man = json.loads(p.read_text(encoding="utf-8"))
-    if man.get("domaine") != DOMAINE:
+    # ⚠️ 12/08 — le garde-fou compare maintenant TOUS les domaines, et il
+    # accepte encore l'ancienne forme à un seul (`domaine`). Ce n'est pas
+    # de la complaisance : un axe figé le 10/08 décrit exactement les
+    # mêmes balises qu'aujourd'hui côté Alpes, et le refuser ferait
+    # échouer tout run lancé entre le déploiement du code et le regel de
+    # l'axe. Ce qu'il doit attraper reste intact — un axe figé sur des
+    # bornes qui ne sont plus celles du code.
+    fige = man.get("domaines")
+    if fige is None and man.get("domaine") is not None:
+        fige = {"nord-alpes": man["domaine"]}
+    attendu = {n: d for n, d in DOMAINES.items()}
+    if fige != attendu and fige != {"nord-alpes": DOMAINE}:
         raise Abort(
-            f"⚠️ l'artefact a été figé sur un AUTRE domaine "
-            f"({man.get('domaine')}) que celui du code ({DOMAINE}). Les "
-            f"colonnes archivées et celles à venir ne porteraient pas sur "
-            f"les mêmes balises. Régénérer explicitement.")
+            f"⚠️ l'artefact a été figé sur d'AUTRES domaines "
+            f"({fige}) que ceux du code ({attendu}). Les colonnes "
+            f"archivées et celles à venir ne porteraient pas sur les mêmes "
+            f"balises. Régénérer explicitement.")
+    if fige == {"nord-alpes": DOMAINE} and len(DOMAINES) > 1:
+        print(f"  ⚠️ axe figé AVANT l'ajout de "
+              f"{', '.join(n for n in DOMAINES if n != 'nord-alpes')} : "
+              f"les balises de ce(s) domaine(s) ne seront pas archivées "
+              f"tant que `freeze_balises.py` n'aura pas été relancé.")
     return man["balises"], man
 
 
@@ -121,11 +138,21 @@ def fusionner(existantes, candidates, crier=print):
         # pas des balises : ils portent `source = "radiosondage"`, et
         # c'est ce marqueur — pas leur position — qui les fait entrer.
         # Aucun score de balise ne doit les avaler par erreur.
-        if c.get("source") != "radiosondage" and not dans_domaine(c["lat"], c["lon"]):
+        # ⚠️ 12/08 — TROIS façons d'entrer dans l'axe, et une seule qui
+        # donne droit au produit B. Une balise d'une ZONE D'INTÉRÊT hors
+        # de toute boîte entre elle aussi : sa colonne ne coûte rien de
+        # plus (indexation sur la grille native) et l'archive est
+        # définitive. Elle est marquée `hors_domaine` pour que personne ne
+        # la croie servie par le calque ou la coupe.
+        dans_boite = dans_domaine(c["lat"], c["lon"])
+        if (c.get("source") != "radiosondage" and not dans_boite
+                and not dans_zone_interet(c["lat"], c["lon"])):
             continue
         ancienne = connues.get(c["id"])
         if ancienne is None:
             connues[c["id"]] = dict(c, position_suspecte=False,
+                                    hors_domaine=not dans_boite
+                                    and c.get("source") != "radiosondage",
                                     vue_le=datetime.now(timezone.utc)
                                     .strftime("%Y-%m-%d"))
             ajouts += 1
@@ -216,14 +243,36 @@ def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print):
               "d'avant n'est plus comparable), soit la balise a déménagé "
               "(et c'est une autre balise).")
 
+    # ⚠️ 12/08 — l'axe couvre DEUX domaines, et le nom du fichier ment.
+    # `balises-nord-alpes.json` porte maintenant aussi les Pyrénées. Le
+    # renommer serait plus propre à lire et plus risqué à faire : c'est
+    # le fichier que `charger_artefact()` ouvre, et un renommage est la
+    # seule opération de ce module qui puisse casser un run en cours de
+    # journée. Le manifeste dit donc la vérité que le nom ne dit pas —
+    # et le renommage reste ouvert, comme un geste à part.
+    par_domaine = {}
+    for b in balises:
+        d = domaine_de(b["lat"], b["lon"])
+        par_domaine[d or "hors domaine"] = par_domaine.get(d or "hors domaine", 0) + 1
     manifeste = dict(
-        produit="AGRUME — axe des balises du domaine Nord-Alpes, figé",
+        produit="AGRUME — axe des balises, figé (tous domaines)",
         ecrit_le=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        domaine=DOMAINE,
+        domaines=DOMAINES,
+        zones_interet=ZONES_INTERET,
         n=len(balises),
+        n_par_domaine=par_domaine,
+        n_hors_domaine=sum(1 for b in balises if b.get("hors_domaine")),
         note=("Fusion À AJOUT SEUL : une balise hors ligne n'est jamais "
               "retirée, sinon l'axe de l'archive se décalerait et son "
-              "historique deviendrait orphelin. Régénérer avec "
+              "historique deviendrait orphelin. ⚠️ L'ajout seul garantit "
+              "qu'aucune balise ne DISPARAÎT ; il ne garantit PAS que les "
+              "positions dans ce fichier ne bougent pas — l'axe est trié "
+              "par identifiant (cf. `_rang`), donc une balise d'identifiant "
+              "plus petit décale les suivantes. Chaque archive porte SA "
+              "propre liste et la recherche se fait par identifiant, jamais "
+              "par indice. ⚠️ Le nom du fichier dit « nord-alpes » pour des "
+              "raisons de continuité ; l'axe couvre tous les domaines de "
+              "`domaine.DOMAINES`. Régénérer avec "
               "`python3 agrume/freeze_balises.py`."),
         balises=balises)
     Path(chemin).parent.mkdir(parents=True, exist_ok=True)

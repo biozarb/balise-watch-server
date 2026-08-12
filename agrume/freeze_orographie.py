@@ -41,11 +41,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from domaine import (DEMI_FENETRE_VERIF_DEG, DOMAINE, GRID_3D,  # noqa: E402
+from domaine import (DEMI_FENETRE_BALISE_DEG,  # noqa: E402
+                     DEMI_FENETRE_VERIF_DEG, DOMAINE, GRID_3D,
                      GRID_FINE, PAQUET_OROGRAPHIE, TEMOIN_VERIF,
-                     fenetre_autour)
+                     ZONES_INTERET, fenetre, fenetre_autour)
 from mf_s3 import download_tmp, s3_keys, s3_objets  # noqa: E402
-from orographie import (ARTEFACT_JSON, ARTEFACT_NPZ,  # noqa: E402
+from orographie import (ARTEFACTS, ARTEFACT_ISOLEES_JSON,  # noqa: E402
+                        ARTEFACT_ISOLEES_NPZ, ARTEFACT_JSON, ARTEFACT_NPZ,
                         ARTEFACT_VERIF_JSON, ARTEFACT_VERIF_NPZ, Abort,
                         CLES_META, _sha256, accord_avec_production,
                         charger_artefact, charger_artefact_verif, decouper,
@@ -102,8 +104,27 @@ def quantiles(v, qs=(0.1, 0.25, 0.5, 0.75, 0.9)):
     return [float(a[min(len(a) - 1, int(q * len(a)))]) for q in qs] if len(a) else []
 
 
-def geler():
+def geler(nom_domaine="nord-alpes"):
+    """Gèle l'orographie d'UN domaine de production.
+
+    ⚠️ 12/08 — cette fonction ne connaissait qu'un domaine. Elle en prend
+    un en argument depuis l'ajout des Pyrénées. Le défaut reste
+    `nord-alpes` : tout appel existant, dans un banc ou une commande
+    tapée à la main, fait donc exactement ce qu'il faisait avant, et
+    produit le MÊME fichier au MÊME sha256. C'était la condition pour
+    toucher à ce fichier — les archives du produit A déclarent ce sha.
+    """
     import eccodes
+
+    from domaine import DOMAINES, verifier_domaines_disjoints
+    verifier_domaines_disjoints()
+    if nom_domaine not in DOMAINES:
+        raise Abort(f"domaine inconnu : {nom_domaine} "
+                    f"(connus : {', '.join(DOMAINES)})")
+    dom = DOMAINES[nom_domaine]
+    npz_cible, js_cible = ARTEFACTS[nom_domaine]
+    print(f"▶ domaine {nom_domaine} : {dom['latmin']}-{dom['latmax']} N × "
+          f"{dom['lonmin']}-{dom['lonmax']} E → {npz_cible.name}")
 
     ref, objets = trouver_run_complet()
     print(f"▶ run retenu : {ref} (champ statique, le run ne fait que dater "
@@ -120,7 +141,13 @@ def geler():
             valeurs, meta = lire_champ_h(chemin)
         finally:
             os.unlink(chemin)          # ménage : jamais de GRIB qui traîne
-        orog = decouper(valeurs, meta, grille)
+        # ⚠️ Les bornes viennent du domaine DEMANDÉ, pas du défaut de
+        # `fenetre()`. Un `decouper(..., grille)` tout court aurait
+        # découpé les Alpes en croyant faire les Pyrénées : mêmes tailles
+        # plausibles, même manifeste, et une orographie de Savoie sous
+        # des balises ariégeoises. Rien n'aurait levé.
+        orog = decouper(valeurs, meta, grille,
+                        bornes=fenetre(meta, domaine=dom))
         paire[grille] = orog
         j0, i0 = orog.j0, orog.i0
         nj, ni = orog.z.shape
@@ -165,7 +192,8 @@ def geler():
         ecrit_le=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         run_source=ref,
         eccodes=eccodes.codes_get_api_version(),
-        domaine=DOMAINE,
+        nom_domaine=nom_domaine,
+        domaine=dom,
         grilles=grilles_manifeste,
         ecart_0025_moins_001=dict(
             n=len(ecarts),
@@ -177,16 +205,17 @@ def geler():
         note=("Champ `h` (surface), STATIQUE. ⚠️ Le paquet CHANGE avec la "
               "grille : 001/SP3 mais 0025/SP2 — 0025/SP3 existe et ne "
               "contient aucune orographie. Régénérer avec "
-              "`python3 agrume/freeze_orographie.py`."))
+              f"`python3 agrume/freeze_orographie.py --domaine {nom_domaine}`."))
 
-    o_npz, o_json = ecrire_artefact(paire, manifeste)
-    print(f"\n▶ {ARTEFACT_NPZ.name} : {o_npz / 1024:.0f} Ko · "
-          f"{ARTEFACT_JSON.name} : {o_json / 1024:.0f} Ko")
+    o_npz, o_json = ecrire_artefact(paire, manifeste, npz_cible, js_cible)
+    print(f"\n▶ {npz_cible.name} : {o_npz / 1024:.0f} Ko · "
+          f"{js_cible.name} : {o_json / 1024:.0f} Ko")
     return 0
 
 
-def verifier():
-    paire, man = charger_artefact()
+def verifier(nom_domaine="nord-alpes"):
+    npz_cible, js_cible = ARTEFACTS[nom_domaine]
+    paire, man = charger_artefact(npz_cible, js_cible)
     print(f"▶ artefact du {man['ecrit_le']}, run source {man['run_source']}, "
           f"eccodes {man['eccodes']}")
     for grille, o in sorted(paire.items()):
@@ -324,8 +353,101 @@ def verifier_radiosondages():
     return 0
 
 
+def geler_balises_isolees():
+    """Le TROISIÈME artefact : une fenêtre de sol autour de chaque balise
+    de l'axe qui tombe hors de TOUTE boîte de production.
+
+    ⚠️ POURQUOI CES BALISES EXISTENT. Les boîtes sont dimensionnées par le
+    budget du produit B — la grille jetable. Le produit A, lui, est
+    définitif et indexé sur la grille NATIVE : la colonne d'une balise
+    hors boîte ne coûte rien de plus. Seul son sol manquait. Sans ce
+    fichier, 21 sites de vol pyrénéens resteraient hors de l'archive
+    permanente à cause du budget d'un produit qui ne survit pas à trois
+    runs.
+
+    ⚠️ La liste vient de l'AXE FIGÉ, pas du catalogue live. Deux raisons :
+    l'axe est ce que l'ingestion lit réellement, et il porte le drapeau
+    `hors_domaine` posé au gel. Repartir du catalogue ferait deux
+    définitions de « hors domaine » qui divergeraient le jour où une
+    balise bouge.
+    """
+    import eccodes
+
+    from freeze_balises import charger_artefact as charger_balises
+    balises, _man = charger_balises()
+    cibles = [b for b in balises if b.get("hors_domaine")]
+    if not cibles:
+        raise Abort("aucune balise hors domaine dans l'axe figé — rien à "
+                    "geler. (Relancer `freeze_balises.py` d'abord ?)")
+    ref, objets = trouver_run_complet()
+    print(f"▶ run retenu : {ref} — {len(cibles)} balise(s) isolée(s), "
+          f"demi-fenêtre {DEMI_FENETRE_BALISE_DEG}° "
+          f"(~{DEMI_FENETRE_BALISE_DEG * 111:.0f} km)")
+
+    par_balise = {str(b["id"]): {} for b in cibles}
+    manifeste_balises = {str(b["id"]): dict(
+        nom=b.get("name") or b["id"], lat=b["lat"], lon=b["lon"],
+        source=b.get("source"), grilles={}) for b in cibles}
+
+    for grille in (GRID_FINE, GRID_3D):
+        cle, taille = objets[grille]
+        paquet, _ = PAQUET_OROGRAPHIE[grille]
+        chemin = download_tmp(cle)
+        try:
+            valeurs, meta = lire_champ_h(chemin)
+        finally:
+            os.unlink(chemin)          # ménage : jamais de GRIB qui traîne
+        print(f"\n── grille {grille} · paquet {paquet} "
+              f"({taille / 1e6:.1f} Mo) ──")
+        for b in cibles:
+            bid = str(b["id"])
+            bornes = fenetre_autour(meta, b["lat"], b["lon"],
+                                    DEMI_FENETRE_BALISE_DEG)
+            o = decouper(valeurs, meta, grille, bornes=bornes)
+            par_balise[bid][grille] = o
+            z = o.z_at(b["lat"], b["lon"])
+            # ⛔ Le contrôle qui compte : une fenêtre qui ne contient pas
+            # SON propre point est une fenêtre calculée au mauvais
+            # endroit. Elle aurait la bonne taille et le bon sha256.
+            if z is None:
+                raise Abort(
+                    f"la fenêtre de {bid} ({b['lat']}/{b['lon']}) ne "
+                    f"contient pas son propre point — bornes {bornes}")
+            manifeste_balises[bid]["grilles"][grille] = dict(
+                paquet=paquet, cle_s3=cle,
+                meta={k: (float(meta[k]) if isinstance(meta[k], float)
+                          else int(meta[k])) for k in CLES_META},
+                j0=o.j0, i0=o.i0, nj=o.z.shape[0], ni=o.z.shape[1],
+                sha256=_sha256(o.z), z_au_point=round(float(z), 1))
+
+    manifeste = dict(
+        produit="AGRUME — sol des balises HORS de toute boîte de production",
+        ecrit_le=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        run_source=ref,
+        eccodes=eccodes.codes_get_api_version(),
+        demi_fenetre_deg=DEMI_FENETRE_BALISE_DEG,
+        zones_interet=ZONES_INTERET,
+        n=len(cibles),
+        balises=manifeste_balises,
+        note=("Ces balises ont un profil vertical (produit A) mais PAS de "
+              "calque ni de coupe (produit B) : elles sont hors grille 3D. "
+              "Régénérer avec `python3 agrume/freeze_orographie.py "
+              "--balises-isolees`, APRÈS `freeze_balises.py`."))
+
+    o_npz, o_json = ecrire_artefact_verif(par_balise, manifeste,
+                                          ARTEFACT_ISOLEES_NPZ,
+                                          ARTEFACT_ISOLEES_JSON)
+    print(f"\n▶ {ARTEFACT_ISOLEES_NPZ.name} : {o_npz / 1024:.0f} Ko · "
+          f"{ARTEFACT_ISOLEES_JSON.name} : {o_json / 1024:.0f} Ko")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--domaine", default="nord-alpes",
+                   help="domaine de production à geler ou à vérifier "
+                        "(nord-alpes | pyrenees). ⚠️ Le défaut reproduit "
+                        "exactement le comportement d'avant le 12/08.")
     p.add_argument("--verifier", action="store_true",
                    help="relit l'artefact existant sans rien retélécharger")
     p.add_argument("--radiosondages", action="store_true",
@@ -333,13 +455,18 @@ def main(argv=None):
                         "radiosondage (la production n'est pas touchée)")
     p.add_argument("--verifier-radiosondages", action="store_true",
                    help="relit l'artefact de vérification")
+    p.add_argument("--balises-isolees", action="store_true",
+                   help="gèle le sol des balises de l'axe qui sont HORS de "
+                        "toute boîte (à lancer APRÈS freeze_balises.py)")
     a = p.parse_args(argv)
     try:
+        if a.balises_isolees:
+            return geler_balises_isolees()
         if a.verifier_radiosondages:
             return verifier_radiosondages()
         if a.radiosondages:
             return geler_radiosondages()
-        return verifier() if a.verifier else geler()
+        return verifier(a.domaine) if a.verifier else geler(a.domaine)
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
         return 2

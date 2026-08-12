@@ -58,12 +58,13 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 
 | fichier | rôle |
 |---|---|
-| `domaine.py` | **toutes** les constantes communes : grilles, niveaux, domaine, paquets, horizon, raccords |
+| `domaine.py` | **toutes** les constantes communes : grilles, niveaux, **les DEUX domaines**, paquets, horizon, raccords |
 | `orographie.py` | le sol du modèle, chargé depuis l'artefact figé — et le refus de deviner le paquet |
-| `freeze_orographie.py` | extrait les deux orographies **une fois**, les découpe, les versionne |
-| `data/orographie-nord-alpes.{npz,json}` | l'artefact figé (94 Ko) et son manifeste |
+| `freeze_orographie.py` | extrait les deux orographies **une fois** par domaine (`--domaine`), les découpe, les versionne |
+| `data/orographie-nord-alpes.{npz,json}` | l'artefact figé des Alpes (94 Ko) et son manifeste |
+| `data/orographie-pyrenees.{npz,json}` | **celui des Pyrénées** (141 Ko), gelé le 12/08 — 41 × 205 = 8 405 colonnes en 0,025° |
 | `freeze_balises.py` | fige l'**axe des balises** de l'archive, en ajout seul |
-| `data/balises-nord-alpes.json` | les 125 balises du domaine (26 Ko) |
+| `data/balises-nord-alpes.json` | ⚠️ **l'axe COMPLET** : 125 Alpes + 55 Pyrénées + 2 radiosondages (38 Ko). Le nom dit « nord-alpes » par continuité — c'est le manifeste qui fait foi |
 | `portail.py` | client WCS, avec les six pièges du portail traités |
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
 | `colonnes.py` | le produit A : conteneur, quantification, disposition |

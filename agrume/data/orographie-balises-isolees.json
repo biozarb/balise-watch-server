@@ -1,0 +1,985 @@
+{
+  "produit": "AGRUME — sol des balises HORS de toute boîte de production",
+  "ecrit_le": "2026-08-12T18:32:19Z",
+  "run_source": "2026-08-12T15:00:00Z",
+  "eccodes": "2.43.0",
+  "demi_fenetre_deg": 0.05,
+  "zones_interet": {
+    "pyrenees-large": {
+      "latmin": 42.0,
+      "latmax": 44.0,
+      "lonmin": -2.5,
+      "lonmax": 3.5
+    }
+  },
+  "n": 21,
+  "balises": {
+    "41": {
+      "nom": "Sauveterre",
+      "lat": 43.4568,
+      "lon": 0.8464,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1189,
+          "i0": 1280,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "b9ff37f364f23117d27d1a8265f2e4edd315b2933ad9c8731946a8a459b9bdd9",
+          "z_au_point": 233.5
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 476,
+          "i0": 512,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "09140beaf1c85ec4ced3c00f9ce174c4a828bfccb8f83f4cd716283a2c74c13d",
+          "z_au_point": 208.9
+        }
+      }
+    },
+    "385": {
+      "nom": "Deco Cessenon-sur-Orb",
+      "lat": 43.4464,
+      "lon": 3.0384,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1190,
+          "i0": 1499,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "e4e94f212a57ce38288c187e499ade7775adb440eaaf0ee89eb9f289ed9598f3",
+          "z_au_point": 82.4
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 476,
+          "i0": 600,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "83b173daba17660181f0d8abe5028d1020534c5630faea8fbd7552bc2af9c219",
+          "z_au_point": 79.0
+        }
+      }
+    },
+    "928": {
+      "nom": "Dourgne St Stapin",
+      "lat": 43.4757,
+      "lon": 2.143,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1187,
+          "i0": 1409,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "8fbc43b9eccb19f3b78e2828fe9226578abf4d516d17af46a4e93aeb88a13ab4",
+          "z_au_point": 320.7
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 475,
+          "i0": 564,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "fe36421ba69404d986f723d839265d9de5b807464a77925150de9db5015940c6",
+          "z_au_point": 424.1
+        }
+      }
+    },
+    "975": {
+      "nom": "Cirque du Bout du Monde 680m",
+      "lat": 43.7878,
+      "lon": 3.3739,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1156,
+          "i0": 1532,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "4a5b9b81bd824a36cae2adace6959a92e7c0356a09a794d8edb8b63cacb735ac",
+          "z_au_point": 624.7
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 462,
+          "i0": 613,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "b43429365098c4b8cfa2c4ea18c692fbdcd7ec4bd0c133c3c422796fcf1095a9",
+          "z_au_point": 725.6
+        }
+      }
+    },
+    "999": {
+      "nom": "Lautrec. Club Rev'aile",
+      "lat": 43.7112,
+      "lon": 2.1415,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1164,
+          "i0": 1409,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "d76c9862e6588d5665f1453d6e92268c693e5c29e46e7eefb4d5590f86d5925c",
+          "z_au_point": 277.4
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 466,
+          "i0": 564,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "fa41fc41f36eee889ddb4623cbb676afd211a222f03e9f42ee2a8fa2146cb509",
+          "z_au_point": 227.2
+        }
+      }
+    },
+    "1371": {
+      "nom": "LES AILES VOLANTES BESSAN",
+      "lat": 43.3415,
+      "lon": 3.4087,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1201,
+          "i0": 1536,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "61c376f7f0ad5813758aa9a6876f631873804a1634eb3d9f758767e9a6d29a3c",
+          "z_au_point": 12.4
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 480,
+          "i0": 614,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "28b5a67273d9209ddf75ea9355ad3cf9cd0dfc6a04d457b237e7bf97ed56b814",
+          "z_au_point": 15.9
+        }
+      }
+    },
+    "1372": {
+      "nom": "Deco Saint-Guiraud 257m",
+      "lat": 43.6845,
+      "lon": 3.4489,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1167,
+          "i0": 1540,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "37ffbc4f6bc85163b63fd80bf5ee815fcadba3ae3035aeee84b89b2564d8e65a",
+          "z_au_point": 142.0
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 467,
+          "i0": 616,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "7a35dedaee993aa28d545b4ff0892bf97c8482feb895275fa758bb88fca5c457",
+          "z_au_point": 126.9
+        }
+      }
+    },
+    "1378": {
+      "nom": "Col de la Merquiere",
+      "lat": 43.6496,
+      "lon": 3.2292,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1170,
+          "i0": 1518,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "d4b66e666c20e28151276b3fd9583df39331aa2f0dff2dc79ff57ed00f33a311",
+          "z_au_point": 363.0
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 468,
+          "i0": 607,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "5189e85959c31cd223d35857cb191e47ad40d4c31fe92c12525727d16997a414",
+          "z_au_point": 358.0
+        }
+      }
+    },
+    "1478": {
+      "nom": "Windbird 1478",
+      "lat": 43.2865,
+      "lon": 3.4519,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1206,
+          "i0": 1540,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "738e6b9cfeb3418a50c4a31391b6d4cd118f1c1952f862dd1c6fc9fd384debd7",
+          "z_au_point": 1.7
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 483,
+          "i0": 616,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "8082dfb24e636e8afaeca7a721bbae6971a632d08310f83f09111ac5a0acc280",
+          "z_au_point": 2.1
+        }
+      }
+    },
+    "1542": {
+      "nom": "Déco Tournemire Gréponac 750m",
+      "lat": 43.9664,
+      "lon": 3.0291,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1138,
+          "i0": 1498,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "4c659a471c1fad50de55c9609d0b3d522024cf52261ccecd99c7640953add832",
+          "z_au_point": 686.0
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 455,
+          "i0": 599,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "c5ec57edfdb488c02eb50bee55ee7f5724840b19fc07ec22b46b9df6a2ccf01b",
+          "z_au_point": 684.1
+        }
+      }
+    },
+    "1553": {
+      "nom": "Mauvezin",
+      "lat": 43.7373,
+      "lon": 0.8665,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1161,
+          "i0": 1282,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "4d0b29ce45877d3f7f16d26ccdb4fa1941bbeb3b97e6fec0fd1742f09dcd62f7",
+          "z_au_point": 152.4
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 465,
+          "i0": 513,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "735afb0ba22b303dd1a67f0922f03ffacc9ee68a420a49632687ad45649b2a4e",
+          "z_au_point": 149.4
+        }
+      }
+    },
+    "1564": {
+      "nom": "LF8123 - Base ULM St Affrique les Montagnes",
+      "lat": 43.5454,
+      "lon": 2.2099,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1180,
+          "i0": 1416,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "26104273259e761c0fea3303157932305a09d0c9621d4b9c967c582f853ea599",
+          "z_au_point": 198.6
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 472,
+          "i0": 566,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "39e2c0383769ee6d5a7382f3583d4d448a27f4148702bc68f791f64d725baad8",
+          "z_au_point": 199.0
+        }
+      }
+    },
+    "1572": {
+      "nom": "Windbird 1572",
+      "lat": 43.0295,
+      "lon": -2.2009,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1232,
+          "i0": 975,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "bdffe3589ca4b972d6abdf7ae949cfe17c5c3178557bee836743817c1292d5cb",
+          "z_au_point": 234.9
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 493,
+          "i0": 390,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "080c25faadcca2dac4b27137349a575101060fc50d6803ca080a627f6569a08a",
+          "z_au_point": 268.0
+        }
+      }
+    },
+    "1581": {
+      "nom": "Windbird 1581",
+      "lat": 43.867,
+      "lon": 1.4175,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1148,
+          "i0": 1337,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "36f64c5dee285ee9346b5df89b222fd41f4115e81092033461ff87dc535ee772",
+          "z_au_point": 105.1
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 459,
+          "i0": 535,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "15872fea3dd4bfeaf5b05a5982e1f9cf30f8a267eca7c3d249653b7a314ffa54",
+          "z_au_point": 106.5
+        }
+      }
+    },
+    "1587": {
+      "nom": "Windbird 1587",
+      "lat": 43.1421,
+      "lon": -1.9992,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1221,
+          "i0": 995,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "5713ac0c484617946a47c6e07a6039be8870bbb7df072a2cc3b4ec70b30dadf7",
+          "z_au_point": 419.2
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 488,
+          "i0": 398,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "066a347d3c064979269a6f5238cb2756123a7a0c30a63afc5ee05dd40ad4799b",
+          "z_au_point": 502.7
+        }
+      }
+    },
+    "1643": {
+      "nom": "Au Service du Vivant 81",
+      "lat": 43.7584,
+      "lon": 2.2371,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1159,
+          "i0": 1419,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "bf2c13d0c7b04d38519b27d33273e0af42ae33786e5a05e8ffc525b0bf9bec71",
+          "z_au_point": 278.0
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 464,
+          "i0": 567,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "1fef1738b9252a072e27bfc5e18acdc5119b37dc545b8680cd4b597f3fac3951",
+          "z_au_point": 258.1
+        }
+      }
+    },
+    "1661": {
+      "nom": "LFMG",
+      "lat": 43.4069,
+      "lon": 1.9904,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1194,
+          "i0": 1394,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "1ac3bc7a9f119a08c9f351c8fd85ef4a71c31b6da680bc31fe2fa6e31de50093",
+          "z_au_point": 371.1
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 478,
+          "i0": 558,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "7a82a935003d55c47213140301f1f39856ae224171ce433d8117edb254b0047d",
+          "z_au_point": 395.0
+        }
+      }
+    },
+    "2058": {
+      "nom": "Ernio",
+      "lat": 43.1669,
+      "lon": -2.1461,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1218,
+          "i0": 980,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "d63a30dde2e72c299a39e39319dc646c567a85049520cdcd514754d6efcc5a83",
+          "z_au_point": 735.2
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 487,
+          "i0": 392,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "c1ad6459cf1dca6c59b0f5ab8c0285f9580b50bcb4a208a77654b4196244af2f",
+          "z_au_point": 733.7
+        }
+      }
+    },
+    "2097": {
+      "nom": "Windbird 2097",
+      "lat": 43.3397,
+      "lon": -2.4789,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1201,
+          "i0": 947,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "614ec25bac5d9e1be0518bd776d49d1c5a78c3ba5d47e53f626e8f3dc8b855c7",
+          "z_au_point": 107.5
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 480,
+          "i0": 379,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "5ccd40b2fd0777b94bb67ef02a58e68dbccd8a4471639231eb8191d10ea6ee69",
+          "z_au_point": 40.7
+        }
+      }
+    },
+    "2156": {
+      "nom": "Windbird 2156",
+      "lat": 43.9264,
+      "lon": 2.5207,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1142,
+          "i0": 1447,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "4426ecf1d47687ff99141eb79591ad50a1bab1d046b4341b30900b23481fbb32",
+          "z_au_point": 434.6
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 457,
+          "i0": 579,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "d4e02b18c401a319804c4a6dc57af804803de9af0447b8721076a646582f3b5c",
+          "z_au_point": 438.6
+        }
+      }
+    },
+    "2170": {
+      "nom": " Les Manensses",
+      "lat": 43.6864,
+      "lon": 1.6419,
+      "source": "pioupiou",
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 1166,
+          "i0": 1359,
+          "nj": 11,
+          "ni": 11,
+          "sha256": "88d1a1b8752b8b2fa407f779a8264cbc9d39ae5045cddd998a259ec05df2a2f8",
+          "z_au_point": 198.6
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-12T15:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T15:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 467,
+          "i0": 544,
+          "nj": 5,
+          "ni": 5,
+          "sha256": "a85e11f17ceb2050a3456311ce9699565ecc59484794dbeffb973e3614778a81",
+          "z_au_point": 202.2
+        }
+      }
+    }
+  },
+  "note": "Ces balises ont un profil vertical (produit A) mais PAS de calque ni de coupe (produit B) : elles sont hors grille 3D. Régénérer avec `python3 agrume/freeze_orographie.py --balises-isolees`, APRÈS `freeze_balises.py`."
+}

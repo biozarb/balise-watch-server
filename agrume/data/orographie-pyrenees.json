@@ -1,0 +1,71 @@
+{
+  "produit": "AGRUME — orographie du modèle, figée",
+  "ecrit_le": "2026-08-12T18:01:49Z",
+  "run_source": "2026-08-12T12:00:00Z",
+  "eccodes": "2.43.0",
+  "nom_domaine": "pyrenees",
+  "domaine": {
+    "latmin": 42.4,
+    "latmax": 43.4,
+    "lonmin": -1.8,
+    "lonmax": 3.3
+  },
+  "grilles": {
+    "001": {
+      "paquet": "SP3",
+      "cle_s3": "pnt/2026-08-12T12:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-12T12:00:00Z.grib2",
+      "octets_source": 8084258,
+      "meta": {
+        "Ni": 2801,
+        "Nj": 1791,
+        "lat0": 55.4,
+        "lon0": -12.0,
+        "di": 0.01,
+        "dj": 0.01,
+        "jScan": 0
+      },
+      "j0": 1200,
+      "i0": 1020,
+      "nj": 101,
+      "ni": 511,
+      "sha256": "c912d81290db3bbf50f9dd189310fe62645ce580061fa60a0dcb6a6ea65ae1cb",
+      "z_min": -6.5,
+      "z_med": 590.4,
+      "z_max": 3002.4
+    },
+    "0025": {
+      "paquet": "SP2",
+      "cle_s3": "pnt/2026-08-12T12:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-12T12:00:00Z.grib2",
+      "octets_source": 41353146,
+      "meta": {
+        "Ni": 1121,
+        "Nj": 717,
+        "lat0": 55.4,
+        "lon0": -12.0,
+        "di": 0.025,
+        "dj": 0.025,
+        "jScan": 0
+      },
+      "j0": 480,
+      "i0": 408,
+      "nj": 41,
+      "ni": 205,
+      "sha256": "ab3aeb3ee72ef34488cd17b6d34b01ed8efbb76f120fb3e9347c413b6b3ba843",
+      "z_min": -4.3,
+      "z_med": 585.4,
+      "z_max": 2947.1
+    }
+  },
+  "ecart_0025_moins_001": {
+    "n": 5814,
+    "d1": -81.9,
+    "q1": -22.8,
+    "mediane": -0.0,
+    "q3": 22.9,
+    "d9": 79.0,
+    "abs_median": 22.8,
+    "abs_max": 496.9,
+    "part_au_dela_100m": 15.7
+  },
+  "note": "Champ `h` (surface), STATIQUE. ⚠️ Le paquet CHANGE avec la grille : 001/SP3 mais 0025/SP2 — 0025/SP3 existe et ne contient aucune orographie. Régénérer avec `python3 agrume/freeze_orographie.py --domaine pyrenees`."
+}

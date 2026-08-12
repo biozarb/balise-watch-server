@@ -77,6 +77,21 @@ from domaine import (GRID_3D, GRID_FINE, MODEL_DIR, PAQUET_OROGRAPHIE,
 ARTEFACT_NPZ = Path(__file__).resolve().parent / "data" / "orographie-nord-alpes.npz"
 ARTEFACT_JSON = Path(__file__).resolve().parent / "data" / "orographie-nord-alpes.json"
 
+# ── UN ARTEFACT PAR DOMAINE DE PRODUCTION (12/08/2026) ────────────────
+# ⚠️ `ARTEFACT_NPZ`/`ARTEFACT_JSON` restent le Nord-Alpes, aux mêmes
+# chemins et au même sha256 qu'au 10/08. C'est délibéré et ce n'est pas
+# de la compatibilité de façade : toutes les archives du produit A déjà
+# écrites déclarent CE sha. Le renommer en `orographie-domaines.npz`, si
+# propre que ça paraisse, ferait que plus aucune archive existante ne se
+# rapporte à un fichier qui existe.
+def _art(nom):
+    d = Path(__file__).resolve().parent / "data"
+    return d / f"orographie-{nom}.npz", d / f"orographie-{nom}.json"
+
+
+ARTEFACTS = {"nord-alpes": (ARTEFACT_NPZ, ARTEFACT_JSON),
+             "pyrenees": _art("pyrenees")}
+
 # Clés de métadonnées de grille conservées dans l'artefact. Ce sont
 # exactement celles que `arome-wind/ingest.py::parse_grib` fabrique — on
 # reste compatible avec `elev_at()` et `orographie_balises.py::indices`,
@@ -251,6 +266,36 @@ def charger_artefact(npz=ARTEFACT_NPZ, js=ARTEFACT_JSON):
     return paire, man
 
 
+def charger_artefacts(noms=None, obligatoires=("nord-alpes",)):
+    """Charge l'orographie de CHAQUE domaine de production.
+
+    Renvoie {nom: (paire, manifeste)}. Un domaine dont l'artefact n'est
+    pas encore gelé est **absent du résultat**, pas une exception — sauf
+    s'il est dans `obligatoires`.
+
+    ⚠️ C'EST LE POINT DE CONCEPTION DE CETTE FONCTION, et il n'est pas
+    cosmétique. Le jour où un domaine est ajouté à `DOMAINES`, son
+    artefact n'existe pas encore : le gel se lance À LA MAIN, après le
+    commit du code. Si l'absence levait, ce commit-là ferait échouer
+    TOUS les runs de production entre les deux — pour les Alpes aussi,
+    qui n'ont rien demandé. On crie, on continue, et le manifeste du run
+    dit quels domaines ont réellement servi.
+    ⛔ Le Nord-Alpes reste obligatoire : sans lui il n'y a pas de produit.
+    """
+    from domaine import DOMAINES
+    noms = list(DOMAINES) if noms is None else list(noms)
+    out, absents = {}, []
+    for nom in noms:
+        npz, js = ARTEFACTS[nom]
+        try:
+            out[nom] = charger_artefact(npz, js)
+        except Abort:
+            if nom in obligatoires:
+                raise
+            absents.append(nom)
+    return out, absents
+
+
 def ecrire_artefact(paire, manifeste, npz=ARTEFACT_NPZ, js=ARTEFACT_JSON):
     npz, js = Path(npz), Path(js)
     npz.parent.mkdir(parents=True, exist_ok=True)
@@ -345,11 +390,20 @@ def decouper(values, meta, grille, bornes=None):
     le `reshape` + slice numpy derrière ne se voit pas. On décode donc la
     France entière et on découpe, sans chercher à être malin.
 
-    `bornes` permet de découper AILLEURS que sur le domaine — la seule
-    utilisation légitime est la fenêtre de vérification des radiosondages
-    (`domaine.fenetre_autour`). ⚠️ Ne pas s'en servir pour fabriquer un
-    second domaine de produit : la note de `domaine.py` explique
-    pourquoi le choix a été de garder la production intacte.
+    `bornes` permet de découper AILLEURS que sur le domaine par défaut :
+    la fenêtre de vérification des radiosondages (`fenetre_autour`), et —
+    depuis le 12/08 — le **second domaine de production**, les Pyrénées.
+
+    ⚠️ 12/08 : CE COMMENTAIRE DISAIT L'INVERSE, et il faut dire pourquoi
+    il a changé plutôt que de l'effacer. Il interdisait de s'en servir
+    « pour fabriquer un second domaine de produit ». L'interdit visait
+    l'ÉLARGISSEMENT du domaine existant — qui aurait changé le sha256 de
+    l'artefact de production et rompu la comparabilité des archives. Un
+    second domaine, avec son propre artefact et son propre sha, ne
+    touche pas au premier : c'est exactement la voie nº 3 déjà retenue
+    pour les radiosondages, appliquée à un vrai domaine cette fois.
+    ⛔ L'interdit d'origine, lui, tient toujours : ne pas élargir
+    `DOMAINE`.
     """
     j0, j1, i0, i1 = fenetre(meta) if bornes is None else bornes
     grille2d = np.asarray(values, dtype=np.float32).reshape(meta["Nj"], meta["Ni"])
@@ -377,20 +431,51 @@ ARTEFACT_VERIF_NPZ = (Path(__file__).resolve().parent / "data"
 ARTEFACT_VERIF_JSON = (Path(__file__).resolve().parent / "data"
                        / "orographie-radiosondages.json")
 
+# ── Le TROISIÈME artefact : les balises isolées (12/08/2026) ──────────
+# ⚠️ Même mécanisme que ci-dessus, autre usage, donc autre fichier. Ici
+# les points ne sont PAS des appareils de mesure : ce sont des balises de
+# pilotes, hors de toute boîte de production, à qui on doit un sol pour
+# que leur colonne du produit A ait un plancher. Mélanger les deux dans
+# un seul fichier aurait fait qu'un artefact « de vérification » devient
+# indispensable à la production — et le §589 d'`ingest_colonnes` explique
+# justement pourquoi son absence ne doit PAS arrêter un run.
+ARTEFACT_ISOLEES_NPZ = (Path(__file__).resolve().parent / "data"
+                        / "orographie-balises-isolees.npz")
+ARTEFACT_ISOLEES_JSON = (Path(__file__).resolve().parent / "data"
+                         / "orographie-balises-isolees.json")
 
-def charger_artefact_verif(npz=ARTEFACT_VERIF_NPZ, js=ARTEFACT_VERIF_JSON):
-    """{wmo: {grille: Orographie}}, sha256 revérifié comme pour la
+
+def charger_artefact_isolees(npz=ARTEFACT_ISOLEES_NPZ,
+                             js=ARTEFACT_ISOLEES_JSON):
+    """{id_balise: {grille: Orographie}} — le sol des balises hors boîte."""
+    return charger_artefact_verif(npz, js, cle="balises",
+                                  quoi="des balises isolées",
+                                  commande="--balises-isolees")
+
+
+def charger_artefact_verif(npz=ARTEFACT_VERIF_NPZ, js=ARTEFACT_VERIF_JSON,
+                           cle="stations", quoi="de vérification",
+                           commande="--radiosondages"):
+    """{identifiant: {grille: Orographie}}, sha256 revérifié comme pour la
     production — même raison : c'est un binaire commité, invisible au
-    diff."""
+    diff.
+
+    ⚠️ 12/08 — `cle` existe parce que le MÊME lecteur sert deux artefacts
+    de fenêtres : celui des radiosondages (clé `stations`) et celui des
+    balises isolées (clé `balises`). Recopier ce lecteur pour changer un
+    nom de clé aurait fait deux vérifications de sha256 à maintenir — et
+    le projet a déjà payé deux fois la recopie d'une logique au lieu de
+    son appel, le 10/08.
+    """
     npz, js = Path(npz), Path(js)
     if not npz.exists() or not js.exists():
-        raise Abort(f"artefact de vérification absent ({npz.name}) — le "
+        raise Abort(f"artefact {quoi} absent ({npz.name}) — le "
                     f"générer avec `python3 agrume/freeze_orographie.py "
-                    f"--radiosondages`")
+                    f"{commande}`")
     man = json.loads(js.read_text(encoding="utf-8"))
     out = {}
     with np.load(npz) as z:
-        for wmo, entrees in man["stations"].items():
+        for wmo, entrees in man[cle].items():
             out[wmo] = {}
             for grille, e in entrees["grilles"].items():
                 arr = z[f"z_{wmo}_{grille}"]

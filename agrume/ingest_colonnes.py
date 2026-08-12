@@ -73,7 +73,8 @@ from grille import Grille, axes_depuis_orographie, decouper  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
                    est_fichier_horaire, s3_objets)
-from orographie import charger_artefact, charger_artefact_verif  # noqa: E402
+from orographie import (charger_artefact, charger_artefacts,  # noqa: E402
+                        charger_artefact_isolees, charger_artefact_verif)
 
 # ⚠️ Alerte de durée : la MOITIÉ du timeout de 60 min, et six fois le
 # budget mesuré. Si on l'atteint, ce n'est pas « c'était un peu long »,
@@ -555,9 +556,25 @@ def main(argv=None):
 
     t_debut = time.time()
     try:
-        paire, man_orog = charger_artefact()
+        # ⚠️ 12/08 — DEUX DOMAINES DE PRODUCTION, ET UN SEUL PRODUIT B.
+        # `paire` reste STRICTEMENT le Nord-Alpes : c'est elle qui est
+        # passée à `ingerer()`, donc c'est elle qui décide de la fenêtre
+        # du produit B et des axes de la grille 3D. Le second domaine
+        # n'entre que dans le SOL des balises, plus bas. Confondre les
+        # deux ferait grossir le produit B sans que personne l'ait décidé
+        # — et le produit B est le seul objet du lot dont le budget R2 se
+        # discute.
+        artefacts, sans_artefact = charger_artefacts()
+        paire, man_orog = artefacts["nord-alpes"]
         journal_horodate(f"▶ orographie figée du run {man_orog['run_source']} "
-                         f"({', '.join(sorted(paire))})")
+                         f"({', '.join(sorted(paire))}) — domaines : "
+                         f"{', '.join(sorted(artefacts))}")
+        if sans_artefact:
+            journal_horodate(
+                f"  ⚠️ domaine(s) SANS orographie figée : "
+                f"{', '.join(sans_artefact)} — leurs balises seront "
+                f"archivées SANS SOL. Lancer "
+                f"`python3 agrume/freeze_orographie.py --domaine <nom>`.")
 
         suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                      if a.suspectes else [])
@@ -571,7 +588,7 @@ def main(argv=None):
             balises = balises_du_domaine(figees, suspectes)
             origine = f"axe figé du {man_bal['ecrit_le'][:10]}"
         if not balises:
-            raise Abort("aucune balise ne tombe dans le domaine Nord-Alpes")
+            raise Abort("aucune balise ne tombe dans un domaine de production")
         marquees = sum(1 for b in balises if b["position_suspecte"])
         journal_horodate(f"▶ {len(balises)} balises — {origine}"
                          + (f", dont {marquees} à position suspecte (marquées, "
@@ -580,10 +597,57 @@ def main(argv=None):
         # Le sol du modèle sous chaque balise, écrit une fois pour toutes
         # dans le manifeste : sans lui, un niveau « 500 m » ne veut rien
         # dire, et l'écart au sol réel ne peut pas être affiché.
+        # ⚠️ On balaie TOUS les domaines, et `z_at` rend None hors de sa
+        # fenêtre : une balise reçoit donc le sol de l'artefact qui la
+        # contient, sans qu'on ait à savoir lequel. `domaine_de()` dirait
+        # la même chose ; le faire par `z_at` évite qu'un désaccord entre
+        # les bornes déclarées et la fenêtre réellement découpée passe
+        # inaperçu — ici c'est le fichier qui décide, pas la constante.
+        par_domaine = {}
         for b in balises:
-            for g, o in paire.items():
-                z = o.z_at(b["lat"], b["lon"])
-                b[f"z_{g}"] = None if z is None else round(z, 1)
+            trouve = None
+            for nom, (p_dom, _) in artefacts.items():
+                for g, o in p_dom.items():
+                    z = o.z_at(b["lat"], b["lon"])
+                    if z is not None:
+                        b[f"z_{g}"] = round(z, 1)
+                        trouve = nom
+                    else:
+                        b.setdefault(f"z_{g}", None)
+            b["domaine"] = trouve
+            par_domaine[trouve] = par_domaine.get(trouve, 0) + 1
+        journal_horodate("▶ sol par domaine : " + ", ".join(
+            f"{n or 'AUCUN'} {c}" for n, c in sorted(
+                par_domaine.items(), key=lambda kv: (kv[0] is None, kv[0]))))
+
+        # ── Le sol des balises HORS de toute boîte ────────────────────
+        # ⚠️ Même arbitrage que pour les radiosondages juste en dessous :
+        # l'absence de cet artefact NE DOIT PAS arrêter l'ingestion. Ces
+        # balises perdent leur plancher, les 180 autres colonnes n'ont
+        # rien à voir là-dedans. On crie, on continue, et le manifeste
+        # dira lesquelles sont sans sol.
+        isolees = [b for b in balises if b.get("hors_domaine")]
+        isolees_manifeste = None
+        if isolees:
+            try:
+                par_bal, man_iso = charger_artefact_isolees()
+                isolees_manifeste = dict(
+                    run_source=man_iso["run_source"],
+                    demi_fenetre_deg=man_iso["demi_fenetre_deg"],
+                    n=man_iso["n"])
+                pose = 0
+                for b in isolees:
+                    for g, o in par_bal.get(str(b["id"]), {}).items():
+                        z = o.z_at(b["lat"], b["lon"])
+                        if z is not None:
+                            b[f"z_{g}"] = round(z, 1)
+                            pose += 1
+                journal_horodate(
+                    f"▶ {len(isolees)} balise(s) hors boîte — sol lu dans "
+                    f"l'artefact des balises isolées du run "
+                    f"{man_iso['run_source']} ({pose} valeurs posées)")
+            except Abort as e:
+                journal_horodate(f"  ⚠️ balises hors boîte SANS SOL : {e}")
 
         # ── Le sol des points de RADIOSONDAGE ─────────────────────────
         # ⚠️ Ils sont hors du domaine, donc hors de l'orographie de
@@ -634,6 +698,7 @@ def main(argv=None):
         # ⚠️ Publié pour qu'on sache, en relisant une archive, si les
         # points de radiosondage avaient un sol ce jour-là — et lequel.
         orographie_radiosondages=verif_manifeste,
+        orographie_balises_isolees=isolees_manifeste,
         mesures=dict(
             duree_min=round(duree_min, 2),
             octets_telecharges=mesures["octets"],

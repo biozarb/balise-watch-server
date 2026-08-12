@@ -40,9 +40,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from domaine import (DOMAINE, GRID_3D, GRID_FINE, NIVEAUX_H_001,  # noqa: E402
                      NIVEAUX_H_0025, NIVEAUX_H_AROMEPI,
-                     PAQUET_OROGRAPHIE, RACCORD_HYBRIDE_M, dans_domaine,
+                     DOMAINES, PAQUET_OROGRAPHIE, RACCORD_HYBRIDE_M,
+                     dans_domaine, domaine_de, verifier_domaines_disjoints,
                      fenetre)
-from orographie import (Abort, altitude_asl, charger_artefact,  # noqa: E402
+from orographie import (ARTEFACTS, Abort, altitude_asl,  # noqa: E402
+                        charger_artefact, charger_artefacts,
                         cle_s3_orographie, ecart_grilles, orographie_pour)
 
 echecs = []
@@ -225,6 +227,94 @@ def main(argv=None):
     print("\n── Le domaine annoncé est celui qui est figé ──────────────")
     verifier("le manifeste porte le domaine", man.get("domaine") == DOMAINE,
              str(man.get("domaine")))
+
+    # ══════════════════════════════════════════════════════════════════
+    #  LES DEUX DOMAINES DE PRODUCTION (12/08/2026)
+    #
+    #  ⚠️ CE QUE CETTE SECTION PROTÈGE. Un second domaine se casse en
+    #  silence de trois façons, et aucune ne lève :
+    #    1. deux domaines qui se RECOUVRENT — un point y a deux sols
+    #       figés, et celui qui sort dépend de l'ordre d'un dictionnaire ;
+    #    2. un `decouper()` sans bornes — on découpe les Alpes en croyant
+    #       faire les Pyrénées, mêmes tailles plausibles, sol de Savoie
+    #       sous des balises ariégeoises ;
+    #    3. l'artefact des Alpes RENOMMÉ ou régénéré — toutes les archives
+    #       du produit A déclarent son sha256 ; il doit rester à l'octet.
+    # ══════════════════════════════════════════════════════════════════
+    print("\n── Les deux domaines de production ───────────────────────")
+    verifier("les domaines sont DISJOINTS",
+             verifier_domaines_disjoints(), ", ".join(DOMAINES))
+    verifier("un point des Alpes est rendu aux Alpes",
+             domaine_de(45.12, 5.88) == "nord-alpes")
+    verifier("un point des Pyrénées est rendu aux Pyrénées",
+             domaine_de(42.84, -0.44) == "pyrenees", "Ossau")
+    verifier("Brest n'est dans aucun domaine",
+             domaine_de(48.39, -4.49) is None)
+    verifier("dans_domaine couvre TOUS les domaines",
+             dans_domaine(42.84, -0.44) and dans_domaine(45.12, 5.88))
+    verifier("dans_domaine(..., 'nord-alpes') reste restrictif",
+             not dans_domaine(42.84, -0.44, "nord-alpes"))
+    # ⚠️ Le chemin de l'artefact Nord-Alpes est figé PAR SON NOM : c'est
+    # lui que déclarent les archives déjà écrites.
+    verifier("l'artefact Nord-Alpes garde son chemin historique",
+             ARTEFACTS["nord-alpes"][0].name == "orographie-nord-alpes.npz",
+             ARTEFACTS["nord-alpes"][0].name)
+    verifier("chaque domaine a un artefact déclaré",
+             set(ARTEFACTS) >= set(DOMAINES),
+             f"{sorted(ARTEFACTS)} ⊇ {sorted(DOMAINES)}")
+    # Un domaine sans artefact gelé ne doit pas faire tomber la
+    # production des autres — c'est ce qui rend le commit du code
+    # dissociable du gel, qui se lance à la main.
+    arts, absents = charger_artefacts(noms=list(DOMAINES) + ["_inexistant"]
+                                      if "_inexistant" in ARTEFACTS
+                                      else list(DOMAINES))
+    verifier("les artefacts des deux domaines se chargent",
+             set(arts) == set(DOMAINES) and not absents,
+             f"{sorted(arts)}, absents {absents}")
+    # ⛔ Le contrôle qui attrape le `decouper()` sans bornes : les deux
+    # domaines ne peuvent pas avoir la même fenêtre.
+    a025 = arts["nord-alpes"][0][GRID_3D]
+    p025 = arts["pyrenees"][0][GRID_3D]
+    verifier("les deux fenêtres 0025 sont DISTINCTES",
+             (a025.j0, a025.i0) != (p025.j0, p025.i0),
+             f"Alpes j{a025.j0}/i{a025.i0} · Pyrénées j{p025.j0}/i{p025.i0}")
+    verifier("la fenêtre pyrénéenne fait bien 41 × 205 = 8 405 points",
+             p025.z.shape == (41, 205), str(p025.z.shape))
+    verifier("le sol pyrénéen est rendu aux Pyrénées, pas ailleurs",
+             p025.z_at(42.84, -0.44) is not None
+             and p025.z_at(45.12, 5.88) is None)
+
+    # ⛔ LE CONTRÔLE QUI COMPTE VRAIMENT POUR LES BALISES DE BORD.
+    # `dans_domaine` teste des bornes, `z_at` une fenêtre alignée sur les
+    # points de grille : ils se contredisent à moins d'une demi-maille du
+    # bord. Ce n'est acceptable QUE si les deux sources rendent le même
+    # sol — sinon une balise aurait deux planchers selon l'artefact
+    # consulté, et la colonne servie changerait sans que rien ne lève.
+    import json as _json
+    from orographie import charger_artefact_isolees
+    try:
+        iso, _ = charger_artefact_isolees()
+        axe = _json.loads((Path(__file__).resolve().parent / "data"
+                           / "balises-nord-alpes.json").read_text())["balises"]
+        desaccords, chevauchantes = [], 0
+        for b in axe:
+            if not b.get("hors_domaine"):
+                continue
+            for nom, (p_dom, _) in arts.items():
+                for g, o in p_dom.items():
+                    zp = o.z_at(b["lat"], b["lon"])
+                    zi = iso.get(str(b["id"]), {}).get(g)
+                    zi = None if zi is None else zi.z_at(b["lat"], b["lon"])
+                    if zp is not None and zi is not None:
+                        chevauchantes += 1
+                        if abs(zp - zi) > 1e-6:
+                            desaccords.append((b["id"], g, zp, zi))
+        verifier("une balise à cheval reçoit le MÊME sol des deux artefacts",
+                 not desaccords,
+                 f"{chevauchantes} cas de chevauchement, "
+                 f"{len(desaccords)} désaccord(s)")
+    except Abort as e:
+        verifier("l'artefact des balises isolées se charge", False, str(e))
 
     print("\n  orographie :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1
