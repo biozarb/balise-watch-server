@@ -301,8 +301,37 @@ def main(argv=None):
     try:
         if a.verifier:
             balises, man = charger_artefact()
+            # ⚠️⚠️ CETTE LIGNE A CASSÉ LA PRODUCTION LE 12/08 AU SOIR, et
+            # elle mérite d'être racontée : la clé du manifeste est passée
+            # de `domaine` à `domaines` avec le second domaine (commit
+            # `c06de92`), `charger_artefact` ci-dessus a été rendu tolérant
+            # aux deux formes — et CE `print`-ci, dix lignes plus bas, est
+            # resté au singulier. `KeyError: 'domaine'`, sur un artefact
+            # parfaitement valide, dans une vérification qui ne vérifiait
+            # plus rien puisqu'elle levait avant.
+            #
+            # ⛔ CE QUI L'A LAISSÉ PASSER N'EST PAS L'INATTENTION, C'EST
+            # L'ABSENCE DE BANC. `--verifier` ne tourne que dans le
+            # workflow ; le workflow n'avait pas été relancé depuis le
+            # renommage. `test_freeze_balises.py` existe maintenant et
+            # rejoue exactement ce chemin. *« Un banc qu'on ne lance
+            # jamais cesse de protéger » — celui-ci n'existait même pas.*
+            #
+            # ⓘ Les deux formes sont acceptées ici comme ailleurs : entre
+            # le déploiement du code et le regel d'un artefact, il existe
+            # toujours une fenêtre où l'ancienne circule.
+            doms = man.get("domaines")
+            if doms is None and man.get("domaine") is not None:
+                doms = {"nord-alpes": man["domaine"]}
             print(f"▶ artefact du {man['ecrit_le']} · {man['n']} balises · "
-                  f"domaine {man['domaine']}")
+                  f"domaine(s) : {', '.join(sorted(doms or {})) or '—'}")
+            par = man.get("n_par_domaine") or {}
+            if par:
+                # ⓘ Publié parce que c'est LE chiffre qui bouge quand un
+                # domaine entre ou sort : un total de 203 ne dit pas si
+                # les Pyrénées sont dedans.
+                print("  " + " · ".join(f"{k} : {v}"
+                                        for k, v in sorted(par.items())))
             sus = [b for b in balises if b.get("position_suspecte")]
             print(f"  {len(sus)} à position suspecte (marquées, pas retirées)")
             return 0

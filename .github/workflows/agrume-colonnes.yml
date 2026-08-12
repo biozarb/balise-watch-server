@@ -121,6 +121,21 @@ jobs:
           # inventé une valeur là où PI en donnait une — et ça ne se
           # voit sur aucune courbe.
           python3 agrume/test_composite.py
+          # ⚠️ Étape 11 (12/08). `test_freeze_balises` existe à cause d'une
+          # panne : la clé du manifeste d'axe est passée de `domaine` à
+          # `domaines` avec les Pyrénées, `charger_artefact` a été rendu
+          # tolérant aux deux formes — et le `print` de `--verifier`, dix
+          # lignes plus bas, est resté au singulier. KeyError en
+          # production, sur un artefact parfaitement valide, dans une
+          # vérification qui ne vérifiait plus rien. Ce fichier n'avait
+          # AUCUN banc ; il en a un, et il rejoue exactement ce chemin.
+          python3 agrume/test_freeze_balises.py
+          # Étape 11. ⚠️ Un calque interpolé de travers reste lisse,
+          # coloré et plausible : aucun contrôle visuel ne le démasque.
+          # L'invariant est le seul qui ne dépende pas de l'œil — aux
+          # altitudes tombant sur un niveau, le calque doit rendre le
+          # niveau BRUT, à l'octet près.
+          python3 agrume/test_calque.py
 
       - name: Ingérer les colonnes
         env:
