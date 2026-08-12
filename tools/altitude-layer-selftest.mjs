@@ -119,6 +119,8 @@ verifier('⛔ 350° et 010° donnent 0° au milieu, PAS 180° — c\'est POURQUO
 console.log('\n── 5. LE CHEMIN COMPLET : tampon brut → Range → décodage ──');
 const tampon = arg('tampon'), zsolF = arg('zsol'), manF = arg('manifeste');
 let man = null, u = null, v = null, zsol = null;
+let isoU = null, isoV = null, ziso = null, iso = null;
+let buf = null, fxStep = 0;
 if (!(tampon && zsolF && manF)) {
   console.log('  ⚠️ --tampon / --zsol / --manifeste absents : NI le décodage '
     + 'du tampon réel NI la parité avec Python ne sont vérifiés.');
@@ -126,7 +128,7 @@ if (!(tampon && zsolF && manF)) {
 } else {
   man = JSON.parse(readFileSync(manF, 'utf-8'));
   const octets = readFileSync(tampon);
-  const buf = octets.buffer.slice(octets.byteOffset,
+  buf = octets.buffer.slice(octets.byteOffset,
     octets.byteOffset + octets.byteLength);
   const zo = readFileSync(zsolF);
   zsol = new Float32Array(zo.buffer.slice(zo.byteOffset,
@@ -136,27 +138,75 @@ if (!(tampon && zsolF && manF)) {
     buf.byteLength === man.service.octets_par_echeance,
     `${buf.byteLength} octets`);
 
-  const tU = man.service.tranches.u, tV = man.service.tranches.v;
-  verifier('⚠️ u et v sont CONTIGUS et EN TÊTE — c\'est ce qui rend le Range '
-    + 'utile', tU.offset === 0 && tV.offset === tU.octets,
-    `u@${tU.offset} v@${tV.offset}, Range = bytes=0-${tV.offset + tV.octets - 1}`);
+  // ⚠️ 12/08 — LE RANGE DU CALQUE NE S'ARRÊTE PLUS À `v`. Il lui faut
+  // aussi les isobares (`iso_u`, `iso_v`) et leur axe (`ziso`), sans
+  // quoi son plafond reste collé au relief. `ORDRE_TAMPON` côté Python
+  // range les cinq d'un seul tenant EN TÊTE — un Range est une plage
+  // CONTINUE, donc l'ordre n'est pas cosmétique.
+  const CLES = [...L.PARAMS_CALQUE];
+  const tr = CLES.map(c => {
+    const t = man.service.tranches[c];
+    if (!t) throw new Error(`tranche « ${c} » absente du manifeste`);
+    return t;
+  });
+  let contigu = tr[0].offset === 0;
+  for (let k = 1; k < tr.length; k++) {
+    if (tr[k].offset !== tr[k - 1].offset + tr[k - 1].octets) contigu = false;
+  }
+  verifier('⚠️ tout ce que le calque lit est CONTIGU et EN TÊTE — u, v, '
+    + 'iso_u, iso_v, ziso', contigu,
+    CLES.map((c, k) => `${c}@${tr[k].offset}`).join(' '));
 
   // Le Range que le navigateur demande réellement.
-  const debut = tU.offset, fin = tV.offset + tV.octets;
+  const debut = tr[0].offset;
+  const fin = tr[tr.length - 1].offset + tr[tr.length - 1].octets;
   const partiel = buf.slice(debut, fin);
-  verifier('le Range u+v ne tire que 40 % de l\'objet',
-    partiel.byteLength / buf.byteLength < 0.45,
+  verifier('le Range du calque tire moins de la moitié de l\'objet',
+    partiel.byteLength / buf.byteLength < 0.5,
     `${(partiel.byteLength / 1e3).toFixed(0)} Ko sur `
     + `${(buf.byteLength / 1e3).toFixed(0)} Ko`);
 
-  u = L.decoderTranche(partiel, tU, debut);
-  v = L.decoderTranche(partiel, tV, debut);
+  u = L.decoderTranche(partiel, man.service.tranches.u, debut);
+  v = L.decoderTranche(partiel, man.service.tranches.v, debut);
+  isoU = L.decoderTranche(partiel, man.service.tranches.iso_u, debut);
+  isoV = L.decoderTranche(partiel, man.service.tranches.iso_v, debut);
+  ziso = L.decoderTranche(partiel, man.service.tranches.ziso, debut);
+  const nbCol0 = man.axes.nb_lat * man.axes.nb_lon;
+  iso = { u: isoU, v: isoV, ziso, nbNiveaux: man.niveaux_hpa.length };
   verifier('décodé depuis le Range, u a la bonne longueur',
-    u.length === man.niveaux_m_sol.length * man.axes.nb_lat * man.axes.nb_lon);
+    u.length === man.niveaux_m_sol.length * nbCol0);
+
+  // ⛔⛔ LE PIÈGE DU LOT 12 : `ziso` est en float32 AU MILIEU de float16.
+  // Un lecteur qui supposerait float16 partout obtiendrait deux fois
+  // trop de valeurs — et elles seraient toutes FINIES. Aucune erreur,
+  // aucun trou, juste un axe vertical inventé.
+  verifier('⛔ `ziso` est annoncé float32 et décodé comme tel — deux fois '
+    + 'moins de valeurs qu\'une lecture float16 en aurait tirées',
+    man.service.tranches.ziso.dtype === 'float32'
+    && ziso.length === man.niveaux_hpa.length * nbCol0
+    && ziso.length * 2 === man.service.tranches.ziso.octets / 2,
+    `${ziso.length} valeurs`);
+  let croissant = true, nFini = 0;
+  for (let c = 0; c < nbCol0 && croissant; c++) {
+    for (let n = 1; n < iso.nbNiveaux; n++) {
+      const bas = ziso[(n - 1) * nbCol0 + c], haut = ziso[n * nbCol0 + c];
+      if (!Number.isFinite(bas) || !Number.isFinite(haut)) continue;
+      nFini++;
+      if (haut <= bas) croissant = false;
+    }
+  }
+  // ⚠️ Ce contrôle a une référence INDÉPENDANTE du décodeur : la
+  // pression décroît de 1000 à 400 hPa, donc l'altitude ne peut que
+  // croître. Un décalage d'un octet, une endianness inversée ou une
+  // lecture float16 casseraient cette monotonie — et rien d'autre ne le
+  // dirait, puisque les valeurs resteraient finies.
+  verifier('⛔ l\'axe isobare décodé est STRICTEMENT croissant (1000 → 400 '
+    + 'hPa) — c\'est ce qui attrape une lecture décalée d\'un octet',
+    croissant && nFini > 0, `${nFini} paires vérifiées`);
 
   // ⚠️ Décoder l'objet ENTIER doit donner la même chose que décoder le
   // Range : c'est le contrôle qui attrape un `offsetBase` oublié.
-  const uEntier = L.decoderTranche(buf, tU, 0);
+  const uEntier = L.decoderTranche(buf, man.service.tranches.u, 0);
   let identique = u.length === uEntier.length;
   for (let k = 0; identique && k < u.length; k++) {
     if (!(u[k] === uEntier[k]
@@ -176,29 +226,45 @@ if (!chemin || !man) {
   echecs++;
 } else {
   const fx = JSON.parse(readFileSync(chemin, 'utf-8'));
+  fxStep = fx.echeanceH;
   const niveaux = fx.niveaux_m_sol;
   const nbLon = man.axes.nb_lon, nbCol = man.axes.nb_lat * nbLon;
   let pireU = 0, pireV = 0, pireW = 0, nServis = 0, nMasq = 0;
   let desaccordMasque = 0, desaccordK = 0, pireZsol = 0, premier = null;
+  let nIso = 0;
 
   for (const c of fx.cas) {
     const idx = c.j * nbLon + c.i;
     pireZsol = Math.max(pireZsol, Math.abs(zsol[idx] - c.zsol));
     const h = c.altitudeASLM - zsol[idx];
-    const servable = h >= niveaux[0] && h <= niveaux[niveaux.length - 1];
+    // ── Étape 12 : au-dessus du plafond hauteur, l'axe change ────────
+    // ⚠️ Le cas porte `source`, et le banc le SUIT plutôt que de le
+    // deviner : deviner reviendrait à réimplémenter la règle qu'on
+    // vérifie, et un banc qui réimplémente sa propre règle ne vérifie
+    // rien (déjà payé le 12/08 sur `test_freeze_balises.py`).
+    const parIso = c.source === 'isobare';
+    let servable = h >= niveaux[0] && h <= niveaux[niveaux.length - 1];
+    let k = 0, w = 0;
+    if (parIso) {
+      const e = L.encadrerIsobares(ziso, nbCol, iso.nbNiveaux, idx, c.altitudeASLM);
+      servable = e.dispo;
+      k = e.k; w = e.w;
+      nIso++;
+    } else if (servable) {
+      const e = L.encadrer(niveaux, h);
+      k = e.k; w = e.w;
+    }
     if (c.u === null) {
       nMasq++;
       if (servable) { desaccordMasque++; premier = premier || c; }
       continue;
     }
     if (!servable) { desaccordMasque++; premier = premier || c; continue; }
-    const { k, w } = L.encadrer(niveaux, h);
     if (k !== c.k) { desaccordK++; premier = premier || c; }
     pireW = Math.max(pireW, Math.abs(w - c.w));
-    const gu = L.melanger(u[k * nbCol + c.i + c.j * nbLon],
-      u[(k + 1) * nbCol + c.i + c.j * nbLon], w);
-    const gv = L.melanger(v[k * nbCol + c.i + c.j * nbLon],
-      v[(k + 1) * nbCol + c.i + c.j * nbLon], w);
+    const pu = parIso ? isoU : u, pv = parIso ? isoV : v;
+    const gu = L.melanger(pu[k * nbCol + idx], pu[(k + 1) * nbCol + idx], w);
+    const gv = L.melanger(pv[k * nbCol + idx], pv[(k + 1) * nbCol + idx], w);
     pireU = Math.max(pireU, Math.abs(gu - c.u));
     pireV = Math.max(pireV, Math.abs(gv - c.v));
     nServis++;
@@ -218,6 +284,12 @@ if (!chemin || !man) {
     pireU === 0 && pireV === 0, `écart max u ${pireU} · v ${pireV}`);
   verifier('la fixture porte des cas servis ET des cas masqués',
     nServis > 0 && nMasq > 0, `${nServis} servis · ${nMasq} masqués`);
+  // ⛔ Sans ce contrôle, la moitié HAUTE du calque ne serait vérifiée
+  // NULLE PART — et c'est celle dont l'axe varie en chaque point, donc
+  // celle où une divergence Python/TypeScript est la plus facile.
+  verifier('⛔ …et des cas servis par les ISOBARES, sans quoi la moitié '
+    + 'haute du calque n\'est comparée nulle part',
+    nIso > 0, `${nIso} cas isobares`);
   console.log(`  ⓘ fixture du run ${fx.run}, échéance ${fx.echeanceH} h`);
 }
 
@@ -243,18 +315,252 @@ if (!man) {
     pire === 0, `${cas} cas · écart max ${pire}`);
 
   console.log('\n     couverture calculée par le TypeScript :');
-  for (const A of [1000, 2000, 3000, 4000]) {
-    const c = L.calculerCalque(man, u, v, zsol, A).couverture;
-    console.log(`       ${String(A).padStart(5)} m : servi `
-      + `${(100 * c.servi).toFixed(1).padStart(5)} %  ·  relief `
-      + `${(100 * c.relief).toFixed(1).padStart(5)} %  ·  plafond `
-      + `${(100 * c.auDessusDuPlafond).toFixed(1).padStart(5)} %  ·  bande basse `
-      + `${(100 * c.sousPremierNiveau).toFixed(2)} %`);
+  console.log('       altitude   servi   relief  plafond  bande basse  par isobares');
+  for (const A of [1000, 2000, 3000, 4000, 5000, 7000]) {
+    const c = L.calculerCalque(man, u, v, zsol, A, iso).couverture;
+    console.log(`       ${String(A).padStart(5)} m  `
+      + `${(100 * c.servi).toFixed(1).padStart(6)} % `
+      + `${(100 * c.relief).toFixed(1).padStart(6)} % `
+      + `${(100 * c.auDessusDuPlafond).toFixed(1).padStart(6)} % `
+      + `${(100 * c.sousPremierNiveau).toFixed(2).padStart(10)} % `
+      + `${(100 * c.parIsobares).toFixed(1).padStart(11)} %`);
+  }
+
+  // ⛔ LE CRITÈRE DU LOT 12, rejoué côté navigateur. Sans les isobares
+  // le plafond SUIT le relief ; avec, il ne le suit plus. On compare les
+  // deux appels — un même code, une seule différence.
+  const A5 = 5000;
+  const sans = L.calculerCalque(man, u, v, zsol, A5).couverture;
+  const avec = L.calculerCalque(man, u, v, zsol, A5, iso).couverture;
+  verifier('⛔ à 5 000 m, le relais isobare supprime les colonnes trouées '
+    + 'par le plafond', avec.auDessusDuPlafond === 0 && sans.auDessusDuPlafond > 0,
+    `sans : ${(100 * sans.auDessusDuPlafond).toFixed(1)} % · `
+    + `avec : ${(100 * avec.auDessusDuPlafond).toFixed(1)} %`);
+  verifier('…et il DIT quelles colonnes il sert, pour que l\'écran puisse '
+    + 'prévenir que le haut vaut moins que le bas',
+    avec.parIsobares > 0
+    && Math.abs(avec.parIsobares - sans.auDessusDuPlafond) < 1e-9,
+    `${(100 * avec.parIsobares).toFixed(1)} % par isobares`);
+  // ⚠️ Et SOUS le plafond hauteur, absolument rien ne doit bouger :
+  // l'invariant de l'étape 11 n'est pas une victime acceptable du lot 12.
+  const bas1 = L.calculerCalque(man, u, v, zsol, 2000);
+  const bas2 = L.calculerCalque(man, u, v, zsol, 2000, iso);
+  let identiqueBas = true;
+  for (let c = 0; c < bas1.u.length && identiqueBas; c++) {
+    const x = bas1.u[c], y = bas2.u[c];
+    if (!(x === y || (Number.isNaN(x) && Number.isNaN(y)))) identiqueBas = false;
+  }
+  verifier('⛔ sous zsol + 3000 m, ajouter les isobares ne change RIEN — '
+    + 'l\'invariant de l\'étape 11 survit au lot 12', identiqueBas);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n── 8 bis. LA COLONNE, et les DEUX dispositions ──');
+// ⛔ CE QUE CE BLOC PROTÈGE. Depuis l'étape 12 le produit publie la même
+// donnée DEUX FOIS : param-majeure pour le calque, colonne-majeure pour
+// la vue de coupe. Rien ne les force à s'accorder — deux dispositions
+// qui divergeraient ne lèveraient aucune exception, elles rendraient
+// deux vents différents pour le même point, sur deux écrans que
+// personne ne regarde en même temps.
+//
+// Le banc Python (`test_grille.py` §7) le vérifie côté encodeur ; ici on
+// le vérifie côté DÉCODEUR, avec le code que le navigateur exécute.
+const colF = arg('colonnes');
+if (!(man && colF)) {
+  console.log('  ⚠️ --colonnes absent : la route de lecture de la vue de '
+    + 'coupe n\'est PAS vérifiée.');
+  echecs++;
+} else {
+  const co = readFileSync(colF);
+  const bufCol = co.buffer.slice(co.byteOffset, co.byteOffset + co.byteLength);
+  const pas = man.service.colonnes.octets_par_colonne;
+  const nbLat = man.axes.nb_lat, nbLon2 = man.axes.nb_lon;
+  const nbCol2 = nbLat * nbLon2;
+  const nbEch = man.echeances.length;
+
+  verifier('l\'objet colonnes fait `octets_par_colonne` × nb de colonnes',
+    bufCol.byteLength === pas * nbCol2,
+    `${bufCol.byteLength} o = ${pas} × ${nbCol2}`);
+  // ⛔ Sans ce multiple de 4, `ziso` (float32) commencerait à un
+  // décalage impair-en-mots une colonne sur deux.
+  verifier('⛔ le pas d\'une colonne est multiple de 4', pas % 4 === 0);
+
+  // La colonne du milieu, et les deux coins : `colonneLaPlusProche` doit
+  // retomber sur le bon (j, i) MALGRÉ le pas de latitude NÉGATIF.
+  const a2 = man.axes;
+  let bonsIndices = 0;
+  for (const [jv, iv] of [[0, 0], [nbLat - 1, nbLon2 - 1],
+                          [Math.floor(nbLat / 2), Math.floor(nbLon2 / 2)]]) {
+    const dLat = (a2.lat_dernier - a2.lat_premier) / (nbLat - 1);
+    const dLon = (a2.lon_dernier - a2.lon_premier) / (nbLon2 - 1);
+    const p = L.colonneLaPlusProche(man, a2.lat_premier + jv * dLat,
+      a2.lon_premier + iv * dLon);
+    if (p.j === jv && p.i === iv) bonsIndices++;
+  }
+  verifier('⚠️ `colonneLaPlusProche` retombe sur le bon (j, i) malgré le pas '
+    + 'de latitude NÉGATIF — une carte symétrique ressemble à une carte',
+    bonsIndices === 3, `${bonsIndices}/3`);
+
+  // ⛔ LE TEST : la colonne lue dans `colonnes.bin` est-elle la même que
+  // celle lue dans le tampon d'échéance ?
+  let desaccords = 0, compares = 0;
+  const iEch = man.echeances.indexOf(fxStep);
+  for (let j = 0; j < nbLat; j += Math.max(1, Math.floor(nbLat / 7))) {
+    for (let i = 0; i < nbLon2; i += Math.max(1, Math.floor(nbLon2 / 7))) {
+      const pos = L.colonneLaPlusProche(man,
+        a2.lat_premier + j * ((a2.lat_dernier - a2.lat_premier) / (nbLat - 1)),
+        a2.lon_premier + i * ((a2.lon_dernier - a2.lon_premier) / (nbLon2 - 1)));
+      const col = L.decoderColonne(man, bufCol, pos, zsol[j * nbLon2 + i], 0);
+      for (const [cle, t] of Object.entries(man.service.tranches)) {
+        const via = col.tranches[cle];
+        const pile = L.decoderTranche(buf, t, 0);
+        for (let n = 0; n < t.niveaux; n++) {
+          const x = via[n * nbEch + iEch];
+          const y = pile[n * nbCol2 + j * nbLon2 + i];
+          compares++;
+          if (!(x === y || (Number.isNaN(x) && Number.isNaN(y)))) desaccords++;
+        }
+      }
+    }
+  }
+  verifier('⛔ la colonne lue dans `colonnes.bin` est identique à celle lue '
+    + 'dans le tampon d\'échéance — les deux dispositions ne divergent pas',
+    desaccords === 0, `${compares - desaccords}/${compares} valeurs`);
+  verifier('⚠️ et un Range de la SEULE colonne suffit (offsetBase honoré)',
+    (() => {
+      const pos = L.colonneLaPlusProche(man, a2.lat_premier, a2.lon_premier);
+      const tranche = bufCol.slice(pos.offset, pos.offset + pas);
+      const c1 = L.decoderColonne(man, tranche, pos, 0, pos.offset);
+      const c2 = L.decoderColonne(man, bufCol, pos, 0, 0);
+      return Object.keys(c1.tranches).every(k => {
+        const a3 = c1.tranches[k], b3 = c2.tranches[k];
+        return a3.length === b3.length && a3.every((x, n) =>
+          x === b3[n] || (Number.isNaN(x) && Number.isNaN(b3[n])));
+      });
+    })(),
+    `${pas} octets par colonne`);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n── 8 ter. LA PRESSION DÉRIVÉE, et ce qu\'elle a le droit de dire ──');
+// ⛔ CE QUE CE BLOC PROTÈGE. Les 25 niveaux hauteur d'AGRUME n'ont pas de
+// pression ; l'émagramme « brut » en fait pourtant son ORDONNÉE. On la
+// dérive donc — arbitrage du 13/08 — et une valeur dérivée servie sur un
+// axe que l'écran affiche comme une mesure doit être exacte là où elle
+// peut l'être, et se dire partout ailleurs.
+{
+  const NIV = [1000, 950, 925, 900, 850, 800, 700, 500, 400];
+  const NECH = 2, ECH = 1;
+  const zsol = 1368, psol = 855.4;
+  //             1000  950  925  900  850  800   700   500   400  hPa
+  const alt =   [ 194, 635, 865, 1101, 1597, 2119, 3243, 5931, 7622];
+  const ziso = new Float32Array(NIV.length * NECH);
+  NIV.forEach((_, k) => { ziso[k * NECH + ECH] = alt[k]; });
+
+  const anc = L.ancresPression(zsol, psol, ziso, NIV, ECH, NECH);
+  verifier('⛔ les niveaux SOUS le sol sont écartés des ancres — sinon la '
+    + 'pression croîtrait en montant', anc.length === NIV.length - 4 + 1
+    && anc[0].alt === zsol && anc[1].hPa === 850,
+    `${anc.length} ancres, la 1re au sol (${psol} hPa), la 2e à ${anc[1].hPa} hPa`);
+  verifier('⚠️ l\'ancre basse est le SOL, pas le premier isobare — sans '
+    + 'elle les 229 premiers mètres seraient extrapolés',
+    anc[0].alt === zsol && anc[0].niveau === false,
+    `${(anc[1].alt - zsol).toFixed(0)} m entre le sol et 850 hPa`);
+
+  // ⛔ Sur un niveau isobare, la pression EST celle du niveau.
+  let exact = 0;
+  for (const a of anc.filter(x => x.niveau)) {
+    const p = L.pressionA(anc, a.alt);
+    if (p && p.hPa === a.hPa && p.source === 'modele') exact++;
+  }
+  verifier('⛔ sur un niveau isobare, la pression rendue est EXACTEMENT '
+    + 'celle du niveau, et elle se dit « modele »',
+    exact === anc.filter(x => x.niveau).length,
+    `${exact}/${anc.filter(x => x.niveau).length}`);
+  const pSol = L.pressionA(anc, zsol);
+  verifier('…et au sol, exactement `psol`',
+    pSol !== null && pSol.hPa === psol);
+
+  // ⚠️ Entre deux ancres : dérivée, monotone, et dans les bornes.
+  let mono = true, dites = 0, n = 0, prev = Infinity;
+  for (let z = zsol; z <= alt[alt.length - 1]; z += 7) {
+    const p = L.pressionA(anc, z);
+    if (!p) { mono = false; break; }
+    if (p.hPa > prev + 1e-9) mono = false;
+    prev = p.hPa; n++;
+    if (p.source === 'derivee') dites++;
+  }
+  verifier('⛔ la pression décroît STRICTEMENT en montant, du sol au '
+    + 'dernier isobare — une ancre souterraine oubliée casserait ça',
+    mono, `${n} altitudes balayées`);
+  verifier('⚠️ et tout ce qui n\'est pas un niveau se dit « derivee » — '
+    + 'servir un calcul sans le dire, sur l\'axe d\'un émagramme, c\'est '
+    + 'le défaut que ce lot corrige ailleurs', dites > 0 && dites <= n,
+    `${dites}/${n}`);
+
+  verifier('⛔ aucune extrapolation : sous le sol et au-dessus du dernier '
+    + 'isobare, on rend null plutôt qu\'une pression inventée',
+    L.pressionA(anc, zsol - 1) === null
+    && L.pressionA(anc, alt[alt.length - 1] + 1) === null);
+
+  // ⓘ CE QUE LA DÉRIVATION COÛTE — ET LE BANC S'EST TROMPÉ DEUX FOIS.
+  //
+  // 1re version : 17,4 hPa. C'était le BANC qui était faux — il comparait
+  //   des ancres inventées à la main (855,4 hPa au sol sous 850 hPa à
+  //   229 m, physiquement incohérent) à une atmosphère standard qui ne
+  //   les respectait pas.
+  // 2e version : 1,603 hPa, soit 13,5 m — vrai, mais mesuré sur l'écart
+  //   500 → 400 hPa, large de 2 562 m. ⚠️ AUCUN NIVEAU HAUTEUR N'Y VIT :
+  //   ils s'arrêtent à zsol + 3 000 m, et cet écart-là commence vers
+  //   5 900 m. Le chiffre était juste et ne décrivait rien.
+  //
+  // ⛔ La question n'est donc pas « quelle est l'erreur maximale de
+  // l'interpolation » mais « quelle est-elle LÀ OÙ IL Y A DES NIVEAUX
+  // HAUTEUR À DATER » — c'est-à-dire entre le sol et zsol + 3 000 m.
+  {
+    const G = 9.80665, R = 287.05, gam = 0.0065, T0 = 288.15, P0 = 1013.25;
+    const pDeZ = (z) => P0 * Math.pow(1 - gam * z / T0, G / (R * gam));
+    const zDeP = (p) => (T0 / gam) * (1 - Math.pow(p / P0, R * gam / G));
+    const zs = 1368;                       // colonne médiane du domaine
+    const ancH = [{ alt: zs, hPa: pDeZ(zs), niveau: false }];
+    for (const hpa of [850, 800, 750, 700, 650, 600, 550, 500, 400]) {
+      const z = zDeP(hpa);
+      if (z > zs) ancH.push({ alt: z, hPa: hpa, niveau: true });
+    }
+    const mesure = (zMin, zMax) => {
+      let pire = 0, ou = 0;
+      for (let z = zMin; z <= zMax; z += 5) {
+        const p = L.pressionA(ancH, z);
+        if (!p) continue;
+        const d = Math.abs(p.hPa - pDeZ(z));
+        if (d > pire) { pire = d; ou = z; }
+      }
+      return { pire, ou };
+    };
+    const bas = mesure(zs, zs + 3000);          // là où vivent les niveaux
+    const tout = mesure(zs, ancH[ancH.length - 1].alt);
+    console.log(`  ⓘ écart à la loi hydrostatique (6,5 K/km), colonne à `
+      + `zsol = ${zs} m :`);
+    console.log(`       sol → zsol+3000 m (où vivent les niveaux hauteur) : `
+      + `${bas.pire.toFixed(3)} hPa ≈ ${(bas.pire * 8.4).toFixed(2)} m, `
+      + `vers ${bas.ou.toFixed(0)} m`);
+    console.log(`       sol → 400 hPa (toute la colonne)                  : `
+      + `${tout.pire.toFixed(3)} hPa ≈ ${(tout.pire * 8.4).toFixed(2)} m, `
+      + `vers ${tout.ou.toFixed(0)} m`);
+    verifier('⛔ dans la tranche où il y a des niveaux hauteur à dater, la '
+      + 'dérivation coûte moins que les 2,00 m du float16 sur l\'axe '
+      + 'd\'altitude — au-dessus, les isobares se datent eux-mêmes',
+      bas.pire * 8.4 < 2.0, `${(bas.pire * 8.4).toFixed(2)} m`);
+    verifier('⚠️ et l\'écart entre deux ancres reste petit là où ça compte : '
+      + 'le sol et le premier isobare émergé se touchent',
+      ancH[1].alt - ancH[0].alt < 300,
+      `${(ancH[1].alt - ancH[0].alt).toFixed(0)} m`);
   }
 }
 
 // ══════════════════════════════════════════════════════════════════════
-console.log('\n── 8. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
+console.log('\n── 9. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
 // ⚠️ CE TEST EST BEHAVIOURAL, PAS UN grep. On donne au module un
 // manifeste DÉLIBÉRÉMENT DIFFÉRENT — 3 niveaux au lieu de 25, une grille
 // 2×3 au lieu de 61×85, des paramètres dans un autre ORDRE — et on exige
@@ -276,6 +582,13 @@ console.log('\n── 8. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
     run: '2026-01-01T00:00:00Z', domaine: 'banc', grille: '0025',
     echeances: [0], niveaux_m_sol: NIV2,
     parametres: [{ nom: 'v' }, { nom: 'u' }],
+    // ⚠️ 12/08 — un manifeste SANS isobares reste un manifeste valide.
+    // Le calque doit alors se comporter EXACTEMENT comme avant l'étape
+    // 12 : plafond collé au relief, aucune erreur. Un module qui
+    // exigerait `iso` casserait sur un run d'avant, ou sur un domaine
+    // que Météo-France servirait sans IP1.
+    niveaux_hpa: [],
+    parametres_isobares: [],
     axes: {
       nb_lat: NJ, nb_lon: NI,
       lat_premier: 46, lat_dernier: 45,       // DÉCROISSANTES, comme AROME
@@ -287,11 +600,18 @@ console.log('\n── 8. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
       cle_zsol: 'x/{domaine}/{run}/zsol.bin',
       disposition_tampon: '(parametre, niveau, lat, lon) float16',
       encodage: 'aucun',
+      cle_colonnes: 'x/{domaine}/{run}/colonnes.bin',
       tranches: {
-        v: { offset: 0, octets: octetsParParam },
-        u: { offset: octetsParParam, octets: octetsParParam },
+        v: { offset: 0, octets: octetsParParam, dtype: 'float16',
+             niveaux: NIV2.length, bloc: 'hauteur' },
+        u: { offset: octetsParParam, octets: octetsParParam, dtype: 'float16',
+             niveaux: NIV2.length, bloc: 'hauteur' },
       },
       octets_par_echeance: 2 * octetsParParam,
+      colonnes: {
+        disposition: 'un enregistrement par colonne', octets_par_colonne: 12,
+        offset: '(j * nb_lon + i) * octets_par_colonne', tranches: {}, note: '',
+      },
     },
   };
   // zsol volontairement étalé : 0 m et 400 m.

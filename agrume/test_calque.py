@@ -93,6 +93,101 @@ def grille_synthetique(nj=7, ni=9, steps=(0, 1)):
     return g
 
 
+def section_9_relais_isobare():
+    """── 9. Le relais isobare, qui lève le plafond (étape 12) ──
+
+    ⚠️ CE QUE CETTE SECTION PROTÈGE. Au-dessus de zsol + 3000 m, le
+    calque changeait de SOURCE le 12/08 — et un changement de source est
+    exactement ce qui ne se voit pas sur une carte : les couleurs
+    restent continues, la carte reste jolie, et on ne peut pas savoir à
+    l'œil si le haut vient des isobares ou d'une extrapolation.
+
+    Trois façons de casser en silence, une par bloc :
+      · le relais joue TROP BAS et écrase des valeurs justes ;
+      · il joue là où l'axe `ziso` est troué, donc sur une altitude
+        inventée ;
+      · il rend `tke` — qui n'existe PAS sur les isobares — au lieu d'un
+        trou, donc un zéro plausible là où il n'y a rien.
+    """
+    from domaine import NIVEAUX_P                        # noqa: PLC0415
+
+    print("\n── 9. Le relais isobare, qui lève le plafond ──")
+    g = grille_synthetique(nj=3, ni=3, steps=(0,))
+    g.zsol[:, :] = 1000.0                       # un sol plat : on isole l'axe
+    # Un axe isobare simple et EXACT en float32 : 1000 hPa à 2 000 m,
+    # puis +500 m par niveau — 400 hPa se retrouve à 8 500 m.
+    for k, hpa in enumerate(NIVEAUX_P):
+        g.ziso[k, 0] = 2000.0 + 500.0 * k
+        g.iso[g.i_param_iso["u"], k, 0] = np.float16(100.0 + k)
+        g.iso[g.i_param_iso["v"], k, 0] = np.float16(200.0 + k)
+
+    # ── a) SOUS le plafond hauteur, RIEN ne doit changer ──────────────
+    # C'est l'invariant de l'étape 11 (« à A = zsol + niveau_k, le calque
+    # rend exactement le niveau k »), et il ne doit pas être une victime
+    # du lot 12.
+    r = C.calque(g, 0, 1000.0 + 2000.0)
+    verifier("sous zsol + 3000 m, la valeur reste celle des niveaux "
+             "HAUTEUR — l'invariant de l'étape 11 survit au lot 12",
+             np.allclose(r["champs"]["u"],
+                         float(np.float16(1000.0 + NIVEAUX_H_0025.index(2000)))),
+             f"{float(r['champs']['u'][0, 0]):.1f}")
+    verifier("…et aucune colonne n'est annoncée servie par les isobares",
+             r["couverture"]["parIsobares"] == 0.0)
+
+    # ── b) AU-DESSUS, le relais joue, et il interpole en ALTITUDE ─────
+    r = C.calque(g, 0, 4250.0)          # pile entre 2 000+500·4 et +500·5
+    attendu = (float(np.float16(104.0)) + float(np.float16(105.0))) / 2
+    verifier("⛔ au-dessus de zsol + 3000 m la colonne est SERVIE, plus "
+             "trouée — c'est le critère du lot",
+             bool(r["servable"].all())
+             and r["couverture"]["auDessusDuPlafond"] == 0.0)
+    verifier("…par interpolation linéaire en ALTITUDE-MER entre les deux "
+             "niveaux isobares encadrants",
+             np.allclose(r["champs"]["u"], attendu, atol=1e-3),
+             f"{float(r['champs']['u'][0, 0]):.3f} (attendu {attendu:.3f})")
+    verifier("…et le calque DIT que ces colonnes viennent des isobares",
+             r["couverture"]["parIsobares"] == 1.0)
+    verifier("⚠️ la valeur écrasée n'est PAS celle du niveau 3 000 m — "
+             "sans écrasement, `interpoler_champ` aurait rendu une valeur "
+             "finie et fausse de plusieurs milliers de mètres",
+             not np.isclose(float(r["champs"]["u"][0, 0]),
+                            float(np.float16(1000.0 + 24))))
+
+    # ── c) tke n'existe pas là-haut : un TROU, pas un zéro ────────────
+    r = C.calque(g, 0, 4250.0, params=("u", "tke"))
+    verifier("⚠️ `tke` au-dessus du plafond hauteur est un TROU (elle vit "
+             "dans IP4, non ingéré) — pas un zéro plausible",
+             bool(np.isnan(np.asarray(r["champs"]["tke"])).all())
+             and not r["servable"].any()
+             and (r["raisonMasque"] == C.MASQUE_DONNEE).all())
+
+    # ── d) au-dessus du DERNIER isobare, on refuse encore ─────────────
+    r = C.calque(g, 0, 8500.0 + 1.0)
+    verifier("au-dessus du dernier niveau isobare, la colonne redevient "
+             "masquée — aucune extrapolation ne dort au-dessus non plus",
+             not r["servable"].any()
+             and (r["raisonMasque"] == C.MASQUE_PLAFOND).all())
+
+    # ── e) un axe troué ne doit pas devenir une altitude inventée ─────
+    g.ziso[:, 0, 1, 1] = np.nan
+    r = C.calque(g, 0, 4250.0)
+    verifier("⛔ une colonne dont `ziso` est NaN reste MASQUÉE — un axe "
+             "absent ne se remplace pas par un encadrement au hasard",
+             not bool(r["servable"][1, 1])
+             and r["raisonMasque"][1, 1] == C.MASQUE_PLAFOND
+             and bool(r["servable"][0, 0]),
+             f"servi ailleurs : {r['couverture']['servi']:.0%}")
+
+    # ── f) ce que l'écran doit dire ───────────────────────────────────
+    a = r["aEcrire"]
+    verifier("l'écran est prévenu que la carte mélange DEUX sources, et "
+             "que la haute est la moins sûre",
+             "DEUX SOURCES" in a["sourceParAltitude"]
+             and "2,34" in a["sourceParAltitude"])
+    verifier("…et que ~7 620 m n'est pas « le max » mais 400 hPa",
+             "400 hPa" in a["plafond"] and "n'est pas « le " in a["plafond"])
+
+
 def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--archive", nargs=2, default=None,
@@ -255,6 +350,8 @@ def main(argv=None):
                   f"relief {100*c['relief']:5.1f} %  ·  plafond "
                   f"{100*c['auDessusDuPlafond']:5.1f} %  ·  bande basse "
                   f"{100*c['sousPremierNiveau']:5.2f} %")
+
+    section_9_relais_isobare()
 
     print("\n  calque :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

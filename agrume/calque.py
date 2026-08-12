@@ -92,7 +92,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from domaine import GRID_3D, NIVEAUX_H_0025
+from domaine import GRID_3D, NIVEAUX_H_0025, NIVEAUX_P
 
 # ⚠️ Les niveaux en float64 UNE FOIS, ici. Comparer un `h` float64 à un
 # niveau entier promu à la volée marche ; le faire dans une boucle
@@ -210,6 +210,68 @@ def interpoler_champ(pile, h, niveaux=NIVEAUX):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  ÉTAPE 12 — LE RELAIS ISOBARE, QUI LÈVE LE PLAFOND
+# ══════════════════════════════════════════════════════════════════════
+#  ⚠️⚠️ L'AXE N'EST PLUS UNE CONSTANTE, ET TOUT EST LÀ. Les 25 niveaux
+#  hauteur sont les mêmes partout : `encadrer(h)` peut donc travailler
+#  sur un vecteur de 25 nombres. Les 14 niveaux isobares, eux, ont une
+#  altitude qui CHANGE en chaque point et à chaque échéance — c'est
+#  `ziso`, un tableau `(14, nj, ni)`. L'encadrement doit donc être fait
+#  colonne par colonne, et c'est la seule différence de fond entre les
+#  deux moitiés du calque.
+#
+#  ⓘ Mesuré sur le run 15 Z, échéance +3 h, 5 185 colonnes : `ziso` varie
+#  peu horizontalement (400 hPa entre 7 616 et 7 626 m, soit 11 m
+#  d'étendue) — mais « peu » n'est pas « pas », et un axe supposé
+#  constant se tromperait de dizaines de mètres à 850 hPa (1 591 → 1 646,
+#  55 m d'étendue) là où l'orographie du modèle en discute autant.
+def _encadrer_isobares(ziso, altitude_asl):
+    """(disponible, k, w) pour l'altitude-mer `altitude_asl`.
+
+    `ziso` est la pile `(niveau, ...)` des altitudes isobares D'UNE
+    échéance. ⚠️ On prend le TABLEAU et non la grille : la fixture doit
+    pouvoir appeler cette fonction sur UNE colonne, et un banc qui ne
+    peut s'exécuter que sur un domaine entier n'est pas un banc.
+
+    `ziso` CROÎT avec l'indice — `NIVEAUX_P` va de 1000 à 400 hPa, donc
+    du bas vers le haut. On compte les niveaux passés plutôt que
+    d'appeler `searchsorted` colonne par colonne : 5 185 appels
+    coûteraient plus que 14 comparaisons vectorielles.
+    """
+    ziso = np.asarray(ziso, dtype=np.float64)                # (14, nj, ni)
+    nlev = ziso.shape[0]
+    if nlev < 2:
+        faux = np.zeros(ziso.shape[1:], dtype=bool)
+        return faux, np.zeros_like(faux, dtype=int), np.zeros_like(faux,
+                                                                   dtype=float)
+    # ⚠️ Les NaN ne doivent pas compter comme « passé » : une colonne dont
+    # l'axe est troué n'est pas servable, et un `<=` sur NaN rend False,
+    # ce qui la ferait passer pour « sous le premier niveau ».
+    sous = np.where(np.isfinite(ziso), ziso <= altitude_asl, False)
+    k = np.clip(sous.sum(axis=0) - 1, 0, nlev - 2)
+    jj, ii = np.indices(k.shape)
+    bas, haut = ziso[k, jj, ii], ziso[k + 1, jj, ii]
+    dispo = (np.isfinite(bas) & np.isfinite(haut)
+             & (bas <= altitude_asl) & (altitude_asl <= haut))
+    span = haut - bas
+    # ⚠️ Même garde-fou que `melanger` : un `span` nul ou négatif ne doit
+    # pas produire un poids infini. Il ne devrait pas arriver — l'axe est
+    # monotone — mais « ne devrait pas » n'est pas un contrôle.
+    w = np.where(span > 0, (altitude_asl - bas) / np.where(span > 0, span, 1.0),
+                 0.0)
+    return dispo, k, np.clip(w, 0.0, 1.0)
+
+
+def _interpoler_isobares(pile, k, w):
+    """Interpole une pile isobare `(niveau, nj, ni)` à l'encadrement
+    donné. Même conversion float16 → float32 avant calcul, et pour la
+    même raison, que `interpoler_champ`."""
+    pile = np.asarray(pile, dtype=np.float32)
+    jj, ii = np.indices(k.shape)
+    return melanger(pile[k, jj, ii], pile[k + 1, jj, ii], w)
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  LE CALQUE
 # ══════════════════════════════════════════════════════════════════════
 def calque(gr, step, altitude_asl, params=("u", "v")):
@@ -249,8 +311,25 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
     # informations, et l'écran doit les dire différemment.
     m_relief = h < 0.0                              # le sol est au-dessus
     m_bas = (h >= 0.0) & (h < NIVEAUX[0])           # sous le premier niveau
-    m_plafond = h > NIVEAUX[-1]                     # au-dessus de zsol+3000
+    m_haut = h > NIVEAUX[-1]                        # au-dessus de zsol+3000
     m_zsol = ~np.isfinite(zsol)
+
+    # ── Étape 12 : au-dessus de zsol+3000, les ISOBARES prennent le relais
+    # ⚠️ CE N'EST PAS UN MÉLANGE, ET C'EST DÉLIBÉRÉ. `profil.py` mélange
+    # les deux sources entre zsol+1000 et zsol+3000, puis sert les
+    # isobares SEULES au-dessus — son poids hauteur vaut déjà 0 à
+    # zsol+3000. Le calque, lui, ne mélange nulle part : il rend le
+    # niveau BRUT du produit, et son invariant (« à A = zsol + niveau_k,
+    # le calque rend exactement le niveau k », 129 625 cas vérifiés) ne
+    # survivrait pas à un mélange.
+    #
+    # ⛔ CONSÉQUENCE À NE PAS TAIRE : entre zsol+1000 et zsol+3000, le
+    # calque et le profil vertical ne rendent donc PAS la même valeur au
+    # même point. `confronter_calque.py --recouvrement` mesure cet écart
+    # sur le domaine et le publie ; il n'est pas arbitré ici.
+    haut_dispo, k_iso, w_iso = _encadrer_isobares(gr.ziso[:, i_step], A)
+    servi_par_iso = m_haut & haut_dispo & ~m_zsol
+    m_plafond = m_haut & ~servi_par_iso             # ce qui reste troué
 
     servable = ~(m_relief | m_bas | m_plafond | m_zsol)
 
@@ -264,11 +343,28 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
 
     champs, k_pub, w_pub = {}, None, None
     m_donnee = np.zeros_like(servable)
+    i_param_iso = {p: k for k, p in enumerate(_noms_params_iso(gr))}
     for nom in params:
         pile = gr.h0025[i_param[nom], :, i_step]        # (niveau, nj, ni)
         val, k, w = interpoler_champ(pile, h_sur)
         if k_pub is None:
             k_pub, w_pub = k, w
+        # ── là où le relais isobare joue, il REMPLACE la valeur ────────
+        # ⚠️ `interpoler_champ` a été appelé sur un `h` écrêté, donc il a
+        # rendu le niveau 3000 m pour ces colonnes — une valeur finie,
+        # plausible, et fausse de plusieurs milliers de mètres. C'est
+        # exactement le genre de résultat qui ne se voit pas : on
+        # l'écrase, on ne le complète pas.
+        if servi_par_iso.any():
+            if nom in i_param_iso:
+                pile_iso = gr.iso[i_param_iso[nom], :, i_step]
+                haut = _interpoler_isobares(pile_iso, k_iso, w_iso)
+                val = np.where(servi_par_iso, haut, val)
+            else:
+                # ⓘ `tke` n'existe pas sur les isobares (elle vit dans
+                # IP4, non ingéré). Au-dessus du plafond hauteur elle est
+                # donc absente — un trou, pas un zéro.
+                val = np.where(servi_par_iso, np.nan, val)
         m_donnee |= ~np.isfinite(val)
         champs[nom] = val
 
@@ -298,6 +394,14 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
             auDessusDuPlafond=round(float(m_plafond.mean()), 4),
             niveauAbsent=round(float((m_donnee & ~(
                 m_relief | m_bas | m_plafond)).mean()), 4),
+            # ⚠️ Publié parce que l'écran DOIT pouvoir le dire : sur une
+            # même carte, les colonnes basses viennent des niveaux
+            # hauteur et les hautes des isobares, et la tranche isobare
+            # est la PIRE des trois contre le ballon (2,34 et 4,09 m/s
+            # d'écart médian, contre 1,70 et 1,84 — n = 2 profils, vent
+            # faible). Une carte qui mélange deux sources sans dire où
+            # empêche de diagnostiquer une marche.
+            parIsobares=round(float(servi_par_iso.mean()), 4),
             nbColonnes=int(n)),
         # ── Ce que l'écran DOIT dire, et que personne n'a envie d'écrire
         # (§4 du lot). Publié ici pour que le front n'ait pas à le
@@ -310,21 +414,49 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
                           "LE VOIT, pas une panne de donnée. L'orographie du "
                           "modèle place les sommets ~135 m plus bas que le "
                           "sol réel en médiane (n = 109)."),
-            plafond=("le produit B ne porte AUCUN niveau isobare : chaque "
-                     "colonne s'arrête à zsol + 3000 m, donc le plafond SUIT "
-                     "le relief. Un calque haut est troué en vallée et plein "
-                     "sur les crêtes."),
+            plafond=("depuis l'étape 12, les niveaux ISOBARES prennent le "
+                     "relais au-dessus de zsol + 3000 m : le plafond ne suit "
+                     "plus le relief, il est uniforme à ~7 620 m (400 hPa). "
+                     "Mesuré le 12/08 sur les 5 185 colonnes du domaine "
+                     "nord-alpes : de « 3 168 à 6 887 m selon le point » à "
+                     "« 7 616 à 7 626 m », et 0 % de colonnes trouées à "
+                     "5 000 m contre 71 % avant. ⚠️ 7 620 m n'est pas « le "
+                     "max » du modèle : c'est 400 hPa, coupure choisie le "
+                     "10/08 pour couvrir zsol + 3000 m partout."),
+            sourceParAltitude=(
+                "⚠️ SUR UNE MÊME CARTE, DEUX SOURCES. Sous zsol + 3000 m les "
+                "valeurs viennent des niveaux HAUTEUR, au-dessus des niveaux "
+                "ISOBARES — et la tranche isobare est la moins sûre des "
+                "deux : 2,34 et 4,09 m/s d'écart médian contre le ballon, "
+                "contre 1,70 et 1,84 pour la hauteur seule (n = 2 profils, "
+                "vent faible, aucune des trois causes isolée). Le haut du "
+                "calque vaut moins que le bas, et l'écran doit le dire — "
+                "`couverture.parIsobares` donne la part concernée."),
+            tkeEnHaut=("la TKE n'existe PAS sur les isobares (elle vit dans "
+                       "IP4, non ingéré) : au-dessus de zsol + 3000 m elle "
+                       "est absente, et c'est un TROU, pas un zéro."),
             retention=("3 runs en ligne, aucun historique.")),
         reference_verticale=(
-            "altitude-mer constante, obtenue par interpolation LINÉAIRE EN "
-            "HAUTEUR-SOL entre les deux niveaux encadrant "
-            "h = altitudeASLM − zsol[lat, lon], sur u et v SÉPARÉMENT. "
-            "Aucune interpolation d'angle, aucune extrapolation."))
+            "altitude-mer constante, obtenue par interpolation LINÉAIRE sur "
+            "u et v SÉPARÉMENT, et sur DEUX axes selon l'altitude : en "
+            "HAUTEUR-SOL entre les niveaux encadrant "
+            "h = altitudeASLM − zsol[lat, lon] jusqu'à zsol + 3000 m, puis "
+            "en ALTITUDE-MER entre les niveaux isobares encadrants, dont "
+            "l'altitude `ziso` varie en chaque point et à chaque échéance. "
+            "Aucune interpolation d'angle, aucune extrapolation, aucun "
+            "mélange des deux sources — la bascule est franche à "
+            "zsol + 3000 m, là où `profil.py` a déjà ramené le poids de la "
+            "source hauteur à zéro."))
 
 
 def _noms_params(gr):
     from grille import PARAMS_GRILLE
     return [p["nom"] for p in PARAMS_GRILLE]
+
+
+def _noms_params_iso(gr):
+    from grille import PARAMS_GRILLE_ISO
+    return [p["nom"] for p in PARAMS_GRILLE_ISO]
 
 
 def direction(u, v):
@@ -386,10 +518,39 @@ def fixture(gr, step, altitudes, nb_colonnes=64, graine=11):
         # colonne : `zsol` étant continu, aucune altitude GLOBALE ne
         # tombe sur un niveau partout à la fois.
         alts += [zs + float(n) for n in NIVEAUX_H_0025]
+        # ⛔ ÉTAPE 12 — LES ALTITUDES QUI TOMBENT PILE SUR UN NIVEAU
+        # ISOBARE, et celles qui tombent entre deux. Sans elles, le banc
+        # de parité ne vérifierait la moitié HAUTE du calque nulle part —
+        # or c'est celle dont l'axe VARIE en chaque point, donc celle où
+        # une divergence Python/TypeScript est la plus facile.
+        zcol = np.asarray(gr.ziso[:, i_step, j, i], dtype=np.float64)
+        for k_iso, zz in enumerate(zcol):
+            if not np.isfinite(zz):
+                continue
+            alts.append(float(zz))
+            if k_iso + 1 < len(zcol) and np.isfinite(zcol[k_iso + 1]):
+                alts.append(float(zz + zcol[k_iso + 1]) / 2.0)
         for A in alts:
             h = A - zs
             attendu = {}
+            # ── Au-dessus du dernier niveau hauteur, le relais isobare ──
+            # ⚠️ On appelle les MÊMES fonctions que `calque()`, pas une
+            # réécriture : un banc qui réimplémente la règle qu'il vérifie
+            # ne vérifie rien (c'est déjà arrivé le 12/08 sur
+            # `test_freeze_balises.py`).
+            par_iso = False
+            if np.isfinite(zs) and h > NIVEAUX[-1]:
+                dispo, ki, wi = _encadrer_isobares(
+                    gr.ziso[:, i_step, j:j + 1, i:i + 1], A)
+                par_iso = bool(dispo[0, 0])
             for nom in ("u", "v"):
+                if par_iso:
+                    pile = gr.iso[gr.i_param_iso[nom], :, i_step, j:j + 1,
+                                  i:i + 1]
+                    val = _interpoler_isobares(pile, ki, wi)
+                    attendu[nom] = (None if not np.isfinite(val[0, 0])
+                                    else float(val[0, 0]))
+                    continue
                 pile = np.asarray(gr.h0025[i_param[nom], :, i_step, j, i],
                                   dtype=np.float32)
                 if h < NIVEAUX[0] or h > NIVEAUX[-1] or not np.isfinite(zs):
@@ -414,18 +575,31 @@ def fixture(gr, step, altitudes, nb_colonnes=64, graine=11):
             # implémentations ont divergé — à l'encadrement, au poids ou
             # au mélange.
             h = A - zs
-            if NIVEAUX[0] <= h <= NIVEAUX[-1]:
+            if par_iso:
+                # ⓘ `k` et `w` portent alors l'encadrement ISOBARE, et
+                # `source` dit lequel des deux. Sans ce champ, un banc qui
+                # échoue ne saurait pas si le TypeScript s'est trompé de
+                # valeur ou simplement d'axe.
+                k_pub, w_pub = int(ki[0, 0]), float(wi[0, 0])
+            elif NIVEAUX[0] <= h <= NIVEAUX[-1]:
                 kk, ww = encadrer(np.array([h]))
                 k_pub, w_pub = int(kk[0]), float(ww[0])
             else:
                 k_pub, w_pub = None, None
             cas.append(dict(j=j, i=i, zsol=zs, altitudeASLM=A, h=h,
+                            source="isobare" if par_iso else "hauteur",
                             k=k_pub, w=w_pub,
                             u=attendu["u"], v=attendu["v"]))
     return dict(
-        produit="AGRUME étape 11 — vecteurs de référence du calque altitude",
+        produit="AGRUME étape 12 — vecteurs de référence du calque altitude",
         run=gr.run, echeanceH=step, grille=GRID_3D,
         niveaux_m_sol=list(NIVEAUX_H_0025),
+        # ⚠️ L'axe isobare n'est PAS publié ici, et c'est volontaire : le
+        # banc JS lit `ziso` DANS LE TAMPON, comme le fera le navigateur.
+        # Le lui donner tout mâché vérifierait l'interpolation mais pas le
+        # décodage — or c'est le décodage qui porte le piège du float32 au
+        # milieu des float16.
+        niveaux_hpa=list(NIVEAUX_P),
         note=("Calculé par agrume/calque.py. Le banc JS DOIT retrouver "
               "ces valeurs à l'identique en float32. Une divergence ici "
               "veut dire que les deux implémentations du calque ont "

@@ -64,11 +64,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from colonnes import (PARAM_ALTITUDE, PARAMS_001, PARAMS_0025,  # noqa: E402
-                      PARAMS_ISO, Abort, Colonnes, balises_du_domaine,
-                      index_plats, quantifier, verifier_grille)
-from domaine import (G, GRID_3D, GRID_FINE, MAX_HOURS,  # noqa: E402
-                     MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES)
+from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL,  # noqa: E402
+                      PARAMS_001, PARAMS_0025, PARAMS_ISO, PARAMS_SURFACE,
+                      Abort, Colonnes, balises_du_domaine, index_plats,
+                      quantifier, verifier_grille)
+from domaine import (GRID_3D, GRID_FINE, MAX_HOURS,  # noqa: E402
+                     MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES,
+                     PAQUET_NEBULOSITE, PAQUETS_ISOBARES, PAQUETS_SURFACE)
 from grille import Grille, axes_depuis_orographie, decouper  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
@@ -104,6 +106,16 @@ PAQUETS = (
     # ait besoin. +1,73 Go sur 0–24 h, bundles de 496 Mo au plus (donc
     # sous le pic de 815 Mo déjà atteint par HP1 : le disque ne bouge pas).
     (GRID_3D, PAQUET_ISOBARES),
+    # Étape 12 : la nébulosité par niveau. ⚠️ SEUL TÉLÉCHARGEMENT NEUF DU
+    # LOT, +450 Mo sur 0–24 h (mesuré le 12/08, run 15 Z). Il n'est pas
+    # là pour enrichir le produit : il est là parce que sans `cc` la vue
+    # de coupe affirme « ciel clair » sur toutes les colonnes.
+    (GRID_3D, PAQUET_NEBULOSITE),
+    # Étape 12 bis : la ligne de SURFACE de la vue de coupe, et l'ancre
+    # basse de la pression dérivée. ⚠️ +388 Mo sur 0–24 h, bundles de
+    # 56 Mo au plus — le pic disque ne bouge pas, la durée si.
+    (GRID_3D, "SP1"),
+    (GRID_3D, "SP2"),
 )
 
 
@@ -264,8 +276,8 @@ def filtre_0025(paquet):
     return veut
 
 
-def filtre_iso():
-    """Ce qu'on retient dans `0025/IP1`.
+def filtre_iso(paquet=PAQUET_ISOBARES):
+    """Ce qu'on retient dans un bundle isobare — `IP1` ou `IP2`.
 
     ⚠️ LE `typeOfLevel` FAIT PARTIE DU FILTRE, PAS DE LA DÉCORATION. Le
     géopotentiel `z` existe aussi dans `IP5`, mais sur des niveaux de
@@ -274,17 +286,62 @@ def filtre_iso():
     des altitudes absurdes au milieu du profil, sans rien casser de
     visible. On ne lit `IP5` nulle part, mais la règle vaut d'être écrite :
     ce jour où quelqu'un ajoutera un paquet, elle sera déjà là.
+
+    ⚠️⚠️ ET LE PAQUET AUSSI FAIT PARTIE DU FILTRE, DEPUIS LE 12/08. Les
+    descripteurs portent leur `paquet` ; on ne retient dans un bundle que
+    les champs qui s'en réclament. Sans ce tri, un `shortName` partagé
+    par deux bundles serait posé DEUX FOIS — la seconde écrasant la
+    première — et rien ne le dirait. Ce n'est pas hypothétique :
+    l'inventaire eccodes du 12/08 sur `0025/IP2` liste 1 008 messages
+    dont 168 de `shortName` **`unknown`**, et un `unknown` de plus dans
+    un futur paquet est exactement le genre de collision qui se
+    produirait sans que rien ne s'allume.
     """
-    voulus = {p["court"]: p["nom"] for p in PARAMS_ISO}
+    voulus = {p["court"]: p["nom"] for p in PARAMS_ISO
+              if p["paquet"] == paquet}
+    veut_altitude = PARAM_ALTITUDE["paquet"] == paquet
     niveaux = set(NIVEAUX_P)
 
     def veut(sn, tol, lvl):
         if tol != "isobaricInhPa" or lvl not in niveaux:
             return None
-        if sn == "z":
-            return (PARAM_ALTITUDE["nom"], lvl)
+        if sn == PARAM_ALTITUDE["court"]:
+            return (PARAM_ALTITUDE["nom"], lvl) if veut_altitude else None
         nom = voulus.get(sn)
         return (nom, lvl) if nom else None
+    return veut
+
+
+def filtre_surface(paquet):
+    """Ce qu'on retient dans `0025/SP1` et `0025/SP2`.
+
+    ⚠️⚠️ TROIS PIÈGES, TOUS MESURÉS LE 13/08, ET AUCUN NE LÈVE.
+
+    1. **`typeOfLevel` ne suffit plus.** Les champs de surface vivent sur
+       `surface`, `heightAboveGround` (2 m pour `2t`/`2d`, 10 m pour la
+       rafale) — et `CAPE_INS` sur **`unknown`**. Un filtre qui exigerait
+       `surface` en perdrait la moitié, en silence.
+    2. **Le paquet fait partie du filtre**, comme pour les isobares :
+       `2t` existe dans SP1, `t` dans SP2, et SP2 porte aussi le `h` de
+       l'orographie qu'on ne veut surtout pas réingérer par run.
+    3. **`10u`/`10v` sont dans SP1 aussi**, et on ne les prend PAS ici :
+       le 0,025° les tient déjà de `HP1` (niveau 10 des niveaux hauteur).
+       Les reprendre écraserait la même valeur par elle-même au mieux, et
+       par une autre convention au pire.
+    """
+    voulus = {p["court"]: p for p in PARAMS_SURFACE if p["paquet"] == paquet}
+    if PARAM_PRESSION_SOL["paquet"] == paquet:
+        voulus[PARAM_PRESSION_SOL["court"]] = PARAM_PRESSION_SOL
+
+    def veut(sn, tol, lvl):
+        p = voulus.get(sn)
+        if p is None:
+            return None
+        # ⚠️ Le niveau publié est FIXÉ À 0 pour tous : un champ de surface
+        # n'a pas de niveau, et laisser passer celui du GRIB ferait entrer
+        # `2t` au « niveau 2 » et la rafale au « niveau 10 » — deux
+        # valeurs qui EXISTENT dans les 25 niveaux hauteur du produit.
+        return (p["nom"], 0)
     return veut
 
 
@@ -359,6 +416,8 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     par_nom_001 = {p["nom"]: p for p in PARAMS_001}
     par_nom_iso = {p["nom"]: p for p in PARAMS_ISO}
     par_nom_iso[PARAM_ALTITUDE["nom"]] = PARAM_ALTITUDE
+    par_nom_surf = {p["nom"]: p for p in PARAMS_SURFACE}
+    par_nom_surf[PARAM_PRESSION_SOL["nom"]] = PARAM_PRESSION_SOL
     steps_set = set(steps)
 
     idx = {}
@@ -381,11 +440,19 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
         total_mo = sum(t for _, t in fichiers) / 1e6
         crier(f"── {grille}/{paquet} : {len(fichiers)} fichiers, "
               f"{total_mo:.0f} Mo")
-        isobare = paquet == PAQUET_ISOBARES
-        veut = (filtre_iso() if isobare
+        # ⚠️ APPARTENANCE, pas égalité : `IP2` rejoint `IP1` le 12/08 et
+        # les deux passent par la branche isobare. Un `== PAQUET_ISOBARES`
+        # oublié ici enverrait `cc` dans la branche des niveaux HAUTEUR,
+        # où son `typeOfLevel = isobaricInhPa` ne correspondrait à rien :
+        # les messages seraient ignorés en silence et `cc` resterait NaN.
+        isobare = paquet in PAQUETS_ISOBARES
+        surface = paquet in PAQUETS_SURFACE and grille == GRID_3D
+        veut = (filtre_iso(paquet) if isobare
+                else filtre_surface(paquet) if surface
                 else filtre_0025(paquet) if grille == GRID_3D
                 else filtre_001(paquet))
         table = (par_nom_iso if isobare
+                 else par_nom_surf if surface
                  else par_nom_0025 if grille == GRID_3D else par_nom_001)
         orog = paire_orog[grille]
         indices = idx[grille]
@@ -399,9 +466,48 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
             octets += os.path.getsize(chemin)
             try:
                 def sur_champ(k, step, values, meta, _g=grille, _o=orog,
-                              _i=indices, _v=valides, _t=table, _iso=isobare):
+                              _i=indices, _v=valides, _t=table, _iso=isobare,
+                              _surf=surface):
                     verifier_grille(_o.meta, meta, f"{_g}/{paquet}")
                     nom, niveau = k
+                    # ⛔⛔ UN ZÉRO PUBLIÉ N'EST PAS UNE DONNÉE.
+                    # `cc` EXISTE à l'échéance 0 — le message est là, il
+                    # se décode, et il vaut exactement 0 sur les 24
+                    # niveaux (`bitsPerValue = 0`, champ constant, mesuré
+                    # sur les runs 15 Z et 12 Z du 12/08). Au même instant
+                    # `clwc` n'est pas nul : ce n'est donc pas la météo,
+                    # c'est l'analyse qui ne diagnostique pas la
+                    # nébulosité. L'archiver tel quel ferait dire au
+                    # produit « ciel clair partout » à l'échéance que le
+                    # pilote regarde EN PREMIER — précisément le mensonge
+                    # que ce lot existe pour empêcher.
+                    # On ne pose rien : le tableau garde son NaN, et
+                    # `remplissage_par_parametre` le montrera, comme il
+                    # montre déjà le trou de la TKE.
+                    # ⓘ Pour la TKE la règle est un no-op — ses messages
+                    # n'existent pas du tout à τ = 0 — mais elle est
+                    # écrite une fois pour les deux, parce que la
+                    # prochaine fois on ne saura pas d'avance de quelle
+                    # façon le champ manque.
+                    if step == 0 and _t[nom].get("absent_a_tau0"):
+                        return
+                    # ── La surface : produit B UNIQUEMENT ─────────────
+                    # ⛔ Le produit A n'en veut pas, et ce n'est pas un
+                    # oubli : c'est une archive DÉFINITIVE dont le format
+                    # engage pour des années, alors que ces champs
+                    # servent la ligne de surface d'une seule vue. On ne
+                    # grave pas un besoin d'écran dans le perpétuel.
+                    if _surf:
+                        dt_s = (np.float32
+                                if nom == PARAM_PRESSION_SOL["nom"]
+                                else np.float16)
+                        for _g_dom, _o_dom in grilles.values():
+                            if _g_dom.accepte_surface(nom, step):
+                                _g_dom.poser_surface(
+                                    nom, step,
+                                    quantifier(decouper(values, meta, _o_dom),
+                                               _t[nom], dtype=dt_s))
+                        return
                     brut = np.full(len(_i), np.nan)
                     brut[_v] = np.asarray(values)[_i[_v]]
                     if not _iso:
@@ -437,20 +543,40 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                                             decouper(values, meta, _o_dom),
                                             _t[nom]))
                         return
-                    if nom == "zp":
-                        # ⚠️ `z` est un GÉOPOTENTIEL en m²/s², pas une
-                        # hauteur. Sans la division par g, les altitudes
-                        # sortent ~9,8 fois trop grandes — ce qui se voit.
-                        # Diviser deux fois donnerait des altitudes
-                        # plausibles au premier coup d'œil, ce qui ne se
-                        # voit pas : la conversion est écrite ICI et
-                        # nulle part ailleurs.
-                        col.poser_isobare(nom, niveau, step,
-                                          quantifier(brut / G, _t[nom],
-                                                     dtype=np.float32))
-                    else:
-                        col.poser_isobare(nom, niveau, step,
-                                          quantifier(brut, _t[nom]))
+                    # ⚠️⚠️ PLUS AUCUNE DIVISION PAR `G` ICI, ET C'EST
+                    # DÉLIBÉRÉ. `z` reste un GÉOPOTENTIEL en m²/s² — mais
+                    # la conversion vit désormais dans le `facteur` de
+                    # `PARAM_ALTITUDE`, donc dans `quantifier()`, donc au
+                    # même endroit pour le produit A et le produit B.
+                    # Deux raisons, la première mesurée le 12/08 :
+                    #  · divisée AVANT le contrôle, la sentinelle 9 999
+                    #    devenait 1 019,6 m et passait pour une altitude ;
+                    #  · le produit B aurait eu besoin de sa PROPRE
+                    #    division, soit une seconde écriture de la même
+                    #    conversion — exactement ce qu'on voulait éviter.
+                    # ⛔ Remettre un `/ G` ici diviserait DEUX FOIS : 331 m
+                    # à 700 hPa au lieu de 3 240, plausible au premier
+                    # coup d'œil. `test_colonnes.py` rejoue ce chemin.
+                    dtype = np.float32 if nom == PARAM_ALTITUDE["nom"] else np.float16
+                    col.poser_isobare(nom, niveau, step,
+                                      quantifier(brut, _t[nom], dtype=dtype))
+
+                    # ── produit B, sur le MÊME message décodé ──────────
+                    # Même geste que pour les niveaux hauteur vingt
+                    # lignes plus haut, et même piège évité : la découpe
+                    # est refaite POUR CHAQUE DOMAINE depuis le champ
+                    # France entière, jamais depuis la fenêtre d'un
+                    # autre. ⓘ Les isobares n'existent qu'en 0,025°, donc
+                    # pas de garde `_g == GRID_3D` à ajouter — mais
+                    # `accepte_isobare()` filtre quand même le niveau,
+                    # parce que `NIVEAUX_P` pourrait un jour ne pas être
+                    # le même des deux côtés.
+                    for _g_dom, _o_dom in grilles.values():
+                        if _g_dom.accepte_isobare(nom, niveau, step):
+                            _g_dom.poser_isobare(
+                                nom, niveau, step,
+                                quantifier(decouper(values, meta, _o_dom),
+                                           _t[nom], dtype=dtype))
 
                 t1 = time.time()
                 lus, dec, incidents = parcourir(chemin, veut, sur_champ,
@@ -471,6 +597,17 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                 os.unlink(chemin)
             crier(f"    {cle.split('/')[-1][-28:]} · {taille / 1e6:.0f} Mo · "
                   f"{dec} champs retenus sur {lus}")
+
+    # ⛔⛔ LA DÉ-ACCUMULATION, UNE FOIS, ICI — ET PAS AILLEURS.
+    # `tp` et `ssrd` arrivent CUMULÉS depuis le début du run (stepRange
+    # 0-1, 0-2, 0-3…, mesuré le 13/08). Les servir tels quels donnerait
+    # une pluie horaire qui ne décroît jamais : une courbe lisse,
+    # croissante, et fausse. La différence se fait sur le tableau
+    # COMPLET, quand toutes les échéances sont arrivées — au fil des
+    # messages, il faudrait espérer que l'échéance précédente soit déjà
+    # là, et l'espoir n'est pas un contrôle.
+    for _g_dom, _o_dom in grilles.values():
+        _g_dom.deaccumuler()
 
     return (col, {d: g for d, (g, _) in grilles.items()},
             dict(octets=octets, pic_disque=pic_disque, t_dl=t_dl,
@@ -511,7 +648,7 @@ def publier_grilles(paquets, ref, crier=journal_horodate):
     `grille.py` est conservé mot pour mot, seul son périmètre s'élargit.
     """
     from grille import (CLE_INDEX, INDEX_VIDE, RETENTION_RUNS,  # noqa: PLC0415
-                        cle_echeance, cles_du_run, index_apres,
+                        cle_colonnes, cle_echeance, cles_du_run, index_apres,
                         index_apres_purge, prefixe_run, verifier_prefixe)
     from storage import (CACHE_IMMUABLE, CACHE_REECRIT,  # noqa: PLC0415
                          Storage, verifier_dimensionnement)
@@ -521,14 +658,23 @@ def publier_grilles(paquets, ref, crier=journal_horodate):
 
     # ── Le chiffrage, AVANT la première écriture ──────────────────────
     # ⚠️ Un objet par échéance et par domaine, plus le manifeste, plus
-    # `zsol`. C'est le poste qui a été TRANCHÉ le 12/08 (voir
-    # `grille.cles_du_run`) et c'est celui qu'il faut voir bouger si
-    # quelqu'un remonte `MAX_HOURS` ou ajoute un domaine : à 25
-    # échéances et 2 domaines on est à 56 objets par run ; à 4 domaines
-    # et 48 échéances on serait à 200, et la ligne journalisée le dirait
-    # AVANT la facture.
+    # `zsol`, plus — depuis le 12/08 — `colonnes.bin`. C'est le poste qui
+    # a été TRANCHÉ deux fois (voir `grille.cles_du_run` puis
+    # `grille.cle_colonnes`) et c'est celui qu'il faut voir bouger si
+    # quelqu'un remonte `MAX_HOURS` ou ajoute un domaine : à 25 échéances
+    # et 2 domaines on est à 58 objets par run ; à 4 domaines et 48
+    # échéances on serait à 204, et la ligne journalisée le dirait AVANT
+    # la facture.
+    #
+    # ⚠️⚠️ `octets()` NE SUFFIT PLUS À CHIFFRER LE STOCKAGE. Il compte les
+    # tableaux EN MÉMOIRE ; or `colonnes.bin` republie exactement les
+    # mêmes valeurs sur l'axe orthogonal. Ce qui monte sur R2 fait donc
+    # ~2× ce que la grille pèse, plus l'alignement — mesuré, pas
+    # supposé : on somme les tailles RÉELLES des objets qu'on s'apprête à
+    # écrire. Sous-estimer ici ferait passer le garde-fou pour vert la
+    # veille du jour où il devait crier.
     objets = sum(len(cles_du_run(ref, d, g.steps)) + 1 for d, g, _ in paquets)
-    mo = sum((g.octets() / 1e6) for _, g, _ in paquets)
+    mo = sum(g.octets_publies() / 1e6 for _, g, _ in paquets)
     plafond = verifier_dimensionnement(
         "agrume-grille", objets_par_run=objets + 2, runs_par_jour=8,
         mo_par_run=round(mo * RETENTION_RUNS, 2))
@@ -559,14 +705,24 @@ def publier_grilles(paquets, ref, crier=journal_horodate):
         store.put(f"{base}/zsol.bin", gr.tampon_zsol(),
                   cache_control=CACHE_IMMUABLE,
                   content_type="application/octet-stream")
+        # ── L'objet « colonnes », pour la vue de coupe ─────────────────
+        # ⚠️ ÉCRIT AVANT LE MANIFESTE, comme les tampons d'échéance : le
+        # manifeste est ce qui rend un run lisible, il ne doit jamais
+        # décrire un objet qui n'est pas encore là. ⓘ C'est le plus gros
+        # objet du produit (57,8 Mo sur les Alpes, 93,7 sur les
+        # Pyrénées) : s'il doit échouer, autant que ce soit avant.
+        store.put(cle_colonnes(ref, dom), gr.tampon_colonnes(),
+                  cache_control=CACHE_IMMUABLE,
+                  content_type="application/octet-stream")
         store.put(f"{base}/manifest.json",
                   json.dumps(manifeste, ensure_ascii=False).encode(),
                   cache_control=CACHE_IMMUABLE)
         cles = cles_du_run(ref, dom, gr.steps) + [f"{base}/zsol.bin"]
         nouveau, sup = index_apres(nouveau, ref, dom, cles)
         a_supprimer += [c for c in sup if c not in a_supprimer]
-        crier(f"▶ produit B [{dom}] : {len(gr.steps)} tampon(s) + zsol + "
-              f"manifeste, {gr.octets() / 1e6:.1f} Mo")
+        crier(f"▶ produit B [{dom}] : {len(gr.steps)} tampon(s) + colonnes + "
+              f"zsol + manifeste, {gr.octets_publies() / 1e6:.1f} Mo publiés "
+              f"({gr.octets() / 1e6:.1f} Mo en mémoire)")
 
     # ── 3. l'index NOUVEAU, avant toute suppression ───────────────────
     nouveau = dict(nouveau, restes=list(a_supprimer))

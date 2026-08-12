@@ -79,6 +79,281 @@ def champ_plat(meta=META, j0=J0, i0=I0):
     return (j + i).ravel()
 
 
+def section_8_surface():
+    """── 8. La surface, et les trois sémantiques de temps ──
+
+    ⛔ CE QUE CETTE SECTION PROTÈGE. `0025/SP1` et `0025/SP2` mélangent
+    TROIS conventions de temps, et les confondre ne lève rien :
+
+      instant   2t 2d sp prmsl blh CAPE_INS lcc mcc hcc
+      max       max_i10fg — déjà horaire (stepRange 0-1, 1-2, 2-3…)
+      accum     tp ssrd  — ⛔ CUMULÉS DEPUIS LE DÉBUT DU RUN (0-1, 0-2…)
+
+    Servir `tp` sans différencier donne une pluie horaire qui ne décroît
+    JAMAIS : une courbe lisse, croissante, et fausse. C'est le mode de
+    panne de ce bloc, et il est invisible à l'œil.
+    """
+    from grille import PARAMS_GRILLE_SURF                # noqa: PLC0415
+
+    print("\n── 8. La surface, et les trois sémantiques de temps ──")
+    NECH = 5
+    rng = np.random.default_rng(1308)
+    g = GR.Grille("R", list(range(NECH)), np.linspace(46.3, 44.8, 3),
+                  np.linspace(5.5, 7.6, 4),
+                  np.zeros((3, 4), dtype=np.float32), domaine="banc")
+
+    verifier("⛔ `psol` est en float32 — c'est l'ANCRE de la pression "
+             "dérivée, et le float16 y coûte 0,125 à 0,25 hPa (1 à 2 m) "
+             "contre 0,016 hPa pour la dérivation qu'elle ancre",
+             g.psol.dtype == np.float32, str(g.psol.dtype))
+    verifier("…et les autres champs de surface restent en float16",
+             g.surf.dtype == np.float16)
+    verifier("⚠️ un champ de surface est refusé à une échéance absente, "
+             "et `psol` est accepté bien qu'absent de PARAMS_GRILLE_SURF",
+             g.accepte_surface("psol", 0) and g.accepte_surface("t2m", 0)
+             and not g.accepte_surface("t2m", 99)
+             and not g.accepte_surface("u", 0))
+
+    # ── Un cumul CROISSANT, comme le GRIB le publie ───────────────────
+    cumul = [0.0, 0.4, 1.0, 1.0, 2.5]        # mm depuis le début du run
+    for s in range(1, NECH):                 # ⛔ absent à τ=0, comme MF
+        g.poser_surface("precipitation", s,
+                        np.full((3, 4), cumul[s], dtype=np.float16))
+        g.poser_surface("t2m", s, np.full((3, 4), 12.0, dtype=np.float16))
+    g.poser_surface("t2m", 0, np.full((3, 4), 11.0, dtype=np.float16))
+    for s in range(NECH):
+        g.poser_surface("psol", s, np.full((3, 4), 913.25, dtype=np.float32))
+
+    avant = np.asarray(g.surf[g.i_param_surf["precipitation"]][:, 0, 0],
+                       dtype=np.float64)
+    verifier("avant dé-accumulation, la pluie ne décroît jamais — c'est "
+             "le cumul, pas l'horaire",
+             all(np.nan_to_num(avant[k]) <= np.nan_to_num(avant[k + 1]) + 1e-9
+                 for k in range(1, NECH - 1)),
+             " ".join(f"{x:.1f}" for x in avant))
+
+    g.deaccumuler()
+    apres = np.asarray(g.surf[g.i_param_surf["precipitation"]][:, 0, 0],
+                       dtype=np.float64)
+    attendu = [np.nan, 0.4, 0.6, 0.0, 1.5]
+    verifier("⛔ après dé-accumulation, chaque échéance porte SON heure",
+             all((np.isnan(a) and np.isnan(b)) or abs(a - b) < 1e-2
+                 for a, b in zip(apres, attendu)),
+             " ".join("NaN" if np.isnan(x) else f"{x:.1f}" for x in apres))
+    verifier("⚠️ l'échéance 0 est NaN et pas ZÉRO — un cumul sur zéro "
+             "heure n'est pas « il n'a pas plu »",
+             bool(np.isnan(apres[0])))
+    verifier("⚠️ un champ `instant` n'est PAS touché par la dé-accumulation",
+             abs(float(g.surf[g.i_param_surf["t2m"], 1, 0, 0]) - 12.0) < 1e-2)
+    verifier("⛔ et `deaccumuler()` REFUSE d'être rejoué — différencier "
+             "des différences donnerait une pluie négative un pas sur deux",
+             _leve(g.deaccumuler))
+
+    # ── Le remplissage explicite, et pourquoi il a remplacé un refus ──
+    for forme in ((5, 7), (61, 85), (41, 205), (3, 4)):
+        gg = GR.Grille("R", [0, 1], np.linspace(46.3, 44.8, forme[0]),
+                       np.linspace(5.5, 7.6, forme[1]),
+                       np.zeros(forme, dtype=np.float32), domaine="banc")
+        tr, tc = gg.tranches(), gg.tranches_colonne()
+        mal = [c for c, v in list(tr.items()) + list(tc.items())
+               if v["offset"] % (4 if v["dtype"] == "float32" else 2)]
+        verifier(f"⛔ {forme[0]}×{forme[1]} : toutes les tranches sont "
+                 f"alignées, tampon ET colonne",
+                 not mal and gg.octets_par_colonne() % 4 == 0
+                 and len(gg.tampon_echeance(0)) == gg.octets_par_echeance(),
+                 f"{gg.octets_par_echeance()} o/éch · "
+                 f"{gg.octets_par_colonne()} o/col")
+
+
+def _leve(fn):
+    try:
+        fn()
+    except Exception:
+        return True
+    return False
+
+
+def section_7_isobares():
+    """── 7. Les isobares, la nébulosité, et les DEUX dispositions ──
+
+    ⚠️ CE QUE CETTE SECTION PROTÈGE, ET QUI EST NOUVEAU AU LOT 12 : le
+    produit publie désormais LA MÊME DONNÉE DEUX FOIS, sur deux axes.
+    Le calque lit l'une, la vue de coupe lit l'autre, et RIEN dans le
+    produit ne les force à s'accorder — sinon ce banc. Deux dispositions
+    qui divergeraient ne lèveraient aucune exception : elles rendraient
+    deux vents différents pour le même point, sur deux écrans que
+    personne ne regarde en même temps.
+    """
+    import json
+
+    from domaine import NIVEAUX_P                       # noqa: PLC0415
+    from grille import (PARAMS_GRILLE, PARAMS_GRILLE_ISO,  # noqa: PLC0415
+                        PARAMS_GRILLE_SURF)
+
+    print("\n── 7. Les isobares, la nébulosité, et les deux dispositions ──")
+    NJ2, NI2, NECH = 5, 7, 4
+    rng = np.random.default_rng(1208)
+    lats = np.linspace(46.3, 44.8, NJ2)
+    lons = np.linspace(5.5, 7.6, NI2)
+    g = GR.Grille("R", list(range(NECH)), lats, lons,
+                  rng.uniform(150, 3900, (NJ2, NI2)).astype(np.float32),
+                  domaine="banc")
+
+    verifier("⛔ `ziso` est en float32 — le SEUL tableau du produit qui "
+             "n'est pas en float16 (2,00 m d'erreur mesurés contre 0,24 mm)",
+             g.ziso.dtype == np.float32, str(g.ziso.dtype))
+    verifier("…et `iso` reste en float16", g.iso.dtype == np.float16)
+    verifier("14 niveaux isobares, 1000 → 400 hPa",
+             g.iso.shape[1] == 14 and min(NIVEAUX_P) == 400)
+
+    # ⚠️ Les hauteurs et les pressions se RECOUVRENT numériquement :
+    # 1000, 750 et 500 sont à la fois des niveaux m/sol et des hPa.
+    verifier("⚠️ un niveau isobare de 500 hPa n'est pas accepté comme "
+             "« 500 m/sol », ni l'inverse",
+             g.accepte_isobare("u", 500, 0) and g.accepte("u", 500, 0)
+             and not g.accepte_isobare("u", 375, 0)
+             and not g.accepte("u", 925, 0))
+    verifier("`zp` est accepté bien qu'absent de PARAMS_GRILLE_ISO — "
+             "sinon `ziso` resterait NaN sans une erreur",
+             g.accepte_isobare("zp", 700, 0))
+
+    # ── Remplissage : des valeurs uniques, et le NaN de τ=0 ────────────
+    # ⚠️ Tirées au sort, pas construites : une formule du genre
+    # `k*1e6 + niveau*1e3` déborde le float16 (max 65 504) et rend des
+    # `inf` — la première version de ce banc l'a fait, et son résultat
+    # ressemblait à un défaut du code.
+    for p in PARAMS_GRILLE:
+        for niveau in NIVEAUX_H_0025:
+            for s in range(NECH):
+                g.poser(p["nom"], niveau, s,
+                        rng.uniform(-99, 99, (NJ2, NI2)).astype(np.float16))
+    for p in PARAMS_GRILLE_ISO:
+        for hpa in NIVEAUX_P:
+            for s in range(NECH):
+                if p.get("absent_a_tau0") and s == 0:
+                    continue        # ⛔ la règle de l'ingestion, rejouée
+                g.poser_isobare(p["nom"], hpa, s,
+                                rng.uniform(0, 99, (NJ2, NI2)).astype(np.float16))
+    for hpa in NIVEAUX_P:
+        for s in range(NECH):
+            g.poser_isobare("zp", hpa, s,
+                            rng.uniform(100, 7600, (NJ2, NI2)).astype(np.float32))
+
+    rp = g.remplissage_par_parametre()
+    verifier("⛔ `cc` est VIDE à τ=0 et pleine ailleurs — un zéro publié "
+             "n'est pas une donnée (mesuré sur deux runs le 12/08)",
+             abs(rp["iso_cc"] - (NECH - 1) / NECH) < 1e-6,
+             f"{rp['iso_cc']:.2%} (attendu {(NECH-1)/NECH:.0%})")
+    verifier("⚠️ `u` hauteur et `u` isobare sont comptés SÉPARÉMENT",
+             "u" in rp and "iso_u" in rp and rp["u"] == 1.0)
+
+    for p in PARAMS_GRILLE_SURF:
+        for s_ in range(NECH):
+            if p.get("absent_a_tau0") and s_ == 0:
+                continue
+            g.poser_surface(p["nom"], s_,
+                            rng.uniform(0, 90, (NJ2, NI2)).astype(np.float16))
+    for s_ in range(NECH):
+        g.poser_surface("psol", s_,
+                        rng.uniform(630, 996, (NJ2, NI2)).astype(np.float32))
+
+    def reference(cle, j, i):
+        """Le tableau que la tranche `cle` décrit, pour la colonne (j, i).
+
+        ⚠️ Une seule table de correspondance, partagée par les deux
+        relectures. Deux tables divergeraient exactement comme les deux
+        dispositions qu'on vérifie ici."""
+        if cle == "ziso":
+            return g.ziso[:, :, j, i]
+        if cle == "psol":
+            return g.psol[None, :, j, i]
+        if cle.startswith("iso_"):
+            return g.iso[g.i_param_iso[cle[4:]], :, :, j, i]
+        if cle in g.i_param_surf:
+            return g.surf[g.i_param_surf[cle]][None, :, j, i]
+        return g.h0025[g.i_param[cle], :, :, j, i]
+
+    # ── Le contrat publié tient-il ? ──────────────────────────────────
+    man = json.loads(json.dumps(g.manifeste()))     # comme il sera servi
+    srv = man["service"]
+    tr_e, tr_c = srv["tranches"], srv["colonnes"]["tranches"]
+    pas = srv["colonnes"]["octets_par_colonne"]
+    buf_e = [g.tampon_echeance(s) for s in g.steps]
+    buf_c = g.tampon_colonnes()
+
+    verifier("le tampon d'échéance fait exactement la taille annoncée",
+             len(buf_e[0]) == srv["octets_par_echeance"],
+             f"{len(buf_e[0])} o")
+    verifier("l'objet colonnes fait `octets_par_colonne` × nb de colonnes",
+             len(buf_c) == pas * NJ2 * NI2)
+    verifier("⛔ le pas d'une colonne est multiple de 4 — sinon "
+             "`new Float32Array(buffer, offset)` lève une colonne sur deux",
+             pas % 4 == 0, f"{pas} o")
+    verifier("⛔ chaque tranche float32 tombe sur un décalage aligné",
+             all(t["offset"] % 4 == 0 for t in tr_e.values()
+                 if t["dtype"] == "float32")
+             and all(t["offset"] % 4 == 0 for t in tr_c.values()
+                     if t["dtype"] == "float32"))
+    verifier("⚠️ le manifeste publie le DTYPE de chaque tranche — le "
+             "tampon n'est plus homogène",
+             all("dtype" in t for t in tr_e.values())
+             and tr_e["ziso"]["dtype"] == "float32"
+             and tr_e["u"]["dtype"] == "float16")
+    verifier("⚠️ tout ce que le calque lit est CONTIGU EN TÊTE "
+             "(u, v hauteur puis u, v isobares puis ziso)",
+             [c for c in tr_e][:5] == ["u", "v", "iso_u", "iso_v", "ziso"]
+             and tr_e["u"]["offset"] == 0)
+
+    # ── ⛔ LE TEST DU LOT : les deux dispositions se contredisent-elles ?
+    # On relit les octets en n'utilisant QUE le manifeste, comme le fera
+    # le navigateur. Un décodeur qui partagerait le code de l'encodeur ne
+    # prouverait rien.
+    desaccords = mal = 0
+    for j in range(NJ2):
+        for i in range(NI2):
+            base = (j * man["axes"]["nb_lon"] + i) * pas
+            for cle, tc in tr_c.items():
+                dt = np.dtype(tc["dtype"])
+                col = np.frombuffer(buf_c, dtype=dt, offset=base + tc["offset"],
+                                    count=tc["niveaux"] * tc["echeances"]
+                                    ).reshape(tc["niveaux"], tc["echeances"])
+                te = tr_e[cle]
+                ech = np.stack([
+                    np.frombuffer(buf_e[s], dtype=dt, offset=te["offset"],
+                                  count=te["niveaux"] * NJ2 * NI2
+                                  ).reshape(te["niveaux"], NJ2, NI2)[:, j, i]
+                    for s in range(NECH)], axis=1)
+                if not np.array_equal(col, ech, equal_nan=True):
+                    desaccords += 1
+                # …et les deux disent-elles bien ce que porte le tableau ?
+                ref = reference(cle, j, i)
+                if not np.array_equal(col, np.asarray(ref, dtype=dt),
+                                      equal_nan=True):
+                    mal += 1
+    n = NJ2 * NI2 * len(tr_c)
+    verifier("⛔ les DEUX dispositions rendent la même valeur pour chaque "
+             "colonne, chaque tranche, chaque échéance",
+             desaccords == 0, f"{n - desaccords}/{n}")
+    verifier("…et cette valeur est bien celle du tableau (relue par le "
+             "seul manifeste, comme le fera le navigateur)",
+             mal == 0, f"{n - mal}/{n}")
+
+    verifier("le manifeste annonce la clé de l'objet colonnes",
+             srv["cle_colonnes"].endswith("/colonnes.bin"))
+    verifier("⚠️ il dit que `cc` manque à τ=0, et distingue « pas de "
+             "nuages » de « pas de donnée »",
+             "NÉBULOSITÉ" in man["avertissement"].upper()
+             and "pas de donnée" in man["avertissement"])
+    verifier("⚠️ il dit que les niveaux souterrains sont à MASQUER à la "
+             "lecture, pas absents",
+             "MASQUÉS À LA LECTURE" in man["avertissement"].upper())
+    verifier("il publie le plafond mesuré, avant et après les isobares",
+             man["plafond"]["avec_isobares_m"][0] > 7000
+             and man["plafond"]["sans_isobares_m"][0] < 4000)
+
+    section_8_surface()
+
+
 def main():
     print("\n── 1. Les axes, et le sens qui ne se voit pas ──")
     o = orog_bidon()
@@ -225,8 +500,18 @@ def main():
              index["runs"][0]["run"] == runs[-1])
     verifier("c'est bien le PLUS ANCIEN qui a été purgé, et lui seul",
              supprimes == cles(runs[0]), str(supprimes))
-    verifier("un run découpé par échéance publie 1 clé par échéance, "
-             "plus le manifeste", len(cles(runs[0])) == len(STEPS) + 1)
+    verifier("un run publie 1 clé par échéance, plus `colonnes.bin`, "
+             "plus le manifeste", len(cles(runs[0])) == len(STEPS) + 2)
+    # ⛔ 12/08 — LE TEST QUI COMPTE VRAIMENT ICI. `colonnes.bin` est le
+    # plus gros objet du produit (57,8 Mo). Absent de `cles_du_run`, il
+    # serait écrit à chaque run et purgé JAMAIS : sans `ListObjects`, un
+    # objet hors index est définitivement invisible et définitivement
+    # facturé. Le compte ci-dessus le dirait mal ; la présence, bien.
+    verifier("⚠️ `colonnes.bin` est DANS les clés du run — donc dans "
+             "l'index, donc purgeable",
+             GR.cle_colonnes(runs[0], D) in cles(runs[0]))
+    verifier("⚠️ et il part bien à la SUPPRESSION quand le run sort",
+             GR.cle_colonnes(runs[0], D) in supprimes)
     verifier("`restes` est vide quand tout s'est bien supprimé",
              index["restes"] == [])
 
@@ -335,6 +620,8 @@ def main():
              "TKE" in m["avertissement"])
     verifier("il donne la règle de conversion vers l'altitude-mer",
              "zsol" in m["reference_verticale"])
+
+    section_7_isobares()
 
     print("\n  grille :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

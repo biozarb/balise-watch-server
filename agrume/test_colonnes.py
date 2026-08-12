@@ -40,7 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 import colonnes as C  # noqa: E402
 import ingest_colonnes as I  # noqa: E402
-from domaine import (GRID_3D, GRID_FINE, NIVEAUX_H_001,  # noqa: E402
+from domaine import (G, GRID_3D, GRID_FINE, NIVEAUX_H_001,  # noqa: E402
                      NIVEAUX_H_0025, NIVEAUX_P, NIVEAUX_P_TOUS)
 
 echecs = []
@@ -261,9 +261,17 @@ def main():
     # cet axe porte le raccord et sert à discuter d'écarts d'orographie de
     # quelques dizaines de mètres. Et contrairement aux kelvins, aucun
     # décalage ne sauve : une altitude va de 0 à 7 000 m.
+    # ⚠️ 12/08 — ON ENTRE DÉSORMAIS UN GÉOPOTENTIEL, PAS UNE ALTITUDE.
+    # `PARAM_ALTITUDE` porte maintenant `facteur = 1/G` : la division est
+    # dans le descripteur, donc dans `quantifier()`, donc au même endroit
+    # pour les deux produits. Nourrir ce banc en mètres reviendrait à
+    # diviser une seconde fois — il rendait 0,25 m au lieu de 2,00 et
+    # concluait « le float16 suffit », exactement l'erreur que ce test
+    # existe pour empêcher.
     alt = rng.uniform(0, 7500, 20000)
-    e16 = C.erreur_quantification(alt, C.PARAM_ALTITUDE, np.float16)
-    e32 = C.erreur_quantification(alt, C.PARAM_ALTITUDE, np.float32)
+    geo = alt * G
+    e16 = C.erreur_quantification(geo, C.PARAM_ALTITUDE, np.float16)
+    e32 = C.erreur_quantification(geo, C.PARAM_ALTITUDE, np.float32)
     # ⓘ 2,00 m exactement, et ce n'est pas un hasard : entre 4 096 et
     # 8 192 m le pas du float16 vaut 4 m, donc l'arrondi coûte au pire la
     # moitié. Le seuil est posé sous cette valeur pour que le test dise

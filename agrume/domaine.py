@@ -160,6 +160,54 @@ PAQUET_OROGRAPHIE = {
 # la décoration.**
 PAQUET_ISOBARES = "IP1"
 
+# ── 12/08 : `IP2` entre, pour la nébulosité et pour elle seule ────────
+# ⚠️ C'EST LE SEUL TÉLÉCHARGEMENT NEUF DU LOT 12. `IP1` était déjà tiré
+# par le produit A ; la découpe d'un domaine coûte une vue numpy (7,6 s
+# contre 7,9 s sans, mesuré le 10/08). Mesuré le 12/08 sur le run 15 Z,
+# bundles 00H06H → 19H24H : 122 + 110 + 112 + 106 = **450 Mo sur 0–24 h**,
+# et le plus gros bundle fait 122 Mo, donc très en dessous du pic disque
+# de 815 Mo déjà atteint par HP1 — le disque ne bouge pas.
+#
+# ⚠️ On ne retient que `cc` des cinq champs d'`IP2` (cc ciwc clwc crwc
+# cswc). Les quatre autres décrivent les contenus en eau et en glace :
+# utiles un jour pour un givrage, inutiles à la coupe, et ils
+# doubleraient le tableau isobare pour rien.
+PAQUET_NEBULOSITE = "IP2"
+
+# Les paquets dont le filtre isobare s'occupe. ⚠️ C'est un ENSEMBLE et
+# non plus une constante unique : `ingest_colonnes.py` décide de la
+# branche de traitement (`poser_isobare`) sur l'appartenance à cet
+# ensemble. Un `paquet == PAQUET_ISOBARES` laissé quelque part enverrait
+# les messages d'`IP2` dans la branche des niveaux HAUTEUR, où
+# `typeOfLevel = isobaricInhPa` ne correspond à rien : ils seraient
+# silencieusement ignorés, et `cc` resterait NaN partout.
+PAQUETS_ISOBARES = (PAQUET_ISOBARES, PAQUET_NEBULOSITE)
+
+# ── 13/08 : les deux paquets de SURFACE ───────────────────────────────
+# ⛔ ILS N'ARRIVENT PAS POUR « COMPLÉTER » LE PRODUIT. Ils arrivent parce
+# que la ligne de surface de la vue de coupe (`ProfileSurface`, treize
+# séries) n'avait AUCUNE source dans AGRUME, et parce que `sp` est
+# l'ancre basse sans laquelle la pression des niveaux hauteur situés sous
+# le premier isobare émergé — la tranche du décollage — serait
+# extrapolée au lieu d'être encadrée.
+#
+# Inventaire eccodes du 13/08 sur le run 15 Z, bundles 00H06H :
+#   SP1 (56 Mo) : 10u 10v 10si 10wdir · 2t 2r · max_i10fg (rafale)
+#                 prmsl · ssrd (rayonnement) · tp (pluie) · tgrp tsnowp
+#   SP2 (41 Mo) : 2d · **sp** · lcc mcc hcc · CAPE_INS · blh · h · t
+#
+# ⓘ `0025/SP2` était déjà connu du projet : c'est le paquet dont
+# `freeze_orographie.py` tire le champ `h`. Il n'était simplement jamais
+# téléchargé PAR RUN.
+#
+# ⚠️ ~388 Mo de plus sur 0–24 h (4 bundles × 97 Mo), après les 450 Mo
+# d'`IP2`. Le pic disque ne bouge pas — 56 Mo au plus, contre les 815 Mo
+# déjà atteints par `HP1`. Le chiffre à surveiller reste la DURÉE
+# d'ingestion : 16,1 min avant ce lot, alerte à 30.
+PAQUET_SURFACE_1 = "SP1"
+PAQUET_SURFACE_2 = "SP2"
+PAQUETS_SURFACE = (PAQUET_SURFACE_1, PAQUET_SURFACE_2)
+
 # ── Le domaine Nord-Alpes ─────────────────────────────────────────────
 # ⚠️ Ce n'est pas un choix de confort, c'est ce qui rend le produit B
 # possible : la France entière en 0,025° fait 803 757 points par niveau,
