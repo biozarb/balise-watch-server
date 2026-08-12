@@ -253,5 +253,121 @@ if (!man) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n── 8. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
+// ⚠️ CE TEST EST BEHAVIOURAL, PAS UN grep. On donne au module un
+// manifeste DÉLIBÉRÉMENT DIFFÉRENT — 3 niveaux au lieu de 25, une grille
+// 2×3 au lieu de 61×85, des paramètres dans un autre ORDRE — et on exige
+// qu'il le suive. Si la liste des niveaux, la taille de la grille ou
+// l'offset de `v` étaient écrits en dur ici, ce bloc casserait.
+//
+// C'est la leçon de LEVELS, dupliqué entre arome-wind/ingest.py et
+// config.ts : « les deux listes doivent bouger ensemble, sinon le
+// sélecteur d'altitude propose des paliers dont les tuiles n'existent
+// plus (404 silencieux, calque vide) ». Un grep sur le source dirait
+// seulement que le chiffre n'y est pas écrit ; celui-ci dit que le
+// module OBÉIT au manifeste.
+{
+  const NIV2 = [5, 50, 500];                 // ni 10, ni 3000
+  const NJ = 2, NI = 3, NC = NJ * NI;
+  const octetsParParam = NIV2.length * NC * 2;
+  // ⛔ v EN PREMIER, u en second : l'ordre inverse du produit réel.
+  const man2 = {
+    run: '2026-01-01T00:00:00Z', domaine: 'banc', grille: '0025',
+    echeances: [0], niveaux_m_sol: NIV2,
+    parametres: [{ nom: 'v' }, { nom: 'u' }],
+    axes: {
+      nb_lat: NJ, nb_lon: NI,
+      lat_premier: 46, lat_dernier: 45,       // DÉCROISSANTES, comme AROME
+      lon_premier: 5, lon_dernier: 7, sens: 'lats DÉCROISSANTES',
+    },
+    retention_runs: 3,
+    service: {
+      cle_echeance: 'x/{domaine}/{run}/e{step:02d}.bin',
+      cle_zsol: 'x/{domaine}/{run}/zsol.bin',
+      disposition_tampon: '(parametre, niveau, lat, lon) float16',
+      encodage: 'aucun',
+      tranches: {
+        v: { offset: 0, octets: octetsParParam },
+        u: { offset: octetsParParam, octets: octetsParParam },
+      },
+      octets_par_echeance: 2 * octetsParParam,
+    },
+  };
+  // zsol volontairement étalé : 0 m et 400 m.
+  const zsol2 = new Float32Array([0, 0, 0, 400, 400, 400]);
+  // u = 10 partout au niveau 500 m, 0 aux deux autres. v = 0 partout.
+  const u2 = new Float32Array(NIV2.length * NC);
+  const v2 = new Float32Array(NIV2.length * NC);
+  u2.fill(0); v2.fill(0);
+  for (let c = 0; c < NC; c++) u2[2 * NC + c] = 10;   // niveau 500 m
+
+  const b = L.bornesAltitude(man2, zsol2);
+  verifier('les bornes du sélecteur SUIVENT le manifeste (5 → 900 m ici, '
+    + 'pas 10 → 3000)', b.minM === 5 && b.maxM === 900 && b.pleinM === 500,
+    `min ${b.minM} · plein ${b.pleinM} · max ${b.maxM}`);
+
+  // À 500 m ASL : les colonnes de sol 0 sont pile sur le niveau 500 →
+  // u = 10. Celles de sol 400 sont à h = 100, entre 50 et 500 → u = 10 ×
+  // (100−50)/(500−50) = 1,111…
+  const c500 = L.calculerCalque(man2, u2, v2, zsol2, 500);
+  // ⚠️ `Math.fround` ET PAS UNE TOLÉRANCE. `calculerCalque` écrit dans un
+  // Float32Array — exactement comme `calque()` côté Python fait
+  // `.astype(np.float32)`. Comparer à la valeur float64 avec un « à peu
+  // près » masquerait le jour où l'un des deux cesserait de narrower.
+  // Le §6 vérifie la parité en float64 (sur `melanger`) ; celui-ci
+  // vérifie que le narrowing final est le même des deux côtés.
+  const attendu = Math.fround(10 * (100 - 50) / (500 - 50));
+  verifier('sur le niveau haut du manifeste, la valeur brute est rendue',
+    c500.u[0] === 10 && c500.u[1] === 10 && c500.u[2] === 10);
+  verifier('et ailleurs elle est interpolée SUR CE manifeste, pas sur les '
+    + '25 niveaux du produit réel — au float32 près, exactement comme Python',
+    c500.u[3] === attendu, `${c500.u[3]} attendu ${attendu}`);
+  verifier('la grille rendue fait 2×3, pas 61×85',
+    c500.nbLat === NJ && c500.nbLon === NI && c500.couverture.nbColonnes === NC);
+
+  // Au-dessus du plafond de la colonne basse (0 + 500) mais sous celui de
+  // la haute (400 + 500) : masquage MIXTE, qui n'existe que si le module
+  // lit vraiment `niveaux_m_sol`.
+  const c700 = L.calculerCalque(man2, u2, v2, zsol2, 700);
+  verifier('⛔ le plafond suit le relief SELON CE manifeste : colonnes '
+    + 'basses au-dessus du plafond, hautes encore servies',
+    c700.masque[0] === L.MASQUE.PLAFOND && c700.masque[3] === L.MASQUE.SERVI,
+    `${c700.masque[0]} / ${c700.masque[3]}`);
+  const c2 = L.calculerCalque(man2, u2, v2, zsol2, 2);
+  verifier('et le premier niveau aussi (2 m < 5 m → bande basse)',
+    c2.masque[0] === L.MASQUE.BAS);
+
+  // Le Range doit suivre l'ORDRE PUBLIÉ : ici v est en tête.
+  let urlVue = null, headersVus = null;
+  const faux = async (url, opts) => {
+    urlVue = url; headersVus = opts.headers;
+    return { ok: true, status: 206, arrayBuffer: async () => new ArrayBuffer(2 * octetsParParam) };
+  };
+  await L.chargerTranches('https://exemple', man2, 3, ['u', 'v'], faux);
+  verifier('⛔ le Range couvre les deux tranches DANS L\'ORDRE DU '
+    + 'MANIFESTE (v@0, u@' + octetsParParam + ')',
+    headersVus.Range === `bytes=0-${2 * octetsParParam - 1}`,
+    headersVus.Range);
+  verifier('et la clé est construite depuis `service.cle_echeance`, avec '
+    + 'l\'échéance sur 2 chiffres',
+    urlVue === 'https://exemple/x/banc/2026-01-01T00:00:00Z/e03.bin', urlVue);
+
+  // L'adaptateur vers WindGridLayer.
+  const wg = L.versWindGrid(man2, c500, 0);
+  verifier('l\'adaptateur rend un point par colonne, sans en inventer',
+    wg.points.length === NC);
+  verifier('⚠️ et il respecte le SENS DÉCROISSANT des latitudes — une '
+    + 'carte retournée ressemble toujours à une carte',
+    wg.points[0].lat === 46 && wg.points[NI].lat === 45,
+    `${wg.points[0].lat} puis ${wg.points[NI].lat}`);
+  verifier('une colonne masquée sort en null, pas en vent nul',
+    L.versWindGrid(man2, c700, 0).points[0].speed[0] === null);
+  verifier('u = +10 m/s ressort à 270° et 36 km/h',
+    Math.abs(wg.points[0].dir[0] - 270) < 1e-9
+    && Math.abs(wg.points[0].speed[0] - 36) < 1e-9,
+    `${wg.points[0].dir[0].toFixed(2)}° · ${wg.points[0].speed[0].toFixed(2)} km/h`);
+}
+
 console.log(`\n  calque altitude (JS) : ${echecs ? `ÉCHEC (${echecs})` : 'OK'}`);
 process.exit(echecs ? 1 : 0);
