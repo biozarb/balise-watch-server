@@ -50,11 +50,13 @@ done
 #    pas la même chose que « le VPS a exactement ces octets ».
 # ══════════════════════════════════════════════════════════════════════
 dire "sha256 local vs distant, fichier par fichier"
+# ⚠️ macOS n'a que `shasum -a 256` ; le VPS (Debian) n'a que `sha256sum`
+# (coreutils GNU) — même sortie « hash  chemin », deux commandes.
 LOCAL_SUM=$(find agrume verif tools -type f \( -name '*.py' -o -name '*.sh' \) \
             ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 shasum -a 256)
 DISTANT_SUM=$(ssh "$VPS" \
   "cd $DISTANT && find agrume verif tools -type f \( -name '*.py' -o -name '*.sh' \) \
-   ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 shasum -a 256")
+   ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum")
 
 if [ "$LOCAL_SUM" != "$DISTANT_SUM" ]; then
   echo "$LOCAL_SUM" > /tmp/deploy-agrume-local.sha256
@@ -77,7 +79,11 @@ fi
 dire "bancs hors-ligne sur le VPS ($DISTANT)"
 ssh "$VPS" bash -s <<EOF
 set -e
-cd "$DISTANT"
+# ⚠️ PAS de guillemets autour de \$DISTANT ici : "~/…" entre guillemets
+# ne s'étend JAMAIS (le tilde n'est développé que hors quotes) — bug vu
+# le 13/08, la commande échouait avec « No such file or directory »
+# alors que le même \$DISTANT non quoté fonctionne très bien à l'étape 2.
+cd $DISTANT
 PY="\${BW_PYTHON:-\$HOME/venv-balise/bin/python3}"
 [ -x "\$PY" ] || PY=python3
 for B in tools/test_mf_s3.py agrume/test_orographie.py \\
