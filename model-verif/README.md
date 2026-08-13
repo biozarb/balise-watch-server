@@ -623,3 +623,108 @@ Tous côté TypeScript, aucun ne casse le build.
    tel point plutôt que d'attribuer la série au hasard. Le client n'est
    pas exposé — ARPEGE et GFS sont mondiaux, donc deux modèles servent
    toujours — mais c'est vrai par accident, pas par construction.
+
+---
+
+## AGRUME, onzième modèle noté — et le premier qui n'est pas d'Open-Meteo (lot I, 13/08/2026)
+
+`agrume_fcst.py` relit le **produit A** d'AGRUME sur R2 (les colonnes
+verticales aux balises, écrites par `agrume/ingest_colonnes.py`) et en
+sort le vent 10 m au format EXACT de `collect.py` — `t0` + `step_s`,
+`speed`/`dir` en km/h et degrés météo. `score.py` le lit à côté du sien
+par `snapshot_rows()` et **ne connaît toujours aucun modèle par son
+nom** : c'est ce qui a rendu ce lot court.
+
+    run.sh agrume                    # hier, run 00 Z
+    run.sh agrume --day 2026-08-11   # rattrapage d'une nuit
+    ./agrume_fcst.py --day … --dry-run --out /var/lib/bw-model-verif
+
+Timer `bw-model-agrume` à **03:35 UTC**, entre la collecte (03:15) et la
+notation (03:55). Le job archive la journée d'HIER, dont tous les runs
+AGRUME sont publiés depuis longtemps : il n'y a aucune course.
+
+### ⚠️ Ce qu'il faut savoir avant d'y toucher
+
+- ⛔ **AGRUME n'a que le lead +6 h, et ce n'est pas un trou.**
+  `LEAD_BY_OFFSET` classe par l'écart en JOURS entre le fichier de
+  snapshot et la journée notée, et `MIN_HOURS_DAILY` vaut 6. L'archive
+  d'AGRUME s'arrête à +24 h : le run 00 Z de la veille ne touche la
+  journée notée que par l'heure 00 — une paire. Le flux est donc lu aux
+  TROIS offsets, comme les autres, et le +24 h s'élimine tout seul.
+  Écrire un `if offset == 0` produirait le même résultat en le faisant
+  dépendre d'une constante lue ailleurs. Tenu par
+  `test_agrume_fcst.py::test_lead_24_ne_sort_aucune_ligne`.
+- ⛔ **AGRUME ne consomme RIEN du quota Open-Meteo.** Il lit R2. Le
+  tableau du § « Les modèles suivis » reste juste, et la conclusion
+  « il ne reste aucune place » aussi — mais elle ne s'applique pas ici.
+  C'est structurellement le seul modèle supplémentaire qui puisse entrer
+  sans qu'un autre sorte.
+- ⚠️ **`fetched_at` porte l'heure du RUN**, pas celle d'un appel d'API :
+  AGRUME n'en fait pas. Seule `lead_exact_h` en dépend, et elle devient
+  donc asymétrique — mesuré sur les 11-12/08 : **11,50 h pour AGRUME
+  contre 8,22 h pour AROME HD**. L'asymétrie est DÉFAVORABLE à AGRUME,
+  et les scores eux-mêmes n'en dépendent pas.
+- ⚠️ **Deux buckets, deux jeux d'identifiants.** Le produit A vit dans
+  `balise-watch-grids` (pas `model-verif`, et pas non plus `wind-grid`,
+  qui est le nom du dos Supabase). `run.sh` exporte
+  `R2_BUCKET=model-verif` et `storage.py` le fait PRIMER : le
+  basculement se fait dans `agrume_fcst.bucket_r2()`, qui restaure tout
+  en sortant pour que l'archive reparte au bon endroit.
+- ⛔ **Le jeton R2 du VPS ne sait qu'ÉCRIRE sur `balise-watch-grids`.**
+  Mesuré le 13/08, opération par opération :
+
+  | | GetObject | ListObjects | DeleteObject | PutObject |
+  |---|---|---|---|---|
+  | jeton ordinaire (`R2_*`) | **403** | **403** | **403** | ✅ |
+  | jeton d'audit (`BW_R2_AUDIT_*`) | ✅ | ✅ | **403** | — |
+
+  D'où la chaîne de repli `AGRUME_R2_READ_* → BW_R2_AUDIT_* → R2_*` du
+  producteur. ⚠️ **Et sans `ListBucket`, S3 rend 403 pour une clé
+  ABSENTE aussi bien que pour un refus de droits** : traiter ce 403
+  comme « run absent » donnerait un job vert tous les soirs sans une
+  seule ligne. `lire_run` s'arrête net et nomme la variable à poser.
+- ⚠️ **Les runs admis sont bornés à 00 Z et 03 Z.** Un run de 15 Z
+  couvrirait encore neuf heures de la journée, mais à +0…+8 h : dix
+  heures de fraîcheur gagnées sur les autres modèles, sous le même
+  intitulé « +6 h ». On préfère une journée SANS ligne AGRUME.
+- ⚠️ **Ce que ce flux mesure aujourd'hui**, c'est le vent 10 m d'AROME
+  lu par NOTRE chaîne : `composite.py` exclut explicitement le 10 m du
+  Δ AROME-PI. Le score doit donc ressembler à celui de
+  `meteofrance_arome_france_hd` — un écart LARGE serait un défaut de
+  l'une des deux chaînes, pas une nouvelle.
+
+### Premiers chiffres (11 + 12/08, deux journées)
+
+223 balise-jours, **223 en +6 h, 0 ailleurs**. 122 lignes de zone sur
+les cinq échelons. Erreur médiane **3,136 km/h** contre **4,332** pour
+AROME HD ; sur les 14 cases où les deux notent exactement les mêmes
+balises, **−0,341 km/h et AGRUME meilleur dans 11 sur 14**.
+⚠️ `rank = null`, `window_too_short` — deux journées, ça oriente et ça
+ne conclut pas. ⚠️ Aux échelons grossiers la comparaison est fausse :
+112 balises de montagne contre 583 dans toute la France.
+
+---
+
+## ⛔ `SKILL_MIN_REF_MSE` — le plancher qui a coûté trois nuits (13/08/2026)
+
+Du 12 au 14/08, `run.sh score` est sorti en échec chaque nuit sur
+`upsert model_score_zone : HTTP 400 — numeric field overflow`. **Aucun
+score de zone écrit, `model_scores.json` gelé pendant trois jours**, et
+rien ne s'est allumé : un `as_of` qui cesse d'avancer ne se voit pas.
+
+Cause : `1 − MSE_modèle / MSE_référence` divise par presque rien dès
+qu'une journée sans vent rend la persistance quasi parfaite. Mesuré en
+rejouant le 11/08 : `skill` = **−2 573 000**, `skill_clim` = **−35 980**
+sur onze lignes — et `skill_clim` est un `numeric(8,4)`, plafond 10⁴.
+Onze lignes sur 27 812 faisaient tomber le lot entier.
+
+`skill_contre()` rend donc `None` — et `beats_persist`/`beats_clim`
+aussi, jamais `false` — dès que la référence tient sous **1 (km/h)²**.
+Le seuil est dénombré : sur les 72 751 balise-jours depuis le 30/07,
+**2 719 (3,74 %)** sont sous ce plancher, **1 855 (2,55 %)** sous
+0,1 km/h. Les scores absolus ne bougent pas d'un chiffre, et le run
+compte et DIT combien de cases il a tues.
+
+Banc : `test_score.py::test_plancher_de_skill` — 11 assertions, dont
+« aucune valeur ne dépasse le plafond 10⁴ », rejouées contre le code
+d'avant (6 rouges).
