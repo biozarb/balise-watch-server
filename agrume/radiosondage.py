@@ -91,6 +91,20 @@ STATIONS = (
          sol_station_m=386, active=False, resolution=None,
          mesure="10/08 : 404 sur 8 couples date/heure du 01/06 au 10/08. "
                 "AUCUNE donnée. C'était la station du plan initial."),
+    dict(wmo="11120", nom="Innsbruck-Flughafen", pays="AT", lat=47.260, lon=11.355,
+         sol_station_m=579, active=True, resolution="haute",
+         mesure="13/08 : sondée sur 12 couples date/heure du 01/06 au "
+                "03/08 (le code réel de ce module, pas une estimation) — "
+                "6/6 à 00Z (4 500 à 5 100 niveaux), 0/6 à 12Z (HTTP 400 "
+                "systématique, PAS un timeout : la station ne publie "
+                "qu'UN lâcher par jour). ⚠️ Le 'flaky' rapporté avant "
+                "(2 timeouts sur 3) mélangeait probablement les deux "
+                "heures. C'est la station de VALLÉE ALPINE qui manquait "
+                "(579 m, encaissée dans l'Inn) — mais elle est à 0,96° "
+                "au nord de latmax et 3,76° à l'est de lonmax du domaine "
+                "Nord-Alpes, bien plus loin que Payerne ou Cameri : la "
+                "confrontation y vérifie AROME en général, encore moins "
+                "la couche limite DU domaine surveillé."),
 )
 
 URL_WYOMING = ("https://weather.uwyo.edu/wsgi/sounding"

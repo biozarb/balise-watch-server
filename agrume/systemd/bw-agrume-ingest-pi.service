@@ -42,6 +42,14 @@ User=debian
 Group=debian
 WorkingDirectory=/home/debian/balise-watch/balise-watch-server/agrume
 ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-ingest-pi.sh
+# ⚠️ Lot P (13/08). Le code 3 est le cas NOMINAL — « rien à faire »,
+# cinq passages sur six (cf. `run-ingest-pi.sh`, qui ne pingue ni ne
+# crie dessus). Sans cette ligne, systemd le compte quand même comme un
+# ÉCHEC : `systemctl status`/`journalctl -p err` restent rouges en
+# permanence, et un voyant rouge permanent est un voyant qu'on cesse de
+# lire — c'est CE service-là qui aurait dû crier le 12/08 sur l'index PI
+# resté trois jours cassé (cf. Lot I), noyé dans le bruit du code 3.
+SuccessExitStatus=3
 # ⚠️ Le budget MESURÉ est de ~1 min pour 300 requêtes (le quota, pas le
 # réseau, fixe la durée). 15 min est une ceinture, pas une contrainte :
 # si on l'atteint, c'est que le portail rame ou que le quota est

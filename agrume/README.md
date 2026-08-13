@@ -211,6 +211,16 @@ La seule propriété unique du VPS est d'être **allumé en permanence** :
 une Action est un cron, elle ne peut pas guetter. Le VPS **décide
 quand**, l'Action **fait le travail**. Le VPS ne touche jamais un GRIB.
 
+**Déploiement du code sur le VPS (Lot P, 13/08) :**
+`tools/deploy-agrume-vps.sh` fige la procédure manuelle — rsync de
+`agrume/`, `verif/` et `tools/` (les trois, jamais un seul : le piège
+déjà payé côté `model-verif/`), sha256 des deux côtés, bancs hors-ligne
+rejoués SUR LE VPS, puis redémarrage des seuls services persistants
+(`bw-agrume-poller`, `bw-agrume-poller-paquets`). ⛔ Il ne touche jamais
+aux timers oneshot ni n'installe de nouvelle unité systemd — ça reste
+une action de Yann, une fois, à la main. S'appelle depuis le Mac (jamais
+depuis une session cloud — `ssh`/`rsync` passent par Desktop Commander).
+
 ⚠️ **C'est pour ça que l'axe des balises et les orographies sont des
 artefacts COMMITÉS** et non des fichiers du VPS : l'Action n'a accès ni
 à `/var/lib/bw-model-verif`, ni au VPS, ni à Supabase. Un run

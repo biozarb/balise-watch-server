@@ -112,6 +112,12 @@ jobs:
           # qu'on a écartée.
           python3 verif/test_separation.py
           python3 verif/test_purge.py
+          # ⚠️ Lot M (13/08). Hors-ligne : le calcul du run depuis
+          # l'échéance fixe, l'idempotence du journal, et le
+          # court-circuit d'une station inactive AVANT tout réseau.
+          # Le timer VPS qui l'utilise n'est PAS testé ici (il lit R2
+          # et Wyoming en vrai) — seule sa logique pure l'est.
+          python3 verif/test_confronter_quotidien.py
           python3 agrume/test_grille.py
           # ⚠️ Ces trois-là ne protègent PAS l'ingestion : ils protègent
           # la LECTURE (profil, coupe, confrontation au ballon). Ils sont
@@ -155,35 +161,59 @@ jobs:
           # plus haut et ça restait vrai pour celui-là.
           python3 agrume/test_front_altitude.py
       # ══════════════════════════════════════════════════════════════
-      #  ⛔⛔ CE QUI N'EST **PAS** DANS CETTE CI, ET POURQUOI (13/08)
+      #  ⛔⛔ LE BANC DE PARITÉ Python ↔ TypeScript (13/08 → câblé ce jour)
       #
-      #  LE BANC DE PARITÉ Python ↔ TypeScript n'y est pas, et c'est le
-      #  banc le plus important du lot depuis aujourd'hui : le mélange des
-      #  deux verticales (étape 13) est écrit DEUX FOIS, une fois ici en
-      #  Python et une fois dans le front en TypeScript. Deux rampes qui
-      #  divergent ne lèvent rien — elles rendent une carte lisse, une
-      #  coupe lisse, et deux vents différents au même point.
-      #
-      #  ⚠️ IL NE PEUT PAS Y ÊTRE AUJOURD'HUI : il charge
+      #  Le mélange des deux verticales (étape 13) est écrit DEUX FOIS,
+      #  une fois ici en Python et une fois dans le front en TypeScript.
+      #  Deux rampes qui divergent ne lèvent rien — elles rendent une
+      #  carte lisse, une coupe lisse, et deux vents différents au même
+      #  point. C'est resté hors CI depuis le 12/08 : il charge
       #  `web/src/lib/altitudeLayer.ts` et `agrumeProfile.ts`, qui vivent
-      #  dans `biozarb/balise-watch` — un dépôt **privé**. Le `GITHUB_TOKEN`
-      #  de ce dépôt-ci ne peut pas l'atteindre. L'ajouter demanderait un
-      #  PAT en secret, et un `actions/checkout` du second dépôt.
+      #  dans `biozarb/balise-watch` — un dépôt PRIVÉ que le
+      #  `GITHUB_TOKEN` de CE dépôt ne peut pas atteindre.
       #
-      #  ⛔ NE PAS le remplacer par une version « qui saute si le module
-      #  est absent » : un banc qui se saute tout seul en CI est
-      #  exactement le faux vert que ce fichier passe son temps à refuser.
-      #  En attendant, il se lance À LA MAIN, et c'est écrit ici pour que
-      #  personne ne croie qu'il tourne :
+      #  ⛔ PAS DE VERSION « QUI SAUTE SI LE SECRET EST ABSENT ». Le
+      #  `checkout` ci-dessous n'a AUCUNE garde conditionnelle : si
+      #  `WEB_REPO_PAT` manque ou est expiré, cette étape ÉCHOUE, point.
+      #  Un banc qui se saute tout seul en CI est exactement le faux vert
+      #  que ce fichier passe son temps à refuser.
       #
-      #      python3 agrume/banc_parite.py --sortie /tmp/bw-parite
-      #      node --experimental-strip-types tools/altitude-layer-selftest.mjs \
-      #        --fixture /tmp/bw-parite/fixture.json \
-      #        --tampon  /tmp/bw-parite/e01.bin \
-      #        --zsol    /tmp/bw-parite/zsol.bin \
-      #        --manifeste /tmp/bw-parite/manifest.json \
-      #        --colonnes  /tmp/bw-parite/colonnes.bin
-      # ══════════════════════════════════════════════════════════════
+      #  ⛔⛔ ACTION YANN, si ce n'est pas déjà fait : créer un PAT
+      #  fine-grained sur `biozarb/balise-watch`, droit `Contents: Read`
+      #  SEUL (rien d'écriture), et le déposer dans CE dépôt
+      #  (balise-watch-server) → Settings → Secrets and variables →
+      #  Actions → `WEB_REPO_PAT`. Sans ça, cette étape échoue avec un
+      #  404 de checkout — c'est le comportement voulu, pas une panne.
+      - name: Checkout du dépôt web privé (pour la parité seulement)
+        uses: actions/checkout@v5
+        with:
+          repository: biozarb/balise-watch
+          token: ${{ secrets.WEB_REPO_PAT }}
+          path: _web-repo-parite
+          sparse-checkout: |
+            web/src/lib/altitudeLayer.ts
+            web/src/lib/agrumeProfile.ts
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # ⚠️ PAS `.nvmrc` (il pointe sur 20, pour le front) :
+          # `--experimental-strip-types` exige Node ≥ 22.6. Concerne
+          # UNIQUEMENT ce job de bench, pas le reste du dépôt.
+          node-version: "22"
+
+      - name: Banc de parité Python ↔ TypeScript
+        run: |
+          python3 agrume/banc_parite.py --sortie /tmp/bw-parite
+          node --experimental-strip-types tools/altitude-layer-selftest.mjs \
+            --fixture /tmp/bw-parite/fixture.json \
+            --tampon  /tmp/bw-parite/e01.bin \
+            --zsol    /tmp/bw-parite/zsol.bin \
+            --manifeste /tmp/bw-parite/manifest.json \
+            --colonnes  /tmp/bw-parite/colonnes.bin
+        env:
+          BW_LAYER_MODULE: ${{ github.workspace }}/_web-repo-parite/web/src/lib/altitudeLayer.ts
+          BW_AGRUME_MODULE: ${{ github.workspace }}/_web-repo-parite/web/src/lib/agrumeProfile.ts
 
       - name: Ingérer les colonnes
         env:

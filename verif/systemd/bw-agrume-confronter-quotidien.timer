@@ -1,0 +1,20 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-confronter-quotidien.timer                    (13/08/2026)
+#
+#  ⚠️ 13:00 UTC, et pas plus tôt. Le lâcher de 12Z de la VEILLE (la
+#  veille de la veille pour ce timer) est déjà loin ; le point qui
+#  compte est le lâcher de 12Z d'HIER, publié par Wyoming quelques
+#  heures après — 13 h laisse une marge large. Le +6 h qui sert de
+#  référence (cf. l'en-tête du script) est de toute façon déjà archivé
+#  depuis longtemps par la rétention glissante de 7 jours.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — timer confrontation quotidienne AGRUME/ballon
+
+[Timer]
+OnCalendar=*-*-* 13:00:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

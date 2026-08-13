@@ -1,6 +1,6 @@
 {
  "produit": "AGRUME — axe des balises, figé (tous domaines)",
- "ecrit_le": "2026-08-12T18:29:47Z",
+ "ecrit_le": "2026-08-13T11:34:25Z",
  "domaines": {
   "nord-alpes": {
    "latmin": 44.8,
@@ -23,9 +23,9 @@
    "lonmax": 3.5
   }
  },
- "n": 203,
+ "n": 204,
  "n_par_domaine": {
-  "hors domaine": 23,
+  "hors domaine": 24,
   "nord-alpes": 125,
   "pyrenees": 55
  },
@@ -2071,6 +2071,16 @@
    "name": "Radiosondage Payerne (06610)",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "RS-11120",
+   "source": "radiosondage",
+   "lat": 47.26,
+   "lon": 11.355,
+   "name": "Radiosondage Innsbruck-Flughafen (11120)",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-13"
   },
   {
    "id": "RS-16064",

@@ -1,7 +1,7 @@
 {
   "produit": "AGRUME — orographie sous les points de radiosondage, figée",
-  "ecrit_le": "2026-08-10T12:35:16Z",
-  "run_source": "2026-08-10T09:00:00Z",
+  "ecrit_le": "2026-08-13T11:34:17Z",
+  "run_source": "2026-08-13T06:00:00Z",
   "eccodes": "2.43.0",
   "demi_fenetre_deg": 0.25,
   "accord_production": {
@@ -19,7 +19,7 @@
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T09:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -39,7 +39,7 @@
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T09:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,
@@ -68,7 +68,7 @@
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T09:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -88,7 +88,7 @@
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T09:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,
@@ -108,6 +108,55 @@
         }
       }
     },
+    "11120": {
+      "nom": "Innsbruck-Flughafen",
+      "pays": "AT",
+      "lat": 47.26,
+      "lon": 11.355,
+      "sol_station_m": 579,
+      "grilles": {
+        "001": {
+          "paquet": "SP3",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
+          "meta": {
+            "Ni": 2801,
+            "Nj": 1791,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.01,
+            "dj": 0.01,
+            "jScan": 0
+          },
+          "j0": 789,
+          "i0": 2310,
+          "nj": 51,
+          "ni": 51,
+          "sha256": "1691d074100bed4678166b8daa0c24c040fb86c435c9dc3876e6f4e1b0267ed1",
+          "z_station": 613.4,
+          "ecart_sol_station_m": 34.4
+        },
+        "0025": {
+          "paquet": "SP2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
+          "meta": {
+            "Ni": 1121,
+            "Nj": 717,
+            "lat0": 55.4,
+            "lon0": -12.0,
+            "di": 0.025,
+            "dj": 0.025,
+            "jScan": 0
+          },
+          "j0": 316,
+          "i0": 924,
+          "nj": 21,
+          "ni": 21,
+          "sha256": "b1b977dd2b308f1fcdeb24a5841f54f616f80774078f01fe8fa064dc4d881b9a",
+          "z_station": 680.6,
+          "ecart_sol_station_m": 101.6
+        }
+      }
+    },
     "TEMOIN": {
       "nom": "témoin (centre du domaine)",
       "pays": "FR",
@@ -117,7 +166,7 @@
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T09:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -137,7 +186,7 @@
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-10T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T09:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,

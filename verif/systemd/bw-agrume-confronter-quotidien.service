@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-confronter-quotidien.service — la confrontation ballon,
+#                                            une fois par jour  (13/08/2026)
+#
+#  Lot M. Fait grandir n tout seul : `verif/confronter_quotidien.py`
+#  rejoue `confronter_sondage.py` pour chaque station ACTIVE de
+#  `radiosondage.STATIONS`, sur les deux lâchers (00Z, 12Z) de la veille,
+#  et journalise chaque résultat — succès ou abandon nommé.
+#
+#  Installation (à faire par Yann — ce fichier ne s'installe pas seul) :
+#    sudo cp verif/systemd/bw-agrume-confronter-quotidien.{service,timer} \
+#            /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-agrume-confronter-quotidien.timer
+#    journalctl -u bw-agrume-confronter-quotidien -f
+#
+#  ⚠️ PRÉREQUIS : voir l'en-tête de `run-confronter-quotidien.sh` — il
+#  faut le jeton R2 en LECTURE (`BW_R2_AUDIT_*`), pas celui d'écriture.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — confrontation quotidienne AGRUME/ballon (Lot M)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/verif/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/verif/run-confronter-quotidien.sh
+# ⚠️ Quelques téléchargements Wyoming (centaines de Ko) + deux lectures
+# R2 par station active : large marge, pas une contrainte mesurée.
+TimeoutStartSec=600
+# Pas de Restart : un jour manqué n'est pas rattrapé automatiquement
+# (le journal note l'absence par idempotence, `--date` le rejoue à la
+# main). Réessayer en boucle sur une erreur de configuration brûlerait
+# des requêtes Wyoming pour rien.
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

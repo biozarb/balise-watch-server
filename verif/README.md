@@ -50,20 +50,23 @@ oblige à écrire pourquoi, dans le fichier, à côté des deux autres.
 | `colonnes.py` | le conteneur du produit A : disposition, remplissage, manifeste, npz |
 | `purge.py` | **la rétention glissante 7 jours** — l'arithmétique de runs qui remplace un index |
 | `sonder.py` | lire un profil en un point, en tableau ou en JSON |
-| `confronter_sondage.py` | le profil contre un vrai ballon (Wyoming) |
+| `confronter_sondage.py` | le profil contre un vrai ballon (Wyoming), À LA MAIN |
+| `confronter_quotidien.py` | ⚠️ **Lot M, 13/08.** Rejoue `confronter_sondage.py` tout seul, chaque jour, pour CHAQUE station active, sur la veille (00Z + 12Z) — journal NDJSON, idempotent, jamais un silence. Timer VPS `bw-agrume-confronter-quotidien` (`systemd/`) |
 | `confronter_calque.py` | le produit A contre le calque altitude du produit B |
 | `marche_raccord.py` | la marche entre les deux mailles à 100 m/sol |
 | `test_colonnes.py` | le banc du produit A — quantification ET conteneur |
 | `test_purge.py` | la purge sur un faux backend, avec trous et panne |
 | `test_separation.py` | la coupe elle-même, vérifiée statiquement |
+| `test_confronter_quotidien.py` | le calcul du run, l'idempotence, la station inactive court-circuitée — hors-ligne |
 
 ```
 python3 verif/test_colonnes.py
 python3 verif/test_purge.py
 python3 verif/test_separation.py
+python3 verif/test_confronter_quotidien.py
 ```
 
-Tous hors-ligne, sans réseau ni clé. Les trois sont dans la CI
+Tous hors-ligne, sans réseau ni clé. Les quatre sont dans la CI
 (`agrume-colonnes.yml`).
 
 ---
