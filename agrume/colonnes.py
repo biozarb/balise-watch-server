@@ -314,8 +314,29 @@ PARAMS_SURFACE = (
     # ⚠️ Pa → hPa, et décalage de 1000 : sans lui le float16 coûterait
     # 0,25 hPa (mesuré sur 200 000 tirages dans la plage réelle du
     # domaine, 630 → 996 hPa). Avec, 0,125. Les deux sont trop.
+    # ⛔⛔ LES DEUX DÉCALAGES NE SONT PAS LE MÊME, ET LES CONFONDRE SE
+    # PAIE DE 1 000 hPa (13/08).
+    #
+    #   `decalage`            — conversion d'UNITÉ. Après lui, l'archive
+    #                           EST dans l'unité publiée. K → °C en est
+    #                           l'exemple : `unite="°C"`, et la valeur
+    #                           archivée est bien des °C.
+    #   `decalage_precision`  — décalage de PRÉCISION, pris uniquement
+    #                           pour gagner des bits de float16. Après
+    #                           lui, l'archive N'EST PLUS dans l'unité
+    #                           publiée, et LE CLIENT DOIT LE DÉFAIRE.
+    #
+    # Ils vivaient dans le même champ jusqu'au 13/08, et le manifeste ne
+    # publiait que `unite`. Un client qui suivait le manifeste à la lettre
+    # affichait donc −13 hPa au lieu de 987 — une valeur fausse, finie,
+    # tracée sans une erreur. `decalage_precision` est publié ; celui qui
+    # ne le lit pas doit REFUSER de servir la valeur.
+    #
+    # Le gain, mesuré sur 200 000 tirages dans la plage réelle du domaine :
+    # 0,125 hPa d'erreur float16 avec le décalage, 0,250 sans.
     dict(nom="pression_mer", court="prmsl", paquet="SP1", unite="hPa",
-         facteur=0.01, decalage=-1000.0, pas_de_temps="instant"),
+         facteur=0.01, decalage=0.0, decalage_precision=-1000.0,
+         pas_de_temps="instant"),
 )
 
 # ⛔⛔ LA PRESSION AU SOL EST EN float32, ET C'EST LE MÊME ARBITRAGE QUE
@@ -479,7 +500,8 @@ def quantifier(valeurs, param, dtype=np.float16):
     """
     a = np.asarray(valeurs, dtype=np.float64)
     mauvais = ~np.isfinite(a) | (a == SENTINELLE)
-    a = a * param.get("facteur", 1.0) + param["decalage"]
+    a = (a * param.get("facteur", 1.0) + param["decalage"]
+         + param.get("decalage_precision", 0.0))
     plafond = PLAFOND_PHYSIQUE.get(param["nom"])
     if plafond is None:
         raise KeyError(
@@ -499,7 +521,7 @@ def erreur_quantification(valeurs, param, dtype=np.float16):
     supposer — c'est ainsi qu'on a vu qu'une température en kelvins perd
     un facteur 8, et qu'une altitude en float16 perd 8 mètres à 7 000."""
     a = (np.asarray(valeurs, dtype=np.float64) * param.get("facteur", 1.0)
-         + param["decalage"])
+         + param["decalage"] + param.get("decalage_precision", 0.0))
     return float(np.nanmax(np.abs(a - a.astype(dtype).astype(np.float64))))
 
 

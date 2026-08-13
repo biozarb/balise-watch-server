@@ -689,5 +689,156 @@ console.log('\n── 9. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
     `${wg.points[0].dir[0].toFixed(2)}° · ${wg.points[0].speed[0].toFixed(2)} km/h`);
 }
 
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n── 10. ⛔ LA COLONNE DEVIENT UN PROFIL — les deux verticales '
+  + 'dans UNE liste ──');
+// ⛔ CE QUE CETTE SECTION PROTÈGE, ET QUE RIEN D'AUTRE NE VOIT.
+// `colonneVersProfil` fusionne 25 niveaux HAUTEUR et 14 niveaux ISOBARES
+// dans un seul `levels`. Quatre façons de casser en silence, une par
+// bloc de vérifications :
+//   1. les isobares SOUTERRAINS servis — un vent « au sol » inventé par
+//      l'extrapolation du modèle, parfaitement lisse et parfaitement
+//      faux ;
+//   2. les m/s servis comme des km/h — un vent 3,6 fois trop faible, et
+//      aucune courbe ne le dit ;
+//   3. la pression d'un niveau hauteur FIGÉE sur une seule heure, alors
+//      qu'elle bouge avec `psol` ;
+//   4. `prmsl` servi sans défaire son décalage — −13 hPa au lieu de 987.
+{
+  const A = await import(process.env.BW_AGRUME_MODULE
+    || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeProfile.ts'));
+
+  // Une colonne fabriquée à la main : 3 échéances, 2 niveaux hauteur
+  // (10 et 500 m), 3 niveaux isobares dont UN sous le sol.
+  const NECH = 3, ZSOL = 1000;
+  const s = (...v) => Float32Array.from(v);
+  const col = {
+    j: 0, i: 0, lat: 45, lon: 6, zsolM: ZSOL,
+    echeances: [0, 1, 2],
+    niveauxMSol: [10, 500],
+    niveauxHPa: [1000, 900, 800],
+    tranches: {
+      // (niveau, échéance)
+      u: s(10, 10, 10, /* 500 m */ 0, 0, 0),
+      v: s(0, 0, 0, -10, -10, -10),
+      t: s(15, 16, 17, 12, 13, 14),
+      r: s(80, 80, 80, 60, 60, 60),
+      iso_u: s(1, 1, 1, 2, 2, 2, 3, 3, 3),
+      iso_v: s(0, 0, 0, 0, 0, 0, 0, 0, 0),
+      iso_t: s(14, 14, 14, 8, 8, 8, 2, 2, 2),
+      iso_r: s(70, 70, 70, 50, 50, 50, 30, 30, 30),
+      iso_cc: s(NaN, 20, 20, NaN, 40, 40, NaN, 60, 60),
+      // ⚠️ FIXTURE PHYSIQUEMENT COHÉRENTE, et ça compte ici : 1000 hPa
+      // est SOUS le sol (100 m < zsol = 1000 m), puis la pression DÉCROÎT
+      // en montant — 910 hPa au sol, 900 à 1 500 m, 800 à 2 500 m. Une
+      // première version avait mis `psol = 900` avec le niveau 900 hPa à
+      // 1 500 m : les deux ancres portaient alors la MÊME pression, la
+      // dérivation rendait une constante, et le banc a eu raison de
+      // refuser — c'est exactement l'ancre incohérente qu'il surveille.
+      ziso: s(100, 100, 100, 1500, 1510, 1520, 2500, 2500, 2500),
+      psol: s(910, 908, 906),
+      t2m: s(18, 19, 20),
+      td2m: s(10, 10, 10),
+      rafale: s(NaN, 10, 20),
+      pression_mer: s(13.5, 12.5, 11.5),   // = 1013,5 hPa − 1000
+      precipitation: s(NaN, 0.5, 1.5),
+    },
+  };
+  const man = {
+    run: '2026-08-13T00:00:00Z',
+    parametres_surface: [
+      { nom: 'pression_mer', unite: 'hPa', paquet: 'SP1',
+        pas_de_temps: 'instant', absent_a_tau0: false,
+        decalage_precision: -1000 },
+    ],
+  };
+  const p = A.colonneVersProfil(man, col);
+
+  verifier('les échéances deviennent des timestamps ancrés sur le run',
+    p.times.length === NECH
+    && p.times[0] === Date.parse('2026-08-13T00:00:00Z')
+    && p.times[2] - p.times[0] === 2 * 3600e3);
+  verifier('le sol du profil est le zsol de la colonne, pas une élévation '
+    + 'demandée ailleurs', p.elevation === ZSOL);
+
+  // ── 1. Le masque sous le sol ──────────────────────────────────────
+  const iso1000 = p.levels.find(l => l.pressure === 1000);
+  verifier('⛔ le niveau isobare SOUS le sol sort avec une altitude nulle — '
+    + 'sinon on servirait un vent « au sol » inventé par l\'extrapolation',
+    iso1000 && iso1000.altitude.every(a => a === null),
+    `ziso = 900 m, zsol = ${ZSOL} m`);
+  const iso900 = p.levels.find(l => l.pressure === 900);
+  verifier('…et celui qui ÉMERGE est servi, avec son altitude variable '
+    + 'dans le temps',
+    iso900 && iso900.altitude[0] === 1500 && iso900.altitude[2] === 1520);
+
+  // ── 2. Les unités ─────────────────────────────────────────────────
+  const h10 = p.levels.find(l => l.altitude[0] === ZSOL + 10);
+  verifier('⛔ u = +10 m/s au niveau 10 m ressort à 36 km/h et 270° — servir '
+    + 'des m/s donnerait un vent 3,6 fois trop faible, sans une erreur',
+    h10 && Math.abs(h10.windSpeed[0] - 36) < 1e-9
+    && Math.abs(h10.windDir[0] - 270) < 1e-9,
+    h10 ? `${h10.windSpeed[0].toFixed(2)} km/h · ${h10.windDir[0].toFixed(0)}°` : '');
+  verifier('⚠️ la rafale aussi (max_i10fg est en m/s, windGust10m en km/h)',
+    Math.abs(p.surface.windGust10m[1] - 36) < 1e-9,
+    `${p.surface.windGust10m[1]} km/h`);
+  verifier('⛔ le vent « 10 m » de la ligne de surface EST le niveau 10 m — '
+    + 'la colonne d\'air et la ligne de surface ne peuvent pas se contredire',
+    p.surface.windSpeed10m[0] === h10.windSpeed[0]
+    && p.surface.windDir10m[0] === h10.windDir[0]);
+
+  // ── 3. La pression heure par heure ────────────────────────────────
+  verifier('⛔ un niveau HAUTEUR porte une pression PAR HEURE, et elle bouge '
+    + 'avec psol — un seul nombre ne pouvait pas dire les deux',
+    h10.pressureByHour && h10.pressureByHour[0] !== h10.pressureByHour[2]
+    // Strictement SOUS psol (on est 10 m plus haut) et au-dessus du
+    // premier isobare émergé : la valeur est encadrée, jamais extrapolée.
+    && h10.pressureByHour.every((v, e) => v < col.tranches.psol[e] && v > 900),
+    h10.pressureByHour
+      ? h10.pressureByHour.map(v => v.toFixed(2)).join(' → ') : 'absente');
+  verifier('⚠️ et elle se dit dérivée — le 10 m ne tombe sur aucun niveau '
+    + 'isobare',
+    h10.pressureSource.every(s => s === 'derivee'));
+  verifier('⛔ un niveau ISOBARE ne porte PAS de série : sa pression est '
+    + 'exacte et ne bouge pas',
+    iso900.pressureByHour === undefined);
+  verifier('⚠️ `pressure` d\'un niveau hauteur est la MÉDIANE des heures, '
+    + 'pas la première — τ = 0 est l\'échéance la plus trouée du produit',
+    Math.abs(h10.pressure - h10.pressureByHour[1]) < 1e-9,
+    `${h10.pressure.toFixed(3)} hPa`);
+
+  // ── 4. Le décalage de précision ───────────────────────────────────
+  verifier('⛔ `prmsl` est archivé en hPa − 1000 et le manifeste le dit — '
+    + 'on le défait EN LE LISANT, jamais de tête',
+    Math.abs(p.surface.pressureMsl[0] - 1013.5) < 1e-6,
+    `${p.surface.pressureMsl[0]} hPa`);
+  const sansDec = A.colonneVersProfil({ ...man, parametres_surface: [] }, col);
+  verifier('⚠️ et SANS le champ dans le manifeste, la série sort vide plutôt '
+    + 'que fausse — une ligne absente se voit, −986 hPa se lit comme une '
+    + 'donnée',
+    sansDec.surface.pressureMsl.every(v => v === null));
+
+  // ── L'ordre, et les NaN ───────────────────────────────────────────
+  const alts = p.levels.map(l => l.altitude.find(a => a != null) ?? Infinity);
+  verifier('les niveaux sortent du bas vers le haut, les deux familles '
+    + 'entrelacées sur l\'ALTITUDE',
+    alts.slice(0, -1).every((a, k) => a <= alts[k + 1]),
+    alts.filter(a => Number.isFinite(a)).join(' < '));
+  verifier('⛔ un NaN archivé devient `null`, pas un NaN qui contaminerait '
+    + 'chaque calcul en aval sans lever',
+    iso900.cloud[0] === null && iso900.cloud[1] === 40
+    && p.surface.precipitation[0] === null);
+  verifier('⚠️ un niveau HAUTEUR n\'a pas de nébulosité — `cc` n\'existe que '
+    + 'sur les isobares, et un zéro aurait affirmé « ciel clair »',
+    h10.cloud.every(c => c === null));
+  verifier('le modèle du profil se nomme, et ce n\'est pas une clé '
+    + 'Open-Meteo empruntée', p.model === 'agrume');
+  verifier('⛔ `runInfo` porte le run EXACT — AGRUME est le seul modèle dont '
+    + 'on maîtrise la chaîne, rendre `null` aurait masqué sa fraîcheur',
+    p.runInfo && p.runInfo.lastRun === Date.parse('2026-08-13T00:00:00Z')
+    && p.runInfo.dataEndMs === p.times[NECH - 1]
+    && p.runInfo.lastProcessingDelaySec === null);
+}
+
 console.log(`\n  calque altitude (JS) : ${echecs ? `ÉCHEC (${echecs})` : 'OK'}`);
 process.exit(echecs ? 1 : 0);

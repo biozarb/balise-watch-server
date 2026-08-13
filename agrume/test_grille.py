@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
 import grille as GR  # noqa: E402
+import colonnes as CO  # noqa: E402
 from colonnes import erreur_quantification, quantifier  # noqa: E402
 from domaine import NIVEAUX_H_0025  # noqa: E402
 from orographie import Orographie  # noqa: E402
@@ -622,6 +623,47 @@ def main():
              "zsol" in m["reference_verticale"])
 
     section_7_isobares()
+
+    # ── 9. ⛔ LE DÉCALAGE DE PRÉCISION SE PUBLIE ──────────────────────
+    # `prmsl` est archivé en `hPa − 1000` pour gagner de la précision
+    # float16, mais l'unité publiée reste « hPa ». Sans le champ, un
+    # client qui suit le manifeste affiche −13 hPa au lieu de 987 : une
+    # valeur fausse, finie, tracée sans une erreur. Ce bloc verrouille les
+    # deux moitiés du contrat — l'archive EST décalée, le manifeste LE DIT.
+    print("\n── 9. ⛔ Le décalage de PRÉCISION, publié et défaisable ──")
+    surf = {p["nom"]: p for p in m["parametres_surface"]}
+    mer = surf["pression_mer"]
+    verifier("le manifeste publie `decalage_precision` pour `prmsl`",
+             mer.get("decalage_precision") == -1000.0,
+             f"{mer.get('decalage_precision')!r}")
+    verifier("⚠️ et il vaut 0 pour tous ceux qui n'en ont pas — un champ "
+             "absent obligerait le client à deviner",
+             all(p.get("decalage_precision") == 0.0
+                 for n, p in surf.items() if n != "pression_mer"))
+    verifier("⛔ le décalage d'UNITÉ n'y entre PAS : `2t` est archivé en °C, "
+             "le défaire ajouterait 273,15",
+             surf["t2m"]["unite"] == "°C"
+             and surf["t2m"].get("decalage_precision") == 0.0)
+    # Le contrat, joué en entier sur une valeur : 101 350 Pa → 1013,5 hPa.
+    p_mer = next(p for p in CO.PARAMS_SURFACE if p["nom"] == "pression_mer")
+    archive = float(CO.quantifier(np.array([101350.0]), p_mer)[0])
+    rendu = archive - mer["decalage_precision"]
+    verifier("⛔ archivé décalé, rendu juste : 101 350 Pa → "
+             f"{archive:.3f} archivé → {rendu:.3f} hPa",
+             abs(rendu - 1013.5) < 0.15,
+             f"écart {abs(rendu - 1013.5):.4f} hPa")
+    # ⚠️ MESURÉ SUR LA PLAGE RÉELLE DU DOMAINE, pas sur une valeur. Sur la
+    # seule valeur 1013,5 hPa les deux erreurs valent ZÉRO — elle tombe
+    # pile sur un float16 représentable dans les deux dispositions, et le
+    # banc aurait conclu « le décalage ne sert à rien ». C'est exactement
+    # l'erreur de mesure que ce projet a déjà faite deux fois.
+    plage = np.linspace(63000.0, 99600.0, 20001)
+    avec = CO.erreur_quantification(plage, p_mer)
+    sans = CO.erreur_quantification(plage, {**p_mer, "decalage_precision": 0.0})
+    verifier("⚠️ et le décalage GAGNE bien de la précision — sans lui, "
+             "l'erreur float16 double",
+             avec < sans / 1.5,
+             f"{avec:.4f} hPa avec · {sans:.4f} sans")
 
     print("\n  grille :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

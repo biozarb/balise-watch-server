@@ -683,18 +683,31 @@ class Grille:
             # lisent pas pareil, et `cumul` a déjà été ramené à l'heure
             # par `deaccumuler()` — un client qui redifférencierait
             # obtiendrait des valeurs négatives un pas sur deux.
+            # ⛔ `decalage_precision` EST PUBLIÉ, et ce n'est pas de la
+            # documentation non plus. `prmsl` est archivé en `hPa − 1000`
+            # pour gagner de la précision float16 (0,125 au lieu de 0,25) ;
+            # l'unité publiée, elle, reste « hPa ». Sans ce champ, un
+            # client qui suit le manifeste affiche −13 hPa au lieu de 987.
+            # `valeur_publiée = valeur_archivée − decalage_precision`.
+            # ⚠️ À ne PAS confondre avec le décalage d'UNITÉ (K → °C),
+            # qui est déjà fait et ne se défait pas : après lui l'archive
+            # EST dans l'unité publiée.
             parametres_surface=[
                 dict(nom=p["nom"], unite=p["unite"], paquet=p["paquet"],
                      pas_de_temps=p.get("pas_de_temps", "instant"),
-                     absent_a_tau0=bool(p.get("absent_a_tau0")))
+                     absent_a_tau0=bool(p.get("absent_a_tau0")),
+                     decalage_precision=float(p.get("decalage_precision", 0.0)))
                 for p in PARAMS_GRILLE_SURF]
             + [dict(nom=PARAM_PRESSION_SOL["nom"],
                     unite=PARAM_PRESSION_SOL["unite"],
                     paquet=PARAM_PRESSION_SOL["paquet"],
                     pas_de_temps="instant", absent_a_tau0=False,
+                    decalage_precision=float(
+                        PARAM_PRESSION_SOL.get("decalage_precision", 0.0)),
                     note=("ancre BASSE de la pression dérivée des niveaux "
                           "hauteur ; en float32 pour la même raison que "
-                          "`ziso`"))],
+                          "`ziso`, et SANS décalage de précision — le "
+                          "float32 n'en a pas besoin"))],
             disposition=("h0025 = (parametre, niveau, echeance, lat, lon) en "
                          "float16 ; iso = (parametre, niveau_hPa, echeance, "
                          "lat, lon) en float16 ; ziso = (niveau_hPa, echeance, "
