@@ -244,6 +244,39 @@ def test_garde_de_bucket():
                 and A.BUCKET_R2_ENV == "AGRUME_R2_BUCKET",
                 f"le bucket R2 du produit A est « {A.BUCKET_R2_DEFAUT} », "
                 f"pilotable par {A.BUCKET_R2_ENV} — comme run-ingest-pi.sh")
+
+        # ⛔ ET LES IDENTIFIANTS. Le jeton ordinaire du VPS ÉCRIT sur
+        # balise-watch-grids sans pouvoir le LIRE — 403 mesuré le 13/08
+        # sur une clé PI écrite six minutes plus tôt. Sans ce
+        # basculement, le producteur ne lirait jamais rien.
+        os.environ["R2_ACCESS_KEY_ID"] = "jeton-ecriture"
+        os.environ["R2_SECRET_ACCESS_KEY"] = "secret-ecriture"
+        os.environ["BW_R2_AUDIT_ACCESS_KEY_ID"] = "jeton-lecture"
+        os.environ["BW_R2_AUDIT_SECRET_ACCESS_KEY"] = "secret-lecture"
+        try:
+            verifie(A.prefixe_lecture() == "BW_R2_AUDIT_",
+                    f"les identifiants de lecture retenus sont "
+                    f"{A.prefixe_lecture()}* (le jeton d'audit, seul en "
+                    f"lecture sur ce VPS)")
+            with A.bucket_r2("balise-watch-grids", A.prefixe_lecture()):
+                dedans = os.environ["R2_ACCESS_KEY_ID"]
+            verifie(dedans == "jeton-lecture",
+                    f"dans le bloc, c'est le jeton de LECTURE ({dedans})")
+            verifie(os.environ["R2_ACCESS_KEY_ID"] == "jeton-ecriture",
+                    "en sortant, le jeton d'écriture est restauré — sinon "
+                    "l'archive partirait signée du mauvais jeton")
+            # Et le repli : sans jeton d'audit, on retombe sur R2_* — un
+            # repli qui ÉCHOUERA sur le VPS d'aujourd'hui, et c'est
+            # `lire_run` qui doit le dire, pas ce banc.
+            del os.environ["BW_R2_AUDIT_ACCESS_KEY_ID"]
+            del os.environ["BW_R2_AUDIT_SECRET_ACCESS_KEY"]
+            verifie(A.prefixe_lecture() == "R2_",
+                    "sans jeton dédié ni jeton d'audit, on retombe sur R2_*")
+        finally:
+            for v in ("R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+                      "BW_R2_AUDIT_ACCESS_KEY_ID",
+                      "BW_R2_AUDIT_SECRET_ACCESS_KEY"):
+                os.environ.pop(v, None)
     finally:
         if avant is None:
             os.environ.pop("R2_BUCKET", None)

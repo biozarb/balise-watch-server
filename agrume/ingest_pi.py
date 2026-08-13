@@ -69,8 +69,9 @@ from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from grille import (axes_depuis_orographie, index_apres,  # noqa: E402
                     index_apres_purge, verifier_prefixe)
 from orographie import charger_artefact, norm_lon  # noqa: E402
-from pi import (CLE_INDEX_GRILLE, ECHEANCES_MIN, NIVEAUX_PI,  # noqa: E402
-                PREFIXE_GRILLE, RETENTION_RUNS, Abort, ColonnesPI, GrillePI,
+from pi import (CLE_INDEX_GRILLE, DOMAINE_INDEX, ECHEANCES_MIN,  # noqa: E402
+                NIVEAUX_PI, PREFIXE_GRILLE, RETENTION_RUNS, Abort,
+                ColonnesPI, GrillePI,
                 aligner_sur_axes, cles_du_run_colonnes, cles_du_run_grille,
                 instants_du_run, json_octets, params_actifs)
 from portail import (SERVICE_AROMEPI, CouvertureAbsente,  # noqa: E402
@@ -388,7 +389,11 @@ def purger(st, run, cles, journal=crier):
     index = st.get_json(CLE_INDEX_GRILLE) or dict(
         produit="AGRUME PI — index des grilles en ligne",
         retention_runs=RETENTION_RUNS, runs=[], restes=[])
-    nouveau, a_supprimer = index_apres(index, run, cles,
+    # ⚠️ `DOMAINE_INDEX` n'est pas décoratif : sans lui, `cles`
+    # atterrit dans le paramètre `domaine` et l'appel lève un
+    # `TypeError` — ce qui s'est produit à chaque run du 12 au
+    # 13/08, en laissant des grilles hors index.
+    nouveau, a_supprimer = index_apres(index, run, DOMAINE_INDEX, cles,
                                        retention=RETENTION_RUNS)
     # ⚠️ LE GARDE-FOU QUI EMPÊCHE LA PURGE DE DÉBORDER : les colonnes PI
     # sont DÉFINITIVES et vivent dans le même bucket, sous

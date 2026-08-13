@@ -462,6 +462,88 @@ def main():
     finally:
         _ur.urlopen = vrai_urlopen
 
+    # ══════════════════════════════════════════════════════════════════
+    #  11. LA PURGE DE L'INDEX PI — et la fratrie qui l'a cassée
+    # ══════════════════════════════════════════════════════════════════
+    print("\n── 11. ⛔ purge de l'index PI, et l'arité de index_apres ──")
+
+    # ⚠️ CE QUI EST ARRIVÉ, ET POURQUOI AUCUN BANC NE L'A VU. Le 12/08,
+    # `grille.index_apres` a gagné un paramètre POSITIONNEL (`domaine`),
+    # pour compter la rétention par domaine. Deux sites d'appel ne l'ont
+    # jamais reçu : `ingest_pi.purger` et `sonde_r2`. Résultat mesuré
+    # dans le journal du VPS le 13/08, à CHAQUE run de PI :
+    #     ⚠️ grille NON écrite (TypeError: index_apres() missing 1
+    #        required positional argument: 'cles')
+    # La grille partait quand même sur R2 — mais l'index, non. Or
+    # `ListObjects` est hors de portée du jeton ordinaire : un objet
+    # hors index est INVISIBLE, donc définitivement perdu. Une fuite,
+    # pas un déchet. C'est la fratrie décrite dans BUGS.md le 13/08 :
+    # « quand une fonction à paramètres change, grepper TOUS ses appels ».
+    import json as _json
+    import ingest_pi as IP  # noqa: PLC0415
+    from pi import CLE_INDEX_GRILLE as _CLE, DOMAINE_INDEX as _DOM
+
+    class _FauxStore:
+        def __init__(self):
+            self.objets, self.supprimes = {}, []
+        def get_json(self, k):
+            return _json.loads(self.objets[k]) if k in self.objets else None
+        def put(self, k, b, **kw):
+            self.objets[k] = b.decode() if isinstance(b, bytes) else b
+        def delete(self, k):
+            self.supprimes.append(k); return True
+
+    _st = _FauxStore()
+    _runs = ["2026-08-13T0%d:00:00Z" % h for h in (1, 2, 3, 4, 5)]
+    try:
+        for _r in _runs:
+            IP.purger(_st, _r, ["agrume/pi/grille/%s/grille.npz" % _r],
+                      journal=lambda *a, **k: None)
+        _idx = _json.loads(_st.objets[_CLE])
+        verifier("⛔ `purger()` tourne de bout en bout — c'est CE "
+                 "TypeError qui a fait perdre l'index PI du 12 au 13/08",
+                 True)
+        verifier("la rétention de 3 runs tient",
+                 len(_idx["runs"]) == 3, str(len(_idx["runs"])))
+        verifier("… et chaque entrée porte son domaine (sans lui, "
+                 "`index_apres` l'enverrait à la suppression au run "
+                 "suivant, comme une entrée d'ancien format)",
+                 all(e.get("domaine") == _DOM for e in _idx["runs"]),
+                 str(sorted({e.get("domaine") for e in _idx["runs"]})))
+        verifier("les deux plus vieux runs partent, et EUX SEULS",
+                 _st.supprimes == ["agrume/pi/grille/%s/grille.npz" % r
+                                   for r in _runs[:2]],
+                 str(_st.supprimes))
+    except TypeError as exc:
+        verifier(f"⛔ `purger()` lève encore : {exc}", False)
+
+    # ⛔ ET LE FRÈRE SUIVANT, MÉCANIQUEMENT. Un banc qui ne teste qu'UN
+    # site d'appel ne protège que celui-là ; c'est justement ce qui a
+    # manqué. On compte donc les arguments de TOUS les appels à
+    # `index_apres` du paquet, et on les compare à la signature réelle.
+    import ast as _ast, inspect as _inspect, glob as _glob
+    from grille import index_apres as _ia
+    _requis = [n for n, prm in _inspect.signature(_ia).parameters.items()
+               if prm.default is _inspect.Parameter.empty]
+    _mauvais = []
+    for _f in sorted(_glob.glob(os.path.join(os.path.dirname(
+            os.path.abspath(__file__)), "*.py"))):
+        if os.path.basename(_f).startswith("test_"):
+            continue
+        for _n in _ast.walk(_ast.parse(open(_f, encoding="utf-8").read())):
+            if (isinstance(_n, _ast.Call)
+                    and isinstance(_n.func, _ast.Name)
+                    and _n.func.id == "index_apres"):
+                _fournis = len(_n.args) + len(
+                    [k for k in _n.keywords if k.arg in _requis])
+                if _fournis != len(_requis):
+                    _mauvais.append("%s:%d (%d arg. pour %d requis)"
+                                    % (os.path.basename(_f), _n.lineno,
+                                       _fournis, len(_requis)))
+    verifier("⛔ tous les appels à `index_apres` du paquet ont le bon "
+             "nombre d'arguments requis (%s)" % ", ".join(_requis),
+             not _mauvais, " · ".join(_mauvais))
+
     print("\n  ingestion PI :",
           "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     for e in echecs:

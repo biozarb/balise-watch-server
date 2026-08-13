@@ -154,6 +154,25 @@ BUCKET_SUPABASE_ENV = "AGRUME_BUCKET"
 BUCKET_SUPABASE_DEFAUT = "wind-grid"
 PREFIXE_COLONNES = "agrume/colonnes/"
 
+#: ⛔ LE JETON R2 ORDINAIRE DU VPS ÉCRIT SUR `balise-watch-grids` MAIS NE
+#: LE LIT PAS. Mesuré le 13/08 : `HeadObject` sur une clé PI écrite six
+#: minutes plus tôt rend **403**, et `ListObjectsV2` aussi. C'est le même
+#: jeton qui a fait écrire à `~/.balise-watch-r2.env` que « le jeton de
+#: ce VPS n'a pas ListBuckets ». Le producteur lit donc avec le jeton
+#: LECTURE SEULE de l'audit, qui, lui, liste et lit (22 runs du produit A
+#: retrouvés avec lui le 13/08). L'écriture de l'archive, elle, repart
+#: sur le jeton ordinaire et sur `model-verif`.
+#:
+#: Ordre d'essai, du plus spécifique au plus général. ⚠️ Le dernier
+#: échelon (`R2_*`) est un repli qui ÉCHOUERA sur le VPS d'aujourd'hui,
+#: et c'est voulu : il fait marcher le job partout où le jeton principal
+#: a le droit de lire (les Actions, une machine de dev), sans faire
+#: croire qu'un jeton dédié n'est pas souhaitable.
+#: ⓘ Reliquat assumé : un jeton `AGRUME_R2_READ_*` propre, scopé au seul
+#: bucket des grilles, vaudrait mieux que d'emprunter celui de l'audit —
+#: le jour où Yann le crée, il suffit de le poser dans le .env.
+PREFIXES_LECTURE = ("AGRUME_R2_READ_", "BW_R2_AUDIT_", "R2_")
+
 
 class Abort(Exception):
     pass
@@ -163,9 +182,24 @@ class Abort(Exception):
 #  LIRE LE PRODUIT A — et le piège des deux buckets
 # ══════════════════════════════════════════════════════════════════
 
+def prefixe_lecture() -> str:
+    """Le premier jeu d'identifiants R2 disponible pour la LECTURE.
+
+    Rend le préfixe de variables retenu (`"BW_R2_AUDIT_"`, …). Le
+    dernier échelon (`"R2_"`) est toujours rendu par défaut, même
+    incomplet : c'est `lire_run` qui dira ce qui a été refusé, avec le
+    nom de la variable à poser.
+    """
+    for p in PREFIXES_LECTURE:
+        if os.environ.get(p + "ACCESS_KEY_ID") and \
+                os.environ.get(p + "SECRET_ACCESS_KEY"):
+            return p
+    return PREFIXES_LECTURE[-1]
+
+
 @contextlib.contextmanager
-def bucket_r2(nom: str):
-    """Force `R2_BUCKET` le temps de construire un `Storage`.
+def bucket_r2(nom: str, prefixe: str | None = None):
+    """Force `R2_BUCKET` (et les identifiants) le temps d'un `Storage`.
 
     ⛔ LE PIÈGE QUE CE BLOC EXISTE POUR ÉVITER, ET IL EST SILENCIEUX.
     `tools/storage.py` résout le bucket R2 par
@@ -178,18 +212,32 @@ def bucket_r2(nom: str):
     nuits — et rien ne s'allumerait, parce qu'un run absent est un cas
     NORMAL au démarrage.
 
-    On restaure la valeur d'avant en sortant : l'envoi de l'archive,
-    lui, doit repartir sur `model-verif`.
+    ⛔ ET LES IDENTIFIANTS AVEC, pour la même raison en pire : le jeton
+    ordinaire du VPS ÉCRIT sur `balise-watch-grids` sans pouvoir le LIRE
+    (403 mesuré le 13/08 sur une clé existante). `prefixe` désigne le jeu
+    de variables à utiliser ; `None` laisse celles en place.
+
+    On restaure tout en sortant : l'envoi de l'archive, lui, doit
+    repartir sur `model-verif` avec le jeton ordinaire.
     """
-    avant = os.environ.get("R2_BUCKET")
+    cles = ["R2_BUCKET"]
+    if prefixe and prefixe != "R2_":
+        cles += ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
+    avant = {k: os.environ.get(k) for k in cles}
     os.environ["R2_BUCKET"] = nom
+    if prefixe and prefixe != "R2_":
+        for suffixe in ("ACCESS_KEY_ID", "SECRET_ACCESS_KEY"):
+            v = os.environ.get(prefixe + suffixe)
+            if v:
+                os.environ["R2_" + suffixe] = v
     try:
         yield nom
     finally:
-        if avant is None:
-            os.environ.pop("R2_BUCKET", None)
-        else:
-            os.environ["R2_BUCKET"] = avant
+        for k, v in avant.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def lire_run(run: str, crier=print):
@@ -203,8 +251,9 @@ def lire_run(run: str, crier=print):
     from storage import Storage                              # noqa: PLC0415
 
     bucket = os.environ.get(BUCKET_R2_ENV) or BUCKET_R2_DEFAUT
+    prefixe = prefixe_lecture()
     base = f"{PREFIXE_COLONNES}{run}"
-    with bucket_r2(bucket):
+    with bucket_r2(bucket, prefixe):
         try:
             store = Storage("agrume-verif", BUCKET_SUPABASE_ENV,
                             BUCKET_SUPABASE_DEFAUT)
@@ -219,11 +268,34 @@ def lire_run(run: str, crier=print):
                 f"lecture du produit A impossible ({exc}) — ce job veut "
                 f"STORAGE_BACKEND=r2 et les R2_* : passer par "
                 f"`run.sh agrume`, ou sourcer ~/.balise-watch-r2.env") from exc
-        crier(f"  lecture du produit A dans le bucket « {bucket} » : {base}")
-        brut_man = store.get(f"{base}/manifest.json")
-        if not brut_man:
-            return None
-        brut_npz = store.get(f"{base}/colonnes.npz")
+        crier(f"  lecture du produit A : bucket « {bucket} », "
+              f"identifiants {prefixe}* — {base}")
+        try:
+            brut_man = store.get(f"{base}/manifest.json")
+            if not brut_man:
+                return None
+            brut_npz = store.get(f"{base}/colonnes.npz")
+        except Exception as exc:                             # noqa: BLE001
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code not in ("AccessDenied", "403", "InvalidAccessKeyId",
+                            "SignatureDoesNotMatch"):
+                raise
+            # ⛔ « UN CODE D'ERREUR D'API N'EST PAS UN DIAGNOSTIC », et
+            # ce projet l'a déjà payé le 10/08 : une sonde d'écriture sur
+            # un bucket INEXISTANT rendait `AccessDenied`, exactement
+            # comme un refus de droits. Ici c'est le symétrique, et il
+            # est pire : sans `ListBucket`, S3 rend 403 pour une clé
+            # ABSENTE aussi bien que pour un refus. Traiter ce 403 comme
+            # « run absent » donnerait un job vert, tous les soirs, sans
+            # une seule ligne AGRUME. On s'arrête, et on nomme la
+            # variable à poser.
+            raise Abort(
+                f"{base} : lecture REFUSÉE (HTTP 403) avec les "
+                f"identifiants {prefixe}*. Ce n'est pas « run absent » : "
+                f"sans ListBucket, R2 rend 403 pour les deux. Poser "
+                f"AGRUME_R2_READ_ACCESS_KEY_ID / "
+                f"AGRUME_R2_READ_SECRET_ACCESS_KEY (jeton lecture sur "
+                f"{bucket}) dans ~/.balise-watch-r2.env.") from exc
         if not brut_npz:
             # Le manifeste sans les données : ce n'est pas « absent »,
             # c'est incohérent. On le DIT au lieu de le lire comme un

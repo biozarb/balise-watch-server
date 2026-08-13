@@ -156,6 +156,23 @@ CLE_INDEX_GRILLE = "agrume/pi/grille/index.json"
 # pour la même raison : de quoi comparer un run au précédent.
 RETENTION_RUNS = 3
 
+#: ⛔ LE DOMAINE SOUS LEQUEL LA GRILLE PI SE COMPTE DANS SON INDEX.
+#: `grille.index_apres` compte la rétention PAR DOMAINE depuis le
+#: 12/08 (deux domaines AROME dans un même run se purgeaient
+#: mutuellement). PI n'en a qu'un — la grille 0,025° du portail —
+#: mais il lui faut quand même un nom : une entrée SANS `domaine`
+#: est envoyée à la suppression par `index_apres`, qui traite ainsi
+#: les entrées de l'ancien format.
+#: ⚠️ Cette constante est née d'une PANNE, pas d'une relecture :
+#: `index_apres` a gagné un paramètre positionnel le 12/08 et deux
+#: sites d'appel ne l'ont jamais reçu (`ingest_pi.purger` et
+#: `sonde_r2`). Résultat : `TypeError` à CHAQUE run PI depuis, donc
+#: index jamais mis à jour, donc grilles écrites hors index —
+#: invisibles, puisque `ListObjects` est hors de portée du jeton
+#: ordinaire. Exactement la fratrie de défauts décrite dans BUGS.md
+#: le 13/08 : « le défaut voyage en fratrie ».
+DOMAINE_INDEX = "pi"
+
 
 def prefixe_run_grille(run):
     return f"{PREFIXE_GRILLE}{run}"

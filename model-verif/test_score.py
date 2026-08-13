@@ -1052,6 +1052,80 @@ def test_lecture_paginee():
           all("order=zone_id" in u for u, _ in vus), True)
 
 
+def test_plancher_de_skill():
+    """⛔ LE BANC DE LA PANNE DES 12-14/08, ET IL SAIT ÉCHOUER.
+
+    Trois nuits de scoring perdues sur `HTTP 400 — numeric field
+    overflow` : `skill_clim` est un `numeric(8,4)` et valait −35 980,
+    `skill` (un `real`, qui passait) −2 573 000. Cause unique :
+    `1 − MSE_modèle / MSE_référence` avec une référence quasi nulle,
+    c'est-à-dire une journée où le vent n'a pas bougé.
+
+    Ce banc tient les deux moitiés de la réponse : sous le plancher on
+    rend `None` — et `beats_persist` AUSSI, parce qu'un `false` se
+    lirait « ce modèle a perdu » ; au-dessus, le skill est calculé comme
+    avant, au chiffre près.
+    """
+    print("── plancher de skill (référence quasi nulle) ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b9:plain", "landform": "plain",
+                                 "basin_id": "b9", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(900, 904)}
+
+    def daily(mse_ref, mse_clim=None):
+        out = []
+        for j in range(3):
+            d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+            for i in range(900, 904):
+                r = {"day": d, "source": "pioupiou", "station_id": str(i),
+                     "model": "icon_d2", "lead_h": 24, "regime": "calm",
+                     "n_hours": 12, "err_vec_med": 5.0,
+                     "mse_model": 25.0, "mse_persist": mse_ref}
+                if mse_clim is not None:
+                    r["mse_clim"] = mse_clim
+                out.append(r)
+        return out
+
+    # Le cas réel : une persistance à 0,0001 (km/h)², soit 0,01 km/h de
+    # RMS. Sans plancher, skill = 1 − 25/0,0001 = −249 999.
+    fine = [r for r in J.rolling_scores(daily(0.0001, 0.0001), zone_of, DAY)
+            if r["zone_id"] == "b9:plain"][0]
+    check("référence à 0,01 km/h de RMS → skill nul", fine["skill"], None)
+    check("… et `beats_persist` nul AUSSI, pas `false`",
+          fine["beats_persist"], None)
+    check("… idem pour la climatologie", fine["skill_clim"], None)
+    check("… et pour `beats_clim`", fine["beats_clim"], None)
+    check("l'erreur absolue, elle, est intacte",
+          fine["typical_err_kmh"], 5.0)
+
+    # Juste sous le plancher, et juste au-dessus : la bascule est nette.
+    check("MSE de référence 0,99 → toujours nul",
+          [r for r in J.rolling_scores(daily(0.99), zone_of, DAY)
+           if r["zone_id"] == "b9:plain"][0]["skill"], None)
+    au_dessus = [r for r in J.rolling_scores(daily(1.0), zone_of, DAY)
+                 if r["zone_id"] == "b9:plain"][0]
+    check("MSE de référence 1,0 → le skill est calculé",
+          au_dessus["skill"], -24.0)
+    check("… et il est bien négatif : le modèle perd contre une "
+          "persistance très bonne", au_dessus["beats_persist"], False)
+
+    # Et le cas ordinaire n'a pas bougé d'un chiffre.
+    normal = [r for r in J.rolling_scores(daily(100.0, 100.0), zone_of, DAY)
+              if r["zone_id"] == "b9:plain"][0]
+    check("cas ordinaire (MSE 25 contre 100) : skill = 0,75",
+          normal["skill"], 0.75)
+    check("… et le modèle bat la persistance", normal["beats_persist"], True)
+
+    # ⛔ Le contrat de la base : aucune valeur ne peut plus déborder le
+    # numeric(8,4) de `model_score_zone`, quelle que soit la référence.
+    pires = J.rolling_scores(daily(1e-9, 1e-9), zone_of, DAY)
+    hors = [r for r in pires
+            for c in ("skill", "skill_clim", "err_sd", "pooled_err_kmh")
+            if isinstance(r.get(c), (int, float)) and abs(r[c]) >= 10000]
+    check("aucune valeur ne dépasse le plafond 10⁴ du numeric(8,4)",
+          hors, [])
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -1060,7 +1134,8 @@ def main() -> int:
                test_rejeu_darchive,
                test_fenetre_de_maintien_adaptative,
                test_stabilite_des_rangs,
-               test_familles_publiees, test_lecture_paginee):
+               test_familles_publiees, test_lecture_paginee,
+               test_plancher_de_skill):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0

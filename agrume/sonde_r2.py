@@ -198,7 +198,7 @@ def sonder_purge(prefixe=PREFIXE, log=print):
     for r in runs:
         store.put(cle_de[r], f"sonde purge · run {r}".encode(),
                   cache_control=CACHE_REECRIT, content_type="text/plain")
-        index, a_sup = index_apres(index, r, [cle_de[r]])
+        index, a_sup = index_apres(index, r, "sonde", [cle_de[r]])
         if a_sup:
             # ⚠️ Le garde-fou de préfixe est celui de la production, avec
             # SON préfixe à lui : la sonde ne doit pas pouvoir toucher

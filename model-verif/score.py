@@ -90,6 +90,32 @@ MIN_HOURS_DAILY = 6
 #: Balises minimales dans une case avant de publier un score de zone.
 MIN_STATIONS_ZONE = 3
 
+#: ⛔ PLANCHER DE LA RÉFÉRENCE D'UN SKILL, EN (km/h)² — 1,0, soit une
+#: erreur RMS de 1 km/h. En dessous, `skill`, `skill_clim`,
+#: `beats_persist` et `beats_clim` sortent à **null** : jamais à
+#: `false`, jamais à un nombre.
+#:
+#: ⚠️ SON ABSENCE A COÛTÉ TROIS NUITS DE SCORING (12, 13 et 14/08).
+#: `1 − MSE_modèle / MSE_référence` divise par presque rien dès qu'une
+#: journée sans vent rend la persistance quasi parfaite. Mesuré le
+#: 13/08 en rejouant la journée du 11/08 : `skill` descendait à
+#: **−2 573 000**, `skill_clim` à **−35 980**. Le second est un
+#: `numeric(8,4)` en base (plafond 10⁴) : l'upsert ENTIER repartait en
+#: `HTTP 400 — numeric field overflow`, donc aucun score de zone n'était
+#: écrit et `model_scores.json` gelait — pour onze lignes sur 27 812.
+#:
+#: Le seuil n'est pas choisi au jugé. Dénombré le 13/08 sur les 72 751
+#: balise-jours de `model_verif_daily` depuis le 30/07 : 2 719 (3,74 %)
+#: ont une persistance dont l'erreur RMS est sous 1 km/h, et 1 855
+#: (2,55 %) sous 0,1 km/h — du vent qui n'a pas bougé de la journée.
+#: « Ce modèle bat la persistance » n'y a pas de contenu, et un chiffre
+#: qui écrase toutes les échelles où il entre est pire qu'une absence.
+#:
+#: ⓘ Les scores ABSOLUS (`typical_err_kmh`, `worst_decile_kmh`,
+#: `err_sd`, `pooled_err_kmh`) ne bougent pas d'un chiffre : ce plancher
+#: ne touche QUE le rapport à une référence.
+SKILL_MIN_REF_MSE = 1.0
+
 #: Fenêtre du score glissant (§8.4).
 ROLLING_DAYS = 15
 
@@ -1626,6 +1652,25 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict],
 #  SCORES DE ZONE
 # ══════════════════════════════════════════════════════════════════
 
+def skill_contre(mse_modele, mse_reference):
+    """`(skill, bat_la_référence)`, ou `(None, None)` sous le plancher.
+
+    ⛔ LE `None` EST LA RÉPONSE, PAS UN ÉCHEC. Une référence dont
+    l'erreur RMS tient sous 1 km/h n'est pas une référence : c'est une
+    journée où le vent n'a pas bougé. Le rapport y devient énorme et
+    arbitraire (−2 573 000 mesuré le 11/08), et il écrase toute médiane
+    et toute échelle où il entre. On rend donc `None` pour les DEUX
+    réponses — y compris `bat_la_référence`, parce qu'un `false` se
+    lirait comme « ce modèle a perdu » alors que la question n'a pas eu
+    lieu. Détail chiffré : `SKILL_MIN_REF_MSE`.
+    """
+    if mse_modele is None or mse_reference is None:
+        return None, None
+    if mse_reference < SKILL_MIN_REF_MSE:
+        return None, None
+    return _r(1 - mse_modele / mse_reference), mse_modele < mse_reference
+
+
 def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
                window_kind: str, regime: str, min_stations: int,
                level_of: dict[str, str] | None = None,
@@ -1672,6 +1717,10 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             b["n_hours"] += d.get("n_hours") or 0
 
     rows: list[dict] = []
+    #: [persistance, climatologie] — cases dont la référence est sous le
+    #: plancher. Compté et DIT : une correction qui fait taire des
+    #: colonnes doit annoncer combien, sinon c'est une purge silencieuse.
+    sous_plancher = [0, 0]
     # Le classement se décide zone par zone et échéance par échéance :
     # comparer deux modèles sur des zones différentes n'a aucun sens.
     by_case: dict[tuple, list[dict]] = defaultdict(list)
@@ -1711,6 +1760,16 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         # comparerait deux échantillons, pas deux prévisions.
         mse_cm = S.median([m for m, _ in b["mse_c"]])
         mse_cc = S.median([c for _, c in b["mse_c"]])
+        skill, bat_persist = skill_contre(mse_m, mse_r)
+        skill_clim, bat_clim = skill_contre(mse_cm, mse_cc)
+        # Le dénombrement se fait ICI, sur la référence, pas sur le
+        # résultat : un skill nul parce que la référence manque et un
+        # skill nul parce qu'elle est trop bonne sont deux choses, et
+        # c'est la seconde qu'on veut voir grossir ou pas.
+        if mse_r is not None and mse_r < SKILL_MIN_REF_MSE:
+            sous_plancher[0] += 1
+        if mse_cc is not None and mse_cc < SKILL_MIN_REF_MSE:
+            sous_plancher[1] += 1
         ordered = sorted(values)
         row = {
             "as_of": as_of.strftime("%Y-%m-%d"), "zone_id": zid, "model": model,
@@ -1721,10 +1780,10 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             "worst_decile_kmh": _r(ordered[min(len(ordered) - 1,
                                                math.floor(len(ordered) * 0.9))])
             if len(ordered) >= 5 else None,
-            "beats_persist": None if mse_m is None or mse_r is None else mse_m < mse_r,
-            "skill": None if not mse_r else _r(1 - mse_m / mse_r),
-            "beats_clim": None if mse_cm is None or mse_cc is None else mse_cm < mse_cc,
-            "skill_clim": None if not mse_cc else _r(1 - mse_cm / mse_cc),
+            "beats_persist": bat_persist,
+            "skill": skill,
+            "beats_clim": bat_clim,
+            "skill_clim": skill_clim,
             "ci_low": _r(ci.ci_low), "ci_high": _r(ci.ci_high),
             "rank": None, "rank_reason": None,
             # ── colonnes du lot G ──
@@ -1749,6 +1808,13 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         rows_by_case_model[(zid, lead, level)][model] = b["rows"]
 
     _apply_rank(by_case, rows_by_case_model)
+    if sous_plancher[0] or sous_plancher[1]:
+        print(f"  ⓘ skill nul sur {sous_plancher[0]} case(s) "
+              f"(persistance) et {sous_plancher[1]} (climatologie) : "
+              f"référence sous {SKILL_MIN_REF_MSE} (km/h)², soit une "
+              f"erreur RMS < {math.sqrt(SKILL_MIN_REF_MSE):.0f} km/h — "
+              f"le vent n'a pas bougé, la question n'a pas eu lieu "
+              f"[{window_kind}/{regime}]")
     return rows
 
 
