@@ -1386,6 +1386,27 @@ function fwPick(arr, idx) {
 // balises distinctes surveillées (même logique que beaconDepartmentCache).
 const fwSignalsCache = new Map(); // `lat,lon` -> { ts, data }
 const FW_SIGNALS_TTL_MS = 20 * 60 * 1000;
+// Débogage 13/08/2026 — rafale de 429 à CHAQUE redémarrage/redeploy Render.
+// `fwSignalsCache` est en RAM : un redeploy le vide entièrement, et la
+// boucle appelante (§ flightwatch, `for (const id of weatherIdsCapped) await
+// fetchOpenMeteoSignals(...)`) est séquentielle mais SANS pause — toutes
+// les balises distinctes retombent en cache-miss d'un coup au premier poll
+// qui suit, et s'enchaînent quasi instantanément (un 429 répond en
+// quelques ms) : logs Render, ~150-200 appels tirés dans la même seconde,
+// quasi tous en 429. Le mur journalier (OPEN_METEO_LIMITES_ANALYSE.md) est
+// large (~49 % au régime actuel) donc ce n'est pas lui — c'est un pic
+// court, concentré sur la seconde qui suit un restart, qui sature un palier
+// plus fin que l'analyse par moyenne journalière ne voit pas. Coûte aussi
+// du bandwidth Render (Service-Initiated) en pure perte vu que ces appels
+// échouent. Même remède que `fetchNamedPeaks`/Overpass juste plus haut
+// (`OVERPASS_MIN_INTERVAL_MS`) : un intervalle mini entre APPELS RÉSEAU
+// réels seulement — les cache hits restent gratuits et instantanés, donc
+// le régime de croisière (déjà spontanément étalé par le TTL) n'est pas
+// ralenti, seul le rattrapage post-redeploy l'est. 150 ms × 200 balises
+// (FW_OM_MAX_BEACONS_PER_POLL) ≈ 30 s de rattrapage au pire, sans commune
+// mesure avec le cycle de poll de 5 min.
+let fwSignalsLastNetCallAt = 0;
+const FW_OM_MIN_NET_INTERVAL_MS = 150;
 async function fetchOpenMeteoSignals(lat, lon) {
   const key = `${lat.toFixed(3)},${lon.toFixed(3)}`;
   const cached = fwSignalsCache.get(key);
@@ -1393,6 +1414,9 @@ async function fetchOpenMeteoSignals(lat, lon) {
   // Miss/périmé : un seul appel réseau, mis en cache uniquement si succès —
   // un échec (429, réseau…) renvoie null SANS écraser le cache : la
   // sémantique d'abstention de l'appelant reste strictement inchangée.
+  const wait = Math.max(0, FW_OM_MIN_NET_INTERVAL_MS - (Date.now() - fwSignalsLastNetCallAt));
+  if (wait > 0) await new Promise(r => setTimeout(r, wait));
+  fwSignalsLastNetCallAt = Date.now();
   const data = await fetchOpenMeteoSignalsNet(lat, lon);
   if (data) fwSignalsCache.set(key, { ts: Date.now(), data });
   return data;
