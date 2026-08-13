@@ -1,0 +1,60 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-agrume.service — le flux AGRUME du scoring (lot I, 13/08/2026)
+#
+#  Relit le produit A d'AGRUME sur R2 et en écrit le vent 10 m dans
+#  `fcstagrume/…`, que `bw-model-score` relira vingt minutes plus tard.
+#
+#  ⚠️ UNE UNITÉ À PART, PAS UN BOUT DE `bw-model-collect`. La collecte
+#  Open-Meteo est IRREMPLAÇABLE — aucun modèle Météo-France n'a
+#  d'historique de runs passés (0/384 sur `_previous_day1`, mesuré le
+#  08/08), une nuit perdue l'est pour toujours. Ce job-ci, lui, se
+#  rejoue : le produit A est encore sur R2. Les mettre dans la même
+#  unité, ce serait donner au rejouable un moyen de faire tomber
+#  l'irremplaçable.
+#
+#  ⚠️ IL LIT UN AUTRE BUCKET que les trois autres modes
+#  (`balise-watch-grids`, pas `model-verif`). `run.sh` exporte
+#  `R2_BUCKET=model-verif` pour tout le monde, et `tools/storage.py`
+#  fait primer cette variable : c'est `agrume_fcst.bucket_r2()` qui la
+#  force le temps de la lecture, et la restaure pour l'écriture. Sans
+#  ce garde, le job sortirait en vert toutes les nuits avec zéro ligne.
+#
+#  ⚠️ Il exige numpy (le produit A est un `.npz`), qui n'est PAS dans le
+#  python3 système du VPS — il vit dans le venv désigné par BW_PYTHON,
+#  comme boto3. `run.sh` le constate et alerte plutôt que de le
+#  découvrir dans une trace d'import.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — flux AGRUME pour le scoring (journée écoulée)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/README.md
+After=network-online.target
+Wants=network-online.target
+# Avant la notation, jamais après : une archive écrite à 04:00 ne serait
+# lue que le lendemain, et la journée d'AGRUME manquerait sans bruit.
+Before=bw-model-score.service
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh agrume
+TimeoutStartSec=15min
+Nice=10
+
+# ── Cloisonnement, calqué sur bw-model-score.service ─────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-agrume.timer — entre la collecte et la notation
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — flux AGRUME pour le scoring
+
+[Timer]
+# 03:35 UTC : après la collecte (03:15, ~6 min), avant la notation
+# (03:55). ⓘ La marge est confortable et elle n'a rien de critique : ce
+# job archive la journée d'HIER, dont tous les runs AGRUME sont publiés
+# depuis longtemps. S'il déborde sur la notation, la journée est
+# simplement notée sans AGRUME — et `score.py` le DIT, ligne « dont N
+# AGRUME » absente. Le rattrapage est un `run.sh agrume --day …`.
+OnCalendar=*-*-* 03:35:00 UTC
+# ⚠️ Persistent=true comme les autres, mais pour une raison PLUS FAIBLE :
+# ici, un run manqué se rattrape par la ligne de commande tant que le
+# produit A est là. Le jour où la rétention glissante du Lot J sera
+# posée (7 jours recommandés), cette faiblesse deviendra une vraie
+# horloge — et c'est écrit ici pour qu'on s'en souvienne alors.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -76,6 +76,12 @@ DAY_MS = 86_400_000
 #: Classe d'échéance ← nombre de jours entre le snapshot et la journée notée.
 LEAD_BY_OFFSET = {0: 6, 1: 24, 2: 48}
 
+#: Le modèle maison, lu dans un flux à part (lot I, 13/08/2026). Il ne
+#: sert ICI qu'à compter des lignes dans le journal : `daily_rows` ne
+#: connaît toujours aucun modèle par son nom, et c'est ce qui a rendu
+#: ce lot court.
+AGRUME_MODEL = "agrume"
+
 #: Heures minimales appariées pour qu'une journée-balise-modèle compte.
 #: En dessous, l'agrégat est du bruit : une balise qui n'a émis que
 #: trois heures ne dit rien de la qualité d'un modèle sur la journée.
@@ -138,7 +144,16 @@ REPLAY_SUBDIR = "replay"
 #: le même piège que le `dist_old_*` servi par localhost le 08/08.
 #: 2 — lot G4 : `daily_rows` porte désormais `mse_clim` à côté de
 #:     `mse_persist`. Les caches de la formule 1 sont donc ignorés.
-REPLAY_FORMULA = 2
+#: 3 — lot I (13/08) : le flux AGRUME entre dans les snapshots. La
+#:     formule n'a pas bougé d'une virgule — c'est l'ENSEMBLE D'ENTRÉE
+#:     qui a changé, et ça suffit. Un cache d'avant ne porte aucune
+#:     ligne AGRUME ; réutilisé, il donnerait une fenêtre de régime où
+#:     AGRUME existe pour les journées récentes et pas pour les
+#:     anciennes, sans que rien ne le dise. ⚠️ Le prix est connu et
+#:     borné : `--replay-budget` (3 par défaut) rattrape trois journées
+#:     par nuit et `replay_window` COMPTE celles qu'il reporte. Pour
+#:     rattraper d'un coup : `--replay-budget 30`.
+REPLAY_FORMULA = 3
 
 
 class Abort(Exception):
@@ -417,6 +432,44 @@ def obs_key(day: datetime) -> str:
     return f"obs/{day:%Y/%m}/obs_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def fcst_agrume_key(day: datetime) -> str:
+    """Le flux AGRUME — un préfixe à part, et c'est délibéré (lot I).
+
+    ⚠️ POURQUOI PAS DANS `fcst/`. Les deux flux n'ont ni le même
+    producteur, ni la même heure, ni la même façon d'échouer :
+    `collect.py` interroge Open-Meteo sous quota et son archive est
+    IRREMPLAÇABLE (aucun modèle Météo-France n'a d'historique de runs
+    passés — mesuré le 08/08 : 0/384 sur `_previous_day1`) ;
+    `agrume_fcst.py` relit un produit A qui, lui, est encore là. Les
+    mélanger dans une clé réécrite par deux jobs, c'est se donner un
+    moyen de perdre l'irremplaçable en réécrivant le rejouable.
+
+    ⓘ Ce préfixe est le seul endroit du dépôt où il est écrit. C'est
+    `agrume_fcst.py` qui l'importe d'ici, pas l'inverse — `score.py` ne
+    doit dépendre ni de numpy ni du paquet `agrume/`.
+    """
+    return f"fcstagrume/{day:%Y/%m}/fcstagrume_{day:%Y-%m-%d}.ndjson.gz"
+
+
+def snapshot_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
+    """Toutes les prévisions émises un jour donné, tous flux confondus.
+
+    ⛔ LE FLUX AGRUME EST LU AUX TROIS OFFSETS, EXACTEMENT COMME LES
+    AUTRES, et ce n'est pas une négligence. Son horizon de 24 h fait
+    qu'aux offsets 1 et 2 il ne reste que 1 à 4 heures appariables dans
+    la journée notée — sous `MIN_HOURS_DAILY`, donc `daily_rows` et
+    `event_rows` les écartent tous les deux d'eux-mêmes. Écrire ici un
+    `if offset == 0` produirait le même résultat en le faisant
+    dépendre d'une constante lue à un autre endroit : le jour où
+    l'horizon d'AGRUME passerait à 48 h (ARPEGE), il faudrait penser à
+    retirer la garde. Ici, il n'y a rien à penser : la donnée décide.
+    Le banc `test_agrume_fcst.py::test_lead_24_ne_sort_aucune_ligne`
+    tient cette propriété.
+    """
+    return (read_ndjson(root, fcst_key(day), storage)
+            + read_ndjson(root, fcst_agrume_key(day), storage))
+
+
 def to_obs_samples(row: dict) -> list[S.ObsSample]:
     t = row.get("t") or []
     sp = row.get("speed") or []
@@ -679,7 +732,7 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
     cached = replay_read(root, day)
     if cached is not None:
         return cached
-    snapshots = {off: read_ndjson(root, fcst_key(day - timedelta(days=off)), storage)
+    snapshots = {off: snapshot_rows(root, day - timedelta(days=off), storage)
                  for off in LEAD_BY_OFFSET}
     obs_day = read_ndjson(root, obs_key(day), storage)
     if not obs_day:
@@ -2033,10 +2086,20 @@ def main() -> int:
     # ── 1. relire l'archive ───────────────────────────────────────
     snapshots = {}
     for offset in LEAD_BY_OFFSET:
-        rows = read_ndjson(root, fcst_key(day - timedelta(days=offset)), st)
+        emis = day - timedelta(days=offset)
+        rows = snapshot_rows(root, emis, st)
         snapshots[offset] = rows
+        n_ag = sum(1 for r in rows if r.get("model") == AGRUME_MODEL)
+        # ⚠️ Le compte AGRUME se dit à chaque offset, y compris quand il
+        # est destiné à ne rien produire. Une ligne « 0 » qui n'apparaît
+        # jamais et une ligne qui manque se lisent pareil dans un
+        # journal, et c'est la seconde qu'on cherche.
         print(f"  prévisions émises J-{offset} : {len(rows)} lignes "
-              f"(classe +{LEAD_BY_OFFSET[offset]} h)")
+              f"(classe +{LEAD_BY_OFFSET[offset]} h)"
+              + (f" — dont {n_ag} AGRUME" if n_ag else "")
+              + (f", qui ne donneront AUCUNE ligne : horizon 24 h, moins de "
+                 f"{MIN_HOURS_DAILY} heures appariables à cet offset"
+                 if n_ag and offset else ""))
     obs_day = read_ndjson(root, obs_key(day), st)
     obs_prev = read_ndjson(root, obs_key(day - timedelta(days=1)), st)
     print(f"  observations du jour : {len(obs_day)} balises, "

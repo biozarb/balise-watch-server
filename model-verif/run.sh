@@ -3,7 +3,8 @@
 #  run.sh — l'enveloppe des jobs nocturnes (07/08/2026,
 #           3e mode « garde-fou-r2 » ajouté le 10/08/2026)
 #
-#  Usage :  run.sh collect  |  run.sh score  |  run.sh garde-fou-r2
+#  Usage :  run.sh collect | run.sh score | run.sh garde-fou-r2
+#           run.sh agrume   (4e mode, lot I du 13/08/2026)
 #
 #  ═══ POURQUOI UNE ENVELOPPE, ET PAS UN EnvironmentFile ═══
 #
@@ -50,8 +51,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|score|garde-fou-r2) ;;
-  *) echo "usage: run.sh collect|score|garde-fou-r2" >&2; exit 2 ;;
+  collect|score|garde-fou-r2|agrume) ;;
+  *) echo "usage: run.sh collect|score|garde-fou-r2|agrume" >&2; exit 2 ;;
 esac
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -74,6 +75,7 @@ ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 case "$MODE" in
   collect|score)  SCRIPT="$ICI/$MODE.py";               LIBELLE="score modeles" ;;
   garde-fou-r2)   SCRIPT="$ICI/../tools/audit_r2.py";   LIBELLE="garde-fou R2" ;;
+  agrume)         SCRIPT="$ICI/agrume_fcst.py";         LIBELLE="flux AGRUME" ;;
 esac
 if [[ ! -f "$SCRIPT" ]]; then
   echo "job introuvable : $SCRIPT" >&2; exit 2
@@ -104,6 +106,18 @@ if [[ "$MODE" == "collect" ]]; then
   # poller Infoclimat, où un cycle raté se rattrape cinq minutes plus
   # tard.
   SEUIL_ALERTE=1
+elif [[ "$MODE" == "agrume" ]]; then
+  # Un objet lu sur R2 (660 Ko), une conversion, un objet écrit.
+  # Mesuré à quelques secondes ; 10 min est déjà dix fois trop.
+  MAX_MINUTES="${BW_AGRUME_FCST_MAX_MINUTES:-10}"
+  # ⚠️ SEUIL_ALERTE=2, et c'est la SEULE différence de nature avec
+  # `collect` : ce flux se REJOUE. Le produit A est encore là (il ne
+  # se purge pas tant que l'arbitrage A1 n'est pas tranché), donc
+  # une nuit manquée se rattrape par `run.sh agrume --day AAAA-MM-JJ`.
+  # Alerter au premier échec ferait sonner pour une chose réparable,
+  # et on cesserait de lire les alertes de `collect`, qui, elle, ne
+  # se rattrape pas.
+  SEUIL_ALERTE=2
 elif [[ "$MODE" == "garde-fou-r2" ]]; then
   # Un listing complet des buckets, rien de plus. 10 min est déjà très
   # large ; si un jour ça dépasse, c'est que le compte a explosé — et
@@ -250,6 +264,17 @@ fi
 if ! "$PYTHON" -c "import boto3" >/dev/null 2>&1; then
   alerter "$LIBELLE ($MODE)" \
     "boto3 absent de $PYTHON — l'archive R2 ne peut pas s'écrire"
+  exit 1
+fi
+# ⚠️ Même raisonnement pour numpy, que SEUL le mode `agrume` exige :
+# le produit A est un `.npz`. On le constate ici, une fois, plutôt
+# que de le découvrir dans une trace d'import à 03:40. ⛔ Et on ne
+# fabrique PAS de version « qui saute si numpy est absent » : un job
+# qui se désactive tout seul est un job dont on cesse de lire le
+# journal (règle du lot P).
+if [[ "$MODE" == "agrume" ]] && ! "$PYTHON" -c "import numpy" >/dev/null 2>&1; then
+  alerter "$LIBELLE ($MODE)" \
+    "numpy absent de $PYTHON — le produit A ne peut pas se relire"
   exit 1
 fi
 
