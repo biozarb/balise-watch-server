@@ -194,7 +194,7 @@ def main(argv=None):
              all(s["sol_station_m"] for s in RS.STATIONS if s["active"]))
 
     print("\n── 7. L'AXE : les radiosondages passent EN DERNIER ──")
-    from colonnes import balises_du_domaine
+    from quantification import balises_du_domaine
     axe = balises_du_domaine([
         dict(id="999", lat=45.5, lon=6.5, name="balise", source="pioupiou"),
         dict(id="RS-06610", lat=46.813, lon=6.943, name="Payerne",

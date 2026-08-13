@@ -321,7 +321,7 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
 
     ⛔ LE VENT S'INTERPOLE PAR u ET v SÉPARÉMENT, JAMAIS PAR L'ANGLE.
     C'est la première ligne des pièges déjà payés du lot, et
-    `test_colonnes.py` porte déjà le cas qui l'exige (une colonne qui
+    `verif/test_colonnes.py` porte déjà le cas qui l'exige (une colonne qui
     traverse 350° → 010° : la moyenne des angles donne 180°, celle des
     composantes donne 0°). Ici la règle est tenue par CONSTRUCTION —
     aucune direction n'est calculée avant l'interpolation, et

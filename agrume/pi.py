@@ -63,7 +63,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from colonnes import quantifier  # noqa: E402
+from quantification import quantifier  # noqa: E402
 from domaine import (DOMAINE, GRID_3D, NIVEAUX_H_0025,  # noqa: E402
                      NIVEAUX_H_AROMEPI)
 
@@ -119,7 +119,7 @@ ECHEANCES_MIN = tuple(range(0, HORIZON_MINUTES + 1, PAS_MINUTES))
 assert len(ECHEANCES_MIN) == 25
 
 # ── Les paramètres ────────────────────────────────────────────────────
-# ⓘ `tolerance` et `decalage` suivent la convention de `colonnes.py` —
+# ⓘ `tolerance` et `decalage` suivent la convention de `quantification.py` —
 # c'est `quantifier()` de ce module qui est réutilisé, pas une seconde
 # copie. Le projet s'est déjà fait mordre par une constante dupliquée
 # (`LEVELS` entre deux dépôts, cf. BUGS.md).
@@ -427,7 +427,7 @@ class ColonnesPI(_Base):
     **La rétention du portail est de 4,25 jours : ce qui n'est pas
     archivé maintenant est perdu pour toujours.**
 
-    ⚠️ L'axe des balises est celui de `colonnes.balises_du_domaine()`, et
+    ⚠️ L'axe des balises est celui de `quantification.balises_du_domaine()`, et
     il est embarqué dans le manifeste. Sans lui, l'archive ne se suffit
     pas : un consommateur devrait retrouver le bon artefact au bon sha
     pour savoir à quelle balise correspond la colonne 47.

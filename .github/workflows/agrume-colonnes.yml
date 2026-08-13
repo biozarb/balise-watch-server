@@ -21,7 +21,9 @@ name: AGRUME — colonnes aux balises (produit A) + grille 3D (produit B)
 #  Il est calé TARD volontairement : si le poller du VPS a fait son
 #  travail, le run est déjà archivé et l'ingestion le reverra simplement
 #  comme déjà couvert. Le filet existe pour qu'une panne du VPS ne laisse
-#  pas de TROU dans une archive qui est définitive. ⚠️ Écrire deux fois
+#  pas de TROU dans l'archive. ⚠️ 13/08 : l'archive n'est plus définitive
+#  (rétention glissante 7 j) mais un trou coûte AUTANT — c'est une
+#  journée que le scoring ne notera jamais, et les scores sont éternels. ⚠️ Écrire deux fois
 #  le même run est sans danger : la clé porte le run, donc on réécrit le
 #  même objet au même endroit.
 #
@@ -98,7 +100,18 @@ jobs:
         run: |
           python3 tools/test_mf_s3.py
           python3 agrume/test_orographie.py
-          python3 agrume/test_colonnes.py
+          python3 verif/test_colonnes.py
+          # ⛔ Lot J (13/08). Deux bancs qui gardent une COUPE, pas un
+          # calcul : `test_separation` refuse toute nouvelle flèche
+          # `agrume/` → `verif/` (une séparation ne se maintient pas
+          # toute seule — six mois plus tard un import la défait sans
+          # qu'aucun écran ne change) ; `test_purge` rejoue la
+          # rétention glissante sur un faux backend, AVEC des trous
+          # d'ingestion et une panne de deux jours, et se prouve
+          # capable d'échouer en se rejouant contre la purge naïve
+          # qu'on a écartée.
+          python3 verif/test_separation.py
+          python3 verif/test_purge.py
           python3 agrume/test_grille.py
           # ⚠️ Ces trois-là ne protègent PAS l'ingestion : ils protègent
           # la LECTURE (profil, coupe, confrontation au ballon). Ils sont

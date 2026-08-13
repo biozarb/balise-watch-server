@@ -270,8 +270,12 @@ DOMAINE = dict(latmin=44.8, latmax=46.3, lonmin=5.5, lonmax=7.6)
 # Noire et d'arrière-pays basque. Leur colonne est extractible
 # (l'indexation se fait sur la grille NATIVE, pas sur la fenêtre) — c'est
 # leur SOL qui manquait. ✅ Traité le 12/08 par `ZONES_INTERET` plus bas :
-# elles reçoivent une petite fenêtre de sol et entrent dans l'archive
-# définitive. ⛔ Elles n'entrent PAS dans le produit B pour autant : pas
+# elles reçoivent une petite fenêtre de sol et entrent dans l'archive.
+# ⛔⛔ 13/08 — ELLES N'Y SONT JAMAIS ENTRÉES EN FAIT :
+# `balises_du_domaine()` ne recopie pas `hors_domaine`, donc `isolees`
+# est toujours vide et l'archive porte 182 points, pas 227. Constaté à
+# l'audit, consigné sur décision de Yann, PAS corrigé — les runs déjà
+# archivés resteront à 182. ⛔ Elles n'entrent PAS dans le produit B : pas
 # de calque, pas de coupe, hors grille 3D.
 DOMAINE_PYRENEES = dict(latmin=42.40, latmax=43.40, lonmin=-1.80, lonmax=3.30)
 
@@ -291,12 +295,16 @@ DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES}
 # ⚠️ POURQUOI CETTE NOTION EXISTE, ET POURQUOI ELLE EST DANGEREUSE SANS
 # CE COMMENTAIRE. Les boîtes de production sont dimensionnées par le
 # budget du produit B — la grille jetable. Le produit A, lui, est une
-# archive définitive par balise : `colonnes.index_plats()` indexe la
-# grille NATIVE France entière, donc extraire la colonne d'une balise
-# hors boîte ne coûte rien de plus. Seul son SOL manque. Laisser 21 sites
-# de vol pyrénéens hors de l'archive définitive à cause du budget d'un
-# produit jetable, ce serait laisser le produit jetable commander le
-# produit permanent — exactement l'inverse de l'ordre voulu.
+# archive PAR BALISE : `quantification.index_plats()` indexe la grille
+# NATIVE France entière, donc extraire la colonne d'une balise hors
+# boîte ne coûte rien de plus. Seul son SOL manque. Laisser 21 sites de
+# vol pyrénéens hors de l'archive à cause du budget d'un produit
+# jetable, ce serait laisser le jetable commander ce qui NOURRIT LES
+# SCORES — exactement l'inverse de l'ordre voulu.
+# ⚠️ 13/08 : l'archive n'est plus « permanente » (rétention glissante
+# 7 j), mais l'argument ne bouge pas d'un pouce — ce sont les SCORES
+# qu'elle nourrit qui sont éternels, et un site absent de l'archive est
+# un site que rien ne notera jamais.
 #
 # ⛔ CE QUE CES BALISES N'ONT PAS, ET IL FAUT LE DIRE : elles auront un
 # profil vertical (produit A), jamais de calque ni de coupe (produit B).
@@ -362,8 +370,8 @@ MAILLE_KM2 = {GRID_FINE: 0.87, GRID_3D: 5.43}
 # recouvrent — sinon « deux fenêtres » deviendrait « deux orographies ».
 #
 # ⚠️ Rien de tout cela n'était nécessaire pour EXTRAIRE les colonnes :
-# `colonnes.index_plats()` indexe la grille NATIVE (France entière), pas
-# la fenêtre. C'est l'ALTITUDE DU SOL qui manquait, et elle seule.
+# `quantification.index_plats()` indexe la grille NATIVE (France
+# entière), pas la fenêtre. C'est l'ALTITUDE DU SOL qui manquait, et elle seule.
 # Demi-fenêtre en degrés autour de chaque station. 0,25° ≈ 28 km, choisi
 # sur une MESURE et pas sur une intuition : la dérive du ballon, intégrée
 # sur les deux sondages réels de Payerne du 10/08, vaut 1,0 km à 2 000 m,
@@ -533,7 +541,7 @@ def dans_domaine(lat, lon, nom=None):
     maintenant l'appartenance à **n'importe lequel** des domaines de
     `DOMAINES`. Tous ses appelants voulaient déjà dire « ce point est-il
     servable ? » et non « est-il dans les Alpes ? » — `freeze_balises`
-    filtre les candidates à l'axe, `colonnes` écarte celles qui n'auront
+    filtre les candidates à l'axe, `quantification` écarte celles qui n'auront
     pas de sol. Passer `nom` restreint à un domaine précis, pour les rares
     cas qui veulent vraiment celui-là et pas un autre.
 

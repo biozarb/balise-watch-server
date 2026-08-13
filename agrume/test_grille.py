@@ -44,8 +44,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
 import grille as GR  # noqa: E402
-import colonnes as CO  # noqa: E402
-from colonnes import erreur_quantification, quantifier  # noqa: E402
+import quantification as CO  # noqa: E402
+from quantification import (erreur_quantification,  # noqa: E402
+                            quantifier)
 from domaine import NIVEAUX_H_0025  # noqa: E402
 from orographie import Orographie  # noqa: E402
 
@@ -145,7 +146,7 @@ def section_10_identite_ab():
 
     # ⚠️ ET LA RÉCIPROQUE : le banc doit ÊTRE CAPABLE d'échouer. Un
     # contrôle d'identité qui passe sur une orographie décalée ne vérifie
-    # rien du tout — c'est l'erreur que `test_colonnes.py` a déjà faite le
+    # rien du tout — c'est l'erreur que `verif/test_colonnes.py` a déjà faite le
     # 12/08 en nourrissant `erreur_quantification` dans la mauvaise unité.
     o_faux = orog_bidon(i0=I0 + 1)
     fen_faux = GR.decouper(champ, META, o_faux)
@@ -160,7 +161,7 @@ def section_10_identite_ab():
     # la faisaient pas au même endroit, l'axe vertical de la coupe et
     # celui du calque ne seraient pas le même — et les deux resteraient
     # plausibles.
-    from colonnes import PARAM_ALTITUDE                    # noqa: PLC0415
+    from quantification import PARAM_ALTITUDE             # noqa: PLC0415
     # ⚠️ REMIS DANS LA PLAGE PHYSIQUE, et ce n'est pas cosmétique :
     # `quantifier` NaN-ifie tout ce qui dépasse `PLAFOND_PHYSIQUE['zp']`
     # (20 000 m). La première version de ce bloc multipliait le champ

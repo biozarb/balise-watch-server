@@ -208,7 +208,7 @@ def echantillonner(depart, arrivee, pas_km, n=None):
     if total <= 0:
         raise ValueError("le départ et l'arrivée sont le même point : "
                          "un transect de longueur nulle n'est pas une coupe, "
-                         "c'est un sondage (voir `agrume/sonder.py`).")
+                         "c'est un sondage (voir `verif/sonder.py`).")
     if n is None:
         n = max(2, int(round(total / pas_km)) + 1)
     if n < 2:

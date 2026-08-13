@@ -189,7 +189,7 @@ def _rang(b):
     fichier (`int(...) if isdigit() else 0`), ce qui se lit très mal.
 
     ⚠️ Et ce tri-ci ne range QUE le fichier figé. L'axe réel de l'archive
-    est trié ailleurs, par `colonnes.balises_du_domaine()`, et sur la
+    est trié ailleurs, par `quantification.balises_du_domaine()`, et sur la
     CHAÎNE de l'identifiant. Deux tris pour une même notion, c'est un de
     trop — c'est écrit des deux côtés en attendant qu'on tranche.
     """

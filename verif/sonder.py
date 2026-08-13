@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════
-#  agrume/sonder.py — lire un profil vertical, en tableau ou en JSON
+#  verif/sonder.py — lire un profil vertical, en tableau ou en JSON
 #                                                        (10/08/2026)
 #
 #  Le visage de l'étape 5. Lit une archive du produit A — locale ou sur
@@ -12,9 +12,9 @@
 #  être prise en même temps. Câbler une route maintenant, ce serait
 #  figer deux choses d'un coup.
 #
-#      python3 agrume/sonder.py --archive c.npz c.json --balise 1377
-#      python3 agrume/sonder.py --run 2026-08-10T06:00:00Z --balise 1377
-#      python3 agrume/sonder.py --archive … --balise 1377 --json
+#      python3 verif/sonder.py --archive c.npz c.json --balise 1377
+#      python3 verif/sonder.py --run 2026-08-10T06:00:00Z --balise 1377
+#      python3 verif/sonder.py --archive … --balise 1377 --json
 # ══════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -28,9 +28,12 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "agrume"))
 
 import profil as P  # noqa: E402
-from colonnes import Abort, Colonnes  # noqa: E402
+from colonnes import Colonnes  # noqa: E402
+from quantification import Abort  # noqa: E402
 
 
 def depuis_r2(run, crier=print):

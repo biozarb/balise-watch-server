@@ -42,9 +42,12 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "verif"))
 
 import transect as T  # noqa: E402
-from colonnes import Colonnes, PARAMS_0025  # noqa: E402
+from colonnes import Colonnes  # noqa: E402
+from quantification import PARAMS_0025  # noqa: E402
 from domaine import DOMAINE, NIVEAUX_H_0025  # noqa: E402
 from grille import Grille, PARAMS_GRILLE  # noqa: E402
 from profil import niveaux_hauteur  # noqa: E402

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════
-#  agrume/confronter_sondage.py — le profil AGRUME contre un vrai ballon
+#  verif/confronter_sondage.py — le profil AGRUME contre un vrai ballon
 #                                                        (10/08/2026)
 #
 #  Le visage de l'étape 5 bis, comme `sonder.py` l'est de l'étape 5.
 #  Lit une archive du produit A, va chercher le radiosondage Wyoming du
 #  même instant, et publie les écarts par tranche.
 #
-#      python3 agrume/confronter_sondage.py --run 2026-08-10T00:00:00Z \
+#      python3 verif/confronter_sondage.py --run 2026-08-10T00:00:00Z \
 #              --station 06610 --date 2026-08-10 --heure 12
-#      python3 agrume/confronter_sondage.py --archive c.npz c.json \
+#      python3 verif/confronter_sondage.py --archive c.npz c.json \
 #              --station 06610 --date 2026-08-10 --heure 00 --json
 #
 #  ⚠️ Sans `--run`, l'outil DIT quels runs conviennent et s'arrête. Il ne
@@ -30,10 +30,13 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "agrume"))
 
 import profil as P  # noqa: E402
 import radiosondage as RS  # noqa: E402
-from colonnes import Abort, Colonnes  # noqa: E402
+from colonnes import Colonnes  # noqa: E402
+from quantification import Abort  # noqa: E402
 from sonder import depuis_r2, trouver_balise  # noqa: E402
 
 

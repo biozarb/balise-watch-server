@@ -97,7 +97,8 @@ from datetime import datetime, timedelta, timezone
 # l'import : la clé et l'appel `Storage` tiennent en six lignes, le
 # sys.path global est le vrai coût.
 _ICI = pathlib.Path(__file__).resolve().parent
-for _p in (_ICI.parent / "agrume", _ICI.parent / "tools"):
+for _p in (_ICI.parent / "agrume", _ICI.parent / "verif",
+           _ICI.parent / "tools"):
     if str(_p) not in sys.path:
         sys.path.append(str(_p))
 

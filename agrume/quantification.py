@@ -1,12 +1,41 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════
-#  agrume/colonnes.py — le produit A : une colonne verticale par balise
-#                                                        (10/08/2026)
+#  agrume/quantification.py — le FORMAT du produit A : ce qu'on archive,
+#  dans quelle unité, avec quelle précision      (extrait le 13/08/2026)
 #
-#  C'est LE SOCLE du lot H. Tout le reste s'y appuie : le sondage
-#  vertical en un point, la confrontation aux mesures des balises, et
-#  plus tard l'alimentation du score. Il est archivé indéfiniment, ce qui
-#  fait de son format une décision à long terme.
+#  ⛔ CE FICHIER EST LA MOITIÉ « MODÈLE » DE L'ANCIEN `agrume/colonnes.py`
+#  — Lot J, arbitrage A3 de Yann. La coupe passe ICI, et pas ailleurs,
+#  pour une raison mesurable : le conteneur du produit A n'est importé
+#  que par la vérification, tandis que la quantification est importée par
+#  le produit B (`grille.py`), par AROME-PI (`pi.py`) et par le profil
+#  (`profil.py`) — tous côté modèle. Tout déplacer dans `verif/` aurait
+#  fait dépendre le MODÈLE du module de scoring ; tout laisser dans
+#  `agrume/` aurait laissé le conteneur d'une archive de vérification au
+#  milieu du modèle. On coupe donc, on ne déplace pas.
+#
+#  ⚠️ LE GESTE EST RISQUÉ, ET LE FILET EST NOMMÉ. `quantifier()` est le
+#  SEUL endroit du projet qui convertisse les unités : les deux produits
+#  y passent, et un facteur qui bougerait pour l'un bougerait en silence
+#  pour l'autre. Le banc d'identité A↔B (`agrume/test_grille.py`, §10)
+#  compare les deux produits colonne par colonne À TRAVERS `quantifier` —
+#  il verrait la divergence à l'arrondi de publication près.
+#
+#  ⛔ LA RÈGLE DE DÉPENDANCE, ET ELLE EST BANCÉE (`verif/test_separation.py`) :
+#      `verif/` peut importer `agrume/`.
+#      `agrume/` n'importe JAMAIS `verif/` — SAUF `ingest_colonnes.py`,
+#      seule exception, assumée et écrite : l'ingestion est une
+#      infrastructure partagée qui remplit les DEUX produits dans le même
+#      `sur_champ`, depuis les mêmes messages (7,6 s contre 7,9 mesurés).
+#      On sépare les MODULES, jamais la passe.
+#
+#  ── ⚠️ L'ARCHIVE N'EST PLUS DÉFINITIVE (13/08/2026, arbitrage A1) ─────
+#  Cet en-tête disait « il est archivé indéfiniment, ce qui fait de son
+#  format une décision à long terme ». La première moitié est fausse
+#  depuis le 13/08 : `verif/purge.py` tient une rétention GLISSANTE de
+#  7 jours, et ce sont les SCORES qui sont éternels, pas les colonnes.
+#  ⛔ La seconde moitié, elle, est devenue PLUS vraie, pas moins : on
+#  renonce à re-scorer le passé (renoncement A2), donc un format qu'on
+#  changerait ne se rattraperait jamais sur les runs déjà notés.
 #
 #  ── LA DÉCISION DE FORMAT QUI COMPTE : ON N'ASSEMBLE PAS À L'INGESTION ─
 #
@@ -44,7 +73,7 @@
 #  température. La parade est de stocker la température en DEGRÉS
 #  CELSIUS (±60 → pas de 0,03 °C) plutôt qu'en kelvins. Ce n'est pas un
 #  détail cosmétique : c'est un facteur 8 sur l'erreur de quantification,
-#  gratuit, et invisible si on n'y pense pas. `test_colonnes.py` mesure
+#  gratuit, et invisible si on n'y pense pas. `verif/test_colonnes.py` mesure
 #  l'erreur réelle par paramètre et échoue si elle dépasse le seuil
 #  annoncé ici.
 # ══════════════════════════════════════════════════════════════════════
@@ -164,7 +193,7 @@ PARAMS_ISO = (
 #
 # Le float16 a 10 bits de mantisse, donc un pas RELATIF de ~0,1 %. Entre
 # 4 096 et 8 192 m, le pas vaut **4 mètres**, soit une erreur d'arrondi
-# pouvant atteindre **2 m** — mesuré, pas déduit : `test_colonnes.py`
+# pouvant atteindre **2 m** — mesuré, pas déduit : `verif/test_colonnes.py`
 # donne 2,00 m d'erreur maximale sur 20 000 tirages entre 0 et 7 500 m,
 # contre 0,24 millimètre en float32.
 #
@@ -176,7 +205,7 @@ PARAMS_ISO = (
 # une altitude va de 0 à 7 500 m, on ne peut pas la recentrer.
 #
 # Le coût de la précision est dérisoire : 14 niveaux × 125 balises ×
-# 25 échéances × 4 o = **175 Ko par run**. `test_colonnes.py` mesure
+# 25 échéances × 4 o = **175 Ko par run**. `verif/test_colonnes.py` mesure
 # l'erreur des deux dtypes et échoue si float32 ne fait pas au moins
 # vingt fois mieux (mesuré : ×8 192).
 DTYPE_ALTITUDE = "float32"
@@ -235,7 +264,7 @@ PLAFOND_PHYSIQUE["rayonnement"] = 40000.0
 #
 # ⛔ Corollaire à ne jamais perdre : `ingest_colonnes.py` NE DOIT PLUS
 # diviser. Diviser deux fois donne 331 m à 700 hPa au lieu de 3 240 —
-# plausible au premier coup d'œil. `test_colonnes.py` rejoue le chemin
+# plausible au premier coup d'œil. `verif/test_colonnes.py` rejoue le chemin
 # complet et exige ~3 240 m.
 # ══════════════════════════════════════════════════════════════════════
 #  LES CHAMPS DE SURFACE — étape 12 bis, 13/08/2026
@@ -523,188 +552,3 @@ def erreur_quantification(valeurs, param, dtype=np.float16):
     a = (np.asarray(valeurs, dtype=np.float64) * param.get("facteur", 1.0)
          + param["decalage"] + param.get("decalage_precision", 0.0))
     return float(np.nanmax(np.abs(a - a.astype(dtype).astype(np.float64))))
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  Le conteneur d'archive
-# ══════════════════════════════════════════════════════════════════════
-class Colonnes:
-    """Un run, une archive.
-
-    Disposition des tableaux, écrite ici et dans le manifeste — c'est le
-    contrat de lecture, et il doit survivre à ce fichier :
-
-        c0025 : (balise, paramètre, niveau, échéance)  float16
-                paramètres = PARAMS_0025 dans l'ordre
-                niveaux    = NIVEAUX_H_0025 (25, de 10 à 3000 m/sol)
-        c001  : (balise, paramètre, niveau, échéance)  float16
-                paramètres = PARAMS_001 (u, v)
-                niveaux    = NIVEAUX_H_001 (4 : 10, 20, 50, 100 m/sol)
-        ciso  : (balise, paramètre, niveau, échéance)  float16
-                paramètres = PARAMS_ISO (u, v, t, r)
-                niveaux    = NIVEAUX_P (14, de 1000 à 400 hPa)
-        ziso  : (balise, niveau, échéance)             **float32**
-                l'ALTITUDE-MER de chaque niveau isobare, en mètres
-
-    ⚠️ Les niveaux hauteur sont AGL — au-dessus du sol DU MODÈLE. L'axe
-    altitude-mer se reconstruit avec `z_001` / `z_0025`, qui sont dans le
-    manifeste, balise par balise :
-        altitude_ASL = z_<maille>[balise] + niveau
-    Servir un niveau sans dire à quel sol il se rapporte serait faux de
-    plusieurs centaines de mètres en montagne.
-
-    ⚠️ Les niveaux ISOBARES, eux, sont déjà absolus — mais leur altitude
-    est une VARIABLE, pas une constante : « 700 hPa » n'est pas à la même
-    altitude d'un point à l'autre ni d'une heure à l'autre. D'où `ziso`,
-    qui est le seul tableau en float32 de toute l'archive (cf.
-    `DTYPE_ALTITUDE`).
-    """
-
-    def __init__(self, run, balises, steps):
-        self.run = run
-        self.balises = list(balises)
-        self.steps = list(steps)
-        nb, ns = len(self.balises), len(self.steps)
-        self.c0025 = np.full((nb, len(PARAMS_0025), len(NIVEAUX_H_0025), ns),
-                             np.nan, dtype=np.float16)
-        self.c001 = np.full((nb, len(PARAMS_001), len(NIVEAUX_H_001), ns),
-                            np.nan, dtype=np.float16)
-        self.ciso = np.full((nb, len(PARAMS_ISO), len(NIVEAUX_P), ns),
-                            np.nan, dtype=np.float16)
-        self.ziso = np.full((nb, len(NIVEAUX_P), ns), np.nan, dtype=np.float32)
-        self.i_niveau_0025 = {n: k for k, n in enumerate(NIVEAUX_H_0025)}
-        self.i_niveau_001 = {n: k for k, n in enumerate(NIVEAUX_H_001)}
-        self.i_niveau_p = {n: k for k, n in enumerate(NIVEAUX_P)}
-        self.i_param_0025 = {p["nom"]: k for k, p in enumerate(PARAMS_0025)}
-        self.i_param_001 = {p["nom"]: k for k, p in enumerate(PARAMS_001)}
-        self.i_param_iso = {p["nom"]: k for k, p in enumerate(PARAMS_ISO)}
-        self.i_step = {s: k for k, s in enumerate(self.steps)}
-
-    def accepte_echeance(self, step):
-        """⛔ L'ARCHIVE ET LA GRILLE N'ONT PLUS LE MÊME HORIZON (13/08).
-
-        Le produit B va jusqu'à `MAX_HOURS_GRILLE` (51 h), l'archive reste
-        à `MAX_HOURS` (24 h) parce qu'elle est DÉFINITIVE. L'ingestion
-        décode donc des messages que ce conteneur-ci ne veut pas.
-
-        ⚠️ CE TEST N'EST PAS UNE POLITESSE. Sans lui, `poser()` lèverait
-        un `KeyError` sur `self.i_step[step]` — et `parcourir()` AVALE les
-        exceptions du callback. La grille, qui se remplit dans le même
-        `sur_champ` juste après, n'aurait jamais reçu ces échéances-là.
-        On aurait donc perdu exactement ce que la rallonge vient chercher,
-        en silence, sur un chemin où rien ne s'allume.
-        """
-        return step in self.i_step
-
-    def poser(self, grille, param_nom, niveau, step, valeurs_balises):
-        if grille == GRID_3D:
-            self.c0025[:, self.i_param_0025[param_nom],
-                       self.i_niveau_0025[niveau], self.i_step[step]] = valeurs_balises
-        else:
-            self.c001[:, self.i_param_001[param_nom],
-                      self.i_niveau_001[niveau], self.i_step[step]] = valeurs_balises
-
-    def poser_isobare(self, param_nom, niveau, step, valeurs_balises):
-        """⚠️ `zp` va dans `ziso` (float32) et NULLE PART ailleurs : c'est
-        l'axe vertical, il ne passe pas par le float16."""
-        if param_nom == "zp":
-            self.ziso[:, self.i_niveau_p[niveau], self.i_step[step]] = valeurs_balises
-        else:
-            self.ciso[:, self.i_param_iso[param_nom],
-                      self.i_niveau_p[niveau], self.i_step[step]] = valeurs_balises
-
-    # ── Complétude ────────────────────────────────────────────────────
-    def remplissage(self):
-        """Part de cases NON vides, par maille. Un run partiel n'est pas
-        une erreur (Météo-France publie progressivement) mais il doit se
-        VOIR : un tableau à moitié NaN qui passe pour complet, c'est un
-        score faussé des semaines plus tard."""
-        def part(a):
-            return float(np.isfinite(a.astype(np.float32)).mean()) if a.size else 0.0
-        return {GRID_3D: part(self.c0025), GRID_FINE: part(self.c001),
-                "isobares": part(self.ciso), "altitude_iso": part(self.ziso)}
-
-    def remplissage_par_parametre(self):
-        """Le même compte, paramètre par paramètre — et c'est celui qui
-        sert vraiment.
-
-        ⚠️ Un remplissage global de 80 % ne dit pas si le run est
-        incomplet ou si un champ manque par construction. Le 10/08, ces
-        80 % venaient entièrement d'un fait mesuré et attendu : **la TKE
-        n'existe pas à l'échéance 0**. Sans ce détail par paramètre, on
-        cherche un bug d'ingestion là où il n'y en a pas — ou pire, on
-        s'habitue à un chiffre qui masquerait un vrai trou le jour venu.
-        """
-        def part(a):
-            return round(float(np.isfinite(a.astype(np.float32)).mean()), 4)
-        out = {GRID_3D: {}, GRID_FINE: {}, "isobares": {}}
-        for k, p in enumerate(PARAMS_0025):
-            out[GRID_3D][p["nom"]] = part(self.c0025[:, k])
-        for k, p in enumerate(PARAMS_001):
-            out[GRID_FINE][p["nom"]] = part(self.c001[:, k])
-        for k, p in enumerate(PARAMS_ISO):
-            out["isobares"][p["nom"]] = part(self.ciso[:, k])
-        out["isobares"]["altitude"] = part(self.ziso)
-        return out
-
-    # ── Sérialisation ─────────────────────────────────────────────────
-    def manifeste(self, extra=None):
-        m = dict(
-            produit="AGRUME produit A — colonnes verticales aux balises",
-            run=self.run,
-            echeances=self.steps,
-            niveaux={GRID_3D: list(NIVEAUX_H_0025),
-                     GRID_FINE: list(NIVEAUX_H_001),
-                     "isobares_hPa": list(NIVEAUX_P)},
-            parametres={
-                GRID_3D: [dict(nom=p["nom"], unite=p["unite"],
-                               paquet=p["paquet"]) for p in PARAMS_0025],
-                GRID_FINE: [dict(nom=p["nom"], unite=p["unite"],
-                                 paquet=p["paquet"]) for p in PARAMS_001],
-                "isobares": [dict(nom=p["nom"], unite=p["unite"],
-                                  paquet=p["paquet"]) for p in PARAMS_ISO]},
-            disposition=("(balise, parametre, niveau, echeance) en float16 ; "
-                         "ziso = (balise, niveau, echeance) en float32"),
-            reference_verticale=("niveaux hauteur AGL au-dessus du sol "
-                                 "MODÈLE : altitude_ASL = z_<maille>[balise] "
-                                 "+ niveau. Niveaux isobares déjà absolus, "
-                                 "leur altitude est dans `ziso` (m, float32) "
-                                 "et varie dans le temps et l'espace."),
-            balises=self.balises,
-            remplissage=self.remplissage(),
-            remplissage_par_parametre=self.remplissage_par_parametre(),
-            avertissement=(
-                "Les deux mailles sont archivées SÉPARÉMENT, à leurs niveaux "
-                "natifs. Le raccord 0,01°/0,025° à 100 m/sol est une décision "
-                "de lecture : sa marche n'est pas encore mesurée (point 7 de "
-                "la séquence du lot H). 35 m et 75 m n'existent PAS en "
-                "maille fine. La TKE n'existe PAS à l'échéance 0 (mesuré) : "
-                "un remplissage < 100 % sur elle seule est normal. Les "
-                "niveaux isobares sous le sol du modèle sont ARCHIVÉS mais "
-                "physiquement vides de sens : ils doivent être masqués à la "
-                "lecture (altitude < z_<maille>[balise])."))
-        if extra:
-            m.update(extra)
-        return m
-
-    def ecrire_npz(self, chemin):
-        np.savez_compressed(chemin, c0025=self.c0025, c001=self.c001,
-                            ciso=self.ciso, ziso=self.ziso,
-                            echeances=np.asarray(self.steps, dtype=np.int16))
-
-    @staticmethod
-    def lire_npz(chemin, manifeste):
-        man = (json.loads(manifeste) if isinstance(manifeste, (str, bytes))
-               else manifeste)
-        with np.load(chemin) as z:
-            c = Colonnes(man["run"], man["balises"], list(man["echeances"]))
-            c.c0025 = z["c0025"]
-            c.c001 = z["c001"]
-            # ⚠️ Les archives écrites AVANT l'étape 5 n'ont pas d'isobares.
-            # On les relit quand même, avec des tableaux vides plutôt
-            # qu'une exception : une archive ancienne reste une archive
-            # valide pour ce qu'elle contient, et le remplissage le dira.
-            if "ciso" in z:
-                c.ciso = z["ciso"]
-                c.ziso = z["ziso"]
-        return c, man

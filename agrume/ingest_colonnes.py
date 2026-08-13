@@ -63,11 +63,24 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "verif"))
 
-from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL,  # noqa: E402
-                      PARAMS_001, PARAMS_0025, PARAMS_ISO, PARAMS_SURFACE,
-                      Abort, Colonnes, balises_du_domaine, index_plats,
-                      quantifier, verifier_grille)
+# ⛔ LA SEULE FLÈCHE `agrume/` → `verif/` DU DÉPÔT, ET ELLE EST NOMMÉE.
+# Le conteneur du produit A vit dans `verif/` depuis le 13/08 (Lot J,
+# arbitrage A3) parce qu'il n'existe plus que pour nourrir la
+# vérification ; sa quantification reste dans `agrume/` parce que le
+# produit B, AROME-PI et le profil en dépendent. L'ingestion, elle,
+# remplit les DEUX produits dans le MÊME `sur_champ`, depuis les mêmes
+# messages (7,6 s contre 7,9 mesurés le 10/08) : on sépare les MODULES,
+# jamais la passe. `verif/test_separation.py` connaît cette exception
+# par son nom et refuse toutes les autres.
+from colonnes import Colonnes  # noqa: E402
+from quantification import (PARAM_ALTITUDE,  # noqa: E402
+                            PARAM_PRESSION_SOL, PARAMS_001, PARAMS_0025,
+                            PARAMS_ISO, PARAMS_SURFACE, Abort,
+                            balises_du_domaine, index_plats,
+                            quantifier, verifier_grille)
 from domaine import (GRID_3D, GRID_FINE, MAX_HOURS, MAX_HOURS_GRILLE,  # noqa: E402
                      MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES,
                      PAQUETS_INGESTION, PAQUETS_ISOBARES, PAQUETS_SURFACE)
@@ -127,8 +140,13 @@ def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
     raison, apprise à la dure le 25/07 : prendre le run le plus récent
     dès qu'UN fichier existe donne un run éternellement incomplet, réécrit
     au run suivant, dont les échéances lointaines ne sont JAMAIS publiées.
-    Ici le risque est pire, parce que l'archive est définitive : une
-    colonne tronquée écrite aujourd'hui le reste pour toujours.
+    Ici le risque est pire, parce que l'archive n'est jamais réécrite :
+    une colonne tronquée écrite aujourd'hui le reste jusqu'à sa purge —
+    et la journée qu'elle devait faire noter est notée AVEC, ou pas
+    notée du tout. ⚠️ Depuis le 13/08 la rétention est glissante
+    (7 jours, `verif/purge.py`) : le run fautif finit par disparaître,
+    mais le SCORE qu'il a produit, lui, est éternel. On ne rattrape
+    donc rien — on renonce à re-scorer le passé (renoncement A2).
     """
     base = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     base -= timedelta(hours=base.hour % 3)
@@ -251,7 +269,7 @@ def parcourir(chemin, veut, sur_champ, steps_voulus):
     branchant le produit B : une fenêtre de la mauvaise maille posée dans
     la grille aurait échoué **sans un mot**.
 
-    On ne rend pas ça fatal — l'archive du produit A est définitive et
+    On ne rend pas ça fatal — un run du produit A ne se réécrit pas, et
     l'interrompre coûterait un run entier pour un message. Mais on
     COMPTE, et on renvoie le premier incident : un run qui perd des
     champs doit se voir dans le bilan, pas se deviner dans un
@@ -443,8 +461,11 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     # `--max-heures 12` — l'entrée de dispatch du workflow — archivait
     # quand même 0–24 h : la rallonge du produit B ramenait des échéances
     # au-delà de 12, et la constante les laissait passer. Douze heures
-    # gravées POUR TOUJOURS dans une archive définitive, que personne
+    # gravées dans une archive qu'on ne réécrit jamais, que personne
     # n'avait demandées, et le journal ressemblait au cas nominal.
+    # ⚠️ 13/08 : la rétention est glissante, donc l'archive fautive
+    # s'efface au bout de 7 jours — mais les SCORES qu'elle a nourris
+    # restent, et ceux-là ne se rejouent pas (renoncement A2).
     steps_archive = [s for s in steps if s <= max_heures_archive]
     if len(steps_archive) < len(steps):
         crier(f"  ⓘ produit A : {len(steps_archive)} échéances archivées "
@@ -1063,9 +1084,11 @@ def main(argv=None):
             secondes_reseau=round(mesures["t_dl"], 1),
             secondes_parsing=round(mesures["t_parse"], 1),
             # ⚠️ Publié dans le manifeste, pas seulement journalisé : un
-            # log de runner disparaît au bout de 90 jours, une archive
-            # définitive se relit dans cinq ans. Si un run a perdu des
-            # champs en silence, il faut que l'archive elle-même le dise.
+            # log de runner disparaît au bout de 90 jours, l'archive se
+            # relit tant qu'elle est là. ⚠️ 13/08 : « tant qu'elle est
+            # là » vaut désormais 7 jours (`verif/purge.py`) et non plus
+            # cinq ans — raison de PLUS de publier l'incident dans le
+            # manifeste, parce que la fenêtre pour le lire est courte.
             incidents=mesures["incidents"],
             debit_mo_s=round(mesures["octets"] / 1e6 / max(mesures["t_dl"], 1e-6), 1))))
 
@@ -1199,6 +1222,48 @@ def main(argv=None):
               json.dumps(manifeste, ensure_ascii=False).encode(),
               cache_control=CACHE_IMMUABLE)
     store.bilan()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  LA RÉTENTION GLISSANTE DU PRODUIT A — APRÈS L'ÉCRITURE, JAMAIS
+    #  AVANT (Lot J, arbitrages A1/A2 de Yann, 13/08/2026)
+    #
+    #  ⛔ L'ORDRE EST UN CONTRAT, comme celui du produit B juste en
+    #  dessous : le run courant est écrit et son manifeste publié AVANT
+    #  qu'une seule suppression ne parte. Purger d'abord ouvrirait le cas
+    #  où l'écriture échoue derrière une purge réussie — on aurait perdu
+    #  un run des deux côtés, et sans `ListObjects` personne ne saurait
+    #  lequel.
+    #
+    #  ⛔ ELLE TOURNE ICI, ET PAS SUR LE VPS, POUR UNE RAISON MESURÉE :
+    #  le jeton R2 du VPS n'a que `PutObject` (403 sur Get, List ET
+    #  Delete, sondé opération par opération le 13/08) — c'est pour ça
+    #  que la purge de la grille PI n'a jamais rien supprimé. Le jeton
+    #  des Actions, lui, sait supprimer : vérifié le même jour sur le
+    #  produit B en ligne (index à `restes = 0`, runs évincés en 404,
+    #  runs gardés en 200). Ne pas rebrancher ceci sur le VPS avant que
+    #  le jeton `Object Read & Write` demandé à Yann n'existe.
+    #
+    #  ⚠️ SOUS `except`, ET C'EST LE MÊME ARBITRAGE QUE LE PRODUIT B :
+    #  l'archive du run est déjà écrite et hors de danger. Faire tomber
+    #  le voyant pour une purge ratée apprendrait à l'ignorer. Mais
+    #  l'échec est CRIÉ — une purge qui échoue en silence est exactement
+    #  ce qui a laissé 18 objets orphelins (24 Mo) sur la grille PI.
+    # ══════════════════════════════════════════════════════════════════
+    try:
+        from purge import purger                         # noqa: PLC0415
+        journal_horodate("▶ rétention produit A (glissante, "
+                         "arbitrage A1 du 13/08)")
+        purger(store, crier=journal_horodate)
+        store.bilan()
+    except Exception as e:                                  # noqa: BLE001
+        print(f"⚠️ PURGE DU PRODUIT A NON FAITE : {type(e).__name__} — {e}\n"
+              f"   Le run est écrit et intact, le voyant reste vert. "
+              f"⛔ Mais rien ne rattrape une purge manquée tant qu'elle "
+              f"revient dans les 7 jours de la fenêtre : au-delà, "
+              f"l'objet devient invisible faute de `ListObjects`. "
+              f"Si ça se répète, regarder les droits R2 "
+              f"(`agrume-sonde-r2.yml`) et le résident "
+              f"(`tools/audit_r2.py`).", file=sys.stderr)
 
     # ══════════════════════════════════════════════════════════════════
     #  LE PRODUIT B — APRÈS, ET SOUS FILET

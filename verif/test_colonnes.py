@@ -2,7 +2,7 @@
 """
 test_colonnes.py — banc du produit A, HORS-LIGNE.
 
-    python3 agrume/test_colonnes.py
+    python3 verif/test_colonnes.py
 
 ⚠️ CE QUE CE BANC PROTÈGE.
 
@@ -37,8 +37,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "agrume"))
 
 import colonnes as C  # noqa: E402
+import quantification as Q  # noqa: E402
 import ingest_colonnes as I  # noqa: E402
 from domaine import (G, GRID_3D, GRID_FINE, NIVEAUX_H_001,  # noqa: E402
                      NIVEAUX_H_0025, NIVEAUX_P, NIVEAUX_P_TOUS)
@@ -154,7 +157,7 @@ def section_horizons():
 
 def main():
     print("── Sélection des balises ─────────────────────────────────")
-    b = C.balises_du_domaine(STATIONS, suspectes=["5"])
+    b = Q.balises_du_domaine(STATIONS, suspectes=["5"])
     verifier("seules les balises du domaine sont retenues",
              [x["id"] for x in b] == ["1", "2", "5"], str([x["id"] for x in b]))
     verifier("les bornes du domaine sont exclusives de ce qui est dehors",
@@ -167,7 +170,7 @@ def main():
              [x["id"] for x in b] == sorted(x["id"] for x in b))
 
     print("\n── Indexation dans la grille native ──────────────────────")
-    idx, hors = C.index_plats(META_0025, b)
+    idx, hors = Q.index_plats(META_0025, b)
     verifier("chaque balise du domaine a un indice", (idx >= 0).all(), str(idx))
     verifier("aucune n'est hors grille France", hors == [], str(hors))
     # Vérification arithmétique indépendante, sur la première balise.
@@ -175,28 +178,28 @@ def main():
     j = round((META_0025["lat0"] - b[0]["lat"]) / META_0025["dj"])
     verifier("l'indice plat vaut bien j × Ni + i",
              idx[0] == j * META_0025["Ni"] + i, f"{idx[0]} = {j}×1121+{i}")
-    dehors = C.index_plats(META_0025, [dict(id="x", lat=80.0, lon=0.0,
+    dehors = Q.index_plats(META_0025, [dict(id="x", lat=80.0, lon=0.0,
                                             nom="", source="",
                                             position_suspecte=False)])
     verifier("une balise hors grille vaut -1 et est signalée",
              dehors[0][0] == -1 and dehors[1] == ["x"])
 
     print("\n── ⚠️ Le garde-fou contre le décalage silencieux ──────────")
-    C.verifier_grille(META_0025, dict(META_0025), "témoin")
+    Q.verifier_grille(META_0025, dict(META_0025), "témoin")
     verifier("une grille identique passe", True)
     for cle, faux in (("Ni", 1120), ("di", 0.05), ("jScan", 1)):
         m = dict(META_0025); m[cle] = faux
         try:
-            C.verifier_grille(META_0025, m, "témoin")
+            Q.verifier_grille(META_0025, m, "témoin")
             verifier(f"un changement de {cle} fait LEVER", False)
-        except C.Abort as e:
+        except Q.Abort as e:
             verifier(f"un changement de {cle} fait LEVER",
                      "sans que rien n'ait l'air anormal" in str(e))
     m = dict(META_0025); m["lat0"] = 55.4001
     try:
-        C.verifier_grille(META_0025, m, "témoin")
+        Q.verifier_grille(META_0025, m, "témoin")
         verifier("un déplacement d'origine de 0,0001° fait LEVER", False)
-    except C.Abort:
+    except Q.Abort:
         verifier("un déplacement d'origine de 0,0001° fait LEVER", True)
 
     print("\n── ⚠️ Quantification : on MESURE la perte, on ne la suppose pas ──")
@@ -208,17 +211,17 @@ def main():
         "r": rng.uniform(0, 100, 20000),
         "tke": rng.uniform(0, 20, 20000),
     }
-    par_nom = {p["nom"]: p for p in C.PARAMS_0025}
+    par_nom = {p["nom"]: p for p in Q.PARAMS_0025}
     for nom, ech in echantillons.items():
         p = par_nom[nom]
-        err = C.erreur_quantification(ech, p)
+        err = Q.erreur_quantification(ech, p)
         verifier(f"{nom:>3} : erreur ≤ {p['tolerance']} {p['unite']}",
                  err <= p["tolerance"], f"mesurée {err:.4f} {p['unite']}")
 
     # Le cœur du sujet : la même température, SANS le décalage.
     sans = dict(par_nom["t"]); sans["decalage"] = 0.0
-    err_k = C.erreur_quantification(echantillons["t"], sans)
-    err_c = C.erreur_quantification(echantillons["t"], par_nom["t"])
+    err_k = Q.erreur_quantification(echantillons["t"], sans)
+    err_c = Q.erreur_quantification(echantillons["t"], par_nom["t"])
     verifier("⚠️ en KELVINS le float16 perd un facteur ~8 — c'est bien "
              "pour ça qu'on stocke en °C",
              err_k > 6 * err_c,
@@ -227,7 +230,7 @@ def main():
 
     print("\n── Valeurs manquantes : NaN, jamais zéro ─────────────────")
     v = np.array([3.0, np.nan, 9999.0, -9999.0, 1e9, 5.0])
-    q = C.quantifier(v, par_nom["u"])
+    q = Q.quantifier(v, par_nom["u"])
     verifier("NaN reste NaN", bool(np.isnan(q[1])))
     verifier("la sentinelle 9999 devient NaN, PAS 9999",
              bool(np.isnan(q[2])) and bool(np.isnan(q[3])))
@@ -291,7 +294,7 @@ def main():
     print("\n── Le conteneur, sa disposition et son remplissage ───────")
     col = C.Colonnes("2026-08-10T00:00:00Z", b, [0, 1, 2])
     verifier("disposition (balise, paramètre, niveau, échéance)",
-             col.c0025.shape == (3, len(C.PARAMS_0025), 25, 3)
+             col.c0025.shape == (3, len(Q.PARAMS_0025), 25, 3)
              and col.c001.shape == (3, 2, 4, 3),
              f"{col.c0025.shape} et {col.c001.shape}")
     verifier("float16 des deux côtés",
@@ -358,8 +361,8 @@ def main():
     # existe pour empêcher.
     alt = rng.uniform(0, 7500, 20000)
     geo = alt * G
-    e16 = C.erreur_quantification(geo, C.PARAM_ALTITUDE, np.float16)
-    e32 = C.erreur_quantification(geo, C.PARAM_ALTITUDE, np.float32)
+    e16 = Q.erreur_quantification(geo, Q.PARAM_ALTITUDE, np.float16)
+    e32 = Q.erreur_quantification(geo, Q.PARAM_ALTITUDE, np.float32)
     # ⓘ 2,00 m exactement, et ce n'est pas un hasard : entre 4 096 et
     # 8 192 m le pas du float16 vaut 4 m, donc l'arrondi coûte au pire la
     # moitié. Le seuil est posé sous cette valeur pour que le test dise
@@ -374,7 +377,7 @@ def main():
              e16 / max(e32, 1e-12) > 20,
              f"rapport ×{e16 / max(e32, 1e-12):.0f}")
     verifier("le plafond physique attrape une altitude absurde",
-             bool(np.isnan(C.quantifier(np.array([1e6]), C.PARAM_ALTITUDE,
+             bool(np.isnan(Q.quantifier(np.array([1e6]), Q.PARAM_ALTITUDE,
                                         np.float32)[0])))
 
     print("\n── Les isobares dans le conteneur ─────────────────────────")

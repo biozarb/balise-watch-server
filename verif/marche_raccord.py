@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════
-#  agrume/marche_raccord.py — mesurer la marche entre les deux mailles
+#  verif/marche_raccord.py — mesurer la marche entre les deux mailles
 #                                                        (10/08/2026)
 #
 #  ⚠️ C'EST LE CRITÈRE D'ACCEPTATION QUI MANQUE À L'HYBRIDE.
@@ -31,7 +31,7 @@
 #  l'écart entre les deux écarts est lui-même l'information.
 #
 #  Usage :
-#      python3 agrume/marche_raccord.py archive.npz archive.json
+#      python3 verif/marche_raccord.py archive.npz archive.json
 # ══════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -44,8 +44,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "agrume"))
 
-from colonnes import PARAMS_001, PARAMS_0025, Colonnes  # noqa: E402
+from colonnes import Colonnes  # noqa: E402
+from quantification import PARAMS_001, PARAMS_0025  # noqa: E402
 from domaine import GRID_3D, GRID_FINE, NIVEAUX_H_001, NIVEAUX_H_0025  # noqa: E402
 
 

@@ -63,7 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from colonnes import balises_du_domaine  # noqa: E402
+from quantification import balises_du_domaine  # noqa: E402
 from domaine import DOMAINE, GRID_3D  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from grille import (axes_depuis_orographie, index_apres,  # noqa: E402

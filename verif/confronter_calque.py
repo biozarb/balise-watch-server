@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════
-#  agrume/confronter_calque.py — le calque contre le produit A
+#  verif/confronter_calque.py — le calque contre le produit A
 #                                                        (12/08/2026)
 #
 #  Le banc de `test_calque.py` vérifie le calque CONTRE LUI-MÊME : que
@@ -14,8 +14,8 @@
 #  d'exactitude que le jour où on le confronte à une source qui n'a rien
 #  en commun avec lui.
 #
-#  Ici la source indépendante est le PRODUIT A : archive définitive,
-#  extraite AUX BALISES par un indice plat calculé depuis les métadonnées
+#  Ici la source indépendante est le PRODUIT A : archive AUX BALISES,
+#  extraite par un indice plat calculé depuis les métadonnées
 #  du GRIB — un chemin d'indexation qui n'a rien à voir avec le plus
 #  proche voisin sur les axes publiés qu'utilise le produit B. C'est la
 #  même confrontation que l'étape 8 a faite pour la coupe (875 colonnes,
@@ -29,7 +29,7 @@
 #  précaution qui avait fait rendre 0/125 à la première comparaison du
 #  10/08 (§4 de la note de l'étape 8).
 #
-#      python3 agrume/confronter_calque.py \
+#      python3 verif/confronter_calque.py \
 #              --grille grille.npz manifest.json \
 #              --colonnes A-colonnes.npz A-manifest.json
 # ══════════════════════════════════════════════════════════════════════
@@ -46,6 +46,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "agrume"))
 
 import calque as C  # noqa: E402
 from colonnes import Colonnes  # noqa: E402

@@ -67,7 +67,7 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `data/balises-nord-alpes.json` | ⚠️ **l'axe COMPLET** : 125 Alpes + 55 Pyrénées + 2 radiosondages (38 Ko). Le nom dit « nord-alpes » par continuité — c'est le manifeste qui fait foi |
 | `portail.py` | client WCS, avec les six pièges du portail traités |
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
-| `colonnes.py` | le produit A : conteneur, quantification, disposition |
+| `quantification.py` | ⚠️ **le FORMAT du produit A** : PARAMS, unités, plafonds, sentinelle, `quantifier()`. Importé par le produit B, AROME-PI et le profil — c'est pourquoi il est resté ICI quand le conteneur est parti dans `verif/` (Lot J, 13/08) |
 | `ingest_colonnes.py` | l'ingestion elle-même — un fichier sur le disque à la fois |
 | `grille.py` | le produit B : grille 3D du domaine, index et **purge sans jamais lister** |
 | `profil.py` | **le raccord vertical** : axe altitude-mer, masquage, mélange |
@@ -80,6 +80,15 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `front_altitude.py` | **étape 10** : fabrique, pour un niveau AGL donné, la grille au format que `gfDetectModel` attend — et ne détecte rien lui-même |
 | `test_*.py` | huit bancs hors-ligne, sans réseau ni clé |
 
+⛔ **Ne sont PLUS dans ce paquet depuis le 13/08 (Lot J, arbitrage A3) :**
+le conteneur du produit A (`colonnes.py`), `sonder.py`,
+`confronter_sondage.py`, `confronter_calque.py` et `marche_raccord.py`
+vivent dans **`../verif/`** — ils n'existent que pour vérifier le modèle,
+et l'archive n'est plus définitive (rétention glissante 7 jours). Voir
+`verif/README.md` ; la règle de dépendance est bancée par
+`verif/test_separation.py` : `agrume/` n'importe jamais `verif/`, sauf
+`ingest_colonnes.py` et deux bancs, nommés un par un.
+
 ---
 
 ## Les bancs
@@ -88,7 +97,9 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 python3 tools/test_mf_s3.py
 python3 agrume/test_orographie.py [--stations /var/lib/bw-model-verif/stations.json]
 python3 agrume/test_poller.py
-python3 agrume/test_colonnes.py
+python3 verif/test_colonnes.py
+python3 verif/test_purge.py
+python3 verif/test_separation.py
 python3 agrume/test_profil.py [--archive <colonnes.npz> <manifeste.json>]
 python3 agrume/test_radiosondage.py
 python3 agrume/test_grille.py
@@ -208,8 +219,13 @@ d'il y a un mois donne le même axe et le même sol qu'à l'époque.
 
 Le cron du workflow (`agrume-colonnes.yml`) n'est qu'un **filet** : il
 est calé très tard, et n'existe que pour qu'une panne du VPS ne laisse
-pas de trou dans une archive qui est définitive. Réécrire le même run
-est sans danger — la clé porte le run.
+pas de trou dans l'archive. Réécrire le même run est sans danger — la
+clé porte le run.
+⚠️ **Un trou coûte toujours, malgré la rétention glissante du 13/08** :
+un run manquant n'est pas un run qu'on rejouera plus tard, c'est une
+journée que le scoring ne notera jamais — et les scores, eux, sont
+éternels. Mesuré le 13/08 : 2 trous sur les 24 runs théoriques de la
+plage couverte, soit 8,3 %.
 
 ⚠️ La clé Météo-France vit sur le VPS (`~/.balise-watch-model-verif.env`,
 mode 600) et **n'en sort pas**. Le miroir S3, lui, est sans clé — d'où la
@@ -266,7 +282,7 @@ fausse. Ce n'est **pas** une mesure d'exactitude.
 
     python3 agrume/freeze_orographie.py --radiosondages   # une fois
     python3 agrume/freeze_balises.py --radiosondages-seulement
-    python3 agrume/confronter_sondage.py --run <run> --station 06610 \
+    python3 verif/confronter_sondage.py --run <run> --station 06610 \
             --date 2026-08-10 --heure 12
 
 ⚠️ **LE CHIFFRE À RETENIR, ET IL EST INCONFORTABLE.** Sur la colonne de

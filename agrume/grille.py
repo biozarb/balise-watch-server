@@ -67,8 +67,9 @@ import json
 
 import numpy as np
 
-from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL, PARAMS_0025,
-                      PARAMS_ISO, PARAMS_SURFACE, Abort)
+from quantification import (PARAM_ALTITUDE,  # noqa: E402
+                            PARAM_PRESSION_SOL, PARAMS_0025,
+                            PARAMS_ISO, PARAMS_SURFACE, Abort)
 from domaine import (GRID_3D, NIVEAUX_H_0025, NIVEAUX_P,
                      RACCORD_BAS_M, RACCORD_HAUT_M)
 
@@ -412,7 +413,7 @@ class Grille:
         self.iso = np.full(
             (len(PARAMS_GRILLE_ISO), len(NIVEAUX_P), len(self.steps), nj, ni),
             np.nan, dtype=np.float16)
-        # ⛔⛔ float32, ET JAMAIS float16. Mesuré (`test_colonnes.py`) :
+        # ⛔⛔ float32, ET JAMAIS float16. Mesuré (`verif/test_colonnes.py`) :
         # entre 4 096 et 8 192 m le pas du float16 vaut 4 m, donc 2,00 m
         # d'erreur, contre 0,24 mm en float32 — un rapport de 8 192. Et
         # c'est l'axe SUR LEQUEL on raccorde deux sources. Ici le coût est

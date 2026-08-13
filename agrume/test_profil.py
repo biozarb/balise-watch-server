@@ -39,6 +39,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "verif"))
 
 import profil as P  # noqa: E402
 from domaine import RACCORD_BAS_M, RACCORD_HAUT_M  # noqa: E402

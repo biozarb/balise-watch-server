@@ -65,7 +65,7 @@ import re
 
 import numpy as np
 
-from colonnes import PARAMS_001, PARAMS_0025, PARAMS_ISO
+from quantification import PARAMS_001, PARAMS_0025, PARAMS_ISO
 from domaine import (GRID_3D, GRID_FINE, NIVEAUX_H_001, NIVEAUX_H_0025,
                      NIVEAUX_P, RACCORD_BAS_M, RACCORD_HAUT_M,
                      RACCORD_HYBRIDE_M)
