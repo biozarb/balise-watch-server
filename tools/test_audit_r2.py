@@ -38,7 +38,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from audit_r2 import (  # noqa: E402
     GO, PALIER_STOCKAGE_GO, agreger, charger_historique, jours_avant,
-    meme_perimetre, pente_go_par_mois, prefixe_de, verdict,
+    meme_perimetre, pente_du_prefixe, pente_go_par_mois, pentes_des_prefixes,
+    prefixe_de, verdict,
 )
 
 T0 = datetime(2026, 8, 1, 3, 0, tzinfo=timezone.utc)
@@ -48,6 +49,22 @@ def hist(*paires):
     """(jour, Go) → relevés au format de l'historique."""
     return [{"t": (T0 + timedelta(days=j)).isoformat(timespec="seconds"),
              "octets": int(go * GO)} for j, go in paires]
+
+
+def rel(jour, prefixes, bucket="grids"):
+    """(jour, {préfixe: Go}) → relevé complet, au format écrit depuis le
+    13/08 : total, buckets ET préfixes.
+
+    ⚠️ Le bucket est le MÊME partout par défaut, et c'est le cœur des
+    bancs qui suivent : le périmètre de buckets ne bouge pas, donc le
+    filtre du 10/08 laisse passer — il faut celui du 13/08 pour voir la
+    marche.
+    """
+    return {"t": (T0 + timedelta(days=jour)).isoformat(timespec="seconds"),
+            "octets": int(sum(prefixes.values()) * GO),
+            "buckets": {bucket: int(sum(prefixes.values()) * GO)},
+            "prefixes": {k: int(v * GO) for k, v in prefixes.items()},
+            "couverture_complete": True}
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -358,6 +375,145 @@ class NuitDu30Juillet(unittest.TestCase):
                "par_bucket": {}, "par_prefixe": {}}
         v = verdict(inv, pente_go_par_mois(releves), seuil_go=7.0, horizon=60)
         self.assertFalse(v["alerte"], f"faux positif : {v['motifs']}")
+
+
+class MarcheDeProduit(unittest.TestCase):
+    """⚠️ LA PANNE DU 13/08, REJOUÉE AVEC SES VRAIS CHIFFRES. Le produit B
+    (grille AGRUME) est arrivé dans la nuit du 12 au 13 : +1,03 Go d'un
+    coup, **à l'intérieur d'un bucket déjà connu**. Le filtre du 10/08 ne
+    regarde que l'ensemble des BUCKETS — il n'a rien vu. Les moindres
+    carrés sur le total ont lu +9,1 Go/mois et annoncé le palier « dans
+    27 jours », alors que la grille était à son plateau (rétention 3
+    runs, 0 orphelin) et le compte à 2,0 Go sur 10.
+
+    Relevés réels : 0,816 · 0,894 · 0,915 · 1,946 Go."""
+
+    SOCLE = "grids:socle"
+    NEUF = "grids:agrume/grille"
+
+    def serie(self):
+        return [rel(0, {self.SOCLE: 0.816}),
+                rel(1, {self.SOCLE: 0.894}),
+                rel(2, {self.SOCLE: 0.915}),
+                rel(3, {self.SOCLE: 0.873, self.NEUF: 1.073})]
+
+    def test_le_calcul_sur_le_total_explose_bien(self):
+        # Le contre-exemple, gardé : sans lui, le test suivant pourrait
+        # passer sur les deux implémentations, donc ne rien vérifier.
+        serie = self.serie()
+        naif = pente_go_par_mois(serie)
+        naif_filtre_1008 = pente_go_par_mois(serie, frozenset(("grids",)))
+        self.assertGreater(naif, 8.0, "le cas de la panne doit bien exploser")
+        self.assertAlmostEqual(naif_filtre_1008, naif, places=6,
+                               msg="le filtre du 10/08 ne voit PAS cette "
+                                   "marche-là — c'est tout le problème")
+
+    def test_la_somme_des_prefixes_ne_fabrique_plus_la_marche(self):
+        p = pentes_des_prefixes(self.serie(), [self.SOCLE, self.NEUF])
+        self.assertIn(self.NEUF, p["jeunes"], "un produit d'un seul relevé "
+                                              "n'a pas de pente")
+        self.assertLess(p["total"], 1.0)
+        self.assertGreater(p["total"], 0.0)
+
+    def test_et_le_mail_ne_part_plus(self):
+        serie = self.serie()
+        inv = {"octets": serie[-1]["octets"], "objets": 1426,
+               "par_bucket": {}, "par_prefixe": {}}
+        naif = pente_go_par_mois(serie)
+        juste = pentes_des_prefixes(serie, [self.SOCLE, self.NEUF])["total"]
+        self.assertTrue(verdict(inv, naif, seuil_go=7.0, horizon=60)["alerte"],
+                        "le 13/08 au matin, l'alerte est bien partie")
+        self.assertFalse(verdict(inv, juste, seuil_go=7.0, horizon=60)["alerte"],
+                         "et elle ne doit plus partir")
+
+    def test_le_prix_est_rendu_pas_tu(self):
+        # Une échéance qui ne couvre pas tout doit le dire : c'est ce
+        # champ que `rendre()` et `main()` journalisent.
+        p = pentes_des_prefixes(self.serie(), [self.SOCLE, self.NEUF])
+        self.assertEqual(p["jeunes"], [self.NEUF])
+
+
+class MarcheDeBucket(unittest.TestCase):
+    """La panne du 10/08 relue à travers le mécanisme du 13/08 : un
+    bucket entier qui apparaît n'est qu'un paquet de préfixes neufs. Le
+    nouveau filtre couvre donc les DEUX marches — c'est ce qui autorise
+    `meme_perimetre` à ne plus servir qu'aux bancs."""
+
+    def test_le_bucket_apparu_ne_fabrique_pas_de_pente(self):
+        vieux = {"mv:fcst/2026": 0.031}
+        serie = [rel(0, vieux), rel(0.01, vieux), rel(0.02, vieux),
+                 rel(0.03, {**vieux, "grids:arome/sol": 0.785})]
+        p = pentes_des_prefixes(serie, ["mv:fcst/2026", "grids:arome/sol"])
+        self.assertIn("grids:arome/sol", p["jeunes"])
+        self.assertLess(abs(p["total"]), 0.5,
+                        "0,78 Go apparus ne sont pas 0,78 Go de croissance")
+
+
+class PenteParPrefixe(unittest.TestCase):
+    def test_absence_n_est_pas_zero(self):
+        # ⚠️ Le piège central. Un préfixe absent d'un relevé est un
+        # SILENCE (produit pas né, ou couverture partielle ce jour-là).
+        # Le lire comme 0 fabriquerait la marche qu'on vient de tuer.
+        serie = [rel(0, {"a": 1.0}), rel(1, {"a": 1.0}),
+                 rel(2, {"a": 1.0, "b": 1.0}),
+                 rel(3, {"a": 1.0, "b": 2.0}),
+                 rel(4, {"a": 1.0, "b": 3.0})]
+        self.assertAlmostEqual(pente_du_prefixe(serie, "b"), 30.0, places=6)
+        # Et la valeur qu'on aurait eue en comptant les absences comme 0,
+        # gardée en clair pour que l'écart soit lisible :
+        self.assertNotAlmostEqual(pente_du_prefixe(serie, "b"), 24.0, places=1)
+
+    def test_la_somme_fait_le_total(self):
+        serie = [rel(j, {"a": 1.0 + j, "b": 2.0 + 2 * j}) for j in (0, 15, 30)]
+        p = pentes_des_prefixes(serie, ["a", "b"])
+        self.assertAlmostEqual(p["par_prefixe"]["a"], 30.0, places=6)
+        self.assertAlmostEqual(p["par_prefixe"]["b"], 60.0, places=6)
+        self.assertAlmostEqual(p["total"], 90.0, places=6)
+
+    def test_un_prefixe_disparu_ne_compte_plus(self):
+        # Une chaîne qu'on arrête laisse sa pente dans l'historique. La
+        # compter encore projetterait une croissance qui n'existe plus.
+        serie = [rel(j, {"a": 1.0, "mort": float(j)}) for j in (0, 15, 30)]
+        p = pentes_des_prefixes(serie, ["a"])   # « mort » n'est plus courant
+        self.assertNotIn("mort", p["par_prefixe"])
+        self.assertAlmostEqual(p["total"], 0.0, places=6)
+
+    def test_aucune_pente_connue_rend_none(self):
+        # Mieux vaut « pas d'échéance » qu'une échéance sur une somme
+        # vide, qui vaudrait 0 et se lirait comme « rien ne monte ».
+        p = pentes_des_prefixes([rel(0, {"a": 1.0})], ["a"])
+        self.assertIsNone(p["total"])
+        self.assertEqual(p["jeunes"], ["a"])
+
+    def test_releves_d_avant_le_13_08_sont_ignores(self):
+        # L'historique existant n'a pas le champ `prefixes`. Il ne doit
+        # ni planter ni compter : la pente repart proprement de zéro.
+        vieux = hist((0, 1.0), (1, 2.0), (2, 3.0))
+        self.assertIsNone(pente_du_prefixe(vieux, "a"))
+
+    def test_une_vraie_fuite_reste_vue(self):
+        # ⛔ L'autre moitié du contrat. Le but n'est pas de faire taire la
+        # jauge : un préfixe qui monte pour de bon doit toujours
+        # déclencher, marche ou pas ailleurs.
+        serie = [rel(j, {"stable": 2.0, "fuite": 0.1 * j}) for j in range(0, 12)]
+        p = pentes_des_prefixes(serie, ["stable", "fuite"])
+        self.assertAlmostEqual(p["total"], 3.0, places=2)
+        inv = {"octets": serie[-1]["octets"], "objets": 1,
+               "par_bucket": {}, "par_prefixe": {}}
+        # À j=11 : 3,1 Go, +3 Go/mois → palier dans 69 j, hors horizon.
+        # À j=22 : 4,2 Go, même pente → 58 j, et là ça doit crier. Le
+        # niveau (4,2 Go) est toujours SOUS le seuil de 7 : c'est bien la
+        # pente qui déclenche, pas le seuil — le contrat du fichier.
+        serie += [rel(j, {"stable": 2.0, "fuite": 0.1 * j})
+                  for j in range(12, 23)]
+        p2 = pentes_des_prefixes(serie, ["stable", "fuite"])
+        inv2 = {"octets": serie[-1]["octets"], "objets": 1,
+                "par_bucket": {}, "par_prefixe": {}}
+        self.assertTrue(verdict(inv2, p2["total"], seuil_go=7.0,
+                                horizon=60)["alerte"],
+                        f"une fuite de {p2['total']:.2f} Go/mois doit crier")
+        self.assertFalse(verdict(inv, p["total"], seuil_go=7.0,
+                                 horizon=60)["alerte"])
 
 
 if __name__ == "__main__":

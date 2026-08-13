@@ -31,6 +31,12 @@
 #  dépassement, pas pendant. Un seuil seul dit « trop tard » ; une pente
 #  dit « dans 47 jours ».
 #
+#  ⚠️ LA PENTE EST LA SOMME DES PENTES PAR PRÉFIXE, et surtout pas les
+#     moindres carrés sur le total. Deux marches réelles ont chacune
+#     fabriqué une fausse échéance sur le total — un BUCKET apparu le
+#     10/08, un PRODUIT apparu le 13/08 dans un bucket déjà connu. Voir
+#     `pentes_des_prefixes`, qui traite les deux d'un coup.
+#
 #  ⚠️ LECTURE SEULE. Ce script ne supprime RIEN, jamais, sous aucune
 #     option. Les purges sont ailleurs et séparées exprès
 #     (`purge_isobars_orphans.py`, `purge_windgrid_orphans.py`).
@@ -172,9 +178,11 @@ def meme_perimetre(releve: dict, perimetre) -> bool:
     return b is not None and frozenset(b.keys()) == perimetre
 
 
-def pente_go_par_mois(historique, perimetre=None) -> float | None:
-    """Moindres carrés sur (jours, Go) de l'historique, à périmètre
-    constant (voir `meme_perimetre`).
+def _moindres_carres(pts) -> float | None:
+    """Pente en Go/mois d'une série de (datetime, Go).
+
+    Cœur commun au total et à chaque préfixe : une seule implémentation,
+    donc un seul endroit où se tromper.
 
     ⚠️ Une simple différence entre le premier et le dernier point serait
     fausse ici : le volume oscille d'un run à l'autre (une chaîne à
@@ -183,10 +191,6 @@ def pente_go_par_mois(historique, perimetre=None) -> float | None:
     `None` sous trois points, qui vaut mieux qu'une pente inventée sur
     une oscillation.
     """
-    pts = [(datetime.fromisoformat(h["t"]), h["octets"] / GO)
-           for h in historique
-           if h.get("t") and h.get("octets") is not None
-           and meme_perimetre(h, perimetre)]
     if len(pts) < 3:
         return None
     t0 = pts[0][0]
@@ -200,6 +204,81 @@ def pente_go_par_mois(historique, perimetre=None) -> float | None:
         return None
     a = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
     return a * 30.0
+
+
+def pente_go_par_mois(historique, perimetre=None) -> float | None:
+    """Moindres carrés sur le TOTAL du compte, à périmètre de buckets
+    constant (voir `meme_perimetre`).
+
+    ⚠️ CE N'EST PLUS CE QUE LA PRODUCTION UTILISE. La pente du compte est
+    désormais la somme des pentes par préfixe (`pentes_des_prefixes`) —
+    la marche du 13/08 a montré qu'un filtre par bucket ne suffit pas.
+    Gardé parce qu'il reste le calcul de RÉFÉRENCE des bancs : c'est lui
+    qui rejoue, sur les deux marches réelles, le faux qu'on a corrigé.
+    Le supprimer effacerait la démonstration en même temps que le code.
+    """
+    pts = [(datetime.fromisoformat(h["t"]), h["octets"] / GO)
+           for h in historique
+           if h.get("t") and h.get("octets") is not None
+           and meme_perimetre(h, perimetre)]
+    return _moindres_carres(pts)
+
+
+def pente_du_prefixe(historique, nom: str) -> float | None:
+    """La pente d'UN préfixe, sur les seuls relevés qui le contiennent.
+
+    ⚠️ Un relevé où le préfixe est absent n'est pas un zéro, c'est un
+    SILENCE : produit pas encore né, ou couverture partielle ce jour-là.
+    Le compter comme 0 fabriquerait une marche — exactement l'erreur que
+    cette fonction existe pour supprimer.
+    """
+    pts = []
+    for h in historique:
+        p = h.get("prefixes")
+        if not h.get("t") or not isinstance(p, dict) or p.get(nom) is None:
+            continue
+        pts.append((datetime.fromisoformat(h["t"]), p[nom] / GO))
+    return _moindres_carres(pts)
+
+
+def pentes_des_prefixes(historique, prefixes_courants) -> dict:
+    """La pente du compte = la SOMME des pentes de ses préfixes.
+
+    ⚠️ AJOUTÉ APRÈS COUP, LE 13/08, PARCE QUE ÇA A REMENTI EN VRAI — un
+    cran plus bas que le 10/08. Ce jour-là c'était un BUCKET qui venait
+    d'apparaître, et `meme_perimetre` a été écrit pour ça. Le 13/08,
+    c'est un PRODUIT qui apparaît — la grille AGRUME, +1,03 Go en une
+    nuit — **à l'intérieur d'un bucket déjà connu**. L'ensemble des
+    buckets n'avait pas bougé d'un iota : le filtre du 10/08 n'a rien vu,
+    les moindres carrés sur le total ont lu +9,10 Go/mois, et le mail
+    « palier atteint dans 27 jours » est parti. Or la grille était déjà
+    à son plateau (rétention 3 runs, 0 orphelin vérifié) et le compte à
+    2,0 Go sur 10.
+
+    Sommer les pentes par préfixe traite les deux marches d'un coup, et
+    sans filtre : un produit qui naît n'a pas encore de pente, il pèse
+    donc 0 dans l'échéance au lieu de la faire exploser ; un produit qui
+    meurt sort de la somme ; un bucket entier qui apparaît n'est qu'un
+    paquet de préfixes neufs. ⓘ Et la pente devient ATTRIBUABLE : le
+    rapport dit QUI monte, ce qu'un total ne dira jamais — c'est ce que
+    la note du Lot J appelait « le détecteur de fuite », qui n'existait
+    en fait pas, faute d'avoir jamais historisé autre chose que le total.
+
+    ⚠️ LE PRIX, ET IL EST RÉEL : pendant ses 3 premiers relevés, un
+    produit ne compte PAS dans l'échéance. Une chaîne qui déborderait dès
+    sa naissance ne serait vue qu'au troisième jour. D'où `jeunes`, rendu
+    ET journalisé : une échéance qui ne couvre pas tout doit le dire,
+    sinon elle se lit comme un feu vert.
+    """
+    connues, jeunes = {}, []
+    for nom in prefixes_courants:
+        p = pente_du_prefixe(historique, nom)
+        if p is None:
+            jeunes.append(nom)
+        else:
+            connues[nom] = p
+    return {"total": sum(connues.values()) if connues else None,
+            "par_prefixe": connues, "jeunes": sorted(jeunes)}
 
 
 def jours_avant(total_octets: int, pente_mois: float | None,
@@ -256,7 +335,7 @@ def verdict(inventaire: dict, pente_mois: float | None,
 
 
 def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
-           log=print) -> None:
+           log=print, pentes: dict | None = None) -> None:
     """Le rapport lisible. Trié par poids décroissant : la première
     ligne est toujours celle sur laquelle agir."""
     go = inventaire["octets"] / GO
@@ -267,7 +346,17 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
     if pente_mois is None:
         log("│ pente                     :        —     (moins de 3 relevés)")
     else:
-        log(f"│ pente mesurée             : {pente_mois:+8.3f} Go/mois")
+        log(f"│ pente mesurée             : {pente_mois:+8.3f} Go/mois"
+            f"   (somme des préfixes)")
+    # ⚠️ Ce que l'échéance NE couvre pas doit se lire à côté d'elle, pas
+    #    dans une note de bas de page : un produit trop jeune pour avoir
+    #    une pente pèse 0 dans le calcul, et son poids réel est là.
+    jeunes = (pentes or {}).get("jeunes") or []
+    if jeunes:
+        poids = sum(inventaire["par_prefixe"][n]["octets"] for n in jeunes
+                    if n in inventaire["par_prefixe"])
+        log(f"│ dont trop jeunes          : {len(jeunes):8d} préfixe(s) · "
+            f"{poids / GO:.3f} Go hors échéance")
     if v["jours_avant_palier"] is not None:
         cible = datetime.now(timezone.utc) + timedelta(days=v["jours_avant_palier"])
         log(f"│ palier atteint dans       : {v['jours_avant_palier']:8.0f} j "
@@ -282,9 +371,19 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
                          key=lambda kv: -kv[1]["octets"]):
         log(f"│ {nom:38s} {e['octets'] / GO:8.3f} Go  {e['objets']:7d} objets")
     log("├─ par préfixe ────────────────────────────────────────────────")
+    # ⓘ La colonne de pente est la seule qui sépare un produit qui
+    #   RESPIRE (rétention courte, poids stable) d'un produit qui FUIT.
+    #   Un poids seul ne le dit pas : 40 Mo peuvent être un plateau ou
+    #   le début d'une dérive, et c'est justement ce qu'il fallait
+    #   trancher le 13/08.
+    pentes_pref = (pentes or {}).get("par_prefixe") or {}
     for nom, e in sorted(inventaire["par_prefixe"].items(),
                          key=lambda kv: -kv[1]["octets"])[:20]:
-        log(f"│ {nom:38s} {e['octets'] / GO:8.3f} Go  {e['objets']:7d} objets")
+        p = pentes_pref.get(nom)
+        col = (f" {p:+8.3f} Go/mois" if p is not None
+               else ("       (trop jeune)" if pentes else ""))
+        log(f"│ {nom:38s} {e['octets'] / GO:8.3f} Go  "
+            f"{e['objets']:7d} objets{col}")
     log("├─ coût de cet audit ──────────────────────────────────────────")
     # ⚠️ Un audit qui surveille un quota et le consomme sans le dire est
     # une jauge malhonnête. `ListObjectsV2` EST une opération classe A.
@@ -458,9 +557,17 @@ def main(argv=None) -> int:
     hist_path = Path(a.out) / "audit_r2.jsonl"
     historique = charger_historique(hist_path)
 
+    # ⚠️ `prefixes` AJOUTÉ LE 13/08. Sans lui, l'historique ne savait que
+    # le total et les buckets : impossible de dire, le lendemain matin,
+    # si +1 Go venait d'un produit nouveau ou d'une fuite. Le champ ne
+    # coûte aucune opération R2 — l'inventaire est déjà calculé — et
+    # c'est ce qui manquait à la « pente par préfixe » que la note du
+    # Lot J croyait déjà avoir.
     releve = {"t": datetime.now(timezone.utc).isoformat(timespec="seconds"),
               "octets": inv["octets"], "objets": inv["objets"],
               "buckets": {k: v["octets"] for k, v in inv["par_bucket"].items()},
+              "prefixes": {k: v["octets"]
+                           for k, v in inv["par_prefixe"].items()},
               "couverture_complete": couverture_complete}
     # On écrit AVANT de juger : si le verdict lève, le relevé du jour est
     # quand même dans l'historique, et la pente de demain reste juste.
@@ -471,22 +578,27 @@ def main(argv=None) -> int:
             print(f"⚠️ historique non écrit ({e}) — pente indisponible demain",
                   file=sys.stderr)
 
-    perimetre = frozenset(inv["par_bucket"].keys())
     serie = historique + [releve]
-    comparables = [h for h in serie if meme_perimetre(h, perimetre)]
-    if len(comparables) < len(serie):
-        print(f"  ⓘ {len(serie) - len(comparables)} relevé(s) d'un autre "
-              f"périmètre écarté(s) du calcul de pente")
-    pente = pente_go_par_mois(serie, perimetre)
+    pentes = pentes_des_prefixes(serie, inv["par_prefixe"].keys())
+    pente = pentes["total"]
+    if pentes["jeunes"]:
+        # Journalisé même quand tout va bien : c'est le seul endroit où
+        # se lit le trou de couverture de l'échéance du jour.
+        apercu = ", ".join(pentes["jeunes"][:5])
+        if len(pentes["jeunes"]) > 5:
+            apercu += f" … (+{len(pentes['jeunes']) - 5})"
+        print(f"  ⓘ {len(pentes['jeunes'])} préfixe(s) sans pente (moins de "
+              f"3 relevés) — hors échéance : {apercu}")
     v = verdict(inv, pente, a.seuil_go, a.horizon_jours,
                 couverture_partielle=not couverture_complete)
 
     if a.json:
         print(json.dumps({"releve": releve, "verdict": v,
                           "par_prefixe": inv["par_prefixe"],
+                          "pentes": pentes,
                           "class_a": requetes}, ensure_ascii=False, indent=2))
     else:
-        rendre(inv, pente, v, requetes)
+        rendre(inv, pente, v, requetes, pentes=pentes)
 
     return 1 if v["alerte"] else 0
 
