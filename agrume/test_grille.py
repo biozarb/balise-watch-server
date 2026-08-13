@@ -250,6 +250,48 @@ def section_8_surface():
              "des différences donnerait une pluie négative un pas sur deux",
              _leve(g.deaccumuler))
 
+    # ── ⛔ Un TROU dans les échéances (audit du 13/08) ────────────────
+    # `steps = sorted(commun)` est une intersection de paquets : la
+    # fenêtre 0–24 n'est PAS contiguë par construction, seule la
+    # rallonge l'est. Sur [0, 1, 3, 4], la position de 3 h porterait
+    # `cumul(3) − cumul(1)` : DEUX heures de pluie étiquetées UNE heure —
+    # plus grande, jamais négative, donc invisible au garde `< 0`. La
+    # première version de ce code faisait exactement ça ; le banc l'a
+    # démentie.
+    gt = GR.Grille("R", [0, 1, 3, 4], np.linspace(46.3, 44.8, 3),
+                   np.linspace(5.5, 7.6, 4),
+                   np.zeros((3, 4), dtype=np.float32), domaine="banc")
+    for k, s in enumerate([1, 3, 4]):
+        gt.poser_surface("precipitation", s,
+                         np.full((3, 4), [0.4, 1.4, 1.6][k],
+                                 dtype=np.float16))
+    gt.deaccumuler()
+    troue = np.asarray(
+        gt.surf[gt.i_param_surf["precipitation"]][:, 0, 0], np.float64)
+    verifier("⛔ une échéance qui SUIT UN TROU sort NaN, pas un cumul de "
+             "deux heures étiqueté une heure",
+             bool(np.isnan(troue[2])),
+             "NaN" if np.isnan(troue[2]) else f"{troue[2]:.1f} mm — FAUX")
+    verifier("…et les échéances au pas horaire, avant comme après le "
+             "trou, gardent leur valeur",
+             abs(troue[1] - 0.4) < 1e-2 and abs(troue[3] - 0.2) < 1e-2,
+             " ".join("NaN" if np.isnan(x) else f"{x:.1f}" for x in troue))
+    # ⚠️ Et sur [0, 2, …] la ligne « première échéance utile » ne doit
+    # PAS s'appliquer : `a[1]` y est le cumul de DEUX heures.
+    gs = GR.Grille("R", [0, 2, 3], np.linspace(46.3, 44.8, 3),
+                   np.linspace(5.5, 7.6, 4),
+                   np.zeros((3, 4), dtype=np.float32), domaine="banc")
+    for s, v in ((2, 0.8), (3, 1.0)):
+        gs.poser_surface("precipitation", s,
+                         np.full((3, 4), v, dtype=np.float16))
+    gs.deaccumuler()
+    saut = np.asarray(
+        gs.surf[gs.i_param_surf["precipitation"]][:, 0, 0], np.float64)
+    verifier("⛔ si τ = 1 MANQUE, le cumul à τ = 2 n'est pas promu en "
+             "valeur horaire",
+             bool(np.isnan(saut[1])) and abs(saut[2] - 0.2) < 1e-2,
+             " ".join("NaN" if np.isnan(x) else f"{x:.1f}" for x in saut))
+
     # ── Le remplissage explicite, et pourquoi il a remplacé un refus ──
     for forme in ((5, 7), (61, 85), (41, 205), (3, 4)):
         gg = GR.Grille("R", [0, 1], np.linspace(46.3, 44.8, forme[0]),
@@ -766,9 +808,90 @@ def main():
              f"{avec:.4f} hPa avec · {sans:.4f} sans")
 
     section_10_identite_ab()
+    section_11_relecture_r2()
 
     print("\n  grille :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1
+
+
+def section_11_relecture_r2():
+    import json                                          # noqa: PLC0415
+    """── 11. ⛔ La relecture d'un run PUBLIÉ, tampon par tampon ──
+
+    `couper.py --run` et `front_altitude.py` lisaient
+    `agrume/grille/{run}/grille.npz` — une clé SUPPRIMÉE par l'étape 11
+    (le format npz n'est plus jamais écrit sur R2, et `index_apres`
+    envoie les clés sans domaine à la suppression). 404 à chaque appel,
+    pendant deux lots, et aucun banc ne le voyait : la CI ne couvrait
+    que `construire()`. Ce banc prouve désormais l'aller-retour
+    `tampon_echeance()` → `depuis_tampons()` à l'octet près — la route
+    que ces deux lecteurs empruntent maintenant.
+    """
+    print("\n── 11. ⛔ La relecture d'un run publié (depuis_tampons) ──")
+    rng = np.random.default_rng(1313)
+    NECH = 3
+    g = GR.Grille("2026-08-13T00:00:00Z", list(range(NECH)),
+                  np.linspace(46.3, 44.8, 5), np.linspace(5.5, 7.6, 7),
+                  rng.uniform(150, 3900, (5, 7)).astype(np.float32),
+                  domaine="banc")
+    from domaine import NIVEAUX_H_0025, NIVEAUX_P       # noqa: PLC0415
+    for p in GR.PARAMS_GRILLE:
+        for niveau in NIVEAUX_H_0025:
+            for s in range(NECH):
+                g.poser(p["nom"], niveau, s,
+                        rng.uniform(-40, 40, (5, 7)).astype(np.float16))
+    for p in GR.PARAMS_GRILLE_ISO:
+        for hpa in NIVEAUX_P:
+            for s in range(NECH):
+                g.poser_isobare(p["nom"], hpa, s,
+                                rng.uniform(-40, 40, (5, 7))
+                                .astype(np.float16))
+        for s in range(NECH):
+            g.poser_isobare("zp", 500, s,
+                            rng.uniform(5000, 6000, (5, 7))
+                            .astype(np.float32))
+    for p in GR.PARAMS_GRILLE_SURF:
+        for s in range(NECH):
+            g.poser_surface(p["nom"], s,
+                            rng.uniform(0, 30, (5, 7)).astype(np.float16))
+    for s in range(NECH):
+        g.poser_surface("psol", s,
+                        rng.uniform(650, 990, (5, 7)).astype(np.float32))
+    g.deaccumuler()
+
+    man = json.loads(json.dumps(g.manifeste()))     # comme depuis R2
+    tampons = {s: g.tampon_echeance(s) for s in range(NECH)}
+    zsol_octets = g.tampon_zsol()
+    g2 = GR.Grille.depuis_tampons(man, tampons, zsol_octets)
+
+    def identiques(a, b):
+        a32, b32 = a.astype(np.float32), b.astype(np.float32)
+        return bool(np.array_equal(a32, b32, equal_nan=True))
+
+    verifier("⛔ h0025, iso, ziso, surf et psol reviennent À L'OCTET "
+             "PRÈS — c'est la route de `couper.py --run` et de "
+             "`front_altitude.py`",
+             all(identiques(getattr(g, n), getattr(g2, n))
+                 for n in ("h0025", "iso", "ziso", "surf", "psol")))
+    verifier("…et zsol, lats, lons aussi",
+             identiques(g.zsol, g2.zsol) and identiques(g.lats, g2.lats)
+             and identiques(g.lons, g2.lons))
+    verifier("⚠️ la grille relue refuse `deaccumuler()` — un run publié "
+             "porte des cumuls DÉJÀ différenciés",
+             _leve(g2.deaccumuler))
+    verifier("⚠️ un tampon PARTIEL laisse ses NaN au lieu de lever — une "
+             "échéance absente est un trou, pas une panne",
+             bool(np.isnan(np.float32(
+                 GR.Grille.depuis_tampons(man, {0: tampons[0]}, zsol_octets)
+                 .h0025[0, 0, 1, 0, 0]))))
+    verifier("⛔ un step INCONNU du manifeste lève — c'est un mélange de "
+             "runs, pas un trou",
+             _leve(lambda: GR.Grille.depuis_tampons(
+                 man, {9: tampons[0]}, zsol_octets)))
+    tronque = tampons[1][:-2]
+    verifier("⛔ un tampon TRONQUÉ est refusé en citant la taille annoncée",
+             _leve(lambda: GR.Grille.depuis_tampons(
+                 man, {1: tronque}, zsol_octets)))
 
 
 if __name__ == "__main__":

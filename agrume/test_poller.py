@@ -328,22 +328,35 @@ def main():
     verifier("un seul run témoin qui répond suffit à valider le champ",
              temoin.endswith("06:00:00Z"), temoin)
 
-    print("\n── ⚠️ Guet SIMULTANÉ des quatre paquets du produit A ──────")
-    # `choisir_run()` exige la couverture COMMUNE aux quatre : l'ingestion
+    print("\n── ⚠️ Guet SIMULTANÉ des paquets de l'ingestion ───────────")
+    # `choisir_run()` exige la couverture COMMUNE à tous : l'ingestion
     # avance au rythme du plus lent. C'est leur ÉCART qu'on mesure, donc
     # ils doivent être interrogés dans le MÊME cycle — sinon une part de
     # l'écart viendrait de la désynchronisation des guets.
-    verifier("les quatre paquets du produit A sont déclarés",
-             P.PAQUETS_PRODUIT_A == (("0025", "HP1"), ("0025", "HP2"),
-                                     ("001", "HP1"), ("001", "SP1")))
-    quatre = P.fabriquer_source("arome-paquets")
-    verifier("`arome-paquets` fabrique bien quatre cibles distinctes",
-             len({s.nom for s in quatre}) == 4,
-             ", ".join(s.nom for s in quatre))
+    # ⛔ LA PARITÉ AVEC L'INGESTION EST LE CONTRÔLE QUI COMPTE (audit du
+    # 13/08) : ce fichier a guetté QUATRE paquets pendant que
+    # `ingest_colonnes.py` en exigeait HUIT — trois étapes de retard,
+    # dispatch prématuré, run plus ancien retenu, voyant vert. Le banc
+    # compare donc les deux listes L'UNE À L'AUTRE, pas à une copie
+    # locale qui prendrait le même retard.
+    from ingest_colonnes import PAQUETS as PAQUETS_INGERES  # noqa: PLC0415
+    verifier("⛔ le poller guette EXACTEMENT les paquets de l'ingestion "
+             "— deux listes qui divergent = dispatch prématuré",
+             tuple(P.PAQUETS_PRODUIT_A) == tuple(PAQUETS_INGERES),
+             f"{len(P.PAQUETS_PRODUIT_A)} guettés / "
+             f"{len(PAQUETS_INGERES)} exigés")
+    verifier("…et il y en a plus que les quatre d'origine (étapes 5, "
+             "12, 12 bis)",
+             len(P.PAQUETS_PRODUIT_A) >= 8,
+             str(len(P.PAQUETS_PRODUIT_A)))
+    cibles = P.fabriquer_source("arome-paquets")
+    verifier("`arome-paquets` fabrique une cible distincte par paquet",
+             len({s.nom for s in cibles}) == len(P.PAQUETS_PRODUIT_A),
+             ", ".join(s.nom for s in cibles))
     verifier("le nom porte le paquet, pas seulement le modèle",
-             quatre[0].nom == "arome:0025/HP1", quatre[0].nom)
-    verifier("les quatre suivent la grille de runs à 3 h",
-             all(s.pas_h == 3 for s in quatre))
+             cibles[0].nom == "arome:0025/HP1", cibles[0].nom)
+    verifier("toutes les cibles suivent la grille de runs à 3 h",
+             all(s.pas_h == 3 for s in cibles))
 
     with tempfile.TemporaryDirectory() as d:
         j = Path(d) / "l.ndjson"

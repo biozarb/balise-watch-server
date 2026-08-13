@@ -63,6 +63,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
+from domaine import PAQUETS_INGESTION  # noqa: E402
 from mf_s3 import covered_steps  # noqa: E402
 from portail import (SERVICE_AROME, SERVICE_AROMEPI, CouvertureAbsente,  # noqa: E402
                      ErreurPortail, Portail)
@@ -148,15 +149,22 @@ class SourceS3(Source):
                 f"(échéance {self.echeance})")
 
 
-# ⚠️ LES QUATRE PAQUETS DONT LE PRODUIT A A BESOIN — et `choisir_run`
-# exige leur couverture COMMUNE, donc l'ingestion avance au rythme du
-# PLUS LENT des quatre. Lequel est-ce ? **Ce n'est pas mesuré**, et ça
-# décide pourtant de la fraîcheur réelle d'AGRUME : si un seul paquet
-# traîne d'une heure, il traîne toute la chaîne. Guetter les quatre
-# séparément ne coûte que quatre listings S3 par cycle — quelques
-# kilo-octets, aucun téléchargement.
-PAQUETS_PRODUIT_A = (("0025", "HP1"), ("0025", "HP2"),
-                     ("001", "HP1"), ("001", "SP1"))
+# ⚠️ LES PAQUETS DONT L'INGESTION A BESOIN — et `choisir_run` exige leur
+# couverture COMMUNE, donc l'ingestion avance au rythme du PLUS LENT.
+# Lequel est-ce ? **Ce n'est pas mesuré**, et ça décide pourtant de la
+# fraîcheur réelle d'AGRUME : si un seul paquet traîne d'une heure, il
+# traîne toute la chaîne. Guetter chacun séparément ne coûte qu'un
+# listing S3 par paquet et par cycle — quelques kilo-octets, aucun
+# téléchargement.
+# ⛔ LA LISTE VIENT DE `domaine.py`, PLUS D'ICI (audit du 13/08). Ce
+# fichier en guettait QUATRE quand `ingest_colonnes.py` en exigeait
+# HUIT — la liste d'avant les étapes 5, 12 et 12 bis, jamais rattrapée.
+# Le dispatch partait donc dès les quatre anciens paquets : si
+# IP1/IP2/SP1/SP2 0,025° n'étaient pas encore publiés, `choisir_run()`
+# retenait un run PLUS ANCIEN. Perte de fraîcheur silencieuse — la
+# seule chose qu'AGRUME apporte — et le voyant restait vert.
+# `test_poller.py` verrouille la parité des deux listes.
+PAQUETS_PRODUIT_A = PAQUETS_INGESTION
 
 
 class SourcePortail(Source):

@@ -15,14 +15,18 @@
 #  découpe donc à la demande dans le produit B, en mémoire, et ne
 #  s'écrit nulle part.
 #
-#  ── CE QUE CE FICHIER NE PEUT PAS FAIRE, ET IL FAUT LE LIRE D'ABORD ──
-#  Le produit B ne porte QUE les 25 niveaux HAUTEUR (10 → 3000 m/sol).
-#  ⛔ Il ne porte AUCUN niveau isobare : ceux-ci ne sont archivés qu'aux
-#  balises, dans le produit A. Une coupe s'arrête donc à `zsol + 3000 m`,
-#  et c'est écrit dans la réponse plutôt que laissé à deviner. Sur un
-#  fond de vallée à 500 m, ça plafonne à 3 500 m ; sur une crête à
-#  3 200 m, à 6 200 m. Pour du vol libre c'est large ; pour un front
-#  d'altitude, ça ne l'est pas.
+#  ── CE QUE CE FICHIER NE SERT PAS, ET IL FAUT LE LIRE D'ABORD ────────
+#  ⚠️ MIS À JOUR LE 13/08 (audit). Depuis l'étape 12, le produit B PORTE
+#  les 14 niveaux isobares (`iso`, `ziso`) et la ligne de surface — ce
+#  fichier disait encore le contraire, dans sa RÉPONSE publiée, pas
+#  seulement dans un commentaire. ⛔ Mais CETTE coupe-ci ne lit toujours
+#  que `gr.h0025` : elle s'arrête à `zsol + 3000 m`, et c'est écrit dans
+#  la réponse plutôt que laissé à deviner. Le lecteur qui sert TOUTE la
+#  colonne (isobares + surface, mélange compris) est le 6ᵉ onglet de la
+#  vue de coupe, via `colonnes.bin` (`web/src/lib/agrumeProfile.ts`).
+#  Étendre cette coupe Python aux isobares est un choix de produit — à
+#  arbitrer, pas à glisser dans un correctif ; en attendant, la réponse
+#  dit exactement ce qu'elle sert.
 #
 #  ── LA DÉCISION DE L'ÉTAPE : ON NE COUD PAS L'AXE VERTICAL ───────────
 #  Chaque colonne repose sur SON sol. Deux colonnes voisines peuvent
@@ -371,10 +375,12 @@ def couper(gr, manifeste, depart, arrivee, step, pas_km=None, n=None):
             "le travail du calque altitude (étape 11)."),
         plafond=dict(
             hauteurSolMaxM=max(NIVEAUX_H_0025),
-            note=("⛔ le produit B ne porte AUCUN niveau isobare : la coupe "
+            note=("⛔ CETTE coupe ne sert que les niveaux HAUTEUR : elle "
                   "s'arrête à solModeleM + 3000 m, et cette limite suit le "
-                  "relief. Les isobares n'existent qu'aux balises, dans le "
-                  "produit A.")),
+                  "relief. ⚠️ Le produit B porte AUSSI les isobares et la "
+                  "surface depuis l'étape 12 (13/08) — ils sont servis par "
+                  "`colonnes.bin` (6ᵉ onglet de la vue de coupe), pas par "
+                  "cette route-ci.")),
         manifesteSource=dict(
             run=(manifeste or {}).get("run"),
             remplissage=(manifeste or {}).get("remplissage")),

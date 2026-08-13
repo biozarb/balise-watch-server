@@ -57,26 +57,41 @@ def symbole(kmh):
     return "@"
 
 
-def depuis_r2(run, crier=print):
+def depuis_r2(run, domaine="nord-alpes", echeances=None, crier=print):
     """Récupère la grille d'un run depuis R2.
 
     ⚠️ Lecture seule et via le module partagé, comme `sonder.py` :
     `tools/storage.py` porte déjà les identifiants et le compteur
     d'opérations. ⚠️ Le produit B ne garde que 3 runs : un run absent
     n'est pas une panne, c'est une purge qui a fait son travail.
+
+    ⛔ RÉÉCRIT LE 13/08 (audit) : ce lecteur demandait encore
+    `agrume/grille/{run}/grille.npz` — une clé de l'AVANT-étape 11, sans
+    domaine, dans un format qui n'est plus jamais écrit sur R2 (et que
+    `index_apres` a envoyée à la suppression). 404 à chaque appel,
+    pendant deux lots, sans qu'aucun banc ne le voie. La route est
+    désormais celle des objets PUBLIÉS — manifeste + tampons d'échéance
+    + zsol — via `Grille.depuis_tampons()`, bancée par `test_grille` §11.
+
+    `echeances=None` tire tout le run (52 tampons × ~1,3 Mo au pire) ;
+    en passer une liste ne tire que celles-là — c'est ce que fait le
+    `main` avec `--echeance`.
     """
     from storage import Storage
     store = Storage("agrume-couper", "AGRUME_BUCKET", "wind-grid")
-    base = f"agrume/grille/{run}"
+    base = f"agrume/grille/{domaine}/{run}"
     man = json.loads(store.get(f"{base}/manifest.json").decode("utf-8"))
-    brut = store.get(f"{base}/grille.npz")
-    tmp = Path(os.environ.get("TMPDIR", "/tmp")) / \
-        f"agrume-grille-{run.replace(':', '')}.npz"
-    tmp.write_bytes(brut)
-    try:
-        return Grille.lire_npz(tmp, man)
-    finally:
-        tmp.unlink(missing_ok=True)          # ménage : rien ne traîne
+    voulues = man["echeances"] if echeances is None else [
+        s for s in man["echeances"] if s in set(echeances)]
+    if echeances is not None and not voulues:
+        raise SystemExit(f"aucune des échéances {sorted(echeances)} n'est "
+                         f"dans le run {run} ({man['echeances']})")
+    tampons = {s: store.get(man["service"]["cle_echeance"]
+                            .format(domaine=domaine, run=run, step=s))
+               for s in voulues}
+    zsol = store.get(man["service"]["cle_zsol"]
+                     .format(domaine=domaine, run=run))
+    return Grille.depuis_tampons(man, tampons, zsol), man
 
 
 def couple(texte):
@@ -182,13 +197,20 @@ def main(argv=None):
                    help="nombre de points imposé — ⚠️ au-delà du nombre de "
                         "mailles, la finesse est fabriquée")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--domaine", default="nord-alpes",
+                   help="domaine du produit B (défaut : nord-alpes) — "
+                        "le domaine fait partie de la clé R2 depuis "
+                        "l'étape 11")
     a = p.parse_args(argv)
 
     if a.archive:
         gr, man = Grille.lire_npz(
             a.archive[0], json.loads(Path(a.archive[1]).read_text("utf-8")))
     elif a.run:
-        gr, man = depuis_r2(a.run)
+        # ⚠️ On ne tire QUE l'échéance demandée : une coupe = un tampon
+        # (~1,3 Mo), pas les 52 du run.
+        gr, man = depuis_r2(a.run, domaine=a.domaine,
+                            echeances=[a.echeance])
     else:
         p.error("il faut --archive ou --run")
 

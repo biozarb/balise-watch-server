@@ -858,12 +858,23 @@ console.log('\n── 10. ⛔ LA COLONNE DEVIENT UN PROFIL — les deux vertical
       precipitation: s(NaN, 0.5, 1.5),
     },
   };
+  // ⚠️ TOUTES les séries de surface déclarées, pas seulement `prmsl`
+  // (audit du 13/08). Le client défait désormais `decalage_precision`
+  // pour CHAQUE série — le contrat du manifeste l'a toujours exigé
+  // (« celui qui ne le lit pas doit REFUSER de servir la valeur »), et
+  // le producteur publie le champ pour toutes (défaut 0.0). Une série
+  // absente de cette liste doit sortir VIDE, et c'est vérifié plus bas.
+  const surf = (nom, dec = 0) => ({
+    nom, unite: 'x', paquet: 'SP1', pas_de_temps: 'instant',
+    absent_a_tau0: false, decalage_precision: dec,
+  });
   const man = {
     run: '2026-08-13T00:00:00Z',
     parametres_surface: [
-      { nom: 'pression_mer', unite: 'hPa', paquet: 'SP1',
-        pas_de_temps: 'instant', absent_a_tau0: false,
-        decalage_precision: -1000 },
+      surf('t2m'), surf('td2m'), surf('rafale'), surf('nuages_bas'),
+      surf('nuages_moyens'), surf('nuages_hauts'), surf('cape'),
+      surf('couche_limite'), surf('rayonnement'), surf('precipitation'),
+      surf('psol'), surf('pression_mer', -1000),
     ],
   };
   const p = A.colonneVersProfil(man, col);
@@ -926,11 +937,23 @@ console.log('\n── 10. ⛔ LA COLONNE DEVIENT UN PROFIL — les deux vertical
     + 'on le défait EN LE LISANT, jamais de tête',
     Math.abs(p.surface.pressureMsl[0] - 1013.5) < 1e-6,
     `${p.surface.pressureMsl[0]} hPa`);
+  verifier('⛔ …et le décalage se défait pour CHAQUE série, pas pour prmsl '
+    + 'seul — un `t2m` décalé de −10 doit ressortir juste',
+    (() => {
+      const dec10 = A.colonneVersProfil({
+        ...man,
+        parametres_surface: man.parametres_surface.map(q =>
+          q.nom === 't2m' ? { ...q, decalage_precision: -10 } : q),
+      }, { ...col, tranches: { ...col.tranches, t2m: s(8, 9, 10) } });
+      return Math.abs(dec10.surface.temp2m[0] - 18) < 1e-6;
+    })(),
+    'archivé 8 (= 18 − 10) → rendu 18 °C');
   const sansDec = A.colonneVersProfil({ ...man, parametres_surface: [] }, col);
   verifier('⚠️ et SANS le champ dans le manifeste, la série sort vide plutôt '
     + 'que fausse — une ligne absente se voit, −986 hPa se lit comme une '
     + 'donnée',
-    sansDec.surface.pressureMsl.every(v => v === null));
+    sansDec.surface.pressureMsl.every(v => v === null)
+    && sansDec.surface.temp2m.every(v => v === null));
 
   // ── L'ordre, et les NaN ───────────────────────────────────────────
   const alts = p.levels.map(l => l.altitude.find(a => a != null) ?? Infinity);

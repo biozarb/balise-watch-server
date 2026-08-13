@@ -68,7 +68,7 @@ import json
 import numpy as np
 
 from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL, PARAMS_0025,
-                      PARAMS_ISO, PARAMS_SURFACE)
+                      PARAMS_ISO, PARAMS_SURFACE, Abort)
 from domaine import (GRID_3D, NIVEAUX_H_0025, NIVEAUX_P,
                      RACCORD_BAS_M, RACCORD_HAUT_M)
 
@@ -512,6 +512,21 @@ class Grille:
             # τ = 0 (mesuré) : la règle et la donnée sont d'accord.
             horaire = np.full_like(a, np.nan)
             horaire[1:] = a[1:] - a[:-1]
+            # ⛔⛔ LA DIFFÉRENCE EST POSITIONNELLE, LES ÉCHÉANCES NE LE
+            # SONT PAS FORCÉMENT (audit du 13/08). La rallonge est
+            # contiguë par construction (`choisir_run` s'arrête au
+            # premier trou), mais la fenêtre 0–24 ne l'est PAS :
+            # `steps = sorted(commun)` est une intersection de paquets,
+            # et un fichier horaire en retard sur le miroir S3 suffit à
+            # produire [0…10, 12…24]. À la position de 12 h, la ligne
+            # ci-dessus ferait `cumul(12) − cumul(10)` : DEUX heures de
+            # pluie étiquetées UNE heure — plus grande, jamais négative,
+            # donc invisible au garde `< 0` plus bas. On refuse : NaN
+            # partout où l'écart d'échéances n'est pas exactement 1 h.
+            # Un trou se voit ; une pluie double se lit comme une pluie.
+            if len(self.steps) > 1:
+                ecarts = np.diff(np.asarray(self.steps))
+                horaire[1:][ecarts != 1] = np.nan
             # ⚠️⚠️ ET LA PREMIÈRE ÉCHÉANCE UTILE VAUT LE CUMUL LUI-MÊME,
             # PAS NaN. Le banc a démenti la première version, qui
             # différenciait bêtement : à τ = 1 elle faisait
@@ -522,7 +537,10 @@ class Grille:
             # écoulée. C'est la seule valeur qu'on ait le droit de
             # supposer ici, et encore : seulement si le run commence
             # bien à l'échéance 0.
-            if self.steps and self.steps[0] == 0 and len(self.steps) > 1:
+            # ⚠️ …et elle non plus ne vaut que si τ = 1 SUIT VRAIMENT
+            # τ = 0 : sur [0, 2, 3…], `a[1]` est le cumul de DEUX heures.
+            if (self.steps and self.steps[0] == 0 and len(self.steps) > 1
+                    and self.steps[1] == 1):
                 horaire[1] = a[1]
             elif self.steps:
                 # ⛔ Run partiel (première échéance > 0) : on ne sait pas
@@ -1107,6 +1125,74 @@ class Grille:
                             dtype=np.dtype(dt).name, niveaux=nlev,
                             bloc=nom_bloc[bloc])
         return out
+
+    @classmethod
+    def depuis_tampons(cls, man, tampons, zsol_octets):
+        """Reconstruit une grille depuis les OBJETS PUBLIÉS d'un run R2 :
+        `manifest.json` (déjà décodé en dict), `{step: octets de
+        e{step:02d}.bin}` et `zsol.bin`.
+
+        ⛔ EXISTE PARCE QUE `grille.npz` N'EST PLUS SUR R2 (étape 11) —
+        et que `couper.py --run` et `front_altitude.py` ont continué de
+        le demander pendant deux lots, 404 à chaque fois, sans qu'aucun
+        banc ne le voie (audit du 13/08). C'est désormais LA route de
+        relecture d'un run en ligne, et le banc §11 de `test_grille.py`
+        prouve l'aller-retour à l'octet près.
+
+        ⚠️ LES OFFSETS SONT LUS DANS LE MANIFESTE, pas recalculés par
+        `_plan()` : même discipline que le client web. Un run écrit par
+        une version antérieure du code se relit selon SON manifeste —
+        recalculer ici supposerait que la disposition n'a jamais bougé,
+        ce qui est exactement le genre de supposition que `tranches()`
+        existe pour rendre inutile.
+
+        ⚠️ `tampons` peut être PARTIEL : une échéance absente laisse ses
+        NaN, et `remplissage()` la montre. Un step inconnu du manifeste,
+        lui, LÈVE — c'est un mélange de runs, pas un trou.
+        """
+        steps = list(man["echeances"])
+        ax = man["axes"]
+        lats = np.linspace(ax["lat_premier"], ax["lat_dernier"],
+                           ax["nb_lat"]).astype(np.float32)
+        lons = np.linspace(ax["lon_premier"], ax["lon_dernier"],
+                           ax["nb_lon"]).astype(np.float32)
+        zsol = np.frombuffer(zsol_octets, dtype="<f4").reshape(
+            ax["nb_lat"], ax["nb_lon"]).copy()
+        g = cls(man["run"], steps, lats, lons, zsol,
+                domaine=man.get("domaine", "nord-alpes"))
+        tranches = man["service"]["tranches"]
+        cibles = {"h": (g.h0025, g.i_param), "iso": (g.iso, g.i_param_iso)}
+        for step, brut in tampons.items():
+            if step not in g.i_step:
+                raise Abort(f"échéance +{step} h inconnue du manifeste "
+                            f"({steps}) — mélange de runs ?")
+            attendu = man["service"]["octets_par_echeance"]
+            if len(brut) != attendu:
+                raise Abort(f"tampon e{step:02d} : {len(brut)} octets au "
+                            f"lieu des {attendu} annoncés par le manifeste")
+            k = g.i_step[step]
+            for cle, tr in tranches.items():
+                arr = np.frombuffer(
+                    brut, dtype=np.dtype(tr["dtype"]).newbyteorder("<"),
+                    count=tr["octets"] // np.dtype(tr["dtype"]).itemsize,
+                    offset=tr["offset"]).reshape(
+                        tr["niveaux"], ax["nb_lat"], ax["nb_lon"])
+                if cle == "ziso":
+                    g.ziso[:, k] = arr
+                elif cle == "psol":
+                    g.psol[k] = arr[0]
+                elif cle.startswith("iso_"):
+                    src, i_p = cibles["iso"]
+                    src[i_p[cle[4:]], :, k] = arr
+                elif cle in g.i_param:
+                    src, i_p = cibles["h"]
+                    src[i_p[cle], :, k] = arr
+                else:                              # surface (t2m, rafale…)
+                    g.surf[g.i_param_surf[cle], k] = arr[0]
+        # ⚠️ Un run publié porte des cumuls DÉJÀ différenciés — même
+        # drapeau que `lire_npz`, même raison.
+        g._deaccumule = True
+        return g
 
     @staticmethod
     def lire_npz(chemin, manifeste):

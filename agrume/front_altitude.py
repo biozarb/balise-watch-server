@@ -50,7 +50,6 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import math
 import os
@@ -99,7 +98,7 @@ def _lire_octets(base, cle):
         return f.read()
 
 
-def dernier_run(base):
+def dernier_run(base, domaine="nord-alpes"):
     """Le run le plus récent DÉCLARÉ PAR L'INDEX, jamais deviné.
 
     ⚠️ Le produit B ne garde que trois runs et n'autorise pas
@@ -108,18 +107,47 @@ def dernier_run(base):
     un run absent rendrait un 404, mais demander « le dernier » en le
     calculant depuis l'heure courante rendrait un 404 SILENCIEUX un jour
     où un run aurait sauté.
+
+    ⚠️ 13/08 (audit) : l'index porte DEUX domaines depuis l'étape 11 —
+    prendre `runs[0]` sans filtrer pouvait rendre un run des Pyrénées à
+    un rejeu qui croyait lire les Alpes.
     """
     idx = _lire_json_local_ou_http(base, CLE_INDEX)
-    runs = idx.get("runs") or []
+    runs = [e for e in (idx.get("runs") or [])
+            if e.get("domaine", "nord-alpes") == domaine]
     if not runs:
-        raise SystemExit("index du produit B vide — aucun run en ligne")
+        raise SystemExit(f"index du produit B : aucun run en ligne pour le "
+                         f"domaine {domaine}")
     return runs[0]["run"], idx
 
 
-def charger_produit_b(base, run):
-    man = _lire_json_local_ou_http(base, f"agrume/grille/{run}/manifest.json")
-    npz = np.load(io.BytesIO(_lire_octets(base, f"agrume/grille/{run}/grille.npz")))
-    return man, npz
+def charger_produit_b(base, run, domaine="nord-alpes"):
+    """⛔ RÉÉCRIT LE 13/08 (audit) : ce lecteur demandait encore
+    `agrume/grille/{run}/grille.npz` — clé de l'avant-étape 11, sans
+    domaine, format qui n'est plus jamais écrit sur R2. 404 à chaque
+    rejeu, pendant deux lots, et la CI ne couvrait que `construire()`.
+
+    La route est désormais celle des objets PUBLIÉS (manifeste + tampons
+    d'échéance + zsol), reconstruits par `Grille.depuis_tampons()` —
+    bancée par `test_grille.py` §11. Rend `(man, npz_like)` où
+    `npz_like` porte les quatre clés que `construire()` lit :
+    `h0025`, `lats`, `lons`, `echeances`.
+
+    ⓘ Coût : un GET par échéance (~1,3 Mo pièce, jusqu'à 52) là où le
+    npz d'avant tirait ~32 Mo d'un coup — même ordre de grandeur, et
+    c'est un outil de rejeu, pas un chemin chaud.
+    """
+    from grille import Grille                              # noqa: PLC0415
+    man = _lire_json_local_ou_http(
+        base, f"agrume/grille/{domaine}/{run}/manifest.json")
+    svc = man["service"]
+    tampons = {s: _lire_octets(base, svc["cle_echeance"].format(
+        domaine=domaine, run=run, step=s)) for s in man["echeances"]}
+    zsol = _lire_octets(base, svc["cle_zsol"].format(
+        domaine=domaine, run=run))
+    g = Grille.depuis_tampons(man, tampons, zsol)
+    return man, {"h0025": g.h0025, "lats": g.lats, "lons": g.lons,
+                 "echeances": g.steps}
 
 
 def charger_surface(base):
@@ -371,15 +399,19 @@ def main(argv=None):
                    help="répertoire où écrire grid-<niveau>m.json")
     p.add_argument("--parite", action="store_true",
                    help="confronte la grille 10 m à celle de la production")
+    p.add_argument("--domaine", default="nord-alpes",
+                   help="domaine du produit B (défaut : nord-alpes) — le "
+                        "domaine fait partie de la clé R2 depuis l'étape 11, "
+                        "et l'index porte les deux")
     a = p.parse_args(argv)
 
     run = a.run
     if run is None:
-        run, idx = dernier_run(a.base)
+        run, idx = dernier_run(a.base, domaine=a.domaine)
         print(f"run du produit B : {run}  "
               f"({len(idx.get('runs') or [])} en ligne sur "
               f"{idx.get('retention_runs')} gardés)")
-    man, npz = charger_produit_b(a.base, run)
+    man, npz = charger_produit_b(a.base, run, domaine=a.domaine)
     surface = charger_surface(a.base)
     print(f"grille de surface : run {surface.get('run')}, "
           f"{len(surface['times'])} échéances, pas {surface.get('stepDeg')}°")

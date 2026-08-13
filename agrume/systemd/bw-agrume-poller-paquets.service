@@ -3,16 +3,19 @@
 #                                                        (10/08/2026)
 #
 #  ⚠️ CE QU'IL MESURE, ET POURQUOI ÇA N'EST PAS COSMÉTIQUE.
-#  `ingest_colonnes.choisir_run()` exige la couverture COMMUNE aux quatre
-#  paquets du produit A (0025/HP1, 0025/HP2, 001/HP1, 001/SP1) :
+#  `ingest_colonnes.choisir_run()` exige la couverture COMMUNE à TOUS
+#  les paquets de l'ingestion — la liste vit dans
+#  `domaine.PAQUETS_INGESTION` (huit paquets depuis les étapes 5, 12 et
+#  12 bis ; l'audit du 13/08 a trouvé ce fichier resté à quatre) :
 #  l'ingestion avance donc au rythme du PLUS LENT. Si un seul paquet
 #  traîne d'une heure, il traîne toute la chaîne — et ça ne se verrait
 #  NULLE PART, puisque le run finit par être complet et que tout a l'air
-#  normal. Ce service date les quatre séparément, dans le même cycle.
+#  normal. Ce service les date tous séparément, dans le même cycle.
 #
 #  ⚠️ AUCUNE CLÉ. Il passe par le miroir S3 public, en listing seul :
-#  quatre requêtes de quelques kilo-octets par cycle, aucun GRIB.
-#  Il peut donc tourner même si la clé Météo-France est indisponible.
+#  une requête de quelques kilo-octets par paquet et par cycle, aucun
+#  GRIB. Il peut donc tourner même si la clé Météo-France est
+#  indisponible.
 #
 #  ⓘ Il écrit dans le MÊME journal que `bw-agrume-poller` — les séries
 #  sont distinguées par le champ `source` (`arome:0025/HP1`, etc.), et

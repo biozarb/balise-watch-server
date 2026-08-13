@@ -70,7 +70,7 @@ from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL,  # noqa: E402
                       quantifier, verifier_grille)
 from domaine import (GRID_3D, GRID_FINE, MAX_HOURS, MAX_HOURS_GRILLE,  # noqa: E402
                      MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES,
-                     PAQUET_NEBULOSITE, PAQUETS_ISOBARES, PAQUETS_SURFACE)
+                     PAQUETS_INGESTION, PAQUETS_ISOBARES, PAQUETS_SURFACE)
 from grille import Grille, axes_depuis_orographie, decouper  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
@@ -95,28 +95,28 @@ def journal_horodate(msg):
 # Les quatre paquets dont le produit A a besoin. ⚠️ DEUX paquets en
 # 0,025°, pas un : HP1 pour le vent et la thermo, HP2 pour la TKE (qui
 # vit avec le géopotentiel). Ils pèsent presque autant l'un que l'autre.
-PAQUETS = (
-    (GRID_3D, "HP1"),
-    (GRID_3D, "HP2"),
-    (GRID_FINE, "HP1"),      # hybride : u/v à 20, 50, 100 m
-    (GRID_FINE, "SP1"),      # hybride : 10u/10v à 10 m
-    # Étape 5 : le haut du profil. ⚠️ `IP1` porte u, v, t, r ET le
-    # géopotentiel `z` — les cinq dans le même paquet, mesuré le 10/08.
-    # Les quatre autres paquets IP* ne contiennent rien dont le raccord
-    # ait besoin. +1,73 Go sur 0–24 h, bundles de 496 Mo au plus (donc
-    # sous le pic de 815 Mo déjà atteint par HP1 : le disque ne bouge pas).
-    (GRID_3D, PAQUET_ISOBARES),
-    # Étape 12 : la nébulosité par niveau. ⚠️ SEUL TÉLÉCHARGEMENT NEUF DU
-    # LOT, +450 Mo sur 0–24 h (mesuré le 12/08, run 15 Z). Il n'est pas
-    # là pour enrichir le produit : il est là parce que sans `cc` la vue
-    # de coupe affirme « ciel clair » sur toutes les colonnes.
-    (GRID_3D, PAQUET_NEBULOSITE),
-    # Étape 12 bis : la ligne de SURFACE de la vue de coupe, et l'ancre
-    # basse de la pression dérivée. ⚠️ +388 Mo sur 0–24 h, bundles de
-    # 56 Mo au plus — le pic disque ne bouge pas, la durée si.
-    (GRID_3D, "SP1"),
-    (GRID_3D, "SP2"),
-)
+# ⛔ LA LISTE ELLE-MÊME VIT DANS `domaine.py` (audit du 13/08) : le
+# poller doit guetter EXACTEMENT ces paquets, et il en guettait quatre
+# sur huit parce que les deux listes vivaient dans deux fichiers.
+# `test_poller.py` verrouille désormais la parité.
+#
+# Ce que chaque paquet apporte, et ce qu'il coûte — mesuré :
+#  · 0025/HP1, 0025/HP2 : le cœur (u, v, t, r + TKE avec z). Bundles
+#    jusqu'à 818 Mo, pic disque 815 Mo.
+#  · 001/HP1, 001/SP1 : la maille fine du produit A — u/v à 20, 50,
+#    100 m, et 10u/10v à 10 m. ⚠️ Archive SEULE : leurs fichiers
+#    s'arrêtent à `max_heures_archive`, pas à la rallonge (cf. la
+#    boucle d'`ingerer`).
+#  · 0025/IP1 (étape 5) : u, v, t, r ET le géopotentiel `z` — les cinq
+#    dans le même paquet, mesuré le 10/08. +1,73 Go sur 0–24 h, bundles
+#    de 496 Mo au plus (sous le pic déjà atteint par HP1).
+#  · 0025/IP2 (étape 12) : la nébulosité, seule. +450 Mo sur 0–24 h
+#    (mesuré le 12/08, run 15 Z) — sans `cc` la coupe affirme
+#    « ciel clair » sur toutes les colonnes.
+#  · 0025/SP1, 0025/SP2 (étape 12 bis) : la ligne de SURFACE et l'ancre
+#    basse `sp` de la pression dérivée. +388 Mo sur 0–24 h, bundles de
+#    56 Mo au plus — le pic disque ne bouge pas, la durée si.
+PAQUETS = PAQUETS_INGESTION
 
 
 def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
@@ -412,7 +412,8 @@ def filtre_001(paquet):
 
 # ══════════════════════════════════════════════════════════════════════
 def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
-            limite_fichiers=None, avec_grille=True, orogs_grille=None):
+            limite_fichiers=None, avec_grille=True, orogs_grille=None,
+            max_heures_archive=MAX_HOURS):
     """`orogs_grille` : {domaine: orographie 0,025°} — les domaines du
     produit B.
 
@@ -437,10 +438,17 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     # l'appelant qui décide de ce qu'il archive, et un conteneur qui
     # tronque en silence les échéances qu'on lui donne serait exactement
     # le genre de politesse qui coûte une journée de débogage.
-    steps_archive = [s for s in steps if s <= MAX_HOURS]
+    # ⛔ Et il filtre sur le PARAMÈTRE, pas sur la constante (audit du
+    # 13/08) : la première version écrivait `s <= MAX_HOURS`, si bien que
+    # `--max-heures 12` — l'entrée de dispatch du workflow — archivait
+    # quand même 0–24 h : la rallonge du produit B ramenait des échéances
+    # au-delà de 12, et la constante les laissait passer. Douze heures
+    # gravées POUR TOUJOURS dans une archive définitive, que personne
+    # n'avait demandées, et le journal ressemblait au cas nominal.
+    steps_archive = [s for s in steps if s <= max_heures_archive]
     if len(steps_archive) < len(steps):
         crier(f"  ⓘ produit A : {len(steps_archive)} échéances archivées "
-              f"(0 → +{MAX_HOURS} h) · produit B : {len(steps)} "
+              f"(0 → +{max_heures_archive} h) · produit B : {len(steps)} "
               f"(0 → +{steps[-1]} h)")
     col = Colonnes(ref, balises, steps_archive)
 
@@ -481,7 +489,6 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     par_nom_iso[PARAM_ALTITUDE["nom"]] = PARAM_ALTITUDE
     par_nom_surf = {p["nom"]: p for p in PARAMS_SURFACE}
     par_nom_surf[PARAM_PRESSION_SOL["nom"]] = PARAM_PRESSION_SOL
-    steps_set = set(steps)
 
     idx = {}
     for grille, orog in paire_orog.items():
@@ -497,7 +504,17 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     t_dl = t_parse = 0.0
 
     for grille, paquet in PAQUETS:
-        fichiers = fichiers_du_paquet(ref, grille, paquet, steps)
+        # ⛔ LA MAILLE FINE S'ARRÊTE À L'HORIZON DE L'ARCHIVE (audit du
+        # 13/08). Elle ne sert QUE le produit A : le produit B est en
+        # 0,025° (`_g == GRID_3D`, plus bas), et la rallonge 25 → 51 h
+        # ne le concerne donc pas. La première version passait `steps`
+        # complet : 27 fichiers horaires 0,01° téléchargés ET décodés
+        # pour que `sur_champ` les jette un par un — mesuré sur le run
+        # 21 Z du 12/08 : 2,03 Go (HP1) + 0,63 Go (SP1) par run, soit
+        # ~13 % du volume total, en pure perte. Et c'est la DURÉE qui
+        # paie, le seul chiffre sous alerte (30 min pour ~23 attendues).
+        steps_paquet = steps_archive if grille == GRID_FINE else steps
+        fichiers = fichiers_du_paquet(ref, grille, paquet, steps_paquet)
         if limite_fichiers:
             fichiers = fichiers[:limite_fichiers]
         total_mo = sum(t for _, t in fichiers) / 1e6
@@ -657,7 +674,7 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
 
                 t1 = time.time()
                 lus, dec, incidents = parcourir(chemin, veut, sur_champ,
-                                                steps_set)
+                                                set(steps_paquet))
                 t_parse += time.time() - t1
                 compte["messages"] += lus
                 compte["decodes"] += dec
@@ -1019,7 +1036,8 @@ def main(argv=None):
         col, grilles, mesures = ingerer(ref, run, steps, balises, paire,
                                         limite_fichiers=a.limite_fichiers,
                                         avec_grille=not a.sans_grille,
-                                        orogs_grille=orogs_b)
+                                        orogs_grille=orogs_b,
+                                        max_heures_archive=a.max_heures)
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
         return 2

@@ -208,6 +208,30 @@ PAQUET_SURFACE_1 = "SP1"
 PAQUET_SURFACE_2 = "SP2"
 PAQUETS_SURFACE = (PAQUET_SURFACE_1, PAQUET_SURFACE_2)
 
+# ── LES PAQUETS DE L'INGESTION, EN UN SEUL ENDROIT (audit du 13/08) ──
+# ⛔ Cette liste existait DEUX fois : les huit paquets dans
+# `ingest_colonnes.PAQUETS`, et seulement QUATRE dans
+# `poller.PAQUETS_PRODUIT_A` — la liste d'avant les étapes 5, 12 et
+# 12 bis, jamais rattrapée. Le poller déclenchait donc le workflow dès
+# que les quatre anciens paquets étaient publiés ; si IP1/IP2/SP1/SP2
+# 0,025° traînaient, `choisir_run()` retenait un run PLUS ANCIEN — perte
+# de fraîcheur silencieuse, voyant au vert. Deux listes qui « doivent
+# bouger ensemble » sont exactement ce que ce fichier existe pour
+# empêcher (cf. `LEVELS`, payé une fois déjà).
+# L'ordre et les couples (grille, paquet) sont ceux de l'ingestion ; le
+# détail mesuré de chaque paquet (volumes, pièges eccodes) reste
+# documenté sur place dans `ingest_colonnes.py`.
+PAQUETS_INGESTION = (
+    (GRID_3D, "HP1"),
+    (GRID_3D, "HP2"),
+    (GRID_FINE, "HP1"),
+    (GRID_FINE, "SP1"),
+    (GRID_3D, PAQUET_ISOBARES),
+    (GRID_3D, PAQUET_NEBULOSITE),
+    (GRID_3D, PAQUET_SURFACE_1),
+    (GRID_3D, PAQUET_SURFACE_2),
+)
+
 # ── Le domaine Nord-Alpes ─────────────────────────────────────────────
 # ⚠️ Ce n'est pas un choix de confort, c'est ce qui rend le produit B
 # possible : la France entière en 0,025° fait 803 757 points par niveau,
