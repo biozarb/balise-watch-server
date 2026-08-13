@@ -13,11 +13,13 @@
 #  le jeton ordinaire du VPS ne sait qu'ÉCRIRE (403 sur Get, List ET
 #  Delete). Ce script charge donc le jeton d'AUDIT, PAS
 #  `~/.balise-watch-agrume-r2.env` (celui-là n'a que Put).
-#  ⛔⛔ ACTION YANN si ce fichier n'existe pas encore sous ce nom :
-#  créer `~/.balise-watch-r2-audit.env` (mode 600) avec R2_ACCOUNT_ID,
-#  R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY du jeton `BW_R2_AUDIT_*` déjà
-#  utilisé par `sonde_r2.py`/l'audit — ou pointer BW_R2_AUDIT_ENV sur le
-#  fichier existant s'il porte déjà ces identifiants sous un autre nom.
+#  ✅ FAIT le 13/08/2026 (installation du timer) : `~/.balise-watch-r2-audit.env`
+#  créé sur le VPS (mode 600), nouveau jeton Cloudflare R2 dédié
+#  (Object Read only, scopé à `balise-watch-grids`) — testé List+Get en
+#  direct avant branchement, jamais de Delete essayé (inutile pour cet
+#  usage). `R2_ACCOUNT_ID` y est le même que les autres jetons du VPS
+#  (compte Cloudflare unique) ; seuls `R2_ACCESS_KEY_ID`/
+#  `R2_SECRET_ACCESS_KEY` sont propres à ce jeton.
 #
 #  Usage :  ./run-confronter-quotidien.sh              # confronte la veille
 #           ./run-confronter-quotidien.sh --date 2026-08-10
@@ -25,7 +27,14 @@
 set -uo pipefail
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PY="${BW_PYTHON:-python3}"
+# ⛔ Défaut CORRIGÉ (13/08/2026, installation du timer) : c'était
+# `python3` (le Python système, sans numpy) et non le venv du projet —
+# contrairement à `run-ingest-pi.sh`/`run-poller.sh` qui pointent tous
+# deux sur `$HOME/venv-balise/bin/python`. Mesuré à l'installation :
+# `ModuleNotFoundError: No module named 'numpy'` dès le premier import
+# de `profil.py`, le service tombait à CHAQUE lancement. Même défaut,
+# même fix que ses deux scripts jumeaux.
+PY="${BW_PYTHON:-$HOME/venv-balise/bin/python}"
 ALERTES_FILE="${BW_ALERTES_ENV:-$HOME/.balise-watch-alertes.env}"
 AUDIT_FILE="${BW_R2_AUDIT_ENV:-$HOME/.balise-watch-r2-audit.env}"
 
