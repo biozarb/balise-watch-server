@@ -977,5 +977,247 @@ console.log('\n── 10. ⛔ LA COLONNE DEVIENT UN PROFIL — les deux vertical
     && p.runInfo.lastProcessingDelaySec === null);
 }
 
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux générations '
+  + 'd\'un même run ──');
+// ⛔ CE QUE CETTE SECTION PROTÈGE, ET POURQUOI ELLE EXISTE (14/08/2026).
+//
+// Depuis la rallonge du 13/08, un run est publié DEUX fois sous les
+// mêmes clés : 25 échéances puis 52. L'échéance étant l'axe INTERNE d'un
+// enregistrement de colonne, `octets_par_colonne` passe de 11 800 à
+// 24 544 et `colonnes.bin` de 61,2 à 127,3 Mo. Le manifeste et les
+// octets ont donc une GÉNÉRATION, et un cache peut les dépareiller.
+//
+// Les deux appariements ne cassent PAS pareil, et c'est tout l'enjeu :
+//
+//   manifeste NEUF + octets VIEUX → Range au-delà de la fin → 416.
+//     Bruyant. Vu à l'écran le 13/08, et le message accusait la
+//     rétention — le mauvais coupable, sur un run parfaitement intact.
+//   manifeste VIEUX + octets NEUFS → le Range tombe DANS l'objet, 206,
+//     la bonne LONGUEUR, au mauvais ENDROIT. **Silencieux.** Une colonne
+//     d'air plausible et fausse, et rien pour le dire.
+//
+// Un banc qui ne vérifierait que le premier laisserait passer celui qui
+// coûte cher. Les deux sont ici.
+{
+  const RUN = '2026-08-13T15:00:00Z', DOM = 'nord-alpes';
+  const CLE_COL = `agrume/grille/${DOM}/${RUN}/colonnes.bin`;
+  const NECH = 2, PAS = 48, NB_LAT = 2, NB_LON = 2;
+  const TOTAL = NB_LAT * NB_LON * PAS;
+
+  // ⚠️ Fixture en float32 de bout en bout : le dtype se LIT dans le
+  // manifeste, donc rien n'oblige cette fixture à imiter le float16 de
+  // la production — et l'écrire à la main n'aurait vérifié que la
+  // fixture elle-même.
+  const tr = (offset, octets) => ({ offset, octets, dtype: 'float32' });
+  const manifeste = (nbEch) => ({
+    run: RUN, domaine: DOM,
+    echeances: Array.from({ length: nbEch }, (_, k) => k),
+    niveaux_m_sol: [10], niveaux_hpa: [900],
+    bornes: { latmin: 45, latmax: 46, lonmin: 6, lonmax: 7 },
+    axes: {
+      nb_lat: NB_LAT, nb_lon: NB_LON, lat_premier: 46, lat_dernier: 45,
+      lon_premier: 6, lon_dernier: 7, sens: 'lats DÉCROISSANTES',
+    },
+    retention_runs: 3,
+    parametres_surface: [],
+    service: {
+      cle_echeance: `agrume/grille/{domaine}/{run}/e{step:02d}.bin`,
+      cle_zsol: `agrume/grille/{domaine}/{run}/zsol.bin`,
+      cle_colonnes: `agrume/grille/{domaine}/{run}/colonnes.bin`,
+      disposition_tampon: '', encodage: 'float32', tranches: {},
+      octets_par_echeance: 64,
+      colonnes: {
+        disposition: '', offset: '', note: '',
+        // ⚠️ LA TAILLE SUIT LE NOMBRE D'ÉCHÉANCES, exactement comme en
+        // production : c'est CE lien qui fabrique le bug.
+        octets_par_colonne: 24 * nbEch,
+        tranches: {
+          ziso: tr(0, 4 * nbEch), psol: tr(4 * nbEch, 4 * nbEch),
+          u: tr(8 * nbEch, 4 * nbEch), v: tr(12 * nbEch, 4 * nbEch),
+          iso_u: tr(16 * nbEch, 4 * nbEch), iso_v: tr(20 * nbEch, 4 * nbEch),
+        },
+      },
+    },
+  });
+  const MAN = manifeste(NECH);          // la génération EN LIGNE
+  const MAN_VIEUX = manifeste(1);       // celle qu'un cache retiendrait
+
+  // L'objet de la génération en ligne : 4 colonnes × 48 o.
+  const octets = new ArrayBuffer(TOTAL);
+  {
+    const vue = new DataView(octets);
+    for (let c = 0; c < NB_LAT * NB_LON; c++) {
+      const b = c * PAS;
+      for (let e = 0; e < NECH; e++) {
+        vue.setFloat32(b + 4 * e, 1500, true);              // ziso
+        vue.setFloat32(b + 8 + 4 * e, 910, true);           // psol
+        vue.setFloat32(b + 16 + 4 * e, 10 + c, true);       // u : marque
+        vue.setFloat32(b + 24 + 4 * e, 0, true);            // v
+        vue.setFloat32(b + 32 + 4 * e, 1, true);            // iso_u
+        vue.setFloat32(b + 40 + 4 * e, 0, true);            // iso_v
+      }
+    }
+  }
+  const ZSOL = Float32Array.from([1000, 1000, 1000, 1000]);
+
+  // ⚠️ UN VRAI SERVEUR DE RANGE, pas un stub qui rend toujours la même
+  // chose : c'est le comportement du 416 et du rabotage de fin d'objet
+  // qu'on veut éprouver, et il se joue dans ces trois lignes.
+  const servir = (corps, { exposeTotal = true } = {}) => async (url, init) => {
+    const m = /bytes=(\d+)-(\d+)/.exec(init?.headers?.Range ?? '');
+    if (!m) return new Response(corps, { status: 200 });
+    const [d, f] = [Number(m[1]), Number(m[2])];
+    if (d >= corps.byteLength) return new Response(null, { status: 416 });
+    const fin = Math.min(f, corps.byteLength - 1);
+    return new Response(corps.slice(d, fin + 1), {
+      status: 206,
+      headers: exposeTotal
+        ? { 'Content-Range': `bytes ${d}-${fin}/${corps.byteLength}` }
+        : {},
+    });
+  };
+  const prendre = async (p) => { try { await p; return null; } catch (e) { return e; } };
+
+  // ── a. L'index sait la génération, et c'est GRATUIT ────────────────
+  const idx = {
+    runs: [{
+      run: RUN, domaine: DOM,
+      cles: [`agrume/grille/${DOM}/${RUN}/e00.bin`,
+             `agrume/grille/${DOM}/${RUN}/e01.bin`,
+             CLE_COL, `agrume/grille/${DOM}/${RUN}/manifest.json`],
+    }],
+  };
+  verifier('l\'index compte les échéances par ses clés `e{step}.bin` — sans '
+    + 'une requête de plus', L.echeancesDansIndex(idx, RUN, DOM) === NECH);
+  verifier('⚠️ un index d\'avant l\'étape 12 (entrée sans `cles`) rend `null` '
+    + '— on ne conclut pas d\'une absence',
+    L.echeancesDansIndex({ runs: [{ run: RUN, domaine: DOM }] }, RUN, DOM)
+      === null);
+  verifier('le manifeste de la BONNE génération passe',
+    L.verifierGeneration(idx, MAN) === undefined);
+  {
+    const e = (() => { try { L.verifierGeneration(idx, MAN_VIEUX); return null; }
+                       catch (x) { return x; } })();
+    verifier('⛔⛔ LE CAS SILENCIEUX : un manifeste PÉRIMÉ est démasqué par '
+      + 'l\'index, alors que les octets, eux, passeraient sans broncher',
+      e instanceof L.GenerationIncoherente && e.quoi === 'manifeste',
+      e ? e.message.slice(0, 60) + '…' : 'RIEN LEVÉ');
+  }
+
+  // ── b. Manifeste neuf + octets vieux → 416, et le BON message ──────
+  const vieuxOctets = octets.slice(0, 4 * 24);   // l'objet de la 1ʳᵉ passe
+  {
+    // La colonne (1,1) est au-delà de la fin de l'ancien objet : c'est
+    // exactement le point de Yann, au sud de 45,575 N sur la vraie
+    // grille.
+    const e = await prendre(L.chargerColonne(
+      '', MAN, 45, 7, ZSOL, servir(vieuxOctets)));
+    verifier('⛔ manifeste NEUF + octets VIEUX → 416 typé, pas une erreur nue',
+      e instanceof L.GenerationIncoherente && e.quoi === 'octets');
+    verifier('⛔ …et le message n\'accuse PLUS la rétention : le run est là, '
+      + 'entier, c\'est le cache qui est vieux',
+      !!e && !/DÉFINITIVEMENT parti/.test(e.message)
+      && /cache/.test(e.message), e ? '' : 'RIEN LEVÉ');
+    // ⚠️ `exposeTotal: false` = la production d'aujourd'hui : le bucket
+    // n'expose PAS `Content-Range` (il n'est pas dans la liste blanche
+    // CORS). C'est ce qui rend ce cas-ci invisible côté client, et c'est
+    // exactement pour ça que le fix de FOND est côté serveur.
+    verifier('⚠️ …et le NORD de la même grille passe encore sans broncher — '
+      + 'c\'est ce qui fait ressembler le bug à « certains afficheurs » '
+      + 'plutôt qu\'à une panne',
+      (await prendre(L.chargerColonne(
+        '', MAN, 46, 6, ZSOL, servir(vieuxOctets, { exposeTotal: false }))))
+        === null,
+      'colonne 0 : offset 0 < 96 o, le Range tombe dans l\'ancien objet');
+  }
+
+  // ── c. Un 404, lui, EST la rétention ───────────────────────────────
+  {
+    const e = await prendre(L.chargerColonne('', MAN, 45, 7, ZSOL,
+      async () => new Response(null, { status: 404 })));
+    verifier('⚠️ un 404 garde le message de la rétention — trois statuts, '
+      + 'trois causes, trois réparations',
+      !!e && /DÉFINITIVEMENT parti/.test(e.message)
+      && !(e instanceof L.GenerationIncoherente));
+  }
+
+  // ── d. Le voisin du 416 : la colonne à cheval sur la fin ───────────
+  {
+    // 3 colonnes et demie : le début du Range de la 4ᵉ est valide, la fin
+    // déborde, le serveur RABOTE et rend 206.
+    const e = await prendre(L.chargerColonne(
+      '', MAN, 45, 7, ZSOL, servir(octets.slice(0, TOTAL - 8),
+        { exposeTotal: false })));
+    verifier('⛔ un 206 RABOTÉ est refusé lui aussi — sans ça il finirait en '
+      + '« tranche hors du tampon », à trois fonctions de sa cause',
+      e instanceof L.GenerationIncoherente && /plus court/.test(e.message));
+  }
+
+  // ── e. Content-Range, quand le bucket l'expose ─────────────────────
+  {
+    const long = new ArrayBuffer(TOTAL * 2);
+    new Uint8Array(long).set(new Uint8Array(octets));
+    const e = await prendre(L.chargerColonne('', MAN, 46, 6, ZSOL,
+      servir(long)));
+    verifier('⚠️ un objet TROP LONG pour ce manifeste est vu quand le bucket '
+      + 'expose `Content-Range` — le seul contrôle qui voie les DEUX sens',
+      e instanceof L.GenerationIncoherente && /le manifeste en décrit/.test(e.message));
+    const ok = await prendre(L.chargerColonne('', MAN, 46, 6, ZSOL,
+      servir(long, { exposeTotal: false })));
+    verifier('…et son absence ne fabrique pas de faux positif : sans l\'en-tête '
+      + 'CORS, la longueur reçue reste juste et la colonne est servie',
+      ok === null);
+  }
+
+  // ── f. Le cas nominal passe toujours ───────────────────────────────
+  {
+    const col = await L.chargerColonne('', MAN, 45, 7, ZSOL, servir(octets));
+    verifier('le cas nominal est servi, et c\'est la BONNE colonne',
+      col.j === 1 && col.i === 1 && col.tranches.u[0] === 13,
+      `u = ${col.tranches.u[0]} (marque de la colonne 3)`);
+  }
+
+  // ── g. Le rejeu qui débloque un appareil empoisonné ────────────────
+  // ⛔ C'EST LA VÉRIFICATION QUI COMPTE POUR L'UTILISATEUR. Le fix
+  // serveur empêche que ça recommence ; celui-ci répare les appareils
+  // DÉJÀ empoisonnés sans attendre l'expiration des 6 h.
+  {
+    const A = await import(process.env.BW_AGRUME_MODULE
+      || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeProfile.ts'));
+    let reloads = 0, passes = 0;
+    const cache = async (url, init) => {
+      const frais = init?.cache === 'reload';
+      if (frais) reloads++;
+      if (url.endsWith('index.json')) return Response.json(idx);
+      if (url.endsWith('manifest.json')) {
+        passes++;
+        // ⚠️ Le cache rend le VIEUX manifeste tant qu'on ne force pas la
+        // revalidation : c'est le comportement exact d'un `max-age` non
+        // expiré, et c'est ce que le rejeu doit vaincre.
+        return Response.json(frais ? MAN : MAN_VIEUX);
+      }
+      if (url.endsWith('zsol.bin')) return new Response(ZSOL.buffer);
+      return servir(octets)(url, init);
+    };
+    const r = await A.chargerProfilAgrume('', 45.5, 6.5, cache);
+    verifier('⛔ un appareil empoisonné se répare TOUT SEUL, en une relecture '
+      + 'forcée, sans attendre les 6 h de cache',
+      r.profil.times.length === NECH && reloads > 0 && passes === 2,
+      `${passes} lectures du manifeste, ${reloads} en \`cache: reload\``);
+    verifier('⚠️ et UN SEUL rejeu : une incohérence qui persiste doit rester '
+      + 'visible, pas devenir lente',
+      await (async () => {
+        let n = 0;
+        const toujours = async (url, init) => {
+          if (url.endsWith('manifest.json')) { n++; return Response.json(MAN_VIEUX); }
+          return cache(url, init);
+        };
+        const e = await prendre(A.chargerProfilAgrume('', 45.5, 6.5, toujours));
+        return e instanceof L.GenerationIncoherente && n === 2;
+      })());
+  }
+}
+
 console.log(`\n  calque altitude (JS) : ${echecs ? `ÉCHEC (${echecs})` : 'OK'}`);
 process.exit(echecs ? 1 : 0);

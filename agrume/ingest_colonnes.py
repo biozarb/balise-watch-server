@@ -826,7 +826,43 @@ def publier_grilles(paquets, ref, crier=journal_horodate):
           + (f", {len(index.get('restes') or [])} reste(s) à supprimer"
              if index.get("restes") else ""))
 
-    # ── 2. les objets de chaque domaine ───────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  2. LES OBJETS DE CHAQUE DOMAINE — ET LEUR POLITIQUE DE CACHE
+    #
+    #  ⛔ 14/08 — « LA CLÉ PORTE LE RUN » NE VEUT PLUS DIRE « IMMUABLE ».
+    #  Depuis la rallonge du 13/08, un run est publié DEUX FOIS : la
+    #  passe de fraîcheur (0–24 h) puis la passe de rallonge (0–51 h),
+    #  sous les MÊMES clés. `CACHE_IMMUABLE` (max-age 6 h) était fondé
+    #  sur la prémisse inverse, et elle est morte ce soir-là.
+    #
+    #  Le critère n'est pas la FORME de la clé, c'est : **les mêmes
+    #  octets sortiront-ils toujours de cette clé ?**
+    #
+    #    · `e{step}.bin`, `zsol.bin` → OUI. Ils ne dépendent que du run
+    #      et du step ; la seconde passe les réécrit à l'identique.
+    #      Ils restent IMMUABLES, et c'est ce qui garde le calque à
+    #      6 h de cache (1 Mo par échéance, le poste le plus lourd).
+    #    · `colonnes.bin`, `manifest.json` → NON. L'échéance est l'axe
+    #      INTERNE d'un enregistrement de colonne : passer de 25 à 52
+    #      échéances fait passer la colonne de 11 800 à 24 544 o et
+    #      l'objet de 61,2 à 127,3 Mo. Ils sont RÉÉCRITS, donc
+    #      `CACHE_REECRIT`.
+    #
+    #  ⛔ CE QUE LE CACHE LONG COÛTAIT, CONSTATÉ À L'ÉCRAN LE 13/08 AU
+    #  SOIR : un cache qui tient le `colonnes.bin` de la 1ʳᵉ passe et le
+    #  `manifest.json` de la 2ᵉ demande un Range au-delà de la fin de
+    #  l'objet → **HTTP 416**, et seulement pour les points dont
+    #  l'indice de colonne dépasse 2 492 (au sud de 45,575 N sur les
+    #  Alpes). ⚠️⚠️ L'appariement INVERSE — vieux manifeste, nouveaux
+    #  octets — ne lève rien : le Range tombe DANS l'objet, rend 206, et
+    #  la coupe trace une colonne d'air plausible et fausse. C'est cette
+    #  moitié-là, silencieuse, qui justifie de corriger la CAUSE ici
+    #  plutôt que de se contenter du garde-fou client.
+    #
+    #  ⓘ Ce que la revalidation coûte : un 304 conditionnel par lecture,
+    #  sur deux objets. `colonnes.bin` n'est jamais tiré en entier — la
+    #  coupe en lit 24 Ko par Range.
+    # ══════════════════════════════════════════════════════════════════
     a_supprimer, nouveau = [], index
     for dom, gr, manifeste in paquets:
         base = prefixe_run(ref, dom)
@@ -848,12 +884,20 @@ def publier_grilles(paquets, ref, crier=journal_horodate):
         # décrire un objet qui n'est pas encore là. ⓘ C'est le plus gros
         # objet du produit (57,8 Mo sur les Alpes, 93,7 sur les
         # Pyrénées) : s'il doit échouer, autant que ce soit avant.
+        # ⚠️ `CACHE_REECRIT` ET PAS `CACHE_IMMUABLE` : cet objet CHANGE DE
+        # TAILLE quand la rallonge repasse sur le même run (cf. l'en-tête
+        # du §2). Un cache long ici sert des octets d'une génération pour
+        # un manifeste d'une autre.
         store.put(cle_colonnes(ref, dom), gr.tampon_colonnes(),
-                  cache_control=CACHE_IMMUABLE,
+                  cache_control=CACHE_REECRIT,
                   content_type="application/octet-stream")
+        # ⚠️ Le manifeste suit la MÊME politique que l'objet qu'il décrit,
+        # et ce n'est pas cosmétique : c'est le couple (manifeste, octets)
+        # qui doit être cohérent. Deux TTL différents sur les deux moitiés
+        # d'un même contrat, c'est la garantie de les désynchroniser.
         store.put(f"{base}/manifest.json",
                   json.dumps(manifeste, ensure_ascii=False).encode(),
-                  cache_control=CACHE_IMMUABLE)
+                  cache_control=CACHE_REECRIT)
         cles = cles_du_run(ref, dom, gr.steps) + [f"{base}/zsol.bin"]
         nouveau, sup = index_apres(nouveau, ref, dom, cles)
         a_supprimer += [c for c in sup if c not in a_supprimer]
@@ -1233,10 +1277,16 @@ def main(argv=None):
         mo_par_run=round((p_npz.stat().st_size + p_man.stat().st_size) / 1e6, 2))
     store = Storage("agrume-colonnes", "AGRUME_BUCKET", "wind-grid", plafond)
     base = f"agrume/colonnes/{ref}"
-    # ⚠️ CACHE_IMMUABLE : la clé porte le run, donc l'objet n'est JAMAIS
-    # réécrit en place — contrairement aux tuiles de vent. C'est le cas
-    # où un TTL long est correct (et la leçon des 23-24/07 ne s'applique
-    # pas ici, elle vise les clés réécrites).
+    # ⚠️ CACHE_IMMUABLE — et depuis le 14/08 la justification n'est PLUS
+    # « la clé porte le run donc rien n'est réécrit » : la rallonge
+    # repasse sur le même run, donc ces deux clés SONT réécrites. Ce qui
+    # rend le TTL long correct ici, c'est que le produit A ne bouge pas
+    # d'une passe à l'autre : son horizon est celui de l'ARCHIVE (0–24 h),
+    # que la rallonge n'étend pas, et il se lit EN ENTIER (jamais par
+    # Range). Mêmes octets utiles, aucune taille à faire concorder.
+    # ⛔ Le jour où le produit A prendrait la rallonge, ou serait lu par
+    # Range, cette ligne redevient le bug du 13/08 (voir le §2 de
+    # `publier_grilles`) : c'est la SEULE chose à revérifier ici.
     store.put(f"{base}/colonnes.npz", p_npz.read_bytes(),
               cache_control=CACHE_IMMUABLE,
               content_type="application/octet-stream")
