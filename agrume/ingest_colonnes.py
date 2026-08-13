@@ -68,7 +68,7 @@ from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL,  # noqa: E402
                       PARAMS_001, PARAMS_0025, PARAMS_ISO, PARAMS_SURFACE,
                       Abort, Colonnes, balises_du_domaine, index_plats,
                       quantifier, verifier_grille)
-from domaine import (GRID_3D, GRID_FINE, MAX_HOURS,  # noqa: E402
+from domaine import (GRID_3D, GRID_FINE, MAX_HOURS, MAX_HOURS_GRILLE,  # noqa: E402
                      MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES,
                      PAQUET_NEBULOSITE, PAQUETS_ISOBARES, PAQUETS_SURFACE)
 from grille import Grille, axes_depuis_orographie, decouper  # noqa: E402
@@ -119,7 +119,8 @@ PAQUETS = (
 )
 
 
-def choisir_run(max_heures, profondeur=5, crier=journal_horodate):
+def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
+                max_heures_grille=None):
     """Run maximisant la couverture COMMUNE aux quatre paquets.
 
     Même esprit que `arome-wind/ingest.py::pick_run`, et pour la même
@@ -153,7 +154,54 @@ def choisir_run(max_heures, profondeur=5, crier=journal_horodate):
                     "réseaux — rien à archiver.")
     ref, run, commun = meilleur
     crier(f"→ run retenu : {ref} ({len(commun)}/{len(voulues)} échéances)")
-    return ref, run, sorted(commun)
+    steps = sorted(commun)
+
+    # ── ⛔ LA RALLONGE DU PRODUIT B — APRÈS le choix, jamais pendant ──
+    # (13/08) Le produit B va jusqu'à `MAX_HOURS_GRILLE` (51 h), l'archive
+    # reste à `MAX_HOURS` (24 h). Ces échéances-là sont cherchées ICI,
+    # une fois le run DÉJÀ retenu, et l'ordre n'est pas un détail :
+    #
+    # ⛔ Si la rallonge entrait dans le critère de sélection, un run vieux
+    # de trois heures publiant ses 52 échéances battrait un run FRAIS qui
+    # n'en publie encore que 25 — `meilleur` compare des longueurs. On
+    # perdrait de la fraîcheur, qui est la seule chose qu'AGRUME apporte,
+    # pour gagner des heures lointaines dont personne ne fait rien. Et ça
+    # ne se verrait nulle part : les deux runs sont valides.
+    #
+    # ⚠️ CONTIGUË, et on s'arrête au premier trou. Les tampons d'échéance
+    # sont indexés par leur position ; un trou au milieu donnerait une
+    # coupe où 14 h manque entre 13 h et 15 h. C'est honnête (le
+    # manifeste publie `echeances`) mais illisible, et le bord est le seul
+    # endroit où l'absence se comprend d'elle-même : « ça s'arrête là ».
+    if max_heures_grille and max_heures_grille > max_heures:
+        rallonge = list(range(max_heures + 1, max_heures_grille + 1))
+        dispo = set(rallonge)
+        for grille, paquet in PAQUETS:
+            dispo &= covered_steps(ref, paquet, grille, rallonge,
+                                   model=MODEL_DIR)
+        contigu = []
+        for h in rallonge:
+            if h not in dispo:
+                break
+            contigu.append(h)
+        # ⚠️ La rallonge n'est ajoutée que si l'archive est COMPLÈTE.
+        # Sur un run tronqué à 19 h, aller chercher 25 → 51 reviendrait à
+        # publier une coupe avec un trou de six heures en son milieu.
+        if len(commun) == len(voulues) and contigu:
+            steps += contigu
+            crier(f"  ▶ produit B prolongé à +{contigu[-1]} h "
+                  f"({len(contigu)} échéances de plus ; l'archive reste à "
+                  f"+{max_heures} h)")
+        elif contigu:
+            crier(f"  ⚠️ rallonge du produit B ABANDONNÉE : l'archive elle-"
+                  f"même est incomplète ({len(commun)}/{len(voulues)}). Un "
+                  f"trou au milieu de la coupe serait pire qu'une coupe "
+                  f"courte.")
+        else:
+            crier(f"  ⓘ aucune échéance au-delà de +{max_heures} h n'est "
+                  f"publiée par les {len(PAQUETS)} paquets — le produit B "
+                  f"s'arrête là, ce n'est pas une panne.")
+    return ref, run, steps
 
 
 def fichiers_du_paquet(ref, grille, paquet, steps, lister=s3_objets):
@@ -379,7 +427,22 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
     tableau de 61×85. Le commentaire de `_g == GRID_3D`, plus bas, décrit
     déjà ce que ça donne : rien ne s'allume.
     """
-    col = Colonnes(ref, balises, steps)
+    # ⛔ DEUX HORIZONS, ET C'EST ICI QU'ILS SE SÉPARENT (13/08).
+    # `steps` est ce qui a été TÉLÉCHARGÉ (jusqu'à `MAX_HOURS_GRILLE`).
+    # L'archive, elle, s'arrête à `MAX_HOURS` : elle est DÉFINITIVE, son
+    # format engage pour des années, et à 0–51 h elle ferait 93 Go au
+    # bout d'un an contre 23. La grille, qui ne garde que trois runs,
+    # prend tout.
+    # ⚠️ Le filtre est écrit ici et PAS dans `Colonnes.__init__` : c'est
+    # l'appelant qui décide de ce qu'il archive, et un conteneur qui
+    # tronque en silence les échéances qu'on lui donne serait exactement
+    # le genre de politesse qui coûte une journée de débogage.
+    steps_archive = [s for s in steps if s <= MAX_HOURS]
+    if len(steps_archive) < len(steps):
+        crier(f"  ⓘ produit A : {len(steps_archive)} échéances archivées "
+              f"(0 → +{MAX_HOURS} h) · produit B : {len(steps)} "
+              f"(0 → +{steps[-1]} h)")
+    col = Colonnes(ref, balises, steps_archive)
 
     # ── Le produit B, dans la MÊME passe ──────────────────────────────
     # ⚠️ C'est ici que l'étape 6 devient presque gratuite : les messages
@@ -511,8 +574,18 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                     brut = np.full(len(_i), np.nan)
                     brut[_v] = np.asarray(values)[_i[_v]]
                     if not _iso:
-                        col.poser(_g, nom, niveau, step,
-                                  quantifier(brut, _t[nom]))
+                        # ⚠️ LA GARDE, ET ELLE PROTÈGE LA GRILLE PLUS QUE
+                        # L'ARCHIVE (13/08). Depuis la rallonge du produit
+                        # B, `step` peut dépasser l'horizon de l'archive.
+                        # Sans ce test, `col.poser` lèverait un `KeyError`
+                        # — et `parcourir()` avale les exceptions de ce
+                        # callback, donc le bloc « produit B » vingt lignes
+                        # plus bas ne serait JAMAIS atteint. On perdrait
+                        # exactement les échéances qu'on est venu chercher,
+                        # sans un mot.
+                        if col.accepte_echeance(step):
+                            col.poser(_g, nom, niveau, step,
+                                      quantifier(brut, _t[nom]))
                         # ── produit B, sur le MÊME message décodé ─────
                         # ⚠️⚠️ `_g == GRID_3D` N'EST PAS REDONDANT AVEC
                         # `accepte()`, ET L'OUBLIER CASSE EN SILENCE. La
@@ -558,8 +631,12 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
                     # à 700 hPa au lieu de 3 240, plausible au premier
                     # coup d'œil. `test_colonnes.py` rejoue ce chemin.
                     dtype = np.float32 if nom == PARAM_ALTITUDE["nom"] else np.float16
-                    col.poser_isobare(nom, niveau, step,
-                                      quantifier(brut, _t[nom], dtype=dtype))
+                    # Même garde que pour les niveaux hauteur, et pour la
+                    # même raison : la grille se remplit APRÈS, dans ce
+                    # même callback.
+                    if col.accepte_echeance(step):
+                        col.poser_isobare(nom, niveau, step,
+                                          quantifier(brut, _t[nom], dtype=dtype))
 
                     # ── produit B, sur le MÊME message décodé ──────────
                     # Même geste que pour les niveaux hauteur vingt
@@ -778,7 +855,13 @@ def main(argv=None):
     p.add_argument("--suspectes", default=None,
                    help="fichier JSON [ids] des balises position_suspecte "
                         "(elles sont MARQUÉES, pas retirées)")
-    p.add_argument("--max-heures", type=int, default=MAX_HOURS)
+    p.add_argument("--max-heures", type=int, default=MAX_HOURS,
+                   help="horizon de l'ARCHIVE (produit A). ⚠️ C'est aussi "
+                        "lui qui décide quel run est retenu : un run qui "
+                        "ne couvre pas cet horizon est incomplet.")
+    p.add_argument("--max-heures-grille", type=int, default=MAX_HOURS_GRILLE,
+                   help="horizon de la GRILLE 3D (produit B), au mieux et "
+                        "seulement si contigu. L'archive n'y va jamais.")
     p.add_argument("--limite-fichiers", type=int, default=None,
                    help="banc d'essai : n premiers fichiers par paquet")
     p.add_argument("--sans-ecriture", action="store_true",
@@ -919,7 +1002,8 @@ def main(argv=None):
             except Abort as e:
                 journal_horodate(f"  ⚠️ points de radiosondage SANS SOL : {e}")
 
-        ref, run, steps = choisir_run(a.max_heures)
+        ref, run, steps = choisir_run(a.max_heures,
+                                      max_heures_grille=a.max_heures_grille)
         # ⚠️ 12/08 — LE PRODUIT B COUVRE MAINTENANT TOUS LES DOMAINES QUI
         # ONT UNE OROGRAPHIE FIGÉE, pas seulement `nord-alpes`. Le
         # commentaire qui précède `charger_artefacts()` disait « DEUX

@@ -580,6 +580,22 @@ class Colonnes:
         self.i_param_iso = {p["nom"]: k for k, p in enumerate(PARAMS_ISO)}
         self.i_step = {s: k for k, s in enumerate(self.steps)}
 
+    def accepte_echeance(self, step):
+        """⛔ L'ARCHIVE ET LA GRILLE N'ONT PLUS LE MÊME HORIZON (13/08).
+
+        Le produit B va jusqu'à `MAX_HOURS_GRILLE` (51 h), l'archive reste
+        à `MAX_HOURS` (24 h) parce qu'elle est DÉFINITIVE. L'ingestion
+        décode donc des messages que ce conteneur-ci ne veut pas.
+
+        ⚠️ CE TEST N'EST PAS UNE POLITESSE. Sans lui, `poser()` lèverait
+        un `KeyError` sur `self.i_step[step]` — et `parcourir()` AVALE les
+        exceptions du callback. La grille, qui se remplit dans le même
+        `sur_champ` juste après, n'aurait jamais reçu ces échéances-là.
+        On aurait donc perdu exactement ce que la rallonge vient chercher,
+        en silence, sur un chemin où rien ne s'allume.
+        """
+        return step in self.i_step
+
     def poser(self, grille, param_nom, niveau, step, valeurs_balises):
         if grille == GRID_3D:
             self.c0025[:, self.i_param_0025[param_nom],

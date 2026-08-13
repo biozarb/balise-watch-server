@@ -53,6 +53,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
 import calque as C  # noqa: E402
+# ⛔ IMPORTÉ POUR ÊTRE CONFRONTÉ, PAS POUR ÊTRE RÉUTILISÉ. Depuis le
+# 13/08 le calque et le profil doivent partager la MÊME rampe de raccord
+# — c'est le §8 a tranché. Le banc le vérifie en comparant les deux
+# fonctions valeur par valeur ; deux rampes qui se ressemblent ne
+# suffisent pas, c'est justement ce qu'on vient de corriger.
+import profil as P  # noqa: E402
 from domaine import NIVEAUX_H_0025  # noqa: E402
 from grille import Grille, PARAMS_GRILLE  # noqa: E402
 
@@ -122,17 +128,68 @@ def section_9_relais_isobare():
         g.iso[g.i_param_iso["v"], k, 0] = np.float16(200.0 + k)
 
     # ── a) SOUS le plafond hauteur, RIEN ne doit changer ──────────────
-    # C'est l'invariant de l'étape 11 (« à A = zsol + niveau_k, le calque
-    # rend exactement le niveau k »), et il ne doit pas être une victime
-    # du lot 12.
-    r = C.calque(g, 0, 1000.0 + 2000.0)
-    verifier("sous zsol + 3000 m, la valeur reste celle des niveaux "
-             "HAUTEUR — l'invariant de l'étape 11 survit au lot 12",
+    # ⛔ L'INVARIANT DE L'ÉTAPE 11 A ÉTÉ VOLONTAIREMENT AFFAIBLI LE 13/08,
+    # ET C'EST LE POINT DE CE BLOC. « À A = zsol + niveau_k, le calque
+    # rend exactement le niveau k » ne vaut plus QUE sous
+    # `zsol + RACCORD_BAS_M` : au-dessus, la valeur est une combinaison
+    # convexe des deux verticales, parce que Yann a tranché le §8 a
+    # (« le mieux est ce que fait la coupe, on prend ce modèle-là
+    # partout »). Un invariant affaibli sans que personne l'écrive serait
+    # pire que pas d'invariant : les trois vérifications ci-dessous
+    # DISENT où il tient encore, et à quoi il a cédé la place.
+    from domaine import RACCORD_BAS_M, RACCORD_HAUT_M     # noqa: PLC0415
+
+    # ── a1) SOUS le raccord bas : le niveau BRUT, à l'octet près ──────
+    n_bas = max(n for n in NIVEAUX_H_0025 if n <= RACCORD_BAS_M)
+    r = C.calque(g, 0, 1000.0 + n_bas)
+    verifier(f"⛔ sous zsol + {RACCORD_BAS_M} m, la valeur est le niveau "
+             f"BRUT — l'invariant de l'étape 11 tient ENCORE là, et c'est "
+             f"la moitié de la colonne qui compte pour un décollage",
              np.allclose(r["champs"]["u"],
-                         float(np.float16(1000.0 + NIVEAUX_H_0025.index(2000)))),
-             f"{float(r['champs']['u'][0, 0]):.1f}")
-    verifier("…et aucune colonne n'est annoncée servie par les isobares",
-             r["couverture"]["parIsobares"] == 0.0)
+                         float(np.float16(1000.0 + NIVEAUX_H_0025.index(n_bas)))),
+             f"{float(r['champs']['u'][0, 0]):.1f} au niveau {n_bas} m")
+    verifier("…et rien n'y est mélangé ni servi par les isobares",
+             r["couverture"]["parIsobares"] == 0.0
+             and float(C.poids_hauteur(n_bas)) == 1.0)
+
+    # ── a2) DANS la bande : une combinaison, encadrée par ses deux
+    #        sources — et surtout PAS l'une des deux.
+    A_mix = 1000.0 + 2000.0                     # w = (3000−2000)/2000 = 0,5
+    r = C.calque(g, 0, A_mix)
+    brut = float(np.float16(1000.0 + NIVEAUX_H_0025.index(2000)))
+    # L'axe isobare de cette fixture : 1000 hPa à 2 000 m puis +500 m.
+    # À 3 000 m on est pile entre le niveau 2 (3 000 m) — donc `u` = 102.
+    v_iso = float(np.float16(102.0))
+    w = float(C.poids_hauteur(2000.0))
+    verifier(f"⛔ DANS la bande {RACCORD_BAS_M}–{RACCORD_HAUT_M} m, la "
+             f"valeur est la COMBINAISON des deux verticales — c'est le "
+             f"§8 a tranché : la carte dit enfin la même chose que la coupe",
+             np.allclose(r["champs"]["u"], w * brut + (1.0 - w) * v_iso,
+                         atol=1e-3),
+             f"w={w:.2f} · {float(r['champs']['u'][0, 0]):.2f} "
+             f"(hauteur {brut:.1f}, isobare {v_iso:.1f})")
+    verifier("…et ce n'est NI l'une NI l'autre des deux sources — sans quoi "
+             "le mélange ne serait qu'un nom",
+             not np.isclose(float(r["champs"]["u"][0, 0]), brut, atol=1e-3)
+             and not np.isclose(float(r["champs"]["u"][0, 0]), v_iso, atol=1e-3))
+    verifier("…et le calque DIT que ces colonnes sont mélangées",
+             r["couverture"]["parMelange"] == 1.0
+             and r["couverture"]["parIsobares"] == 0.0,
+             f"mélange {r['couverture']['parMelange']:.0%}")
+
+    # ── a3) LES DEUX BORNES, où le mélange doit être une identité ─────
+    verifier(f"⚠️ à zsol + {RACCORD_BAS_M} m exactement, w = 1 : le mélange "
+             f"rend la hauteur SEULE — la rampe démarre sans marche",
+             float(C.poids_hauteur(RACCORD_BAS_M)) == 1.0)
+    verifier(f"⚠️ et à zsol + {RACCORD_HAUT_M} m, w = 0 : il rend l'isobare "
+             f"SEUL, donc il se raccorde SANS MARCHE au relais qui prend la "
+             f"suite juste au-dessus",
+             float(C.poids_hauteur(RACCORD_HAUT_M)) == 0.0)
+    verifier("⛔ et le poids est CELUI DE `profil.py`, pas une seconde "
+             "rampe qui lui ressemblerait — c'était tout l'objet du §8 a",
+             all(abs(float(C.poids_hauteur(z - 1000.0))
+                     - P.poids_hauteur(z, 1000.0)) < 1e-12
+                 for z in (1000.0, 1500.0, 2000.0, 2999.0, 4000.0, 5000.0)))
 
     # ── b) AU-DESSUS, le relais joue, et il interpole en ALTITUDE ─────
     r = C.calque(g, 0, 4250.0)          # pile entre 2 000+500·4 et +500·5

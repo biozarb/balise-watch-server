@@ -232,6 +232,10 @@ if (!chemin || !man) {
   let pireU = 0, pireV = 0, pireW = 0, nServis = 0, nMasq = 0;
   let desaccordMasque = 0, desaccordK = 0, pireZsol = 0, premier = null;
   let nIso = 0;
+  // Étape 13 : le mélange. `nMix` compte, `pireWh` mesure l'écart de
+  // rampe, `desaccordMix` compte les cas où les deux implémentations ont
+  // divergé sur le CHEMIN et pas sur la valeur.
+  let nMix = 0, pireWh = 0, desaccordMix = 0;
 
   for (const c of fx.cas) {
     const idx = c.j * nbLon + c.i;
@@ -263,8 +267,46 @@ if (!chemin || !man) {
     if (k !== c.k) { desaccordK++; premier = premier || c; }
     pireW = Math.max(pireW, Math.abs(w - c.w));
     const pu = parIso ? isoU : u, pv = parIso ? isoV : v;
-    const gu = L.melanger(pu[k * nbCol + idx], pu[(k + 1) * nbCol + idx], w);
-    const gv = L.melanger(pv[k * nbCol + idx], pv[(k + 1) * nbCol + idx], w);
+    let gu = L.melanger(pu[k * nbCol + idx], pu[(k + 1) * nbCol + idx], w);
+    let gv = L.melanger(pv[k * nbCol + idx], pv[(k + 1) * nbCol + idx], w);
+
+    // ── ÉTAPE 13 : LE MÉLANGE, rejoué du côté JS ─────────────────────
+    // ⛔ Le cas porte `source: 'melange'` ET `poidsHauteur`. Le banc SUIT
+    // les deux plutôt que de redécider quand mélanger : redécider serait
+    // réimplémenter la règle qu'on vérifie. Mais il RECALCULE le poids
+    // par `L.poidsHauteur(man, h)` et compare — c'est ce qui attrape une
+    // rampe qui aurait divergé d'un côté du pont.
+    if (c.source === 'melange') {
+      nMix++;
+      const wh = L.poidsHauteur(man, h);
+      pireWh = Math.max(pireWh, Math.abs(wh - c.poidsHauteur));
+      const e = L.encadrerIsobares(ziso, nbCol, iso.nbNiveaux, idx, c.altitudeASLM);
+      if (!e.dispo) { desaccordMix++; premier = premier || c; continue; }
+      const iu = L.melanger(isoU[e.k * nbCol + idx], isoU[(e.k + 1) * nbCol + idx], e.w);
+      const iv = L.melanger(isoV[e.k * nbCol + idx], isoV[(e.k + 1) * nbCol + idx], e.w);
+      // ⚠️ MÊME ORDRE DES TERMES QUE PYTHON. `w*a + (1-w)*b` et
+      // `b + w*(a-b)` sont égaux en algèbre et pas en virgule flottante,
+      // et ce banc exige l'écart NUL, pas « petit ».
+      gu = wh * gu + (1 - wh) * iu;
+      gv = wh * gv + (1 - wh) * iv;
+    } else if (!parIso) {
+      // ⛔ ET LA RÉCIPROQUE, qui est la moitié qui manquerait. Si Python
+      // dit « hauteur » là où le TypeScript mélangerait, les valeurs
+      // divergeraient — mais si le banc ne testait QUE les cas étiquetés
+      // `melange`, il ne le verrait jamais. On vérifie donc aussi que le
+      // poids vaut bien 1 partout où Python n'a PAS mélangé.
+      const wh = L.poidsHauteur(man, h);
+      if (wh < 1) {
+        const e = L.encadrerIsobares(ziso, nbCol, iso.nbNiveaux, idx, c.altitudeASLM);
+        // Python n'a pas mélangé : soit l'axe isobare ne dit rien ici,
+        // soit le poids vaut 1. Si les deux sont faux, les deux
+        // implémentations ont divergé sur le CHEMIN, pas sur la valeur.
+        if (e.dispo) {
+          const iu = L.melanger(isoU[e.k * nbCol + idx], isoU[(e.k + 1) * nbCol + idx], e.w);
+          if (Number.isFinite(iu)) { desaccordMix++; premier = premier || c; }
+        }
+      }
+    }
     pireU = Math.max(pireU, Math.abs(gu - c.u));
     pireV = Math.max(pireV, Math.abs(gv - c.v));
     nServis++;
@@ -282,6 +324,17 @@ if (!chemin || !man) {
     pireW === 0, `écart max ${pireW}`);
   verifier(`⛔ LA PARITÉ : u et v identiques sur les ${nServis} cas servis`,
     pireU === 0 && pireV === 0, `écart max u ${pireU} · v ${pireV}`);
+  // ── ÉTAPE 13 : la bande de mélange, des deux côtés du pont ────────
+  verifier('⛔ la fixture porte des cas MÉLANGÉS — sans eux, la bande '
+    + 'zsol+1000 → zsol+3000 ne serait comparée nulle part, et c\'est '
+    + 'exactement la tranche où vole un parapentiste',
+    nMix > 0, `${nMix} cas mélangés`);
+  verifier('⛔ la RAMPE est la même des deux côtés, à l\'octet près — deux '
+    + 'rampes qui se ressemblent, c\'est le défaut que le §8 a corrigeait',
+    pireWh === 0, `écart max ${pireWh}`);
+  verifier('⛔ et les deux implémentations mélangent aux MÊMES ENDROITS : '
+    + 'aucune ne mélange là où l\'autre sert la hauteur seule',
+    desaccordMix === 0, `${desaccordMix} désaccord(s) de chemin`);
   verifier('la fixture porte des cas servis ET des cas masqués',
     nServis > 0 && nMasq > 0, `${nServis} servis · ${nMasq} masqués`);
   // ⛔ Sans ce contrôle, la moitié HAUTE du calque ne serait vérifiée
@@ -311,11 +364,17 @@ if (!man) {
       if (Number.isFinite(brut)) { pire = Math.max(pire, Math.abs(got - brut)); cas++; }
     }
   }
-  verifier('altitude tombant sur un niveau → le niveau BRUT, écart nul',
+  // ⚠️ CE CONTRÔLE-CI PORTE SUR `encadrer` + `melanger`, pas sur le
+  // calque entier — et c'est ce qui lui permet de survivre intact à
+  // l'étape 13. L'interpolation VERTICALE rend toujours le niveau brut
+  // sur un niveau ; ce qui a changé, c'est ce que le calque en fait
+  // ensuite (cf. le contrôle retourné plus bas).
+  verifier('altitude tombant sur un niveau → l\'interpolation verticale rend '
+    + 'le niveau BRUT, écart nul',
     pire === 0, `${cas} cas · écart max ${pire}`);
 
   console.log('\n     couverture calculée par le TypeScript :');
-  console.log('       altitude   servi   relief  plafond  bande basse  par isobares');
+  console.log('       altitude   servi   relief  plafond  bande basse  par isobares   mélangé');
   for (const A of [1000, 2000, 3000, 4000, 5000, 7000]) {
     const c = L.calculerCalque(man, u, v, zsol, A, iso).couverture;
     console.log(`       ${String(A).padStart(5)} m  `
@@ -323,7 +382,8 @@ if (!man) {
       + `${(100 * c.relief).toFixed(1).padStart(6)} % `
       + `${(100 * c.auDessusDuPlafond).toFixed(1).padStart(6)} % `
       + `${(100 * c.sousPremierNiveau).toFixed(2).padStart(10)} % `
-      + `${(100 * c.parIsobares).toFixed(1).padStart(11)} %`);
+      + `${(100 * c.parIsobares).toFixed(1).padStart(11)} % `
+      + `${(100 * c.parMelange).toFixed(1).padStart(8)} %`);
   }
 
   // ⛔ LE CRITÈRE DU LOT 12, rejoué côté navigateur. Sans les isobares
@@ -341,17 +401,46 @@ if (!man) {
     avec.parIsobares > 0
     && Math.abs(avec.parIsobares - sans.auDessusDuPlafond) < 1e-9,
     `${(100 * avec.parIsobares).toFixed(1)} % par isobares`);
-  // ⚠️ Et SOUS le plafond hauteur, absolument rien ne doit bouger :
-  // l'invariant de l'étape 11 n'est pas une victime acceptable du lot 12.
-  const bas1 = L.calculerCalque(man, u, v, zsol, 2000);
-  const bas2 = L.calculerCalque(man, u, v, zsol, 2000, iso);
-  let identiqueBas = true;
-  for (let c = 0; c < bas1.u.length && identiqueBas; c++) {
-    const x = bas1.u[c], y = bas2.u[c];
-    if (!(x === y || (Number.isNaN(x) && Number.isNaN(y)))) identiqueBas = false;
-  }
-  verifier('⛔ sous zsol + 3000 m, ajouter les isobares ne change RIEN — '
-    + 'l\'invariant de l\'étape 11 survit au lot 12', identiqueBas);
+  // ── ⛔ ÉTAPE 13 : CE CONTRÔLE A ÉTÉ RETOURNÉ, ET IL FAUT LE DIRE ──
+  //
+  // Jusqu'au 13/08 il vérifiait « sous zsol + 3000 m, ajouter les
+  // isobares ne change RIEN » — et il était juste, parce que le calque
+  // basculait net. Yann a tranché le §8 a : le calque MÉLANGE désormais
+  // comme `profil.py`, donc ajouter les isobares CHANGE la valeur dans
+  // la bande, et c'est le but.
+  //
+  // ⚠️ Le supprimer aurait été le pire choix. Un contrôle qui disparaît
+  // ne laisse aucune trace de ce qui a cessé d'être vrai ; il est donc
+  // RETOURNÉ, et il vérifie maintenant les deux moitiés de la nouvelle
+  // règle — que ça change dans la bande, et que ça ne change PAS
+  // en dessous.
+  const raccord = man.raccord;
+  const cmp = (A) => {
+    const s = L.calculerCalque(man, u, v, zsol, A);
+    const a = L.calculerCalque(man, u, v, zsol, A, iso);
+    let n = 0;
+    for (let c = 0; c < s.u.length; c++) {
+      const x = s.u[c], y = a.u[c];
+      if (!(x === y || (Number.isNaN(x) && Number.isNaN(y)))) n++;
+    }
+    return { n, avec: a };
+  };
+  // Une altitude franchement DANS la bande pour la plupart des colonnes :
+  // le sol médian du domaine tourne autour de 1 370 m, donc 3 000 m
+  // tombe à ~1 630 m au-dessus du sol — au cœur de la rampe.
+  const dans = cmp(3000);
+  verifier('⛔ DANS la bande, ajouter les isobares CHANGE la valeur — '
+    + 'c\'est le §8 a tranché, et c\'est ce que la coupe fait depuis '
+    + 'toujours', dans.n > 0,
+    `${dans.n} colonnes changées · ${(100 * dans.avec.couverture.parMelange).toFixed(1)} % mélangées`);
+  // ⚠️ Et SOUS le raccord bas, rien ne doit bouger : l'invariant de
+  // l'étape 11 tient encore là, et c'est la moitié de la colonne qui
+  // décide d'un décollage.
+  const sousBas = cmp(raccord ? raccord.bas_m - 100 : 900);
+  verifier('⛔ …mais SOUS le raccord bas, rien ne change : l\'invariant de '
+    + 'l\'étape 11 tient encore là, et c\'est la tranche du décollage',
+    sousBas.n === 0 && sousBas.avec.couverture.parMelange === 0,
+    `${sousBas.n} colonne(s) changée(s)`);
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -589,6 +678,13 @@ console.log('\n── 9. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
     // que Météo-France servirait sans IP1.
     niveaux_hpa: [],
     parametres_isobares: [],
+    // ⛔ UN RACCORD QUI N'EST PAS CELUI DE LA PRODUCTION (200 → 700 m au
+    // lieu de 1 000 → 3 000). Le module doit OBÉIR à ces bornes-là.
+    // ⚠️ Ce manifeste ne porte AUCUN isobare, donc rien ne sera mélangé
+    // ici : ce qu'on vérifie plus bas, c'est que la rampe elle-même suit
+    // le manifeste — un `poidsHauteur` codé en dur rendrait 1 à 400 m,
+    // là où ce manifeste-ci exige 0,6.
+    raccord: { bas_m: 200, haut_m: 700 },
     axes: {
       nb_lat: NJ, nb_lon: NI,
       lat_premier: 46, lat_dernier: 45,       // DÉCROISSANTES, comme AROME
@@ -626,6 +722,24 @@ console.log('\n── 9. ⛔ RIEN N\'EST CODÉ EN DUR CÔTÉ CLIENT ──');
   verifier('les bornes du sélecteur SUIVENT le manifeste (5 → 900 m ici, '
     + 'pas 10 → 3000)', b.minM === 5 && b.maxM === 900 && b.pleinM === 500,
     `min ${b.minM} · plein ${b.pleinM} · max ${b.maxM}`);
+
+  // ── ⛔ ET LE RACCORD AUSSI (étape 13) ────────────────────────────
+  // Le raccord décide d'une VALEUR servie, pas d'un affichage : c'est
+  // la constante qu'il aurait été le plus tentant de recopier côté
+  // client, et la plus coûteuse. Ce manifeste-ci dit 200 → 700 m ; un
+  // `poidsHauteur` figé sur la production rendrait 1 à h = 400 m.
+  verifier('⛔ la RAMPE DU RACCORD suit le manifeste (200 → 700 m ici, pas '
+    + '1000 → 3000) — c\'est la constante qu\'il aurait été le plus '
+    + 'tentant de recopier',
+    L.poidsHauteur(man2, 400) === 0.6
+    && L.poidsHauteur(man2, 200) === 1 && L.poidsHauteur(man2, 700) === 0,
+    `w(400 m) = ${L.poidsHauteur(man2, 400)}`);
+  verifier('⛔ et un manifeste SANS raccord LÈVE plutôt que de mélanger '
+    + 'selon des bornes que le producteur n\'a jamais annoncées',
+    (() => {
+      try { L.poidsHauteur({ ...man2, raccord: undefined }, 400); return false; }
+      catch { return true; }
+    })());
 
   // À 500 m ASL : les colonnes de sol 0 sont pile sur le niveau 500 →
   // u = 10. Celles de sol 400 sont à h = 100, entre 50 et 500 → u = 10 ×

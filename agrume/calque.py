@@ -92,7 +92,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from domaine import GRID_3D, NIVEAUX_H_0025, NIVEAUX_P
+from domaine import (GRID_3D, NIVEAUX_H_0025, NIVEAUX_P,
+                     RACCORD_BAS_M, RACCORD_HAUT_M)
 
 # ⚠️ Les niveaux en float64 UNE FOIS, ici. Comparer un `h` float64 à un
 # niveau entier promu à la volée marche ; le faire dans une boucle
@@ -107,6 +108,44 @@ MASQUE_RELIEF = "relief"      # zsol > altitude demandée
 MASQUE_BAS = "sous_premier_niveau"
 MASQUE_PLAFOND = "au_dessus_du_plafond"
 MASQUE_DONNEE = "niveau_absent"
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ LE MÉLANGE — arbitré par Yann le 13/08 : « on prend le modèle de la
+#     coupe partout »
+# ══════════════════════════════════════════════════════════════════════
+def poids_hauteur(h):
+    """Poids de la source HAUTEUR à la hauteur-sol `h`, dans [0, 1].
+
+    1 sous `RACCORD_BAS_M`, 0 au-dessus de `RACCORD_HAUT_M`, rampe
+    linéaire entre les deux. **C'est `profil.py::poids_hauteur`, à
+    l'identique, sur un tableau.**
+
+    ── CE QUE CETTE FONCTION CORRIGE ────────────────────────────────────
+    Jusqu'au 13/08, le calque BASCULAIT net à `zsol + 3000` là où
+    `profil.py` MÉLANGEAIT depuis `zsol + 1000`. Les deux vues rendaient
+    donc deux valeurs différentes au même point, dans la tranche
+    2 000–4 000 m — celle où vole un parapentiste. L'écart était petit
+    (médiane 0,121 m/s, max 2,359 sur 17 398 comparaisons du 12/08) mais
+    pas nul, et **deux vues de la même donnée qui divergent en silence,
+    c'est ce que ce projet refuse.**
+
+    ⚠️ CE QUE ÇA COÛTE, ET IL FAUT LE SAVOIR : l'invariant de l'étape 11
+    — « à `A = zsol + niveau_k`, le calque rend exactement le niveau k »,
+    129 625 cas — ne vaut plus QUE sous `zsol + RACCORD_BAS_M`. Au-dessus,
+    la valeur servie est une combinaison convexe, et c'est délibéré. Le
+    banc a été réécrit en conséquence : il vérifie le brut sous la bande,
+    l'encadrement de la combinaison DANS la bande, et l'égalité aux deux
+    bornes (w = 1 en bas, w = 0 en haut). Un invariant affaibli sans que
+    personne le remarque serait pire que pas d'invariant.
+
+    ⓘ `RACCORD_HAUT_M` vaut 3 000 m, c'est-à-dire exactement
+    `NIVEAUX[-1]`. La coïncidence est heureuse et non nécessaire : on
+    écrit `RACCORD_HAUT_M`, parce que c'est le raccord qu'on décrit, pas
+    le sommet du tableau.
+    """
+    return np.clip((RACCORD_HAUT_M - np.asarray(h, dtype=np.float64))
+                   / (RACCORD_HAUT_M - RACCORD_BAS_M), 0.0, 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -315,21 +354,31 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
     m_zsol = ~np.isfinite(zsol)
 
     # ── Étape 12 : au-dessus de zsol+3000, les ISOBARES prennent le relais
-    # ⚠️ CE N'EST PAS UN MÉLANGE, ET C'EST DÉLIBÉRÉ. `profil.py` mélange
-    # les deux sources entre zsol+1000 et zsol+3000, puis sert les
-    # isobares SEULES au-dessus — son poids hauteur vaut déjà 0 à
-    # zsol+3000. Le calque, lui, ne mélange nulle part : il rend le
-    # niveau BRUT du produit, et son invariant (« à A = zsol + niveau_k,
-    # le calque rend exactement le niveau k », 129 625 cas vérifiés) ne
-    # survivrait pas à un mélange.
+    # ── Étape 13 (13/08) : ET ENTRE zsol+1000 ET zsol+3000, ON MÉLANGE
     #
-    # ⛔ CONSÉQUENCE À NE PAS TAIRE : entre zsol+1000 et zsol+3000, le
-    # calque et le profil vertical ne rendent donc PAS la même valeur au
-    # même point. `confronter_calque.py --recouvrement` mesure cet écart
-    # sur le domaine et le publie ; il n'est pas arbitré ici.
+    # ⛔ C'EST LE §8 a DE L'ÉTAPE 12, TRANCHÉ. Jusqu'ici le calque
+    # basculait NET là où `profil.py` mélangeait : les deux vues rendaient
+    # donc deux valeurs différentes au même point, dans la tranche
+    # 2 000–4 000 m. Yann a tranché le 13/08 — « le mieux est ce que fait
+    # la coupe, on prend ce modèle-là partout ». Le calque applique
+    # désormais `poids_hauteur()`, qui EST celui de `profil.py`.
+    #
+    # ⚠️ Ce que ça a coûté est écrit dans `poids_hauteur` : l'invariant de
+    # l'étape 11 ne vaut plus que sous `zsol + RACCORD_BAS_M`, et le banc
+    # a été réécrit pour le dire.
     haut_dispo, k_iso, w_iso = _encadrer_isobares(gr.ziso[:, i_step], A)
     servi_par_iso = m_haut & haut_dispo & ~m_zsol
     m_plafond = m_haut & ~servi_par_iso             # ce qui reste troué
+
+    # Le poids de la source hauteur, colonne par colonne. ⚠️ Il ne dépend
+    # que de `h`, donc de `zsol` : sur un domaine de montagne, deux
+    # colonnes voisines à la même altitude-mer n'ont PAS le même poids.
+    # C'est voulu — le raccord est défini au-dessus du SOL, pas de la mer.
+    w_h = poids_hauteur(h)
+    # ⚠️ `~m_haut` : au-dessus de zsol+3000 c'est le relais, pas le
+    # mélange, et les deux ne doivent pas se marcher dessus. Ils se
+    # touchent proprement, parce que `w_h` vaut déjà 0 à zsol+3000.
+    a_melanger = (~m_haut) & (w_h < 1.0) & haut_dispo & ~m_zsol
 
     servable = ~(m_relief | m_bas | m_plafond | m_zsol)
 
@@ -355,16 +404,30 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
         # plausible, et fausse de plusieurs milliers de mètres. C'est
         # exactement le genre de résultat qui ne se voit pas : on
         # l'écrase, on ne le complète pas.
-        if servi_par_iso.any():
-            if nom in i_param_iso:
-                pile_iso = gr.iso[i_param_iso[nom], :, i_step]
-                haut = _interpoler_isobares(pile_iso, k_iso, w_iso)
-                val = np.where(servi_par_iso, haut, val)
-            else:
-                # ⓘ `tke` n'existe pas sur les isobares (elle vit dans
-                # IP4, non ingéré). Au-dessus du plafond hauteur elle est
-                # donc absente — un trou, pas un zéro.
-                val = np.where(servi_par_iso, np.nan, val)
+        if nom in i_param_iso:
+            pile_iso = gr.iso[i_param_iso[nom], :, i_step]
+            haut = _interpoler_isobares(pile_iso, k_iso, w_iso)
+            val = np.where(servi_par_iso, haut, val)
+            # ── LE MÉLANGE (étape 13) ─────────────────────────────────
+            # ⚠️ `np.isfinite(haut)` en plus de `a_melanger` : sous le
+            # premier isobare ÉMERGÉ d'une colonne, l'axe isobare ne dit
+            # rien. On garde alors la hauteur SEULE plutôt que de rendre
+            # NaN — refuser de servir une valeur qu'on a, au prétexte
+            # qu'une seconde source manque, serait un trou fabriqué.
+            mix = a_melanger & np.isfinite(haut)
+            # ⚠️ ÉCRIT DANS CET ORDRE EXACT, et le TypeScript l'écrit
+            # pareil : `w*a + (1-w)*b` et `b + w*(a-b)` sont égaux en
+            # algèbre et pas en float32. Le banc de parité exige l'écart
+            # NUL, pas « petit ».
+            val = np.where(mix, w_h * val + (1.0 - w_h) * haut, val)
+        else:
+            # ⓘ `tke` n'existe pas sur les isobares (elle vit dans
+            # IP4, non ingéré). Au-dessus du plafond hauteur elle est
+            # donc absente — un trou, pas un zéro. Et dans la bande de
+            # mélange elle n'est PAS mélangée : il n'y a rien à mélanger
+            # avec. Une TKE « mélangée » avec elle-même à poids 0,4
+            # aurait été la même valeur sous un autre nom.
+            val = np.where(servi_par_iso, np.nan, val)
         m_donnee |= ~np.isfinite(val)
         champs[nom] = val
 
@@ -402,6 +465,14 @@ def calque(gr, step, altitude_asl, params=("u", "v")):
             # faible). Une carte qui mélange deux sources sans dire où
             # empêche de diagnostiquer une marche.
             parIsobares=round(float(servi_par_iso.mean()), 4),
+            # ⚠️ ET LA PART MÉLANGÉE (étape 13). Sur ces colonnes-là, la
+            # valeur servie n'est plus un niveau du modèle mais une
+            # COMBINAISON des deux verticales. C'est ce que la coupe fait
+            # depuis toujours, c'est désormais ce que la carte fait aussi
+            # — mais un écran qui ne peut pas le dire ne peut pas non plus
+            # expliquer pourquoi deux niveaux voisins se ressemblent plus
+            # qu'ils ne le devraient.
+            parMelange=round(float((a_melanger & servable).mean()), 4),
             nbColonnes=int(n)),
         # ── Ce que l'écran DOIT dire, et que personne n'a envie d'écrire
         # (§4 du lot). Publié ici pour que le front n'ait pas à le
@@ -538,11 +609,17 @@ def fixture(gr, step, altitudes, nb_colonnes=64, graine=11):
             # réécriture : un banc qui réimplémente la règle qu'il vérifie
             # ne vérifie rien (c'est déjà arrivé le 12/08 sur
             # `test_freeze_balises.py`).
-            par_iso = False
-            if np.isfinite(zs) and h > NIVEAUX[-1]:
+            # ⚠️ L'ENCADREMENT ISOBARE EST DÉSORMAIS CALCULÉ PARTOUT, pas
+            # seulement au-dessus de zsol+3000 : depuis l'étape 13 il sert
+            # AUSSI au mélange, dans la bande zsol+1000 → zsol+3000.
+            dispo = ki = wi = None
+            if np.isfinite(zs):
                 dispo, ki, wi = _encadrer_isobares(
                     gr.ziso[:, i_step, j:j + 1, i:i + 1], A)
-                par_iso = bool(dispo[0, 0])
+                dispo = bool(dispo[0, 0])
+            par_iso = bool(dispo) and h > NIVEAUX[-1]
+            w_h = float(poids_hauteur(h))
+            melange = False
             for nom in ("u", "v"):
                 if par_iso:
                     pile = gr.iso[gr.i_param_iso[nom], :, i_step, j:j + 1,
@@ -555,11 +632,20 @@ def fixture(gr, step, altitudes, nb_colonnes=64, graine=11):
                                   dtype=np.float32)
                 if h < NIVEAUX[0] or h > NIVEAUX[-1] or not np.isfinite(zs):
                     attendu[nom] = None
-                else:
-                    val, _, _ = interpoler_champ(pile[:, None, None],
-                                                 np.array([[h]]))
-                    attendu[nom] = (None if not np.isfinite(val[0, 0])
-                                    else float(val[0, 0]))
+                    continue
+                val, _, _ = interpoler_champ(pile[:, None, None],
+                                             np.array([[h]]))
+                v_h = val[0, 0]
+                # ── LE MÉLANGE (étape 13), calculé par les MÊMES
+                #    fonctions que `calque()` et dans le MÊME ordre ──
+                if dispo and w_h < 1.0:
+                    pile_iso = gr.iso[gr.i_param_iso[nom], :, i_step,
+                                      j:j + 1, i:i + 1]
+                    v_iso = _interpoler_isobares(pile_iso, ki, wi)[0, 0]
+                    if np.isfinite(v_iso) and np.isfinite(v_h):
+                        v_h = w_h * v_h + (1.0 - w_h) * v_iso
+                        melange = True
+                attendu[nom] = None if not np.isfinite(v_h) else float(v_h)
             # ⛔ `A` EST PUBLIÉ SANS ARRONDI, ET C'EST LE BANC JS QUI L'A
             # EXIGÉ. La première version écrivait `round(A, 6)` — par
             # habitude de publication. Le consommateur recalcule
@@ -587,7 +673,16 @@ def fixture(gr, step, altitudes, nb_colonnes=64, graine=11):
             else:
                 k_pub, w_pub = None, None
             cas.append(dict(j=j, i=i, zsol=zs, altitudeASLM=A, h=h,
-                            source="isobare" if par_iso else "hauteur",
+                            # ⛔ TROIS sources, plus deux. `melange` est le
+                            # cas ajouté le 13/08, et il faut qu'il porte
+                            # son nom : un banc qui verrait « hauteur » sur
+                            # une valeur mélangée comparerait la bonne
+                            # chose sous la mauvaise étiquette, et le jour
+                            # où le mélange casserait, le message
+                            # d'échec mentirait sur l'endroit.
+                            source=("isobare" if par_iso
+                                    else "melange" if melange else "hauteur"),
+                            poidsHauteur=w_h,
                             k=k_pub, w=w_pub,
                             u=attendu["u"], v=attendu["v"]))
     return dict(

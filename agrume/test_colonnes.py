@@ -64,6 +64,94 @@ STATIONS = [
 ]
 
 
+def section_horizons():
+    """⛔ DEUX HORIZONS, ET TROIS FAÇONS DE LES CASSER EN SILENCE (13/08).
+
+    Le produit B va à 51 h, l'archive reste à 24 h. Trois pièges, un par
+    bloc, et aucun ne lève :
+
+      1. **La fraîcheur troquée contre des heures lointaines.** Si la
+         rallonge entrait dans le critère de sélection, un run vieux de
+         trois heures publiant ses 52 échéances battrait un run FRAIS qui
+         n'en publie que 25 — les deux sont valides, et `meilleur`
+         compare des longueurs.
+      2. **Un trou au milieu de la coupe.** Les tampons sont indexés par
+         position ; une rallonge non contiguë ferait disparaître 14 h
+         entre 13 h et 15 h.
+      3. **L'archive qui avale la rallonge.** Elle est DÉFINITIVE ; une
+         échéance de trop y reste pour toujours.
+    """
+    print("\n── 9. ⛔ Deux horizons : l'archive à 24 h, la grille à 51 ──")
+    vrai = I.covered_steps
+    try:
+        # ── 1. Un run FRAIS et complet gagne, et on n'interroge même pas
+        #       le précédent — même s'il publierait 51 h.
+        vus = []
+
+        def stub_frais(ref, paquet, grille, voulues, model=None):
+            if ref not in vus:
+                vus.append(ref)
+            # Le plus récent : complet à 24 h, rien au-delà.
+            # Les précédents : tout, jusqu'à 51 h.
+            return ({h for h in voulues if h <= 24} if vus.index(ref) == 0
+                    else set(voulues))
+
+        I.covered_steps = stub_frais
+        ref, _run, steps = I.choisir_run(24, profondeur=3,
+                                         crier=lambda *_a: None,
+                                         max_heures_grille=51)
+        verifier("⛔ un run FRAIS complet à 24 h est retenu SANS que le "
+                 "précédent soit même interrogé — sinon on troquerait la "
+                 "fraîcheur, seule chose qu'AGRUME apporte, contre des "
+                 "heures lointaines",
+                 len(vus) == 1 and steps == list(range(0, 25)),
+                 f"{len(vus)} run(s) sondé(s) · {len(steps)} échéances")
+
+        # ── 2. La rallonge, et le trou qui l'arrête.
+        def stub_trou(_ref, _paquet, _grille, voulues, model=None):
+            return {h for h in voulues if h <= 33 and h != 30}
+
+        I.covered_steps = stub_trou
+        _r, _run, steps = I.choisir_run(24, profondeur=1,
+                                        crier=lambda *_a: None,
+                                        max_heures_grille=51)
+        verifier("⚠️ la rallonge s'arrête au PREMIER trou (33 est publié, "
+                 "30 non → on va jusqu'à 29) — un trou au milieu ferait "
+                 "disparaître une heure entre deux autres",
+                 steps == list(range(0, 30)),
+                 f"jusqu'à +{steps[-1]} h")
+
+        # ── 3. Archive incomplète : PAS de rallonge du tout.
+        def stub_court(_ref, _paquet, _grille, voulues, model=None):
+            return {h for h in voulues if h <= 19 or h >= 25}
+
+        I.covered_steps = stub_court
+        _r, _run, steps = I.choisir_run(24, profondeur=1,
+                                        crier=lambda *_a: None,
+                                        max_heures_grille=51)
+        verifier("⛔ archive tronquée (0→19) : la rallonge est ABANDONNÉE, "
+                 "pas recollée — sinon la coupe aurait un trou de six "
+                 "heures en son milieu",
+                 steps == list(range(0, 20)),
+                 f"jusqu'à +{steps[-1]} h")
+
+        # ── 4. Et l'archive n'avale pas la rallonge.
+        col = C.Colonnes("2026-08-13T00:00:00Z",
+                         [{"id": "x", "lat": 45.0, "lon": 6.0}],
+                         list(range(0, 25)))
+        verifier("⛔ `accepte_echeance` refuse ce qui dépasse l'horizon de "
+                 "l'archive — sans lui `poser()` lèverait un KeyError, que "
+                 "`parcourir()` AVALE, et la grille perdrait justement les "
+                 "échéances qu'on est allé chercher",
+                 col.accepte_echeance(24) and not col.accepte_echeance(25))
+        verifier("⚠️ et l'archive a bien la taille de SES échéances, pas de "
+                 "celles qui ont été téléchargées",
+                 col.c0025.shape[-1] == 25 and col.ziso.shape[-1] == 25,
+                 f"{col.c0025.shape[-1]} échéances")
+    finally:
+        I.covered_steps = vrai
+
+
 def main():
     print("── Sélection des balises ─────────────────────────────────")
     b = C.balises_du_domaine(STATIONS, suspectes=["5"])
@@ -365,6 +453,8 @@ def main():
                  M.quantiles([3, 1, 2, 9, 5, 4, 8, 7, 6, 10])))
     verifier("quantiles d'un échantillon vide → None, pas une erreur",
              M.quantiles([]) is None)
+
+    section_horizons()
 
     print("\n  colonnes :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

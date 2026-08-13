@@ -80,6 +80,106 @@ def champ_plat(meta=META, j0=J0, i0=I0):
     return (j + i).ravel()
 
 
+def section_10_identite_ab():
+    """⛔ L'IDENTITÉ PRODUIT A ↔ PRODUIT B, AUX BALISES.
+
+    Les deux produits sont remplis DANS LE MÊME `sur_champ`, depuis le
+    MÊME message décodé — mais par deux chemins qui n'ont rien en commun :
+
+        produit A :  values[ index_plats(meta, balises) ]   → quantifier
+        produit B :  decouper(values, meta, orog)[j, i]     → quantifier
+
+    ⚠️ RIEN NE LES FORCE À S'ACCORDER. `quantifier` est élémentaire, donc
+    la valeur ne peut pas diverger — ce qui peut diverger, c'est LE POINT
+    QU'ON DÉSIGNE. Un `j0`/`i0` décalé d'une case, un reshape transposé,
+    un `jScan` mal lu : les deux produits serviraient alors deux points
+    différents sous le même nom de balise, avec des valeurs parfaitement
+    plausibles des deux côtés. Personne ne regarde les deux écrans en
+    même temps.
+
+    ⓘ C'est le dernier point ouvert de l'étape 12 bis (« identité produit
+    A ↔ produit B aux niveaux isobares, aux balises »), et il est vérifié
+    HORS LIGNE : le faire sur un run réel aurait demandé un run, donc
+    n'aurait tourné qu'une fois. Le champ synthétique encode sa position
+    (`j * 10000 + i`), donc un décalage d'une seule case se lit dans la
+    valeur au lieu de se cacher dedans.
+    """
+    print("\n── 10. ⛔ Identité produit A ↔ produit B, aux balises ──")
+    o = orog_bidon()
+    champ = champ_plat()
+    nj, ni = o.z.shape
+
+    # Des balises posées PILE sur des points de grille du domaine — dont
+    # les quatre coins, là où un décalage d'une case se voit le mieux.
+    coins = [(0, 0), (0, ni - 1), (nj - 1, 0), (nj - 1, ni - 1),
+             (nj // 2, ni // 2), (7, 3), (nj - 5, ni - 9)]
+    balises = []
+    for (j, i) in coins:
+        balises.append(dict(
+            id=f"{j}_{i}",
+            lat=META["lat0"] - (J0 + j) * META["dj"],
+            lon=META["lon0"] + (I0 + i) * META["di"]))
+
+    idx, hors = CO.index_plats(META, balises)
+    verifier("les balises de contrôle sont toutes DANS la grille native",
+             not hors, f"{len(hors)} hors grille")
+
+    fenetre = GR.decouper(champ, META, o)
+    verifier("⚠️ la fenêtre découpée a la forme de l'orographie, pas celle "
+             "du champ", fenetre.shape == (nj, ni), f"{fenetre.shape}")
+
+    # ── LE CONTRÔLE ────────────────────────────────────────────────────
+    desaccords = []
+    for k, (j, i) in enumerate(coins):
+        a = float(champ[idx[k]])          # ce que le produit A archiverait
+        b = float(fenetre[j, i])          # ce que le produit B découpe
+        if a != b:
+            desaccords.append((balises[k]["id"], a, b))
+    verifier("⛔ LE MÊME POINT : pour chaque balise, le produit A et le "
+             "produit B tirent la MÊME valeur du même champ — un j0/i0 "
+             "décalé d'une case donnerait deux points plausibles et "
+             "différents",
+             not desaccords,
+             f"{len(coins)} balises · " + (f"1er écart {desaccords[0]}"
+                                           if desaccords else "0 désaccord"))
+
+    # ⚠️ ET LA RÉCIPROQUE : le banc doit ÊTRE CAPABLE d'échouer. Un
+    # contrôle d'identité qui passe sur une orographie décalée ne vérifie
+    # rien du tout — c'est l'erreur que `test_colonnes.py` a déjà faite le
+    # 12/08 en nourrissant `erreur_quantification` dans la mauvaise unité.
+    o_faux = orog_bidon(i0=I0 + 1)
+    fen_faux = GR.decouper(champ, META, o_faux)
+    verifier("⚠️ …et le contrôle SAIT échouer : décalé d'une seule case en "
+             "longitude, il détecte le désaccord",
+             any(float(champ[idx[k]]) != float(fen_faux[j, i])
+                 for k, (j, i) in enumerate(coins)))
+
+    # ── Et l'identité vaut aussi APRÈS quantification, isobares comprises
+    # ⓘ `zp` est le cas qui compte : il est le SEUL en float32, et sa
+    # conversion (÷ G) vit dans `PARAM_ALTITUDE`. Si les deux produits ne
+    # la faisaient pas au même endroit, l'axe vertical de la coupe et
+    # celui du calque ne seraient pas le même — et les deux resteraient
+    # plausibles.
+    from colonnes import PARAM_ALTITUDE                    # noqa: PLC0415
+    # ⚠️ REMIS DANS LA PLAGE PHYSIQUE, et ce n'est pas cosmétique :
+    # `quantifier` NaN-ifie tout ce qui dépasse `PLAFOND_PHYSIQUE['zp']`
+    # (20 000 m). La première version de ce bloc multipliait le champ
+    # encodé par 3 — 730 000 m d'altitude — et rendait donc `nan` des
+    # deux côtés. ⛔ Il aurait « passé » sur une comparaison plus
+    # tolérante : deux NaN qui se ressemblent ne sont pas une identité.
+    # Ici : 29 000 → 100 600 m²/s², soit 2 957 → 10 259 m.
+    geop = 29000.0 + champ * 0.01
+    qa = CO.quantifier(geop[idx], PARAM_ALTITUDE, dtype=np.float32)
+    qb = CO.quantifier(GR.decouper(geop, META, o), PARAM_ALTITUDE,
+                       dtype=np.float32)
+    verifier("⛔ et l'identité tient APRÈS quantification, `zp` compris — "
+             "la division par G vit dans `PARAM_ALTITUDE`, donc au même "
+             "endroit pour les deux produits",
+             all(np.isfinite(qa[k]) and float(qa[k]) == float(qb[j, i])
+                 for k, (j, i) in enumerate(coins)),
+             f"{float(qa[0]):.1f} → {float(qa[3]):.1f} m")
+
+
 def section_8_surface():
     """── 8. La surface, et les trois sémantiques de temps ──
 
@@ -664,6 +764,8 @@ def main():
              "l'erreur float16 double",
              avec < sans / 1.5,
              f"{avec:.4f} hPa avec · {sans:.4f} sans")
+
+    section_10_identite_ab()
 
     print("\n  grille :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

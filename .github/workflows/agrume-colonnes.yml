@@ -136,6 +136,41 @@ jobs:
           # altitudes tombant sur un niveau, le calque doit rendre le
           # niveau BRUT, à l'octet près.
           python3 agrume/test_calque.py
+          # Étape 12 bis. Le front d'altitude a un banc depuis le 10/08 et
+          # n'était jamais entré dans cette liste — un banc qu'on ne lance
+          # pas cesse de protéger quoi que ce soit, c'est écrit trois fois
+          # plus haut et ça restait vrai pour celui-là.
+          python3 agrume/test_front_altitude.py
+      # ══════════════════════════════════════════════════════════════
+      #  ⛔⛔ CE QUI N'EST **PAS** DANS CETTE CI, ET POURQUOI (13/08)
+      #
+      #  LE BANC DE PARITÉ Python ↔ TypeScript n'y est pas, et c'est le
+      #  banc le plus important du lot depuis aujourd'hui : le mélange des
+      #  deux verticales (étape 13) est écrit DEUX FOIS, une fois ici en
+      #  Python et une fois dans le front en TypeScript. Deux rampes qui
+      #  divergent ne lèvent rien — elles rendent une carte lisse, une
+      #  coupe lisse, et deux vents différents au même point.
+      #
+      #  ⚠️ IL NE PEUT PAS Y ÊTRE AUJOURD'HUI : il charge
+      #  `web/src/lib/altitudeLayer.ts` et `agrumeProfile.ts`, qui vivent
+      #  dans `biozarb/balise-watch` — un dépôt **privé**. Le `GITHUB_TOKEN`
+      #  de ce dépôt-ci ne peut pas l'atteindre. L'ajouter demanderait un
+      #  PAT en secret, et un `actions/checkout` du second dépôt.
+      #
+      #  ⛔ NE PAS le remplacer par une version « qui saute si le module
+      #  est absent » : un banc qui se saute tout seul en CI est
+      #  exactement le faux vert que ce fichier passe son temps à refuser.
+      #  En attendant, il se lance À LA MAIN, et c'est écrit ici pour que
+      #  personne ne croie qu'il tourne :
+      #
+      #      python3 agrume/banc_parite.py --sortie /tmp/bw-parite
+      #      node --experimental-strip-types tools/altitude-layer-selftest.mjs \
+      #        --fixture /tmp/bw-parite/fixture.json \
+      #        --tampon  /tmp/bw-parite/e01.bin \
+      #        --zsol    /tmp/bw-parite/zsol.bin \
+      #        --manifeste /tmp/bw-parite/manifest.json \
+      #        --colonnes  /tmp/bw-parite/colonnes.bin
+      # ══════════════════════════════════════════════════════════════
 
       - name: Ingérer les colonnes
         env:

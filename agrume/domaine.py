@@ -380,6 +380,38 @@ TEMOIN_VERIF = dict(
 # (`model_verif_daily` porte `check (lead_h in (6, 24, 48))`).
 MAX_HOURS = 24
 
+# ── ⛔ ET LA GRILLE VA PLUS LOIN QUE L'ARCHIVE (13/08/2026) ────────────
+# Demande Yann : « je n'ai que la prévision d'une journée jusqu'à 20 h ».
+# C'est exact, et c'est arithmétique — un run 18 Z + 24 h s'arrête au
+# lendemain 18 Z, soit 20 h locales.
+#
+# ⛔ LES DEUX PRODUITS N'ONT PLUS LE MÊME HORIZON, ET C'EST LE POINT.
+# Le paragraphe ci-dessus reste vrai POUR L'ARCHIVE : le produit A est
+# DÉFINITIF, il croît pour toujours, et à 0–51 h il ferait 93 Go au bout
+# d'un an contre 23. La consigne du projet est de rester SOUS le palier
+# gratuit de 10 Go, pas de payer peu. Il reste donc à 24 h.
+#
+# Le produit B, lui, ne garde que TROIS runs. Doubler son horizon double
+# un stationnaire, il ne grave rien. Chiffré depuis le run réel du 13/08
+# (11,1 min, 9,96 Go, 320,8 Mo publiés, 962 Mo stationnaires) :
+#
+#     téléchargement    9,96 Go → ~21 Go      (les bundles vont par 6 h)
+#     durée             11,1 min → ~23 min    ⚠️ alerte à 30, timeout 60
+#     stationnaire      962 Mo → ~2 Go        (seuil d'arrêt 5 Go)
+#     archive A         inchangée
+#
+# ⚠️ LA DURÉE EST LE CHIFFRE À SURVEILLER, et cette rallonge mange la
+# moitié de la marge. Si un run passe 30 min, c'est ICI qu'il faut
+# revenir — pas dans le nombre de domaines.
+#
+# ⛔ ET LA RALLONGE EST « AU MIEUX », PAS UN CONTRAT. Le choix du run
+# reste décidé par la couverture de l'ARCHIVE (0 → MAX_HOURS) : sans ça,
+# un run vieux de 3 h publiant 51 échéances battrait un run frais qui
+# n'en publie encore que 25, et on perdrait de la fraîcheur pour gagner
+# des heures lointaines dont personne ne fait rien. La rallonge est
+# ajoutée APRÈS, et seulement tant qu'elle est CONTIGUË.
+MAX_HOURS_GRILLE = 51
+
 # ── Le raccord vertical (§3.3 du lot) ─────────────────────────────────
 # Sur l'axe altitude-mer, avec z_s = ALTITUDE(lat, lon) :
 #   z_s → z_s + RACCORD_BAS      : niveaux HAUTEUR uniquement

@@ -69,7 +69,8 @@ import numpy as np
 
 from colonnes import (PARAM_ALTITUDE, PARAM_PRESSION_SOL, PARAMS_0025,
                       PARAMS_ISO, PARAMS_SURFACE)
-from domaine import GRID_3D, NIVEAUX_H_0025, NIVEAUX_P
+from domaine import (GRID_3D, NIVEAUX_H_0025, NIVEAUX_P,
+                     RACCORD_BAS_M, RACCORD_HAUT_M)
 
 # ⚠️ LE PRODUIT B N'A PAS SA PROPRE LISTE DE PARAMÈTRES, ET C'EST VOULU.
 # Il sert les mêmes cinq champs que le produit A sur les mêmes 25
@@ -671,6 +672,22 @@ class Grille:
                       "plus de valeurs, toutes fausses et toutes finies.")),
             niveaux_m_sol=list(NIVEAUX_H_0025),
             niveaux_hpa=list(NIVEAUX_P),
+            # ⛔ LE RACCORD EST PUBLIÉ (étape 13, 13/08), et ce n'est pas
+            # de la documentation. Depuis que le calque MÉLANGE les deux
+            # verticales entre `bas_m` et `haut_m` — comme `profil.py`,
+            # décision de Yann — ces deux bornes décident d'une VALEUR
+            # servie, pas d'un affichage. Les recopier côté client aurait
+            # fait deux vérités pour un seul raccord ; le jour où l'une
+            # bouge, la carte et la coupe divergeraient à nouveau, en
+            # silence, ce que cette étape existe précisément pour éliminer.
+            raccord=dict(
+                bas_m=RACCORD_BAS_M, haut_m=RACCORD_HAUT_M,
+                note=("poids de la source HAUTEUR : 1 sous `bas_m`, 0 "
+                      "au-dessus de `haut_m`, rampe linéaire entre les "
+                      "deux. valeur = w·hauteur + (1-w)·isobare, dans "
+                      "CET ordre — l'ordre des termes n'est pas neutre en "
+                      "virgule flottante et le banc de parité exige "
+                      "l'écart NUL.")),
             parametres=[dict(nom=p["nom"], unite=p["unite"],
                              paquet=p["paquet"]) for p in PARAMS_GRILLE],
             parametres_isobares=[
