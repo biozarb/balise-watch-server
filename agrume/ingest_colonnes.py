@@ -83,7 +83,8 @@ from quantification import (PARAM_ALTITUDE,  # noqa: E402
                             quantifier, verifier_grille)
 from domaine import (GRID_3D, GRID_FINE, MAX_HOURS, MAX_HOURS_GRILLE,  # noqa: E402
                      MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES,
-                     PAQUETS_INGESTION, PAQUETS_ISOBARES, PAQUETS_SURFACE)
+                     PAQUETS_INGESTION, PAQUETS_ISOBARES, PAQUETS_RALLONGE,
+                     PAQUETS_SURFACE)
 from grille import Grille, axes_depuis_orographie, decouper  # noqa: E402
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
 from mf_s3 import (bornes_echeances, covered_steps, download_tmp,  # noqa: E402
@@ -133,8 +134,15 @@ PAQUETS = PAQUETS_INGESTION
 
 
 def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
-                max_heures_grille=None):
+                max_heures_grille=None, couverture=None, maintenant=None):
     """Run maximisant la couverture COMMUNE aux quatre paquets.
+
+    ⚠️ `couverture` et `maintenant` sont injectables, et ce n'est pas du
+    confort de banc : cette fonction décide de la fraîcheur ET de
+    l'horizon du produit B, et jusqu'au 14/08 aucun banc ne la couvrait
+    parce qu'elle ne savait parler qu'au vrai S3. Les deux défauts de la
+    rallonge (les paquets de trop, et l'instant où on la cherche) sont
+    exactement le genre de chose qu'un banc hors ligne voit d'un coup.
 
     Même esprit que `arome-wind/ingest.py::pick_run`, et pour la même
     raison, apprise à la dure le 25/07 : prendre le run le plus récent
@@ -148,7 +156,9 @@ def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
     mais le SCORE qu'il a produit, lui, est éternel. On ne rattrape
     donc rien — on renonce à re-scorer le passé (renoncement A2).
     """
-    base = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+    couvre = couverture or covered_steps
+    base = (maintenant or datetime.now(timezone.utc)).replace(
+        minute=0, second=0, microsecond=0)
     base -= timedelta(hours=base.hour % 3)
     voulues = list(range(0, max_heures + 1))
     meilleur = None
@@ -158,7 +168,7 @@ def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
         commun = set(voulues)
         detail = []
         for grille, paquet in PAQUETS:
-            c = covered_steps(ref, paquet, grille, voulues, model=MODEL_DIR)
+            c = couvre(ref, paquet, grille, voulues, model=MODEL_DIR)
             detail.append(f"{grille}/{paquet} {len(c)}")
             commun &= c
         crier(f"  run {ref} : {len(commun)}/{len(voulues)} échéances communes "
@@ -194,9 +204,13 @@ def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
     if max_heures_grille and max_heures_grille > max_heures:
         rallonge = list(range(max_heures + 1, max_heures_grille + 1))
         dispo = set(rallonge)
-        for grille, paquet in PAQUETS:
-            dispo &= covered_steps(ref, paquet, grille, rallonge,
-                                   model=MODEL_DIR)
+        # ⛔ `PAQUETS_RALLONGE`, PAS `PAQUETS` (14/08). La rallonge ne
+        # remplit que la grille 0,025° — la maille fine s'arrête à
+        # l'horizon de l'archive quelques dizaines de lignes plus bas.
+        # Exiger `001/HP1` et `001/SP1` au-delà de +24 h la faisait
+        # attendre deux paquets dont elle ne lit pas un octet.
+        for grille, paquet in PAQUETS_RALLONGE:
+            dispo &= couvre(ref, paquet, grille, rallonge, model=MODEL_DIR)
         contigu = []
         for h in rallonge:
             if h not in dispo:
@@ -216,9 +230,17 @@ def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
                   f"trou au milieu de la coupe serait pire qu'une coupe "
                   f"courte.")
         else:
+            # ⚠️ CE MESSAGE EST LE PLUS TROMPEUR DU FICHIER, et il a
+            # coûté une soirée le 13/08 : « ce n'est pas une panne » est
+            # vrai, mais tant que la rallonge était cherchée à l'instant
+            # du guet, il sortait à CHAQUE run frais. Il dit donc aussi
+            # l'heure, pour qu'on voie tout de suite que c'est une course
+            # de publication et pas un horizon manquant chez Météo-France.
             crier(f"  ⓘ aucune échéance au-delà de +{max_heures} h n'est "
-                  f"publiée par les {len(PAQUETS)} paquets — le produit B "
-                  f"s'arrête là, ce n'est pas une panne.")
+                  f"publiée par les {len(PAQUETS_RALLONGE)} paquets 0,025° "
+                  f"À CET INSTANT — le produit B s'arrête là. Ce n'est pas "
+                  f"une panne : la seconde passe (guet `arome-rallonge`) "
+                  f"repassera quand elles seront publiées.")
     return ref, run, steps
 
 

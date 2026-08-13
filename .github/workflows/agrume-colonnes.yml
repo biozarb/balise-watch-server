@@ -57,9 +57,21 @@ on:
         default: "24"
         type: string
   schedule:
-    # Filet de sécurité : ~5 h après chaque réseau AROME, largement après
-    # la publication observée. Le chemin normal reste le dispatch du VPS.
-    - cron: "20 5,8,11,14,17,20,23,2 * * *"   # UTC
+    # Filet de sécurité : le chemin normal reste le dispatch du VPS.
+    #
+    # ⛔ DÉCALÉ DE H+2 h 20 À H+4 h 20 LE 14/08, et ce n'est pas
+    # cosmétique. À H+2 h 20, ce filet retombait TOUJOURS sur le réseau
+    # PRÉCÉDENT (le réseau H n'est publié qu'à partir de H+2 h 50), et
+    # il le republiait à l'identique — un run entier de 21 Go pour
+    # réécrire ce que le guet avait déjà écrit. À H+4 h 20 il attrape le
+    # réseau H lui-même, rallonge 25→51 h comprise (0–24 h prêt entre
+    # H+2 h 51 et H+5 h 26, rallonge entre H+2 h 52 et H+7 h 29, mesuré
+    # sur douze réseaux les 12 et 13/08).
+    #
+    # ⚠️ Et s'il tombe sur un réseau pas encore publié, `choisir_run()`
+    # se rabat sur le précédent — qui, lui, est complet ET rallongé. Le
+    # filet ne peut donc pas faire PIRE qu'avant, seulement mieux.
+    - cron: "20 4,7,10,13,16,19,22,1 * * *"   # UTC
 
 concurrency:
   # ⚠️ `cancel-in-progress: false` : un run d'ingestion écrit une archive

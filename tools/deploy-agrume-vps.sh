@@ -110,7 +110,7 @@ EOF
 dire "daemon-reload + redémarrage des services persistants"
 ssh "$VPS" '
   sudo systemctl daemon-reload
-  for S in bw-agrume-poller bw-agrume-poller-paquets; do
+  for S in bw-agrume-poller bw-agrume-poller-paquets bw-agrume-poller-rallonge; do
     if systemctl is-enabled --quiet "$S" 2>/dev/null; then
       sudo systemctl restart "$S" && echo "  ✓ $S redémarré"
     else

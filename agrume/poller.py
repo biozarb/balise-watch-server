@@ -63,7 +63,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from domaine import PAQUETS_INGESTION  # noqa: E402
+from domaine import (MAX_HOURS_GRILLE, PAQUETS_INGESTION,  # noqa: E402
+                     PAQUETS_RALLONGE)
 from mf_s3 import covered_steps  # noqa: E402
 from portail import (SERVICE_AROME, SERVICE_AROMEPI, CouvertureAbsente,  # noqa: E402
                      ErreurPortail, Portail)
@@ -137,7 +138,16 @@ class SourceS3(Source):
         # quatre paquets dont AGRUME a besoin se mélangeraient dans une
         # seule série de latences — et c'est justement leur ÉCART qu'on
         # cherche à mesurer.
-        self.nom = f"{modele}:{grille}/{paquet}"
+        # ⚠️ ET L'ÉCHÉANCE, quand elle n'est pas 0 (14/08). « HP1 couvre
+        # l'échéance 0 » et « HP1 couvre l'échéance 51 » sont deux
+        # latences séparées de plusieurs heures ; sous un seul nom, le
+        # journal les mélangerait, `debut_de_guet_min()` apprendrait une
+        # fenêtre qui n'existe pas, et surtout `deja_vu()` prendrait
+        # l'une pour l'autre — le second guet ne partirait jamais.
+        # Le suffixe n'apparaît QUE pour une échéance non nulle : les
+        # séries mesurées depuis le 10/08 gardent leur nom.
+        self.nom = (f"{modele}:{grille}/{paquet}" if echeance == 0
+                    else f"{modele}:{grille}/{paquet}@{echeance}")
 
     def publie(self, run):
         ref = run.strftime("%Y-%m-%dT%H:00:00Z")
@@ -165,6 +175,27 @@ class SourceS3(Source):
 # seule chose qu'AGRUME apporte — et le voyant restait vert.
 # `test_poller.py` verrouille la parité des deux listes.
 PAQUETS_PRODUIT_A = PAQUETS_INGESTION
+
+# ── ⛔ LE SECOND GUET : LA RALLONGE DU PRODUIT B (14/08/2026) ─────────
+# Le guet ci-dessus déclenche dès que l'archive 0–24 h est complète, et
+# c'est bien ce qu'on veut : la fraîcheur est la seule chose qu'AGRUME
+# apporte. Mais `choisir_run()` cherche la rallonge (25 → 51 h) au même
+# instant, et Météo-France ne l'a PAS ENCORE publiée — mesuré sur le run
+# 15 Z du 13/08 : archive complète à 18:25:37 Z, rallonge complète à
+# 18:53:29 Z. Le produit B sortait donc à +24 h à chaque run frais, et
+# l'étape 14 n'avait jamais servi à personne.
+#
+# ⛔ CE N'EST PAS UN CRON. L'écart entre « archive prête » et « rallonge
+# prête » va de 2 min à 3 h 33 sur les douze réseaux mesurés les 12 et
+# 13/08 — une heure fixe raterait la moitié des runs, exactement la
+# raison pour laquelle ce fichier existe (cf. l'en-tête de
+# `bw-agrume-poller.service`).
+#
+# ⚠️ LES PAQUETS 0,025° SEULEMENT, et la parité avec `choisir_run()` est
+# bancée : guetter la maille fine ferait attendre le second dispatch sur
+# deux paquets que la rallonge ne lit pas.
+PAQUETS_PRODUIT_B_RALLONGE = PAQUETS_RALLONGE
+ECHEANCE_RALLONGE = MAX_HOURS_GRILLE
 
 
 class SourcePortail(Source):
@@ -628,6 +659,15 @@ def fabriquer_source(nom, journal=print):
         return SourceS3()
     if nom == "arome-paquets":
         return [SourceS3(paquet=p, grille=g) for g, p in PAQUETS_PRODUIT_A]
+    if nom == "arome-rallonge":
+        # ⚠️ MÊME workflow déclenché que `arome-paquets`, et c'est voulu :
+        # l'ingestion revérifie de toute façon la couverture réelle et
+        # reprendra la rallonge d'elle-même. Un second point d'entrée
+        # « qui ne ferait que la rallonge » aurait demandé un second
+        # chemin d'écriture du produit B — deux façons d'écrire le même
+        # objet, c'est-à-dire deux façons de se tromper.
+        return [SourceS3(paquet=p, grille=g, echeance=ECHEANCE_RALLONGE)
+                for g, p in PAQUETS_PRODUIT_B_RALLONGE]
     if nom == "aromepi":
         return SourcePortail(SERVICE_AROMEPI, "0025", journal=journal)
     if nom == "arome-wcs":
@@ -641,7 +681,8 @@ def fabriquer_source(nom, journal=print):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--source", default="aromepi",
-                   choices=("aromepi", "arome", "arome-wcs", "arome-paquets"))
+                   choices=("aromepi", "arome", "arome-wcs", "arome-paquets",
+                            "arome-rallonge"))
     p.add_argument("--journal", default=str(JOURNAL_DEFAUT))
     p.add_argument("--une-fois", action="store_true",
                    help="guette un seul run puis sort (mode cron)")

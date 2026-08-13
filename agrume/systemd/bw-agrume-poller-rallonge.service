@@ -1,0 +1,80 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-poller-rallonge.service — la SECONDE passe   (14/08/2026)
+#
+#  ⛔ POURQUOI UN SECOND GUET, ET PAS UN CRON.
+#  `bw-agrume-poller-paquets` déclenche l'ingestion dès que l'archive
+#  0–24 h est complète : c'est la fraîcheur, et c'est la seule chose
+#  qu'AGRUME apporte. Mais `choisir_run()` cherche la rallonge du
+#  produit B (25 → 51 h) à CE MÊME INSTANT, et Météo-France ne l'a pas
+#  encore publiée. Mesuré sur le run 15 Z du 13/08 :
+#
+#      archive 0–24 h complète sur les 8 paquets   18:25:37 Z
+#      rallonge cherchée par l'ingestion           18:29:12 Z  → VIDE
+#      rallonge 25–51 h complète                   18:53:29 Z
+#
+#  La coupe sortait donc à +24 h à CHAQUE run frais, et l'étape 14
+#  n'avait jamais servi à personne. Ce service repasse quand les
+#  échéances lointaines sont là, et l'ingestion les prend d'elle-même.
+#
+#  ⚠️ UN CRON NE PEUT PAS FAIRE ÇA. L'écart entre « archive prête » et
+#  « rallonge prête » va de 2 min à 3 h 33 sur les douze réseaux mesurés
+#  les 12 et 13/08 (min 2 min sur le 12 Z du 12/08, max 3 h 33 sur le
+#  09 Z du 12/08). Une heure fixe raterait la moitié des runs — c'est
+#  exactement l'argument de l'en-tête de `bw-agrume-poller.service`.
+#
+#  ⚠️ CE QUE ÇA COÛTE, ET CE QUE ÇA NE COÛTE PAS. Le guet lui-même :
+#  six listings S3 de quelques kilo-octets par cycle, aucun GRIB, aucune
+#  clé (le miroir est public). La passe qu'il déclenche : une ingestion
+#  COMPLÈTE de plus par réseau, ~21 Go et ~23 min de runner — gratuit,
+#  le dépôt est public, et c'est le même arbitrage que le cron filet qui
+#  tourne déjà huit fois par jour.
+#
+#  ⓘ Il écrit dans le MÊME journal que les deux autres guets. Ses séries
+#  portent le suffixe `@51` (`arome:0025/HP1@51`, etc.) : `poller.py
+#  --rapport` les affiche à côté des séries `@0`, et l'écart entre les
+#  deux EST la latence de la rallonge — la mesure qui manquait le 13/08.
+#
+#  ⚠️ PRÉREQUIS : `AGRUME_DISPATCH` et `GITHUB_DISPATCH_TOKEN` dans
+#  `~/.balise-watch-model-verif.env`, comme pour `-paquets`. Sans jeton,
+#  le service tourne quand même et DATE la publication de la rallonge —
+#  mode légitime, mais la coupe reste à +24 h et le poller le dit.
+#
+#  Installation (à faire par Yann — ce fichier ne s'installe pas seul) :
+#    sudo cp agrume/systemd/bw-agrume-poller-rallonge.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-agrume-poller-rallonge
+#    journalctl -u bw-agrume-poller-rallonge -f
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — guet de la rallonge 25-51 h du produit B (seconde passe)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/agrume/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/agrume
+ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-poller.sh arome-rallonge
+Restart=always
+RestartSec=60
+RestartPreventExitStatus=78
+Nice=15
+
+# ── Cloisonnement, calqué sur bw-agrume-poller-paquets.service ───────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

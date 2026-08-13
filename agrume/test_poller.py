@@ -94,6 +94,152 @@ class SourceFactice(P.Source):
         return "source factice"
 
 
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ LA RALLONGE DU PRODUIT B — LE SECOND GUET ET SON JUMEAU
+# ══════════════════════════════════════════════════════════════════════
+def banc_rallonge():
+    """Ce que ce banc protège, et pourquoi il n'existait pas avant.
+
+    L'étape 14 a écrit la rallonge 25 → 51 h, l'a documentée sur trois
+    pages, et elle n'a JAMAIS servi : elle est cherchée à l'instant du
+    dispatch, c'est-à-dire avant que Météo-France ait publié les
+    échéances lointaines. Rien ne le disait — le message est un ⓘ, le
+    run est vert, la coupe s'arrête simplement un jour plus tôt.
+
+    ⛔ ET LE SEUL SYMPTÔME VISIBLE ÉTAIT À L'ÉCRAN. C'est exactement le
+    jumeau du 6ᵉ argument du 13/08 : un chemin construit, mesuré,
+    documenté, et jamais emprunté, parce que rien ne lève quand il ne
+    l'est pas. Les trois contrôles ci-dessous sont donc écrits pour
+    ÉCHOUER sur le code d'avant.
+    """
+    from ingest_colonnes import choisir_run  # noqa: PLC0415
+    import domaine as D  # noqa: PLC0415
+
+    print("\n── ⛔ La rallonge du produit B (25 → 51 h) ────────────────")
+
+    verifier("⛔ la rallonge n'exige QUE des paquets 0,025° — la maille "
+             "fine s'arrête à l'horizon de l'archive",
+             all(g == D.GRID_3D for g, _ in D.PAQUETS_RALLONGE)
+             and len(D.PAQUETS_RALLONGE) < len(D.PAQUETS_INGESTION),
+             f"{len(D.PAQUETS_RALLONGE)} sur {len(D.PAQUETS_INGESTION)}")
+    verifier("…et elle est DÉRIVÉE de la liste d'ingestion, pas recopiée "
+             "(un paquet 0,025° ajouté entre tout seul)",
+             set(D.PAQUETS_RALLONGE)
+             == {(g, p) for g, p in D.PAQUETS_INGESTION if g == D.GRID_3D})
+
+    # ── Un S3 factice : chaque (grille, paquet) publie jusqu'à N h ────
+    maintenant = datetime(2026, 8, 13, 18, 29, tzinfo=timezone.utc)
+    frais = "2026-08-13T15:00:00Z"
+
+    def couverture_a(horizons, partout=False):
+        """`horizons[(grille, paquet)] = dernière échéance publiée`.
+
+        ⚠️ Le réseau de 18 Z existe DÉJÀ dans la grille théorique à
+        18:29 Z, et Météo-France n'en a pas encore publié un octet —
+        c'est la situation réelle, et l'oublier ferait bancer un run qui
+        n'existe pas. Plus récent que `frais` → ABSENT ; plus ancien →
+        complet ; `frais` → ce que dit `horizons`.
+
+        `partout=True` applique `horizons` à tous les runs publiés :
+        indispensable quand le run frais est INCOMPLET, sinon
+        `choisir_run()` se rabat sur un run plus ancien réputé parfait
+        et on bance autre chose que ce qu'on croit."""
+        vus = []
+
+        def couvre(ref, paquet, grille, steps, model=None):
+            vus.append((ref, grille, paquet, max(steps)))
+            if ref > frais:
+                return set()               # réseau pas encore publié
+            if ref < frais and not partout:
+                return set(steps)          # les vieux runs sont complets
+            h = horizons.get((grille, paquet), 24)
+            return {s for s in steps if s <= h}
+        return couvre, vus
+
+    # 1. LE CAS RÉEL DU 13/08 : archive complète, rallonge pas encore là.
+    couvre, vus = couverture_a({})
+    ref, _run, steps = choisir_run(24, crier=lambda *a: None,
+                                   max_heures_grille=51, couverture=couvre,
+                                   maintenant=maintenant)
+    verifier("run frais retenu même sans rallonge (la fraîcheur d'abord)",
+             ref == frais, ref)
+    verifier("…et la coupe s'arrête à +24 h — le défaut MESURÉ le 13/08 "
+             "à 18:29:12 Z",
+             steps == list(range(25)), f"{len(steps)} échéances")
+    verifier("⛔ aucun run PLUS ANCIEN n'est même interrogé dès qu'un run "
+             "complet est trouvé — la rallonge ne peut donc PAS voler le "
+             "choix du run à la fraîcheur",
+             min(r for r, _, _, _ in vus) == frais,
+             ", ".join(sorted({r for r, _, _, _ in vus})))
+
+    # 2. LA SECONDE PASSE : Météo-France a fini de publier.
+    couvre, vus = couverture_a({(g, p): 51 for g, p in D.PAQUETS_RALLONGE})
+    ref, _run, steps = choisir_run(24, crier=lambda *a: None,
+                                   max_heures_grille=51, couverture=couvre,
+                                   maintenant=maintenant)
+    verifier("⛔ la seconde passe monte à +51 h ALORS QUE la maille fine "
+             "reste à +24 h — c'est tout l'objet du fix",
+             steps == list(range(52)), f"{len(steps)} échéances")
+    verifier("⛔ …et la maille fine n'a JAMAIS été interrogée au-delà de "
+             "+24 h : c'était ça, le paquet de trop",
+             all(h <= 24 for _r, g, _p, h in vus if g == D.GRID_FINE),
+             f"max +{max([h for _r, g, _p, h in vus if g == D.GRID_FINE])} h "
+             f"sur la maille fine, +{max(h for *_x, h in vus)} h en 0,025°")
+
+    # 3. UN TROU DANS LA RALLONGE : on s'arrête au bord, pas au trou.
+    #    SP2 traîne (c'est le paquet le plus lent, mesuré le 13/08) :
+    #    30 h chez lui, 51 h chez les autres.
+    horizons = {(D.GRID_3D, p): 51 for _g, p in D.PAQUETS_RALLONGE}
+    horizons[(D.GRID_3D, D.PAQUET_SURFACE_2)] = 30
+    couvre, _vus = couverture_a(horizons)
+    _ref, _run, steps = choisir_run(24, crier=lambda *a: None,
+                                    max_heures_grille=51, couverture=couvre,
+                                    maintenant=maintenant)
+    verifier("⚠️ un paquet en retard borne la coupe à SON horizon — pas "
+             "de trou au milieu",
+             steps == list(range(31)), f"{len(steps)} échéances")
+
+    # 4. ARCHIVE INCOMPLÈTE, RALLONGE DISPONIBLE — le cas que la
+    #    séparation des deux listes rend POSSIBLE, et qu'il faut donc
+    #    bancer : les six paquets 0,025° montent à 51 h pendant que la
+    #    maille fine, elle, traîne à 19 h. La rallonge est là, l'archive
+    #    ne l'est pas, et une coupe 0–19 h + 25–51 h serait illisible.
+    horizons = {(g, p): 51 for g, p in D.PAQUETS_INGESTION}
+    horizons[(D.GRID_FINE, "HP1")] = 19
+    couvre, _vus = couverture_a(horizons, partout=True)
+    messages = []
+    _ref, _run, steps = choisir_run(24, crier=messages.append,
+                                    max_heures_grille=51, couverture=couvre,
+                                    maintenant=maintenant)
+    verifier("⚠️ archive incomplète → rallonge ABANDONNÉE (une coupe "
+             "courte vaut mieux qu'une coupe trouée)",
+             steps == list(range(20)), f"jusqu'à +{max(steps)} h")
+    verifier("…et l'abandon est CRIÉ, pas silencieux",
+             any("ABANDONNÉE" in m for m in messages))
+
+    # ── Le guet, côté poller ─────────────────────────────────────────
+    print("\n── ⛔ Le second guet `arome-rallonge` ─────────────────────")
+    cibles = P.fabriquer_source("arome-rallonge")
+    verifier("⛔ il guette EXACTEMENT les paquets que la rallonge exige "
+             "— deux listes qui divergent = un dispatch qui n'arrive pas",
+             tuple((s.grille, s.paquet) for s in cibles)
+             == tuple(D.PAQUETS_RALLONGE),
+             ", ".join(f"{s.grille}/{s.paquet}" for s in cibles))
+    verifier("il guette l'échéance la PLUS LOINTAINE (celle qui arrive "
+             "en dernier), pas l'échéance 0",
+             all(s.echeance == D.MAX_HOURS_GRILLE for s in cibles),
+             str({s.echeance for s in cibles}))
+    verifier("⛔ ses séries portent un nom DISTINCT du premier guet — "
+             "sinon `deja_vu()` les confond et le second guet ne part "
+             "jamais",
+             not ({s.nom for s in cibles}
+                  & {s.nom for s in P.fabriquer_source("arome-paquets")}),
+             ", ".join(sorted(s.nom for s in cibles)[:2]) + " …")
+    verifier("…et le premier guet garde le nom qu'il a depuis le 10/08 "
+             "(la série mesurée ne se casse pas)",
+             P.fabriquer_source("arome-paquets")[0].nom == "arome:0025/HP1")
+
+
 def main():
     print("── Lecture des corps d'erreur du portail ──────────────────")
     exc, msg = W._lire_exception_wcs(CORPS_404_ABSENT)
@@ -434,6 +580,8 @@ def main():
         P.rapport(j, crier=lignes.append)
     verifier("sans encadrement, le rapport REFUSE d'appeler ça une latence",
              any("PAS des latences" in x for x in lignes))
+
+    banc_rallonge()
 
     print("\n  poller :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

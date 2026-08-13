@@ -211,12 +211,24 @@ La seule propriété unique du VPS est d'être **allumé en permanence** :
 une Action est un cron, elle ne peut pas guetter. Le VPS **décide
 quand**, l'Action **fait le travail**. Le VPS ne touche jamais un GRIB.
 
+**⛔ Et il déclenche DEUX FOIS par réseau, depuis le 14/08.**
+`bw-agrume-poller-paquets` part dès que l'archive 0–24 h est complète —
+c'est la fraîcheur, la seule chose qu'AGRUME apporte.
+`bw-agrume-poller-rallonge` repart quand les échéances 25 → 51 h sont
+publiées, et c'est la seule façon d'avoir la coupe à deux jours : la
+rallonge du produit B est cherchée à l'instant du dispatch, et
+Météo-France publie les échéances lointaines **entre 2 min et 3 h 33
+plus tard** (douze réseaux mesurés les 12 et 13/08). Sans ce second
+guet, la coupe s'arrêtait à +24 h sur **tous** les runs frais, sans
+qu'aucun voyant ne passe au rouge.
+
 **Déploiement du code sur le VPS (Lot P, 13/08) :**
 `tools/deploy-agrume-vps.sh` fige la procédure manuelle — rsync de
 `agrume/`, `verif/` et `tools/` (les trois, jamais un seul : le piège
 déjà payé côté `model-verif/`), sha256 des deux côtés, bancs hors-ligne
 rejoués SUR LE VPS, puis redémarrage des seuls services persistants
-(`bw-agrume-poller`, `bw-agrume-poller-paquets`). ⛔ Il ne touche jamais
+(`bw-agrume-poller`, `bw-agrume-poller-paquets`,
+`bw-agrume-poller-rallonge`). ⛔ Il ne touche jamais
 aux timers oneshot ni n'installe de nouvelle unité systemd — ça reste
 une action de Yann, une fois, à la main. S'appelle depuis le Mac (jamais
 depuis une session cloud — `ssh`/`rsync` passent par Desktop Commander).

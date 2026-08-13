@@ -232,6 +232,24 @@ PAQUETS_INGESTION = (
     (GRID_3D, PAQUET_SURFACE_2),
 )
 
+# ── ⛔ LES PAQUETS DE LA RALLONGE — UN SOUS-ENSEMBLE (14/08) ──────────
+# La rallonge du produit B (25 → MAX_HOURS_GRILLE) ne remplit QUE la
+# grille 0,025° : `ingerer()` coupe la maille fine à l'horizon de
+# l'ARCHIVE, c'est écrit noir sur blanc dans `ingest_colonnes.py`
+# (« LA MAILLE FINE S'ARRÊTE À L'HORIZON DE L'ARCHIVE »).
+#
+# ⛔ La première version du 13/08 exigeait pourtant la couverture des
+# HUIT paquets au-delà de +24 h, `001/HP1` et `001/SP1` compris. La
+# rallonge était donc conditionnée à la publication de deux paquets dont
+# elle ne lit pas un octet — elle attendait pour rien, et elle serait
+# tombée à zéro le jour où Météo-France cesserait de publier la maille
+# fine au-delà de l'horizon de l'archive, SANS QU'AUCUNE ERREUR NE SORTE
+# (le message « aucune échéance au-delà de +24 h » est un ⓘ, pas un ⚠️).
+#
+# ⚠️ Elle reste dérivée de `PAQUETS_INGESTION`, jamais recopiée : un
+# paquet 0,025° ajouté à l'ingestion entre ici tout seul.
+PAQUETS_RALLONGE = tuple((g, p) for g, p in PAQUETS_INGESTION if g == GRID_3D)
+
 # ── Le domaine Nord-Alpes ─────────────────────────────────────────────
 # ⚠️ Ce n'est pas un choix de confort, c'est ce qui rend le produit B
 # possible : la France entière en 0,025° fait 803 757 points par niveau,
@@ -442,6 +460,21 @@ MAX_HOURS = 24
 # n'en publie encore que 25, et on perdrait de la fraîcheur pour gagner
 # des heures lointaines dont personne ne fait rien. La rallonge est
 # ajoutée APRÈS, et seulement tant qu'elle est CONTIGUË.
+#
+# ⛔⛔ ET « AU MIEUX » VOULAIT DIRE « JAMAIS » (mesuré le 13/08 au soir).
+# La rallonge est cherchée à l'instant où le guet déclenche, c'est-à-dire
+# dès que l'archive 0–24 h est complète. Or Météo-France publie les
+# échéances lointaines APRÈS. Mesuré sur le run 15 Z du 13/08 :
+#
+#     0–24 h complet sur les 8 paquets   18:25:37 Z   (H+3 h 26)
+#     rallonge cherchée par l'ingestion  18:29:12 Z   → VIDE
+#     0–51 h complet                     18:53:29 Z   (H+3 h 53)
+#
+# Le seul run à sortir avec 52 échéances ce jour-là est celui qui avait
+# été ingéré en RETARD. Sur douze réseaux mesurés (12 et 13/08), l'écart
+# entre « archive prête » et « rallonge prête » va de 2 min à 3 h 33.
+# ⚠️ Un cron ne peut donc pas le rattraper : c'est un second GUET qui
+# déclenche une seconde passe (`poller.py --source arome-rallonge`).
 MAX_HOURS_GRILLE = 51
 
 # ── Le raccord vertical (§3.3 du lot) ─────────────────────────────────

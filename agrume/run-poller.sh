@@ -25,9 +25,11 @@ if [ -r "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   . "$ENV_FILE"
   set +a
-elif [ "$SOURCE" != "arome" ] && [ "$SOURCE" != "arome-paquets" ]; then
+elif [ "$SOURCE" != "arome" ] && [ "$SOURCE" != "arome-paquets" ] \
+     && [ "$SOURCE" != "arome-rallonge" ]; then
   # ⚠️ Seules les sources qui passent par le MIROIR S3 (`arome`,
-  # `arome-paquets`) se passent de clé — le miroir est public. Pour le
+  # `arome-paquets`, `arome-rallonge`) se passent de clé — le miroir est
+  # public. Pour le
   # portail, mieux vaut refuser de démarrer que tourner en boucle sur
   # des erreurs d'authentification : un service qui redémarre toutes
   # les cinq secondes ressemble à un service qui marche.
@@ -52,9 +54,17 @@ fi
 # (Défaut introduit puis corrigé le 10/08, avant qu'un seul run ne parte.)
 # Le composite PI, lui, est l'étape 9 : il aura sa propre chaîne et son
 # propre déclencheur le jour où il existera.
+#
+# ⚠️ 14/08 — `arome-rallonge` DÉCLENCHE AUSSI, et c'est tout son objet :
+# c'est la SECONDE passe, celle qui repasse quand Météo-France a fini de
+# publier 25 → 51 h. Elle relance le MÊME workflow (l'ingestion
+# revérifie la couverture réelle) et ajoute donc ~23 min de runner par
+# réseau — gratuit, le dépôt est public. Sans dispatch, elle ne ferait
+# que dater la publication des échéances lointaines : utile, mais la
+# coupe resterait à +24 h.
 case "$SOURCE" in
-  arome|arome-paquets) DECLENCHE="${AGRUME_DISPATCH:-}" ;;
-  *)                   DECLENCHE="" ;;
+  arome|arome-paquets|arome-rallonge) DECLENCHE="${AGRUME_DISPATCH:-}" ;;
+  *)                                  DECLENCHE="" ;;
 esac
 
 if [ -n "$DECLENCHE" ]; then
