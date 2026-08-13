@@ -168,9 +168,15 @@ jobs:
       #  Deux rampes qui divergent ne lèvent rien — elles rendent une
       #  carte lisse, une coupe lisse, et deux vents différents au même
       #  point. C'est resté hors CI depuis le 12/08 : il charge
-      #  `web/src/lib/altitudeLayer.ts` et `agrumeProfile.ts`, qui vivent
-      #  dans `biozarb/balise-watch` — un dépôt PRIVÉ que le
+      #  `PWA/web/src/lib/altitudeLayer.ts` et `agrumeProfile.ts`, qui
+      #  vivent dans `biozarb/balise-watch` — un dépôt PRIVÉ que le
       #  `GITHUB_TOKEN` de CE dépôt ne peut pas atteindre.
+      #  ⚠️ Le préfixe `PWA/` n'est PAS cosmétique : depuis
+      #  `PWA/balise-watch-server/tools/`, le banc local voit ces
+      #  fichiers en `../../web/src/lib/…` — et c'est ce chemin-là,
+      #  amputé de `PWA/`, qui a été recopié ici le 13/08. Un
+      #  sparse-checkout sur un motif qui ne correspond à rien reste
+      #  VERT (runs #62 et #63).
       #
       #  ⛔ PAS DE VERSION « QUI SAUTE SI LE SECRET EST ABSENT ». Le
       #  `checkout` ci-dessous n'a AUCUNE garde conditionnelle : si
@@ -191,9 +197,46 @@ jobs:
           token: ${{ secrets.WEB_REPO_PAT }}
           path: _web-repo-parite
           sparse-checkout: |
-            web/src/lib/altitudeLayer.ts
-            web/src/lib/agrumeProfile.ts
+            PWA/web/src/lib/altitudeLayer.ts
+            PWA/web/src/lib/agrumeProfile.ts
           sparse-checkout-cone-mode: false
+
+      # ══════════════════════════════════════════════════════════════
+      #  ⛔ 13/08 — UN SPARSE-CHECKOUT QUI NE TROUVE RIEN RESTE VERT.
+      #
+      #  Les deux chemins ci-dessus étaient `web/src/lib/…` : c'est le
+      #  chemin vu depuis `PWA/`, pas depuis la RACINE du dépôt web (les
+      #  fichiers y vivent sous `PWA/web/…`). Le motif ne correspondait à
+      #  aucun fichier — et `actions/checkout` a rendu un arbre VIDE en
+      #  1 s, en vert, sans un mot. La panne n'est apparue que deux
+      #  étapes plus loin, en `ERR_MODULE_NOT_FOUND` de Node : runs #62
+      #  et #63 du 13/08.
+      #
+      #  Cette étape existe pour que ce silence-là ne se reproduise pas :
+      #  le motif se prouve, à l'endroit où il est écrit.
+      # ══════════════════════════════════════════════════════════════
+      - name: Le sparse-checkout a bien ramené les deux fichiers
+        run: |
+          manque=0
+          for f in _web-repo-parite/PWA/web/src/lib/altitudeLayer.ts \
+                   _web-repo-parite/PWA/web/src/lib/agrumeProfile.ts; do
+            if [ -s "$f" ]; then
+              echo "✓ $f ($(wc -c < "$f") o)"
+            else
+              echo "✗ ABSENT OU VIDE : $f"
+              manque=1
+            fi
+          done
+          if [ "$manque" = "1" ]; then
+            echo "──────────────────────────────────────────────────────"
+            echo "Le checkout du dépôt web est VERT mais n'a rien ramené."
+            echo "C'est un motif sparse-checkout qui ne correspond à"
+            echo "aucun fichier — vérifier les chemins ci-dessus contre"
+            echo "l'arborescence RÉELLE de biozarb/balise-watch."
+            echo "Contenu effectivement ramené :"
+            find _web-repo-parite -type f | head -40
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -212,8 +255,8 @@ jobs:
             --manifeste /tmp/bw-parite/manifest.json \
             --colonnes  /tmp/bw-parite/colonnes.bin
         env:
-          BW_LAYER_MODULE: ${{ github.workspace }}/_web-repo-parite/web/src/lib/altitudeLayer.ts
-          BW_AGRUME_MODULE: ${{ github.workspace }}/_web-repo-parite/web/src/lib/agrumeProfile.ts
+          BW_LAYER_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/altitudeLayer.ts
+          BW_AGRUME_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/agrumeProfile.ts
 
       - name: Ingérer les colonnes
         env:
