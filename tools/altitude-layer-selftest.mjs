@@ -1087,6 +1087,9 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
              `agrume/grille/${DOM}/${RUN}/e01.bin`,
              CLE_COL, `agrume/grille/${DOM}/${RUN}/manifest.json`],
     }],
+    // ⚠️ L'horodatage de l'index amorce la chaîne de jetons : il est le
+    // seul que ni un navigateur ni un CDN ne peut avoir périmé.
+    ecrit_le: '2026-08-13T23:36:02Z',
   };
   verifier('l\'index compte les échéances par ses clés `e{step}.bin` — sans '
     + 'une requête de plus', L.echeancesDansIndex(idx, RUN, DOM) === NECH);
@@ -1178,6 +1181,32 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
       `u = ${col.tranches.u[0]} (marque de la colonne 3)`);
   }
 
+  // ── f bis. LE JETON D'URL — parce que le rejeu n'a pas suffi ───────
+  // ⛔ CONSTATÉ À L'ÉCRAN LE 14/08 : `cache: 'reload'` n'a PAS débloqué
+  // l'appareil, pendant que `curl` obtenait un 206 sur l'offset exact,
+  // à la seconde près. Un `reload` ne bat que le cache HTTP du
+  // navigateur — ni un cache d'entité partielle (Chrome rend un 416
+  // depuis la taille qu'il croit connaître, sans requête), ni un
+  // intermédiaire qui ignore le `no-cache` d'un client. Une URL
+  // différente, elle, est une clé différente pour TOUS les caches.
+  {
+    verifier('le jeton se colle sur l\'URL, et il est encodé',
+      L.avecJeton('https://x/colonnes.bin', '2026-08-13T23:33:00Z')
+        === 'https://x/colonnes.bin?g=2026-08-13T23%3A33%3A00Z');
+    verifier('⚠️ deux générations du même run donnent deux URL — c\'est TOUT '
+      + 'ce qu\'il faut pour qu\'un cache empoisonné devienne inatteignable',
+      L.avecJeton('u', 'A') !== L.avecJeton('u', 'B'));
+    verifier('⚠️ un manifeste sans `genere_le` (produit d\'avant le 14/08) '
+      + 'laisse l\'URL intacte plutôt que de fabriquer un `?g=undefined`',
+      L.avecJeton('u', undefined) === 'u' && L.avecJeton('u', null) === 'u');
+    let vue = null;
+    await L.chargerColonne('', { ...MAN, genere_le: '2026-08-13T23:33:00Z' },
+      46, 6, ZSOL, async (url, init) => { vue = url; return servir(octets)(url, init); });
+    verifier('⛔ `chargerColonne` demande bien l\'URL JETONNÉE — sans ça tout '
+      + 'le reste de cette section ne protège rien',
+      /\?g=2026-08-13T23%3A33%3A00Z$/.test(vue), vue);
+  }
+
   // ── g. Le rejeu qui débloque un appareil empoisonné ────────────────
   // ⛔ C'EST LA VÉRIFICATION QUI COMPTE POUR L'UTILISATEUR. Le fix
   // serveur empêche que ça recommence ; celui-ci répare les appareils
@@ -1185,12 +1214,15 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
   {
     const A = await import(process.env.BW_AGRUME_MODULE
       || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeProfile.ts'));
-    let reloads = 0, passes = 0;
+    let reloads = 0, passes = 0, urlMan = null;
     const cache = async (url, init) => {
       const frais = init?.cache === 'reload';
       if (frais) reloads++;
       if (url.endsWith('index.json')) return Response.json(idx);
-      if (url.endsWith('manifest.json')) {
+      // ⚠️ `includes` et pas `endsWith` : l'URL du manifeste porte
+      // maintenant le jeton de l'index en paramètre de requête.
+      if (url.includes('manifest.json')) {
+        urlMan = url;
         passes++;
         // ⚠️ Le cache rend le VIEUX manifeste tant qu'on ne force pas la
         // revalidation : c'est le comportement exact d'un `max-age` non
@@ -1205,12 +1237,15 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
       + 'forcée, sans attendre les 6 h de cache',
       r.profil.times.length === NECH && reloads > 0 && passes === 2,
       `${passes} lectures du manifeste, ${reloads} en \`cache: reload\``);
+    verifier('⛔ …et l\'URL du manifeste porte le jeton de l\'INDEX — la seule '
+      + 'pièce qu\'aucun cache ne peut avoir périmée',
+      /\?g=2026-08-13T23%3A36%3A02Z$/.test(urlMan ?? ''), urlMan);
     verifier('⚠️ et UN SEUL rejeu : une incohérence qui persiste doit rester '
       + 'visible, pas devenir lente',
       await (async () => {
         let n = 0;
         const toujours = async (url, init) => {
-          if (url.endsWith('manifest.json')) { n++; return Response.json(MAN_VIEUX); }
+          if (url.includes('manifest.json')) { n++; return Response.json(MAN_VIEUX); }
           return cache(url, init);
         };
         const e = await prendre(A.chargerProfilAgrume('', 45.5, 6.5, toujours));
