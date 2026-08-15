@@ -297,11 +297,52 @@ DOMAINE = dict(latmin=44.8, latmax=46.3, lonmin=5.5, lonmax=7.6)
 # de calque, pas de coupe, hors grille 3D.
 DOMAINE_PYRENEES = dict(latmin=42.40, latmax=43.40, lonmin=-1.80, lonmax=3.30)
 
+# ── Le TROISIÈME domaine : Tarn / Aveyron / Hérault (15/08/2026) ──────
+# Demande Yann. Étude complète dans le projet Claude (« balise watch » —
+# `agrume-faisabilite-tarn-aveyron-herault-15-08.md` et
+# `agrume-forme-boite-tarn-aveyron-herault-15-08.md`) : reverse-geocoding
+# PRÉCIS (polygones INSEE réels via `geo.api.gouv.fr/communes`, jamais un
+# simple test de boîte — l'API d'adresses `api-adresse.data.gouv.fr` rate
+# systématiquement les sites de vol, trop loin de toute adresse) du
+# catalogue Pioupiou live : **30 balises** dans les trois départements
+# visés (Tarn 9 · Aveyron 5 · Hérault 16).
+#
+# ⛔ LA BOÎTE ÉVIDENTE (englobant les 30) CHEVAUCHE `DOMAINE_PYRENEES` —
+# deux balises d'Hérault (Lespignan, Puisserguier) sont même DÉJÀ dans la
+# boîte pyrénéenne. `verifier_domaines_disjoints()` l'aurait refusée.
+#
+# ✅ RETENU : coupe à `latmin=43.43`, une marge de 0,03° (~3,3 km)
+# au-dessus de `DOMAINE_PYRENEES` — plus du double du rayon d'ambiguïté
+# d'une demi-maille déjà mesuré dans ce fichier (1,4 km, cas de la balise
+# 1661/LFMG). Résultat : **26 balises, 34 × 84 = 2 856 colonnes**
+# (formule vérifiée : elle rend exactement 5 185 sur Nord-Alpes et 8 405
+# sur les Pyrénées). Densité 110 col/balise — meilleure que les
+# Pyrénées (153) pour un volume R2 plus petit encore (~0,35 Go estimé,
+# contre ~1,0 Go/domaine mesuré le 13/08 sur les Pyrénées).
+#
+# ⚠️ CE QUE LA BOÎTE LAISSE DEHORS, ET POURQUOI :
+#   · Lespignan et Puisserguier (Hérault sud) sont déjà dans la boîte
+#     Pyrénées — rien à faire ici, à vérifier séparément qu'elles y
+#     entrent bien à la prochaine régénération de l'axe.
+#   · Agde et Bessan (Hérault côtier, lon 3,41–3,45) tombent dans le
+#     « trou » entre les deux boîtes. Déjà couvertes par la zone
+#     d'intérêt `pyrenees-large` (lat 42-44 × lon -2,5-3,5) : rien à
+#     ajouter, elles entreront en balises isolées (sol seulement).
+#   · Saujac (Aveyron, isolée à 44,49 N / 1,89 E, à côté du Lot) ferait
+#     passer `latmax` à 44,49 pour la SEULE inclure : +756 colonnes pour
+#     1 balise, densité 134 au lieu de 110 — le même verdict que « le
+#     coût marginal explose » déjà mesuré sur les Pyrénées le 12/08.
+#     Laissée hors de la boîte de production ; couverte en zone
+#     d'intérêt dédiée (cf. `ZONES_INTERET["tah-nord-ouest-isolees"]`)
+#     pour ne pas la perdre pour autant côté archive/score.
+DOMAINE_TAH = dict(latmin=43.43, latmax=44.26, lonmin=1.88, lonmax=3.96)
+
 # ⚠️ L'ORDRE COMPTE POUR `domaine_de()` — pas pour le résultat (les
 # domaines sont disjoints, `verifier_domaines_disjoints()` l'exige), mais
 # pour la lisibilité des journaux. Nord-Alpes d'abord : c'est le domaine
 # historique, celui dont les archives remontent au 10/08.
-DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES}
+DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES,
+            "tarn-aveyron-herault": DOMAINE_TAH}
 
 # ── LES ZONES D'INTÉRÊT — ⛔ CE NE SONT PAS DES DOMAINES ──────────────
 # Une zone d'intérêt ne découpe AUCUNE grille, ne produit AUCUN artefact
@@ -330,6 +371,13 @@ DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES}
 # pas.
 ZONES_INTERET = {
     "pyrenees-large": dict(latmin=42.0, latmax=44.0, lonmin=-2.5, lonmax=3.5),
+    # 15/08/2026 — la balise 2109 (Saujac, Aveyron) et sa voisine 1662
+    # (Montblond, Lot) : coût marginal trop élevé pour la boîte de
+    # production `tarn-aveyron-herault` (cf. le commentaire de
+    # `DOMAINE_TAH`), mais elles ne perdent pas pour autant leur sol —
+    # petite fenêtre dédiée, resserrée pour ne rien avaler d'autre.
+    "tah-nord-ouest-isolees": dict(latmin=44.40, latmax=44.60,
+                                   lonmin=1.75, lonmax=2.00),
 }
 
 # Demi-fenêtre de sol autour d'une balise isolée. ⚠️ Ce n'est PAS le

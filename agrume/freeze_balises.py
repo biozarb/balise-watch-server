@@ -45,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from domaine import (DOMAINE, DOMAINES, ZONES_INTERET,  # noqa: E402
+from domaine import (DOMAINES, ZONES_INTERET,  # noqa: E402
                      dans_domaine, dans_zone_interet, domaine_de)
 
 ARTEFACT = Path(__file__).resolve().parent / "data" / "balises-nord-alpes.json"
@@ -102,19 +102,42 @@ def charger_artefact(chemin=ARTEFACT):
     # échouer tout run lancé entre le déploiement du code et le regel de
     # l'axe. Ce qu'il doit attraper reste intact — un axe figé sur des
     # bornes qui ne sont plus celles du code.
+    #
+    # ⛔⛔ 15/08 — CE TEST S'EST TROMPÉ DE CIBLE, ET ÇA A COÛTÉ 3 BALISES.
+    # `fige != attendu` compare l'ENSEMBLE des domaines : ajouter un
+    # TROISIÈME domaine (`tarn-aveyron-herault`) l'a fait lever, pour la
+    # mauvaise raison — rien n'avait changé côté Nord-Alpes ni Pyrénées.
+    # Et `geler()` rattrape cet `Abort` en le lisant comme « aucun
+    # artefact existant » (`except Abort: existantes = []`) : la
+    # discipline d'AJOUT SEUL saute entièrement, et toute balise pas
+    # LIVE à l'instant précis du gel est perdue en silence — constaté :
+    # 1333, 1361, 365 disparus d'un axe qui n'aurait dû que grandir.
+    #
+    # Le vrai invariant à protéger n'est PAS « les deux ensembles de
+    # domaines sont identiques », c'est « aucun domaine DÉJÀ FIGÉ n'a
+    # changé de bornes ». Un domaine ajouté DEPUIS le dernier gel n'en
+    # est pas un — c'est exactement le cas que le message d'avertissement
+    # ci-dessous existe pour couvrir, pas pour être contredit par l'Abort
+    # juste au-dessus.
     fige = man.get("domaines")
     if fige is None and man.get("domaine") is not None:
         fige = {"nord-alpes": man["domaine"]}
     attendu = {n: d for n, d in DOMAINES.items()}
-    if fige != attendu and fige != {"nord-alpes": DOMAINE}:
+    if fige is None:
         raise Abort(
-            f"⚠️ l'artefact a été figé sur d'AUTRES domaines "
-            f"({fige}) que ceux du code ({attendu}). Les colonnes "
-            f"archivées et celles à venir ne porteraient pas sur les mêmes "
-            f"balises. Régénérer explicitement.")
-    if fige == {"nord-alpes": DOMAINE} and len(DOMAINES) > 1:
-        print(f"  ⚠️ axe figé AVANT l'ajout de "
-              f"{', '.join(n for n in DOMAINES if n != 'nord-alpes')} : "
+            f"⚠️ l'artefact ne porte aucun domaine reconnaissable "
+            f"({man.keys()}). Régénérer explicitement.")
+    incoherents = {n: (fige[n], attendu.get(n)) for n in fige
+                  if n not in attendu or attendu[n] != fige[n]}
+    if incoherents:
+        raise Abort(
+            f"⚠️ l'artefact a été figé sur des BORNES DIFFÉRENTES de "
+            f"celles du code pour {sorted(incoherents)} — {incoherents}. "
+            f"Les colonnes archivées et celles à venir ne porteraient pas "
+            f"sur les mêmes balises. Régénérer explicitement.")
+    nouveaux = [n for n in DOMAINES if n not in fige]
+    if nouveaux:
+        print(f"  ⚠️ axe figé AVANT l'ajout de {', '.join(nouveaux)} : "
               f"les balises de ce(s) domaine(s) ne seront pas archivées "
               f"tant que `freeze_balises.py` n'aura pas été relancé.")
     return man["balises"], man
@@ -161,6 +184,28 @@ def fusionner(existantes, candidates, crier=print):
         if d > SEUIL_DEPLACEMENT_M:
             deplacements.append((c["id"], ancienne["name"], round(d)))
         ancienne["name"] = c["name"] or ancienne["name"]
+        # ⛔ 15/08 — `hors_domaine` N'ÉTAIT JAMAIS RECALCULÉ POUR UNE
+        # BALISE DÉJÀ CONNUE. Une balise gelée AVANT l'ajout d'un
+        # troisième domaine restait marquée `hors_domaine=True` même
+        # quand ce nouveau domaine la couvre désormais — constaté à
+        # l'ajout de `tarn-aveyron-herault` : 10 balises géométriquement
+        # DANS la boîte (Dourgne, Lautrec, Curvalle…) sont restées
+        # étiquetées comme isolées. Ce n'est PAS le défaut que la
+        # discipline d'ajout seul protège — on ne RETIRE personne, on
+        # corrige juste un champ. Recalculer sur la position FIGÉE
+        # (`ancienne`, jamais `c` qui peut avoir bougé sans validation —
+        # cf. `deplacements` ci-dessus) et ne jamais faire flipper
+        # `False → True` : les domaines ne rétrécissent pas
+        # (`verifier_domaines_disjoints`/le refus d'élargir un domaine
+        # existant l'empêchent), donc seul `True → False` est un cas
+        # légitime.
+        etait_hors = ancienne.get("hors_domaine", False)
+        est_hors = (not dans_domaine(ancienne["lat"], ancienne["lon"])
+                   and ancienne.get("source") != "radiosondage")
+        if etait_hors and not est_hors:
+            crier(f"  ⓘ {c['id']} · {ancienne['name']} : entre dans un "
+                  f"domaine de production (n'est plus hors_domaine)")
+            ancienne["hors_domaine"] = False
     return sorted(connues.values(), key=_rang), ajouts, deplacements
 
 

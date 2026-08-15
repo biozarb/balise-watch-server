@@ -1,0 +1,71 @@
+{
+  "produit": "AGRUME — orographie du modèle, figée",
+  "ecrit_le": "2026-08-15T13:04:53Z",
+  "run_source": "2026-08-15T09:00:00Z",
+  "eccodes": "2.43.0",
+  "nom_domaine": "tarn-aveyron-herault",
+  "domaine": {
+    "latmin": 43.43,
+    "latmax": 44.26,
+    "lonmin": 1.88,
+    "lonmax": 3.96
+  },
+  "grilles": {
+    "001": {
+      "paquet": "SP3",
+      "cle_s3": "pnt/2026-08-15T09:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-15T09:00:00Z.grib2",
+      "octets_source": 7929462,
+      "meta": {
+        "Ni": 2801,
+        "Nj": 1791,
+        "lat0": 55.4,
+        "lon0": -12.0,
+        "di": 0.01,
+        "dj": 0.01,
+        "jScan": 0
+      },
+      "j0": 1114,
+      "i0": 1388,
+      "nj": 84,
+      "ni": 209,
+      "sha256": "260db5838e84fb6c5cd4a65ebace00025c968d9a63a1df49214b237f41ee6434",
+      "z_min": -5.6,
+      "z_med": 454.4,
+      "z_max": 1435.1
+    },
+    "0025": {
+      "paquet": "SP2",
+      "cle_s3": "pnt/2026-08-15T09:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-15T09:00:00Z.grib2",
+      "octets_source": 45802390,
+      "meta": {
+        "Ni": 1121,
+        "Nj": 717,
+        "lat0": 55.4,
+        "lon0": -12.0,
+        "di": 0.025,
+        "dj": 0.025,
+        "jScan": 0
+      },
+      "j0": 446,
+      "i0": 555,
+      "nj": 34,
+      "ni": 84,
+      "sha256": "80a49f54e52505cf3fbfb1644aa4a5cd2493985d21be6d2a2deb62556115ca6b",
+      "z_min": -4.1,
+      "z_med": 447.7,
+      "z_max": 1418.0
+    }
+  },
+  "ecart_0025_moins_001": {
+    "n": 1960,
+    "d1": -38.8,
+    "q1": -15.0,
+    "mediane": -0.0,
+    "q3": 16.2,
+    "d9": 38.7,
+    "abs_median": 15.5,
+    "abs_max": 346.0,
+    "part_au_dela_100m": 3.4
+  },
+  "note": "Champ `h` (surface), STATIQUE. ⚠️ Le paquet CHANGE avec la grille : 001/SP3 mais 0025/SP2 — 0025/SP3 existe et ne contient aucune orographie. Régénérer avec `python3 agrume/freeze_orographie.py --domaine tarn-aveyron-herault`."
+}

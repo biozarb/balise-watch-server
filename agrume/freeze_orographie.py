@@ -446,8 +446,9 @@ def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--domaine", default="nord-alpes",
                    help="domaine de production à geler ou à vérifier "
-                        "(nord-alpes | pyrenees). ⚠️ Le défaut reproduit "
-                        "exactement le comportement d'avant le 12/08.")
+                        "(nord-alpes | pyrenees | tarn-aveyron-herault). "
+                        "⚠️ Le défaut reproduit exactement le "
+                        "comportement d'avant le 12/08.")
     p.add_argument("--verifier", action="store_true",
                    help="relit l'artefact existant sans rien retélécharger")
     p.add_argument("--radiosondages", action="store_true",

@@ -1,6 +1,6 @@
 {
  "produit": "AGRUME — axe des balises, figé (tous domaines)",
- "ecrit_le": "2026-08-13T11:34:25Z",
+ "ecrit_le": "2026-08-15T13:14:15Z",
  "domaines": {
   "nord-alpes": {
    "latmin": 44.8,
@@ -13,6 +13,12 @@
    "latmax": 43.4,
    "lonmin": -1.8,
    "lonmax": 3.3
+  },
+  "tarn-aveyron-herault": {
+   "latmin": 43.43,
+   "latmax": 44.26,
+   "lonmin": 1.88,
+   "lonmax": 3.96
   }
  },
  "zones_interet": {
@@ -21,15 +27,22 @@
    "latmax": 44.0,
    "lonmin": -2.5,
    "lonmax": 3.5
+  },
+  "tah-nord-ouest-isolees": {
+   "latmin": 44.4,
+   "latmax": 44.6,
+   "lonmin": 1.75,
+   "lonmax": 2.0
   }
  },
- "n": 204,
+ "n": 220,
  "n_par_domaine": {
-  "hors domaine": 24,
-  "nord-alpes": 125,
-  "pyrenees": 55
+  "hors domaine": 16,
+  "nord-alpes": 126,
+  "pyrenees": 55,
+  "tarn-aveyron-herault": 23
  },
- "n_hors_domaine": 21,
+ "n_hors_domaine": 13,
  "note": "Fusion À AJOUT SEUL : une balise hors ligne n'est jamais retirée, sinon l'axe de l'archive se décalerait et son historique deviendrait orphelin. ⚠️ L'ajout seul garantit qu'aucune balise ne DISPARAÎT ; il ne garantit PAS que les positions dans ce fichier ne bougent pas — l'axe est trié par identifiant (cf. `_rang`), donc une balise d'identifiant plus petit décale les suivantes. Chaque archive porte SA propre liste et la recherche se fait par identifiant, jamais par indice. ⚠️ Le nom du fichier dit « nord-alpes » pour des raisons de continuité ; l'axe couvre tous les domaines de `domaine.DOMAINES`. Régénérer avec `python3 agrume/freeze_balises.py`.",
  "balises": [
   {
@@ -152,6 +165,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "158",
+   "source": "pioupiou",
+   "lat": 43.875,
+   "lon": 3.8848,
+   "name": "Pioupiou des Embruscalles",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "159",
@@ -381,8 +404,18 @@
    "name": "Deco Cessenon-sur-Orb",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "414",
+   "source": "pioupiou",
+   "lat": 45.2993,
+   "lon": 5.8823,
+   "name": "Pioupiou 414",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "459",
@@ -393,6 +426,26 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "463",
+   "source": "pioupiou",
+   "lat": 43.5382,
+   "lon": 3.8858,
+   "name": "Modèle Air Club de l'Hérault",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
+  },
+  {
+   "id": "488",
+   "source": "pioupiou",
+   "lat": 44.0465,
+   "lon": 2.1451,
+   "name": "Le Piardel Plaisance Est",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "521",
@@ -632,7 +685,7 @@
    "name": "Dourgne St Stapin",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -664,6 +717,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "946",
+   "source": "pioupiou",
+   "lat": 43.6775,
+   "lon": 3.8941,
+   "name": "PEGASE",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "952",
@@ -703,7 +766,7 @@
    "name": "Cirque du Bout du Monde 680m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -744,7 +807,7 @@
    "name": "Lautrec. Club Rev'aile",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -856,6 +919,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "1240",
+   "source": "pioupiou",
+   "lat": 43.4402,
+   "lon": 3.7936,
+   "name": "Balise de Test plage des Aresquiers - Etang d'Ingr…",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "1308",
@@ -1006,7 +1079,7 @@
    "name": "Deco Saint-Guiraud 257m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -1057,7 +1130,7 @@
    "name": "Col de la Merquiere",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -1075,10 +1148,20 @@
    "source": "pioupiou",
    "lat": 45.6365,
    "lon": 5.9629,
-   "name": "Passage du Croc Sire 1405m",
+   "name": " Passage du Croc Sire 1405m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "1406",
+   "source": "pioupiou",
+   "lat": 44.0031,
+   "lon": 2.1435,
+   "name": "WindBird 1406",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "1410",
@@ -1099,6 +1182,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "1419",
+   "source": "pioupiou",
+   "lat": 44.2577,
+   "lon": 3.1178,
+   "name": "DECO NOVIS CDVL12",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "1424",
@@ -1129,6 +1222,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "1437",
+   "source": "pioupiou",
+   "lat": 44.1257,
+   "lon": 1.9032,
+   "name": "LE RIOLS",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "1446",
@@ -1259,7 +1362,7 @@
    "name": "Déco Tournemire Gréponac 750m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -1341,7 +1444,7 @@
    "name": "LF8123 - Base ULM St Affrique les Montagnes",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {
@@ -1428,6 +1531,16 @@
    "vue_le": "2026-08-10"
   },
   {
+   "id": "1604",
+   "source": "pioupiou",
+   "lat": 43.475,
+   "lon": 3.7365,
+   "name": "Mas Rimbault Frontignan 220m",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
+  },
+  {
    "id": "1623",
    "source": "pioupiou",
    "lat": 45.9256,
@@ -1465,8 +1578,18 @@
    "name": "Au Service du Vivant 81",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "1653",
+   "source": "pioupiou",
+   "lat": 44.1068,
+   "lon": 1.8863,
+   "name": "Marnaves",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "1661",
@@ -1480,6 +1603,16 @@
    "vue_le": "2026-08-12"
   },
   {
+   "id": "1662",
+   "source": "pioupiou",
+   "lat": 44.5082,
+   "lon": 1.8926,
+   "name": "Décollage de Montblond",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-08-15"
+  },
+  {
    "id": "1678",
    "source": "pioupiou",
    "lat": 43.0106,
@@ -1488,6 +1621,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "1679",
+   "source": "pioupiou",
+   "lat": 43.6571,
+   "lon": 3.9535,
+   "name": "Windbird 1679",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "1691",
@@ -1780,6 +1923,16 @@
    "vue_le": "2026-08-10"
   },
   {
+   "id": "2047",
+   "source": "pioupiou",
+   "lat": 44.0715,
+   "lon": 3.0646,
+   "name": "Déco Brunas 730m",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
+  },
+  {
    "id": "2052",
    "source": "pioupiou",
    "lat": 45.4051,
@@ -1809,6 +1962,16 @@
    "position_suspecte": false,
    "hors_domaine": true,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "2076",
+   "source": "pioupiou",
+   "lat": 43.5645,
+   "lon": 3.7444,
+   "name": "OMAT - Club modélisme Planeur, Avion et Hélico",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "2081",
@@ -1880,6 +2043,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-12"
+  },
+  {
+   "id": "2109",
+   "source": "pioupiou",
+   "lat": 44.4875,
+   "lon": 1.8923,
+   "name": "Windbird 2109",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "2112",
@@ -1969,7 +2142,7 @@
    "name": "Windbird 2156",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "hors_domaine": true,
+   "hors_domaine": false,
    "vue_le": "2026-08-12"
   },
   {

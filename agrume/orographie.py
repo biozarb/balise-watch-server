@@ -90,7 +90,8 @@ def _art(nom):
 
 
 ARTEFACTS = {"nord-alpes": (ARTEFACT_NPZ, ARTEFACT_JSON),
-             "pyrenees": _art("pyrenees")}
+             "pyrenees": _art("pyrenees"),
+             "tarn-aveyron-herault": _art("tarn-aveyron-herault")}
 
 # Clés de métadonnées de grille conservées dans l'artefact. Ce sont
 # exactement celles que `arome-wind/ingest.py::parse_grib` fabrique — on
