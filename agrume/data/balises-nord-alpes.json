@@ -1,6 +1,6 @@
 {
  "produit": "AGRUME — axe des balises, figé (tous domaines)",
- "ecrit_le": "2026-08-15T13:14:15Z",
+ "ecrit_le": "2026-08-15T13:36:18Z",
  "domaines": {
   "nord-alpes": {
    "latmin": 44.8,
@@ -33,16 +33,28 @@
    "latmax": 44.6,
    "lonmin": 1.75,
    "lonmax": 2.0
+  },
+  "tah-est-castries": {
+   "latmin": 43.63,
+   "latmax": 43.73,
+   "lonmin": 3.96,
+   "lonmax": 4.06
+  },
+  "tah-nord-kaymard": {
+   "latmin": 44.49,
+   "latmax": 44.6,
+   "lonmin": 2.43,
+   "lonmax": 2.53
   }
  },
- "n": 220,
+ "n": 222,
  "n_par_domaine": {
-  "hors domaine": 16,
+  "hors domaine": 18,
   "nord-alpes": 126,
   "pyrenees": 55,
   "tarn-aveyron-herault": 23
  },
- "n_hors_domaine": 13,
+ "n_hors_domaine": 15,
  "note": "Fusion À AJOUT SEUL : une balise hors ligne n'est jamais retirée, sinon l'axe de l'archive se décalerait et son historique deviendrait orphelin. ⚠️ L'ajout seul garantit qu'aucune balise ne DISPARAÎT ; il ne garantit PAS que les positions dans ce fichier ne bougent pas — l'axe est trié par identifiant (cf. `_rang`), donc une balise d'identifiant plus petit décale les suivantes. Chaque archive porte SA propre liste et la recherche se fait par identifiant, jamais par indice. ⚠️ Le nom du fichier dit « nord-alpes » pour des raisons de continuité ; l'axe couvre tous les domaines de `domaine.DOMAINES`. Régénérer avec `python3 agrume/freeze_balises.py`.",
  "balises": [
   {
@@ -476,6 +488,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "549",
+   "source": "pioupiou",
+   "lat": 43.6824,
+   "lon": 4.0097,
+   "name": "BAC Castries 120/300",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "582",
@@ -2175,6 +2197,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "2177",
+   "source": "pioupiou",
+   "lat": 44.5463,
+   "lon": 2.4798,
+   "name": "PUECH DE KAYMARD",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-08-15"
   },
   {
    "id": "2185",

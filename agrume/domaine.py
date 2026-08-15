@@ -378,6 +378,21 @@ ZONES_INTERET = {
     # petite fenêtre dédiée, resserrée pour ne rien avaler d'autre.
     "tah-nord-ouest-isolees": dict(latmin=44.40, latmax=44.60,
                                    lonmin=1.75, lonmax=2.00),
+    # 15/08/2026 — repérées en vérifiant le compte final de
+    # `tarn-aveyron-herault` (23 balises mesurées contre 25-26 annoncées
+    # dans l'étude de forme — l'étude vérifiait qu'aucune balise d'un
+    # AUTRE département ne tombait dans la boîte, pas que toutes les
+    # balises des 3 départements ciblés y tombaient). Deux balises
+    # géométriquement hors de toute boîte et de toute zone existante :
+    "tah-est-castries": dict(latmin=43.63, latmax=43.73,
+                              lonmin=3.96, lonmax=4.06),
+    # 549 · BAC Castries (Hérault, 43.682/4.010) — juste à l'est de
+    # `lonmax` de `tarn-aveyron-herault`, trou comparable à Agde/Bessan.
+    "tah-nord-kaymard": dict(latmin=44.49, latmax=44.60,
+                              lonmin=2.43, lonmax=2.53),
+    # 2177 · Puech de Kaymard (Aveyron, 44.546/2.480) — au nord de
+    # `latmax` de `tarn-aveyron-herault`, à l'est de la zone
+    # `tah-nord-ouest-isolees` (qui s'arrête à `lonmax=2.00`).
 }
 
 # Demi-fenêtre de sol autour d'une balise isolée. ⚠️ Ce n'est PAS le
