@@ -58,11 +58,25 @@ def verifier(nom, condition, detail=""):
 META_0025 = dict(Ni=1121, Nj=717, lat0=55.4, lon0=-12.0, di=0.025, dj=0.025,
                  jScan=0)
 
+# ⚠️ 16/08 — LA BALISE nº 4 ÉTAIT ÉCRITE `lat=44.79`, c'est-à-dire « un
+# centième de degré sous `latmin` » AU MOMENT OÙ LE BANC A ÉTÉ ÉCRIT.
+# L'élargissement de `DOMAINE` aux Alpes entières (43,70 N) l'a fait
+# passer DEDANS, et le banc est tombé — pas sur une régression, sur sa
+# propre copie périmée du domaine. Cinquième banc du projet dans ce cas
+# le même jour (cf. `BUGS.md`, entrée du 16/08).
+#
+# ⛔ Ce que ce point doit prouver n'est pas « 44,79 est dehors », c'est
+# « une balise JUSTE sous la borne est exclue » — la seule formulation
+# qui reste vraie quand la borne bouge. Il se calcule donc depuis
+# `DOMAINE`, comme la production.
+from domaine import DOMAINE as _DOM  # noqa: E402
+
 STATIONS = [
     dict(id="1", lat=45.93, lon=6.86, name="Chamonix"),        # dedans
     dict(id="2", lat=45.20, lon=5.80, name="Grenoble-ish"),    # dedans
     dict(id="3", lat=48.39, lon=-4.49, name="Brest"),          # dehors
-    dict(id="4", lat=44.79, lon=6.00, name="juste sous latmin"),  # dehors
+    dict(id="4", lat=round(_DOM["latmin"] - 0.01, 4), lon=6.00,
+         name="juste sous latmin"),                            # dehors
     dict(id="5", lat=45.00, lon=7.00, name="suspecte"),        # dedans
 ]
 

@@ -38,14 +38,23 @@ drapeau explicite, `--rebornage <domaine>`, qui conserve l'axe.
 ensembles d'IDs avant/après, comme le 15/08 — ce contrôle-là n'est
 toujours pas automatique).
 
-### Effet de bord : quatre bancs recopiaient le domaine au lieu de le lire
+### Effet de bord : cinq bancs recopiaient le domaine au lieu de le lire
 
-`test_grille.py` portait `J0, I0, NJ, NI = 364, 700, 61, 85` et les
-quatre bornes `46.3 / 44.8 / 5.5 / 7.6` en dur ; `test_orographie.py`
-attendait `(61, 85)` et `(151, 211)` ; `test_transect.py` mesurait
-l'orthodromie contre une diagonale de « 233 km ». Tous sont tombés à
-l'élargissement — **pas sur une régression, sur leur propre copie
-périmée**.
+`agrume/test_grille.py` portait `J0, I0, NJ, NI = 364, 700, 61, 85`, les
+quatre bornes `46.3 / 44.8 / 5.5 / 7.6` et la forme `(5, 25, 3, 61, 85)`
+en dur ; `agrume/test_orographie.py` attendait `(61, 85)` et
+`(151, 211)` ; `agrume/test_transect.py` mesurait l'orthodromie contre
+une diagonale de « 233 km » ; **`verif/test_colonnes.py` plaçait une
+balise-témoin à `lat=44.79`, commentée « juste sous latmin »** — elle
+s'est retrouvée DEDANS, et le conteneur est passé de 3 à 4 balises
+(`could not broadcast input array from shape (3,) into shape (4,)`).
+⚠️ Celui-là n'est **pas tombé sur le Mac au premier passage** : la
+tournée de bancs n'avait couvert que `agrume/`. C'est
+`deploy-agrume-vps.sh` qui l'a arrêté, sur le VPS, avant tout
+redémarrage — le script a fait exactement son travail.
+
+Tous sont tombés à l'élargissement — **pas sur une régression, sur leur
+propre copie périmée**.
 
 ⚠️ **C'est exactement ce que `domaine.py` existe pour empêcher** (« les
 indices se DÉDUISENT des métadonnées, jamais codés en dur »), et ça
