@@ -128,6 +128,55 @@ vrais chiffres, et les moindres carrés sont **gardés en contre-exemple**
 — sans eux, le banc passerait sur les deux implémentations, donc ne
 vérifierait rien.
 
+### Suite du même jour : ⛔ une pente ne répondra JAMAIS à « est-ce légitime ? »
+
+**Le vrai trou, découvert en répondant à « et si j'agrandis la boîte des
+Alpes ? »** : une fois les marches correctement ignorées, une croissance
+faite **uniquement** de marches n'a plus aucune tendance. Un domaine de
+plus, une boîte élargie, et la règle d'horizon ne dit plus rien du
+tout — il ne resterait que la règle de niveau à 7 Go, c'est-à-dire un
+constat.
+
+**Piège réutilisable** : *rendre un détecteur robuste au bruit le rend
+aveugle à un signal qui ressemble au bruit.* Le correctif du matin est
+juste, et il crée ce trou-là. Il fallait le mesurer, pas le supposer :
+simulé sur l'historique réel, deux marches à moins de trois jours
+d'écart traversent quand même la médiane (le 17/08 : deux mails ; le
+18/08 : un ; à partir du 19/08 : silence).
+
+**Fix** : ajouter une question que la pente ne pose pas.
+`agrume/grille` et `agrume/pi/grille` publient un `index.json` qui
+déclare **clé par clé** tout ce qui doit exister sous leur préfixe —
+c'est ce qui leur permet de purger sans jamais faire de `ListObjects`.
+La jauge le confronte au bucket : **tout objet présent doit être RÉCLAMÉ
+par quelqu'un.** Agrandir une boîte ne crée aucun orphelin ; une purge
+qui cesse de mordre en crée dès la nuit suivante. Coût : 1 GetObject par
+produit (classe B), le listing étant déjà fait.
+
+⚠️ **Le contrôle qui donne son sens au banc** : `MarcheEtOrphelin`
+vérifie que les deux cas **PÈSENT PAREIL**. Sans lui, les deux tests
+auraient pu passer sans rien prouver sur ce que le poids sait ou ne sait
+pas distinguer.
+
+⚠️ **Un index illisible ne rend pas « 0 orphelin »** — il rend
+`lu=False`. Jumeau exact de `couverture_partielle` : un rapprochement
+qui n'a pas eu lieu ne doit jamais se lire comme un rapprochement
+réussi. Un index **vide**, en revanche, rend bien tout orphelin : c'est
+une information (le produit a perdu son index), pas une panne de
+lecture.
+
+**Trouvé dès le premier tir, en production** : 18 orphelins sous
+`agrume/pi/grille/` (24 Mo, 9 runs du 13/08) — le résidu du `TypeError`
+de `purger()` des 12-13/08, repéré à la main ce jour-là et **toujours
+présent trois jours plus tard**, faute d'outil de nettoyage posé. Ce
+mécanisme les aurait nommés le 14 au matin. Supprimés le 16/08 après
+vérification par `head` (⚠️ `DeleteObject` réussit sur une clé absente —
+sans le `head`, « supprimé » et « n'a jamais existé » sont
+indistinguables). Compte : 3,407 → 3,383 Go, 0 orphelin des deux côtés.
+
+Bancs : 64 → **80 verts**. Et `tools/test_audit_r2.py` tourne désormais
+au déploiement (15 → 16 bancs sur le VPS).
+
 ---
 
 ## 15/08/2026 — AGRUME : `freeze_balises.py`, deux bugs liés à l'ajout d'un 3e domaine
