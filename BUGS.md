@@ -6,6 +6,56 @@
 
 ---
 
+## 16/08/2026 — Jauge R2 : une MARCHE lue comme une PENTE, la troisième fois
+
+**Symptôme** : mail « au rythme mesuré (+7.26 Go/mois), palier atteint
+dans 27 jours » à 04:31 UTC, sur un compte à **3,40 Go sur 10**.
+
+**Cause** : le domaine `tarn-aveyron-herault` est entré en production
+le 15/08. `agrume/grille` est passé de 2,0016 à 2,4223 Go en une nuit —
++0,4207 Go, exactement le poids du domaine neuf, **déjà à son plateau**
+(165 objets, comme ses deux voisins ; contrôle croisé 1,238/0,764 =
+1,62, le rapport des tailles de maille Pyrénées/Alpes). Sur les trois
+seuls relevés disponibles, les moindres carrés ne peuvent pas
+distinguer cette marche d'une croissance : ils en tirent +6,31 Go/mois,
+soit 87 % de l'alerte.
+
+**Piège réutilisable — et c'est le vrai sujet** : c'est la **troisième**
+fois, et à chaque fois un cran plus bas. 10/08 : un BUCKET apparaît →
+correctif `meme_perimetre` (filtre par bucket). 13/08 : un PRODUIT
+apparaît dans un bucket connu → correctif « pente par préfixe ». 16/08 :
+un DOMAINE apparaît dans un préfixe connu. **Deux correctifs de suite
+ont déplacé la GRANULARITÉ ; le problème était le CALCUL.** Un correctif
+qui ne fait que descendre d'un cran ne corrige pas une classe de bug, il
+déplace l'endroit où elle ressortira. Mesuré : descendre encore
+(profondeur 3) mettrait 3,39 Go sur 3,41 « hors échéance ».
+
+**Fix** : la pente d'un préfixe est désormais la **médiane des
+différences entre relevés consécutifs**, sur **4 relevés minimum**.
+Quatre relevés font trois différences, et la médiane de trois valeurs
+ignore toujours l'extrême : une marche isolée ne peut plus être la
+médiane, **quelle que soit la granularité où elle tombe**.
+
+⚠️ **Le piège que ce fix INTRODUIT** : une différence divisée par un
+petit Δt explose. L'historique réel en contient — le 10/08, la jauge a
+tourné six fois en une heure, dont deux relevés à 24 s d'écart (0,784 Go
+÷ 24 s ≈ 2,8 millions de Go/mois). Les moindres carrés noyaient ça ; une
+médiane pourrait le prendre pour la valeur centrale. D'où `_degrouper` :
+les relevés plus rapprochés que 0,25 j ne comptent que pour un point, et
+c'est le plus récent du groupe qui gagne.
+
+⚠️ **Le prix, assumé** : une croissance réellement EN ESCALIER est
+sous-estimée, et un produit neuf est hors échéance pendant 4 relevés au
+lieu de 3. Une fuite, elle, est continue — `test_une_vraie_fuite_reste_vue`
+et `NuitDu30Juillet` la clouent contre le calcul de production.
+
+Bancs : 51 → **64 verts**. Les trois marches sont rejouées avec leurs
+vrais chiffres, et les moindres carrés sont **gardés en contre-exemple**
+— sans eux, le banc passerait sur les deux implémentations, donc ne
+vérifierait rien.
+
+---
+
 ## 15/08/2026 — AGRUME : `freeze_balises.py`, deux bugs liés à l'ajout d'un 3e domaine
 
 Contexte : ajout du domaine `tarn-aveyron-herault` à AGRUME (cf. le

@@ -31,11 +31,19 @@
 #  dépassement, pas pendant. Un seuil seul dit « trop tard » ; une pente
 #  dit « dans 47 jours ».
 #
-#  ⚠️ LA PENTE EST LA SOMME DES PENTES PAR PRÉFIXE, et surtout pas les
-#     moindres carrés sur le total. Deux marches réelles ont chacune
-#     fabriqué une fausse échéance sur le total — un BUCKET apparu le
-#     10/08, un PRODUIT apparu le 13/08 dans un bucket déjà connu. Voir
-#     `pentes_des_prefixes`, qui traite les deux d'un coup.
+#  ⚠️ LA PENTE EST LA SOMME DES PENTES PAR PRÉFIXE, et chaque pente est
+#     une MÉDIANE DE DIFFÉRENCES, jamais des moindres carrés. TROIS
+#     marches réelles ont chacune fabriqué une fausse échéance, et à
+#     chaque fois un cran plus bas que la précédente : un BUCKET apparu
+#     le 10/08, un PRODUIT le 13/08 dans un bucket déjà connu, un
+#     DOMAINE le 16/08 dans un préfixe déjà connu.
+#
+#     Les deux premiers correctifs ont déplacé la granularité ; le
+#     troisième a montré que c'était la mauvaise question. Descendre
+#     encore (profondeur 3) met 3,39 Go sur 3,41 « hors échéance »
+#     — mesuré le 16/08 sur le compte réel. Ce qui manquait n'était pas
+#     de la finesse mais un calcul qui ne confonde pas une MARCHE avec
+#     une PENTE. Voir `_pente_mediane` et `MINI_RELEVES`.
 #
 #  ⚠️ LECTURE SEULE. Ce script ne supprime RIEN, jamais, sous aucune
 #     option. Les purges sont ailleurs et séparées exprès
@@ -71,6 +79,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -102,6 +111,30 @@ HORIZON_ALERTE_JOURS = int(os.environ.get("BW_R2_HORIZON_JOURS", "60"))
 # chaîne, un produit) ; à 1 tout serait « arome », à 3 on noierait le
 # tableau sous les échéances.
 PROFONDEUR_PREFIXE = int(os.environ.get("BW_R2_PROFONDEUR", "2"))
+
+# ⚠️ QUATRE RELEVÉS, PAS TROIS — LA LEÇON DU 16/08. Avec trois points,
+# aucun calcul ne sait distinguer une PENTE d'une MARCHE : le domaine
+# tarn-aveyron-hérault, né à son plateau (+0,421 Go, 165 objets comme
+# ses deux voisins), a été lu +6,31 Go/mois et le mail « palier dans
+# 27 jours » est parti sur un compte à 3,4 Go sur 10.
+#
+# Quatre relevés font TROIS différences, et la médiane de trois valeurs
+# ignore toujours l'extrême — donc une marche isolée, où qu'elle tombe
+# dans la série, ne peut plus être la médiane. C'est ce qui rend le
+# mécanisme indépendant de la granularité : bucket, produit, domaine, et
+# ce qui viendra ensuite.
+MINI_RELEVES = int(os.environ.get("BW_R2_MINI_RELEVES", "4"))
+
+# ⚠️ Deux relevés à 24 SECONDES d'intervalle ne mesurent pas une vitesse.
+# L'historique réel en contient : le 10/08, la jauge a tourné six fois
+# en une heure (déploiement, puis arrivée du jeton d'audit). Une
+# différence divisée par 24 s vaut des milliers de Go/mois — les
+# moindres carrés noyaient ça dans la masse, une médiane de différences
+# pourrait la prendre pour la valeur centrale. Les relevés plus
+# rapprochés que ce pas sont donc REGROUPÉS, et c'est le plus récent du
+# groupe qui compte : le 10/08, c'est celui qui voyait enfin les trois
+# buckets.
+ESPACEMENT_MINI_JOURS = float(os.environ.get("BW_R2_ESPACEMENT_MINI", "0.25"))
 
 GO = 1_000_000_000  # R2 facture en Go décimaux, pas en Gio — ne pas
                     # « corriger » en 1024³ : ça sous-estimerait de 7 %
@@ -181,8 +214,11 @@ def meme_perimetre(releve: dict, perimetre) -> bool:
 def _moindres_carres(pts) -> float | None:
     """Pente en Go/mois d'une série de (datetime, Go).
 
-    Cœur commun au total et à chaque préfixe : une seule implémentation,
-    donc un seul endroit où se tromper.
+    ⚠️ CE N'EST PLUS LE CALCUL DE PRODUCTION depuis le 16/08 — voir
+    `_pente_mediane`. Gardé parce qu'il reste le CONTRE-EXEMPLE des
+    bancs : c'est lui qui rejoue, sur les trois marches réelles, le faux
+    qu'on a corrigé. Le supprimer effacerait la démonstration en même
+    temps que le code.
 
     ⚠️ Une simple différence entre le premier et le dernier point serait
     fausse ici : le volume oscille d'un run à l'autre (une chaîne à
@@ -206,15 +242,59 @@ def _moindres_carres(pts) -> float | None:
     return a * 30.0
 
 
+def _degrouper(pts, mini: float = ESPACEMENT_MINI_JOURS):
+    """Une rafale de relevés rapprochés ne compte que pour UN point.
+
+    Voir `ESPACEMENT_MINI_JOURS`. On garde le plus RÉCENT de chaque
+    groupe, pas le premier : le 10/08, c'est le dernier de la rafale qui
+    portait enfin la couverture complète.
+    """
+    garde: list = []
+    for t, y in sorted(pts, key=lambda p: p[0]):
+        if garde and (t - garde[-1][0]).total_seconds() / 86400.0 < mini:
+            garde[-1] = (t, y)
+            continue
+        garde.append((t, y))
+    return garde
+
+
+def _pente_mediane(pts) -> float | None:
+    """Pente en Go/mois : la MÉDIANE des vitesses entre relevés
+    consécutifs. C'est le calcul de production depuis le 16/08.
+
+    Voir `MINI_RELEVES` pour le pourquoi : la médiane de trois
+    différences est insensible à l'une quelconque d'entre elles, donc
+    une marche isolée — un bucket, un produit ou un domaine qui naît à
+    son plateau — ne se lit plus comme une croissance, quelle que soit
+    la profondeur de préfixe à laquelle elle tombe. Les deux correctifs
+    précédents dépendaient de la granularité ; celui-ci n'en dépend pas.
+
+    ⚠️ LE PRIX, DIT PLUTÔT QUE DÉCOUVERT : une croissance réellement EN
+    ESCALIER (un palier tous les trois jours) est sous-estimée. Une
+    fuite, elle, est continue — c'est le cas qu'on surveille, et
+    `test_une_vraie_fuite_reste_vue` le cloue pour que ce compromis
+    reste un compromis et ne devienne pas un trou.
+    """
+    pts = _degrouper(pts)
+    if len(pts) < MINI_RELEVES:
+        return None
+    # `_degrouper` garantit un écart ≥ ESPACEMENT_MINI_JOURS entre deux
+    # points consécutifs : la division ne peut pas être par zéro.
+    vitesses = [(y1 - y0) / ((t1 - t0).total_seconds() / 86400.0)
+                for (t0, y0), (t1, y1) in zip(pts, pts[1:])]
+    return median(vitesses) * 30.0
+
+
 def pente_go_par_mois(historique, perimetre=None) -> float | None:
     """Moindres carrés sur le TOTAL du compte, à périmètre de buckets
     constant (voir `meme_perimetre`).
 
     ⚠️ CE N'EST PLUS CE QUE LA PRODUCTION UTILISE. La pente du compte est
     désormais la somme des pentes par préfixe (`pentes_des_prefixes`) —
-    la marche du 13/08 a montré qu'un filtre par bucket ne suffit pas.
+    la marche du 13/08 a montré qu'un filtre par bucket ne suffit pas,
+    et celle du 16/08 que les moindres carrés eux-mêmes devaient partir.
     Gardé parce qu'il reste le calcul de RÉFÉRENCE des bancs : c'est lui
-    qui rejoue, sur les deux marches réelles, le faux qu'on a corrigé.
+    qui rejoue, sur les trois marches réelles, le faux qu'on a corrigé.
     Le supprimer effacerait la démonstration en même temps que le code.
     """
     pts = [(datetime.fromisoformat(h["t"]), h["octets"] / GO)
@@ -230,7 +310,8 @@ def pente_du_prefixe(historique, nom: str) -> float | None:
     ⚠️ Un relevé où le préfixe est absent n'est pas un zéro, c'est un
     SILENCE : produit pas encore né, ou couverture partielle ce jour-là.
     Le compter comme 0 fabriquerait une marche — exactement l'erreur que
-    cette fonction existe pour supprimer.
+    cette fonction existe pour supprimer. Et ça compterait un relevé de
+    plus, donc sortirait le préfixe de `jeunes` un jour trop tôt.
     """
     pts = []
     for h in historique:
@@ -238,7 +319,7 @@ def pente_du_prefixe(historique, nom: str) -> float | None:
         if not h.get("t") or not isinstance(p, dict) or p.get(nom) is None:
             continue
         pts.append((datetime.fromisoformat(h["t"]), p[nom] / GO))
-    return _moindres_carres(pts)
+    return _pente_mediane(pts)
 
 
 def pentes_des_prefixes(historique, prefixes_courants) -> dict:
@@ -264,11 +345,19 @@ def pentes_des_prefixes(historique, prefixes_courants) -> dict:
     la note du Lot J appelait « le détecteur de fuite », qui n'existait
     en fait pas, faute d'avoir jamais historisé autre chose que le total.
 
-    ⚠️ LE PRIX, ET IL EST RÉEL : pendant ses 3 premiers relevés, un
-    produit ne compte PAS dans l'échéance. Une chaîne qui déborderait dès
-    sa naissance ne serait vue qu'au troisième jour. D'où `jeunes`, rendu
-    ET journalisé : une échéance qui ne couvre pas tout doit le dire,
-    sinon elle se lit comme un feu vert.
+    ⚠️ ET ÇA N'A PAS SUFFI : le 16/08, la marche est descendue encore
+    d'un cran — un DOMAINE neuf à l'intérieur de `agrume/grille`, un
+    préfixe qui, lui, avait ses trois relevés. Le mécanisme ci-dessous
+    n'a rien pu faire, parce que le problème n'était plus la
+    granularité mais le CALCUL : sur trois points, les moindres carrés
+    ne savent pas séparer une marche d'une pente. C'est `_pente_mediane`
+    qui répond à ça, et il répond pour toutes les granularités à la fois.
+
+    ⚠️ LE PRIX, ET IL EST RÉEL : pendant ses 4 premiers relevés (3 avant
+    le 16/08), un produit ne compte PAS dans l'échéance. Une chaîne qui
+    déborderait dès sa naissance ne serait vue qu'au quatrième jour.
+    D'où `jeunes`, rendu ET journalisé : une échéance qui ne couvre pas
+    tout doit le dire, sinon elle se lit comme un feu vert.
     """
     connues, jeunes = {}, []
     for nom in prefixes_courants:
@@ -344,10 +433,11 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
         f"({go / PALIER_STOCKAGE_GO * 100:5.1f} % du palier {PALIER_STOCKAGE_GO:.0f} Go)")
     log(f"│ objets                    : {inventaire['objets']:8d}")
     if pente_mois is None:
-        log("│ pente                     :        —     (moins de 3 relevés)")
+        log(f"│ pente                     :        —     "
+            f"(moins de {MINI_RELEVES} relevés)")
     else:
         log(f"│ pente mesurée             : {pente_mois:+8.3f} Go/mois"
-            f"   (somme des préfixes)")
+            f"   (somme des préfixes, médiane des différences)")
     # ⚠️ Ce que l'échéance NE couvre pas doit se lire à côté d'elle, pas
     #    dans une note de bas de page : un produit trop jeune pour avoir
     #    une pente pèse 0 dans le calcul, et son poids réel est là.
@@ -588,7 +678,7 @@ def main(argv=None) -> int:
         if len(pentes["jeunes"]) > 5:
             apercu += f" … (+{len(pentes['jeunes']) - 5})"
         print(f"  ⓘ {len(pentes['jeunes'])} préfixe(s) sans pente (moins de "
-              f"3 relevés) — hors échéance : {apercu}")
+              f"{MINI_RELEVES} relevés) — hors échéance : {apercu}")
     v = verdict(inv, pente, a.seuil_go, a.horizon_jours,
                 couverture_partielle=not couverture_complete)
 

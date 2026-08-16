@@ -16,6 +16,13 @@
 #    · une pente calculée sur un volume qui OSCILLE (chaîne à rétention
 #      courte : écrit puis purge) ne doit pas être la différence entre
 #      le premier et le dernier point ;
+#    · ⛔ une MARCHE n'est pas une pente. Trois fois de suite, un volume
+#      né à son plateau a été lu comme une croissance et un mail est
+#      parti : un bucket le 10/08, un produit le 13/08, un domaine le
+#      16/08. Les trois sont rejoués ici AVEC LEURS VRAIS CHIFFRES, et
+#      le calcul fautif est gardé à côté en contre-exemple — sans lui,
+#      le banc pourrait passer sur les deux implémentations et ne rien
+#      vérifier du tout ;
 #    · un historique corrompu ne doit pas empêcher de mesurer le présent ;
 #    · le palier se compte en Go DÉCIMAUX. Le « corriger » en 1024³
 #      sous-estimerait de 7 % au moment précis où on frôle la ligne ;
@@ -376,6 +383,30 @@ class NuitDu30Juillet(unittest.TestCase):
         v = verdict(inv, pente_go_par_mois(releves), seuil_go=7.0, horizon=60)
         self.assertFalse(v["alerte"], f"faux positif : {v['motifs']}")
 
+    def test_la_jauge_parle_ENCORE_avec_le_calcul_du_16_08(self):
+        """⛔ Le contrat du fichier, rejoué contre le calcul de
+        PRODUCTION. Faire taire trois marches ne doit pas avoir fait
+        taire les fuites : c'est la moitié du travail qu'on risque de
+        casser en corrigeant l'autre."""
+        PENTE, DEPART = 1.9, 0.85
+        serie, premiere = [], None
+        for j in range(0, 180, 3):
+            serie.append(rel(j, {"grids:fuite": DEPART + PENTE * (j / 30.0)}))
+            inv = {"octets": serie[-1]["octets"], "objets": 0,
+                   "par_bucket": {}, "par_prefixe": {}}
+            juste = pentes_des_prefixes(serie, ["grids:fuite"])["total"]
+            if verdict(inv, juste, seuil_go=7.0, horizon=60)["alerte"]:
+                premiere = serie[-1]
+                break
+
+        self.assertIsNotNone(premiere, "la jauge n'a jamais parlé")
+        go = premiere["octets"] / GO
+        # Comme pour les moindres carrés : c'est la PENTE qui doit
+        # déclencher, pas le niveau, et il doit rester de quoi décider.
+        self.assertLess(go, 7.0)
+        marge = (PALIER_STOCKAGE_GO - go) / (PENTE / 30.0)
+        self.assertGreaterEqual(marge, 55, f"seulement {marge:.0f} j de marge")
+
 
 class MarcheDeProduit(unittest.TestCase):
     """⚠️ LA PANNE DU 13/08, REJOUÉE AVEC SES VRAIS CHIFFRES. Le produit B
@@ -434,19 +465,148 @@ class MarcheDeProduit(unittest.TestCase):
 
 
 class MarcheDeBucket(unittest.TestCase):
-    """La panne du 10/08 relue à travers le mécanisme du 13/08 : un
-    bucket entier qui apparaît n'est qu'un paquet de préfixes neufs. Le
-    nouveau filtre couvre donc les DEUX marches — c'est ce qui autorise
-    `meme_perimetre` à ne plus servir qu'aux bancs."""
+    """La panne du 10/08 relue à travers les mécanismes qui ont suivi :
+    un bucket entier qui apparaît n'est qu'un paquet de préfixes neufs.
+    C'est ce qui autorise `meme_perimetre` à ne plus servir qu'aux
+    bancs."""
 
-    def test_le_bucket_apparu_ne_fabrique_pas_de_pente(self):
-        vieux = {"mv:fcst/2026": 0.031}
+    VIEUX = "mv:fcst/2026"
+    NEUF = "grids:arome/sol"
+
+    def test_la_rafale_du_matin_ne_vaut_qu_un_point(self):
+        # ⚠️ Les six relevés du 10/08 tenaient dans l'heure — deux d'entre
+        # eux à 24 secondes d'écart. Ils ne comptent que pour UN point :
+        # rien n'est mesurable ce matin-là, et c'est le bon résultat.
+        vieux = {self.VIEUX: 0.031}
         serie = [rel(0, vieux), rel(0.01, vieux), rel(0.02, vieux),
-                 rel(0.03, {**vieux, "grids:arome/sol": 0.785})]
-        p = pentes_des_prefixes(serie, ["mv:fcst/2026", "grids:arome/sol"])
-        self.assertIn("grids:arome/sol", p["jeunes"])
-        self.assertLess(abs(p["total"]), 0.5,
-                        "0,78 Go apparus ne sont pas 0,78 Go de croissance")
+                 rel(0.03, {**vieux, self.NEUF: 0.785})]
+        p = pentes_des_prefixes(serie, [self.VIEUX, self.NEUF])
+        self.assertEqual(p["jeunes"], sorted([self.VIEUX, self.NEUF]))
+        self.assertIsNone(p["total"], "aucune pente n'est mesurable ici")
+
+    def test_et_les_jours_suivants_le_bucket_apparu_est_plat(self):
+        vieux = {self.VIEUX: 0.031}
+        tous = {**vieux, self.NEUF: 0.785}
+        serie = [rel(0, vieux), rel(0.01, vieux), rel(0.02, vieux),
+                 rel(0.03, tous), rel(1, tous), rel(2, tous), rel(3, tous)]
+        p = pentes_des_prefixes(serie, [self.VIEUX, self.NEUF])
+        self.assertAlmostEqual(p["par_prefixe"][self.NEUF], 0.0, places=6,
+                               msg="0,78 Go apparus ne sont pas 0,78 Go "
+                                   "de croissance")
+        self.assertAlmostEqual(p["total"], 0.0, places=6)
+
+
+class MarcheDeDomaine(unittest.TestCase):
+    """⚠️ LA PANNE DU 16/08, REJOUÉE AVEC SES VRAIS CHIFFRES. Troisième
+    marche, troisième granularité : le domaine tarn-aveyron-hérault est
+    entré en production le 15/08, et `agrume/grille` est passé de 2,0016
+    à 2,4223 Go en une nuit. +0,4207 Go, soit EXACTEMENT le poids du
+    domaine neuf — déjà à son plateau (165 objets, comme ses deux
+    voisins ; contrôle croisé : 1,238 / 0,764 = 1,62 comme le rapport
+    des tailles de maille Pyrénées/Alpes).
+
+    Mais il naît À L'INTÉRIEUR d'un préfixe déjà connu, qui avait donc
+    ses trois relevés : le mécanisme du 13/08 ne pouvait rien voir, les
+    moindres carrés sur trois points ont lu +6,31 Go/mois, et « palier
+    dans 27 jours » est parti sur un compte à 3,40 Go sur 10.
+
+    ⛔ Descendre encore d'un cran (profondeur 3) ne corrigeait rien :
+    mesuré le 16/08 sur le compte réel, ça met 3,39 Go sur 3,41 « hors
+    échéance » — un préfixe par run de `agrume/colonnes`, dont aucun
+    n'atteindra jamais quatre relevés. La réponse n'était pas la
+    granularité, c'était de ne plus confondre une marche avec une
+    pente."""
+
+    GRILLE = "grids:agrume/grille"
+    SOCLE = "grids:socle"
+
+    def serie(self, jours=4):
+        """Les relevés réels des 14, 15 et 16/08, puis la suite au
+        plateau. Le socle est constant : on isole la marche."""
+        poids = [2.0016, 2.0016, 2.4223] + [2.4223] * (jours - 3)
+        return [rel(j, {self.SOCLE: 0.98, self.GRILLE: p})
+                for j, p in enumerate(poids)]
+
+    def test_les_moindres_carres_explosent_bien(self):
+        # Le contre-exemple, gardé : sans lui, les tests suivants
+        # pourraient passer sur les deux implémentations, donc ne rien
+        # vérifier. 6,31 est le chiffre qui est parti dans le mail.
+        self.assertAlmostEqual(pente_go_par_mois(self.serie(3)), 6.31,
+                               delta=0.05)
+
+    def test_au_troisieme_jour_il_n_y_a_PLUS_de_pente_du_tout(self):
+        # ⛔ Ce que le matin du 16/08 aurait donné avec ce code : pas une
+        # pente plus juste, PAS DE PENTE. Trois points ne suffisent pas à
+        # distinguer une marche d'une croissance — le dire est plus
+        # honnête que trancher.
+        p = pentes_des_prefixes(self.serie(3), [self.SOCLE, self.GRILLE])
+        self.assertEqual(p["jeunes"], sorted([self.SOCLE, self.GRILLE]))
+        self.assertIsNone(p["total"])
+
+    def test_au_quatrieme_jour_la_marche_est_ignoree(self):
+        # ⛔ Et le lendemain, quand la pente redevient calculable, elle
+        # vaut ZÉRO : un domaine né à son plateau ne monte pas.
+        p = pentes_des_prefixes(self.serie(4), [self.SOCLE, self.GRILLE])
+        self.assertAlmostEqual(p["par_prefixe"][self.GRILLE], 0.0, places=6)
+        self.assertAlmostEqual(p["par_prefixe"][self.SOCLE], 0.0, places=6)
+
+    def test_et_le_mail_ne_part_plus(self):
+        inv = {"octets": int(3.4049 * GO), "objets": 1913,
+               "par_bucket": {}, "par_prefixe": {}}
+        juste = pentes_des_prefixes(self.serie(4),
+                                    [self.SOCLE, self.GRILLE])["total"]
+        self.assertTrue(verdict(inv, pente_go_par_mois(self.serie(3)),
+                                seuil_go=7.0, horizon=60)["alerte"],
+                        "le 16/08 au matin, l'alerte est bien partie")
+        self.assertFalse(verdict(inv, juste, seuil_go=7.0,
+                                 horizon=60)["alerte"],
+                         "et elle ne doit plus partir")
+
+
+class PenteRobuste(unittest.TestCase):
+    """Les propriétés du calcul du 16/08, isolées de tout contexte."""
+
+    def test_moins_de_quatre_releves_pas_de_pente(self):
+        serie = [rel(j, {"a": 1.0 + j}) for j in (0, 1, 2)]
+        self.assertIsNone(pente_du_prefixe(serie, "a"))
+
+    def test_quatre_releves_suffisent(self):
+        serie = [rel(j, {"a": 1.0 + j}) for j in (0, 1, 2, 3)]
+        self.assertAlmostEqual(pente_du_prefixe(serie, "a"), 30.0, places=6)
+
+    def test_une_marche_isolee_ne_peut_pas_etre_la_mediane(self):
+        # ⛔ LA propriété qui rend le mécanisme indépendant de la
+        # granularité : quatre relevés font trois différences, une seule
+        # aberrante, et la médiane de trois valeurs ignore toujours
+        # l'extrême — où que la marche tombe dans la série.
+        for rang in range(3):
+            poids = [1.0 if k <= rang else 6.0 for k in range(4)]
+            serie = [rel(j, {"a": p}) for j, p in enumerate(poids)]
+            self.assertAlmostEqual(
+                pente_du_prefixe(serie, "a"), 0.0, places=6,
+                msg=f"marche au rang {rang} : {poids}")
+
+    def test_deux_releves_a_24_secondes_ne_font_pas_une_vitesse(self):
+        # ⚠️ Le piège que la médiane INTRODUIT et que les moindres carrés
+        # noyaient : 0,784 Go divisés par 24 secondes valent 2,8 millions
+        # de Go/mois. Sur une série courte, cette valeur pourrait très
+        # bien être la médiane. D'où le regroupement.
+        rafale = [rel(0.0, {"a": 0.031}), rel(24 / 86400, {"a": 0.031}),
+                  rel(0.02, {"a": 0.815}), rel(0.03, {"a": 0.815})]
+        self.assertIsNone(pente_du_prefixe(rafale, "a"),
+                          "une rafale d'une heure ne vaut qu'un point")
+
+    def test_la_rafale_ne_pollue_pas_une_vraie_serie(self):
+        serie = [rel(0.0, {"a": 1.0}), rel(0.01, {"a": 1.0}),
+                 rel(0.02, {"a": 1.0}), rel(1, {"a": 1.0}),
+                 rel(2, {"a": 1.0}), rel(3, {"a": 1.0})]
+        self.assertAlmostEqual(pente_du_prefixe(serie, "a"), 0.0, places=6)
+
+    def test_une_decroissance_reste_une_decroissance(self):
+        # Un produit qui se range doit se lire comme tel, sinon la purge
+        # qui mord ressemblerait à un plateau.
+        serie = [rel(j, {"a": 4.0 - j}) for j in (0, 1, 2, 3)]
+        self.assertAlmostEqual(pente_du_prefixe(serie, "a"), -30.0, places=6)
 
 
 class PenteParPrefixe(unittest.TestCase):
@@ -457,14 +617,26 @@ class PenteParPrefixe(unittest.TestCase):
         serie = [rel(0, {"a": 1.0}), rel(1, {"a": 1.0}),
                  rel(2, {"a": 1.0, "b": 1.0}),
                  rel(3, {"a": 1.0, "b": 2.0}),
-                 rel(4, {"a": 1.0, "b": 3.0})]
+                 rel(4, {"a": 1.0, "b": 3.0}),
+                 rel(5, {"a": 1.0, "b": 4.0})]
         self.assertAlmostEqual(pente_du_prefixe(serie, "b"), 30.0, places=6)
-        # Et la valeur qu'on aurait eue en comptant les absences comme 0,
-        # gardée en clair pour que l'écart soit lisible :
-        self.assertNotAlmostEqual(pente_du_prefixe(serie, "b"), 24.0, places=1)
+
+    def test_absence_ne_compte_pas_comme_un_releve(self):
+        # ⚠️ La seconde moitié du même piège, et celle qui reste mordante
+        # depuis le 16/08 : compter les absences comme des zéros
+        # donnerait 4 relevés à « b » là où il n'en a que 2, et le
+        # sortirait de `jeunes` deux jours trop tôt — c'est-à-dire au
+        # moment précis où sa marche de naissance est encore dans la
+        # série.
+        serie = [rel(0, {"a": 1.0}), rel(1, {"a": 1.0}),
+                 rel(2, {"a": 1.0, "b": 1.0}),
+                 rel(3, {"a": 1.0, "b": 1.0})]
+        p = pentes_des_prefixes(serie, ["a", "b"])
+        self.assertEqual(p["jeunes"], ["b"])
+        self.assertAlmostEqual(p["total"], 0.0, places=6)
 
     def test_la_somme_fait_le_total(self):
-        serie = [rel(j, {"a": 1.0 + j, "b": 2.0 + 2 * j}) for j in (0, 15, 30)]
+        serie = [rel(j, {"a": 1.0 + j, "b": 2.0 + 2 * j}) for j in (0, 1, 2, 3)]
         p = pentes_des_prefixes(serie, ["a", "b"])
         self.assertAlmostEqual(p["par_prefixe"]["a"], 30.0, places=6)
         self.assertAlmostEqual(p["par_prefixe"]["b"], 60.0, places=6)
@@ -473,7 +645,7 @@ class PenteParPrefixe(unittest.TestCase):
     def test_un_prefixe_disparu_ne_compte_plus(self):
         # Une chaîne qu'on arrête laisse sa pente dans l'historique. La
         # compter encore projetterait une croissance qui n'existe plus.
-        serie = [rel(j, {"a": 1.0, "mort": float(j)}) for j in (0, 15, 30)]
+        serie = [rel(j, {"a": 1.0, "mort": float(j)}) for j in (0, 1, 2, 3)]
         p = pentes_des_prefixes(serie, ["a"])   # « mort » n'est plus courant
         self.assertNotIn("mort", p["par_prefixe"])
         self.assertAlmostEqual(p["total"], 0.0, places=6)
