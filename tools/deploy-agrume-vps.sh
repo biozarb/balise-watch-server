@@ -86,7 +86,12 @@ set -e
 cd $DISTANT
 PY="\${BW_PYTHON:-\$HOME/venv-balise/bin/python3}"
 [ -x "\$PY" ] || PY=python3
-for B in tools/test_mf_s3.py agrume/test_orographie.py \\
+# ⚠️ \`tools/test_audit_r2.py\` AJOUTÉ LE 16/08 : la jauge R2 est le seul
+# de ces modules qui envoie un MAIL, et c'était le seul dont le banc ne
+# tournait pas au déploiement. Trois fausses alertes en une semaine, et
+# à chaque fois le correctif partait sur le Mac sans que rien ne le
+# revérifie sur le VPS.
+for B in tools/test_mf_s3.py tools/test_audit_r2.py agrume/test_orographie.py \\
          verif/test_colonnes.py verif/test_separation.py verif/test_purge.py \\
          verif/test_confronter_quotidien.py agrume/test_grille.py \\
          agrume/test_profil.py agrume/test_radiosondage.py agrume/test_transect.py \\
@@ -95,7 +100,7 @@ for B in tools/test_mf_s3.py agrume/test_orographie.py \\
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
 done
-echo "  ✓ 15/15 bancs verts sur le VPS"
+echo "  ✓ 16/16 bancs verts sur le VPS"
 EOF
 [ $? -eq 0 ] || echec "un banc a échoué sur le VPS — RIEN N'A ÉTÉ REDÉMARRÉ"
 
