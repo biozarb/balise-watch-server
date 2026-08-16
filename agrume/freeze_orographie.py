@@ -442,6 +442,110 @@ def geler_balises_isolees():
     return 0
 
 
+def comparer_orographie(ancien_npz, nom_domaine="nord-alpes"):
+    """⛔ LE BANC QUI REMPLACE LE SHA256 LE JOUR OÙ ON ÉLARGIT UN DOMAINE.
+
+    ⚠️ POURQUOI IL EXISTE, ET POURQUOI IL EST PLUS FORT QUE CE QU'IL
+    REMPLACE. Jusqu'au 16/08, la continuité de l'orographie de production
+    était garantie par un fait négatif : on n'élargissait pas `DOMAINE`,
+    donc son sha256 ne bougeait pas, donc les archives se rapportaient
+    toutes au même fichier. Le jour où on élargit, ce sha change
+    forcément — et la question « les altitudes servies ont-elles bougé ? »
+    reste entière, sans réponse.
+
+    ⓘ Elle a pourtant une réponse mesurable. `fenetre()` s'aligne sur les
+    POINTS de la grille native et `Orographie.z_at()` cherche le plus
+    proche voisin : agrandir la découpe ne peut pas déplacer un point de
+    grille, seulement en ajouter autour. Le sol d'une balise donnée doit
+    donc être IDENTIQUE À L'OCTET avant et après. Ce banc le vérifie au
+    lieu de le supposer, balise par balise, sur les deux grilles.
+
+    ⚠️ CE QU'IL FAUT LUI DONNER : le chemin de l'ANCIEN `.npz`, mis de
+    côté AVANT le regel (le `.json` est déduit du même nom). Sans copie
+    préalable, il n'y a plus rien à comparer — le gel écrase en place.
+    C'est délibérément à l'utilisateur de faire cette copie : un banc qui
+    fabriquerait lui-même sa référence en la retéléchargeant ne prouverait
+    que la reproductibilité du téléchargement.
+
+    ⛔ UN ÉCART NON NUL N'EST PAS UN DÉTAIL À ARRONDIR. Il voudrait dire
+    que le découpage ne s'aligne plus sur la grille native — donc que
+    TOUTES les altitudes servies sur le domaine ont glissé d'une maille.
+    Le banc échoue, et c'est le bon comportement.
+    """
+    from pathlib import Path
+
+    from freeze_balises import charger_artefact as charger_balises
+
+    anc_npz = Path(ancien_npz)
+    anc_json = anc_npz.with_suffix(".json")
+    if not anc_npz.exists() or not anc_json.exists():
+        raise Abort(
+            f"référence absente ({anc_npz.name} / {anc_json.name}). Copier "
+            f"l'artefact AVANT de regeler :\n"
+            f"    cp agrume/data/orographie-{nom_domaine}.npz "
+            f"/tmp/ref-orographie-{nom_domaine}.npz\n"
+            f"    cp agrume/data/orographie-{nom_domaine}.json "
+            f"/tmp/ref-orographie-{nom_domaine}.json")
+
+    ancien, man_a = charger_artefact(anc_npz, anc_json)
+    npz_cible, js_cible = ARTEFACTS[nom_domaine]
+    nouveau, man_n = charger_artefact(npz_cible, js_cible)
+
+    print(f"▶ RÉFÉRENCE  {man_a['ecrit_le']} · {man_a['domaine']}")
+    print(f"▶ ACTUEL     {man_n['ecrit_le']} · {man_n['domaine']}")
+    for g in sorted(nouveau):
+        print(f"  {g} : {ancien[g].z.shape} → {nouveau[g].z.shape}")
+
+    # ⚠️ L'axe FIGÉ, pas le catalogue live : c'est la liste que
+    # l'ingestion lit réellement. `--rebornage` est passé parce que le
+    # code porte déjà les nouvelles bornes au moment où ce banc tourne —
+    # c'est même tout l'intérêt de le lancer AVANT le regel de l'axe.
+    balises, _ = charger_balises(rebornage=[nom_domaine])
+
+    lignes, pire, communes, entrantes = [], 0.0, 0, 0
+    for b in balises:
+        if b.get("source") == "radiosondage":
+            continue
+        for g in sorted(nouveau):
+            za = ancien[g].z_at(b["lat"], b["lon"])
+            zn = nouveau[g].z_at(b["lat"], b["lon"])
+            if za is None and zn is not None:
+                entrantes += 1
+                continue
+            if za is None or zn is None:
+                continue
+            communes += 1
+            e = abs(zn - za)
+            if e > 0:
+                lignes.append((e, b["id"], b.get("name", ""), g, za, zn))
+            pire = max(pire, e)
+
+    print(f"\n── SOL DES BALISES DE L'AXE, ANCIEN vs NOUVEAU ──")
+    print(f"  {communes} couple(s) (balise × grille) portés par LES DEUX "
+          f"artefacts")
+    print(f"  {entrantes} couple(s) que seul le NOUVEAU porte "
+          f"(élargissement — rien à comparer, c'est le gain)")
+    print(f"  écart max : {pire:.3f} m")
+    if lignes:
+        print("\n⛔ LES ALTITUDES SERVIES ONT BOUGÉ — l'élargissement n'est "
+              "PAS neutre, ne pas publier :")
+        for e, i, nom, g, za, zn in sorted(lignes, reverse=True)[:20]:
+            print(f"     {i:>6} · {nom[:34]:<34} {g} : "
+                  f"{za:8.1f} → {zn:8.1f} m  (Δ {e:+.1f})")
+        raise Abort(f"{len(lignes)} couple(s) balise × grille dont le sol a "
+                    f"changé. Le découpage ne s'aligne plus sur la grille "
+                    f"native — c'est un défaut, pas un arrondi.")
+    if not communes:
+        # ⚠️ Un banc sur zéro point rend un ✓ qui ne dit rien — la leçon
+        # du TÉMOIN de `domaine.py`, exactement.
+        raise Abort("aucune balise portée par les deux artefacts : ce banc "
+                    "n'a rien vérifié. Vérifier que la référence est bien "
+                    f"celle du domaine « {nom_domaine} ».")
+    print(f"\n✅ IDENTIQUE À L'OCTET sur les {communes} couples communs. "
+          f"L'élargissement n'a déplacé aucune altitude servie.")
+    return 0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--domaine", default="nord-alpes",
@@ -459,8 +563,17 @@ def main(argv=None):
     p.add_argument("--balises-isolees", action="store_true",
                    help="gèle le sol des balises de l'axe qui sont HORS de "
                         "toute boîte (à lancer APRÈS freeze_balises.py)")
+    p.add_argument("--comparer-orographie", metavar="ANCIEN_NPZ", default=None,
+                   help="compare, balise par balise, le sol rendu par un "
+                        "artefact de RÉFÉRENCE et par l'artefact actuel. ⛔ "
+                        "À lancer après tout élargissement de domaine : "
+                        "c'est ce banc qui remplace le sha256 comme preuve "
+                        "de continuité. Copier l'ancien .npz/.json AVANT de "
+                        "regeler.")
     a = p.parse_args(argv)
     try:
+        if a.comparer_orographie:
+            return comparer_orographie(a.comparer_orographie, a.domaine)
         if a.balises_isolees:
             return geler_balises_isolees()
         if a.verifier_radiosondages:

@@ -61,11 +61,11 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `domaine.py` | **toutes** les constantes communes : grilles, niveaux, **les TROIS domaines**, paquets, horizon, raccords |
 | `orographie.py` | le sol du modèle, chargé depuis l'artefact figé — et le refus de deviner le paquet |
 | `freeze_orographie.py` | extrait les trois orographies **une fois** par domaine (`--domaine`), les découpe, les versionne |
-| `data/orographie-nord-alpes.{npz,json}` | l'artefact figé des Alpes (94 Ko) et son manifeste |
+| `data/orographie-nord-alpes.{npz,json}` | l'artefact figé des Alpes (207 Ko), regelé le 16/08 — **111 × 105 = 11 655 colonnes** en 0,025°. ⚠️ Le nom dit « nord-alpes », la boîte descend au Mercantour depuis l'élargissement du 16/08 (43,70-46,45 N × 5,00-7,60 E) : renommer casserait les clés R2 des runs en ligne |
 | `data/orographie-pyrenees.{npz,json}` | **celui des Pyrénées** (141 Ko), gelé le 12/08 — 41 × 205 = 8 405 colonnes en 0,025° |
 | `data/orographie-tarn-aveyron-herault.{npz,json}` | **celui du Tarn/Aveyron/Hérault** (48 Ko), gelé le 15/08 — 34 × 84 = 2 856 colonnes en 0,025° |
 | `freeze_balises.py` | fige l'**axe des balises** de l'archive, en ajout seul |
-| `data/balises-nord-alpes.json` | ⚠️ **l'axe COMPLET** : 126 Alpes + 55 Pyrénées + 23 Tarn/Aveyron/Hérault + 13 hors domaine + 3 radiosondages, 220 balises (47 Ko). Le nom dit « nord-alpes » par continuité — c'est le manifeste qui fait foi |
+| `data/balises-nord-alpes.json` | ⚠️ **l'axe COMPLET** : 207 Alpes + 55 Pyrénées + 23 Tarn/Aveyron/Hérault + 15 hors domaine + 3 radiosondages, **303 balises** (64 Ko) au regel du 16/08. Le nom dit « nord-alpes » par continuité — c'est le manifeste qui fait foi |
 | `portail.py` | client WCS, avec les six pièges du portail traités |
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
 | `quantification.py` | ⚠️ **le FORMAT du produit A** : PARAMS, unités, plafonds, sentinelle, `quantifier()`. Importé par le produit B, AROME-PI et le profil — c'est pourquoi il est resté ICI quand le conteneur est parti dans `verif/` (Lot J, 13/08) |

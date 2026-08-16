@@ -1,13 +1,13 @@
 {
   "produit": "AGRUME — orographie sous les points de radiosondage, figée",
-  "ecrit_le": "2026-08-13T11:34:17Z",
-  "run_source": "2026-08-13T06:00:00Z",
+  "ecrit_le": "2026-08-16T07:22:42Z",
+  "run_source": "2026-08-16T03:00:00Z",
   "eccodes": "2.43.0",
   "demi_fenetre_deg": 0.25,
   "accord_production": {
     "n_points_communs": 3042,
     "ecart_max_m": 0.0,
-    "run_source_production": "2026-08-10T03:00:00Z"
+    "run_source_production": "2026-08-16T03:00:00Z"
   },
   "stations": {
     "06610": {
@@ -19,7 +19,7 @@
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -39,7 +39,7 @@
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,
@@ -68,7 +68,7 @@
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -88,7 +88,7 @@
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,
@@ -117,7 +117,7 @@
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -137,7 +137,7 @@
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,
@@ -160,13 +160,13 @@
     "TEMOIN": {
       "nom": "témoin (centre du domaine)",
       "pays": "FR",
-      "lat": 45.55,
-      "lon": 6.55,
+      "lat": 45.075,
+      "lon": 6.3,
       "sol_station_m": null,
       "grilles": {
         "001": {
           "paquet": "SP3",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 2801,
             "Nj": 1791,
@@ -176,17 +176,17 @@
             "dj": 0.01,
             "jScan": 0
           },
-          "j0": 960,
-          "i0": 1830,
+          "j0": 1007,
+          "i0": 1805,
           "nj": 51,
           "ni": 51,
-          "sha256": "e089f5e208ac326110c1c479f03164ba6ef2060c4f33d151c127f2e817427d84",
-          "z_station": 1903.1,
+          "sha256": "7ce0bd5c21dabc9bb06a9f718f2f5323f6e6f150788aa1bfb3fe66198f1206c9",
+          "z_station": 2288.9,
           "ecart_sol_station_m": null
         },
         "0025": {
           "paquet": "SP2",
-          "cle_s3": "pnt/2026-08-13T06:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-13T06:00:00Z.grib2",
+          "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-16T03:00:00Z.grib2",
           "meta": {
             "Ni": 1121,
             "Nj": 717,
@@ -196,12 +196,12 @@
             "dj": 0.025,
             "jScan": 0
           },
-          "j0": 384,
-          "i0": 732,
+          "j0": 403,
+          "i0": 722,
           "nj": 21,
           "ni": 21,
-          "sha256": "92e6b030e0381595f92ad33f443f1d83dbf6f231a6b0a6bf91b5fe8855624757",
-          "z_station": 1903.0,
+          "sha256": "4b88184cb333c0221ae98ab473fbad40e19ef39eb9bee692c972cb244895b813",
+          "z_station": 2227.2,
           "ecart_sol_station_m": null
         }
       }

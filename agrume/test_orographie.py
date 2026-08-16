@@ -75,10 +75,31 @@ def main(argv=None):
              bool(man.get("eccodes")), str(man.get("eccodes", "")))
 
     fine, gros = paire[GRID_FINE], paire[GRID_3D]
-    verifier("domaine 0,025° = 61 × 85 = 5 185 points (valeur MESURÉE le 10/08)",
-             gros.z.shape == (61, 85), str(gros.z.shape))
-    verifier("domaine 0,01° = 151 × 211 points",
-             fine.z.shape == (151, 211), str(fine.z.shape))
+    # ⚠️ 16/08 — CES DEUX VALEURS ONT CHANGÉ, ET IL FAUT DIRE POURQUOI
+    # PLUTÔT QUE DE LES REMPLACER EN SILENCE. Elles valaient 61 × 85 =
+    # 5 185 (0,025°) et 151 × 211 (0,01°) : c'était l'ancien domaine
+    # Nord-Alpes, mesuré le 10/08 en découpant un GRIB réel. `DOMAINE` a
+    # été élargi aux Alpes entières le 16/08 (cf. `domaine.py`), donc la
+    # fenêtre aussi — 111 × 105 = 11 655 et 276 × 261 = 72 036, mesurés au
+    # regel du même jour.
+    # ⛔ CE QUI COMPTE ICI N'EST PAS LE NOMBRE, C'EST QU'IL SOIT CELUI QUE
+    # `fenetre()` DÉDUIT DES MÉTADONNÉES. Un nombre recopié à la main ne
+    # prouve que l'immobilité ; comparer à `fenetre(meta)` attrape le cas
+    # qui fait vraiment mal — un artefact gelé sur une fenêtre qui n'est
+    # plus celle du code, donc des altitudes décalées d'une maille sans
+    # que rien ne s'allume.
+    from domaine import fenetre as _fen  # noqa: PLC0415
+    for nom, o, attendu in (("0,025°", gros, 11655), ("0,01°", fine, 72036)):
+        j0, j1, i0, i1 = _fen(o.meta)
+        nj, ni = j1 - j0 + 1, i1 - i0 + 1
+        verifier(f"domaine {nom} : l'artefact tombe EXACTEMENT sur la "
+                 f"fenêtre déduite de ses propres métadonnées",
+                 o.z.shape == (nj, ni) and (o.j0, o.i0) == (j0, i0),
+                 f"{o.z.shape} @ j{o.j0}/i{o.i0} · fenêtre ({nj}, {ni}) "
+                 f"@ j{j0}/i{i0}")
+        verifier(f"domaine {nom} = {nj} × {ni} = {nj * ni} points "
+                 f"(mesuré au regel du 16/08)",
+                 nj * ni == attendu, f"{nj * ni}")
     verifier("aucune altitude aberrante (0 ≤ z ≤ 5000 m, Alpes)",
              float(fine.z.min()) >= -10 and float(fine.z.max()) <= 5000
              and float(gros.z.min()) >= -10 and float(gros.z.max()) <= 5000,

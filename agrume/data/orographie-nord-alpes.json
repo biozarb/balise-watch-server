@@ -1,19 +1,20 @@
 {
   "produit": "AGRUME — orographie du modèle, figée",
-  "ecrit_le": "2026-08-10T09:13:34Z",
-  "run_source": "2026-08-10T03:00:00Z",
-  "eccodes": "2.48.0",
+  "ecrit_le": "2026-08-16T07:21:51Z",
+  "run_source": "2026-08-16T03:00:00Z",
+  "eccodes": "2.43.0",
+  "nom_domaine": "nord-alpes",
   "domaine": {
-    "latmin": 44.8,
-    "latmax": 46.3,
-    "lonmin": 5.5,
+    "latmin": 43.7,
+    "latmax": 46.45,
+    "lonmin": 5.0,
     "lonmax": 7.6
   },
   "grilles": {
     "001": {
       "paquet": "SP3",
-      "cle_s3": "pnt/2026-08-10T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-10T03:00:00Z.grib2",
-      "octets_source": 7506816,
+      "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/001/SP3/arome__001__SP3__00H__2026-08-16T03:00:00Z.grib2",
+      "octets_source": 7433170,
       "meta": {
         "Ni": 2801,
         "Nj": 1791,
@@ -23,19 +24,19 @@
         "dj": 0.01,
         "jScan": 0
       },
-      "j0": 910,
-      "i0": 1750,
-      "nj": 151,
-      "ni": 211,
-      "sha256": "37a204257be84a58c470e364657e624bb06967f50e3ef762c7ef75f859fa6a1c",
-      "z_min": 163.0,
-      "z_med": 1371.7,
+      "j0": 895,
+      "i0": 1700,
+      "nj": 276,
+      "ni": 261,
+      "sha256": "33f1a0fb3b41d5f2ff96c1735574399cbee05df640ad6e93128174834f2132f0",
+      "z_min": -6.6,
+      "z_med": 1009.1,
       "z_max": 4220.5
     },
     "0025": {
       "paquet": "SP2",
-      "cle_s3": "pnt/2026-08-10T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-10T03:00:00Z.grib2",
-      "octets_source": 43398450,
+      "cle_s3": "pnt/2026-08-16T03:00:00Z/arome/0025/SP2/arome__0025__SP2__00H06H__2026-08-16T03:00:00Z.grib2",
+      "octets_source": 45385003,
       "meta": {
         "Ni": 1121,
         "Nj": 717,
@@ -45,26 +46,26 @@
         "dj": 0.025,
         "jScan": 0
       },
-      "j0": 364,
-      "i0": 700,
-      "nj": 61,
-      "ni": 85,
-      "sha256": "0fdd9a4bb88ad194b2f42feea553a52bae12122cfcec4434ccd7f46530c57c31",
-      "z_min": 167.9,
-      "z_med": 1368.5,
+      "j0": 358,
+      "i0": 680,
+      "nj": 111,
+      "ni": 105,
+      "sha256": "5add8b8a86f9f8e33130696732f015ccee7fdcfbdc1f028dd103051117564a97",
+      "z_min": -7.6,
+      "z_med": 1001.9,
       "z_max": 3887.4
     }
   },
   "ecart_0025_moins_001": {
-    "n": 3621,
-    "d1": -169.3,
-    "q1": -64.6,
+    "n": 8004,
+    "d1": -141.8,
+    "q1": -44.4,
     "mediane": -0.0,
-    "q3": 62.2,
-    "d9": 176.4,
-    "abs_median": 63.6,
-    "abs_max": 747.2,
-    "part_au_dela_100m": 36.3
+    "q3": 44.7,
+    "d9": 131.0,
+    "abs_median": 44.6,
+    "abs_max": 647.7,
+    "part_au_dela_100m": 28.5
   },
-  "note": "Champ `h` (surface), STATIQUE. ⚠️ Le paquet CHANGE avec la grille : 001/SP3 mais 0025/SP2 — 0025/SP3 existe et ne contient aucune orographie. Régénérer avec `python3 agrume/freeze_orographie.py`."
+  "note": "Champ `h` (surface), STATIQUE. ⚠️ Le paquet CHANGE avec la grille : 001/SP3 mais 0025/SP2 — 0025/SP3 existe et ne contient aucune orographie. Régénérer avec `python3 agrume/freeze_orographie.py --domaine nord-alpes`."
 }

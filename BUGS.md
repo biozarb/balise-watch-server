@@ -6,6 +6,71 @@
 
 ---
 
+## 16/08/2026 — AGRUME : le `except Abort` du 15/08 n'avait été corrigé qu'à moitié
+
+**Contexte** : élargissement de `DOMAINE` aux Alpes entières
+(44,8-46,3 N × 5,5-7,6 E → 43,70-46,45 × 5,00-7,60), après qu'un pilote
+de Bernex (74) a signalé qu'AGRUME ne marchait pas chez lui.
+
+**Le bug, trouvé AVANT de le déclencher** : l'entrée du 15/08 ci-dessous
+raconte comment `geler()` a perdu 3 balises en lisant « artefact
+incohérent » comme « artefact inexistant ». Le fix du 15/08 a corrigé
+*la cause de cet Abort-là* (contrôle de cohérence trop strict) — mais a
+laissé en place **le `except Abort` générique qui transformait l'erreur
+en perte de données**. Le piège était donc intact : il suffisait d'une
+AUTRE cause d'Abort pour rejouer exactement la même perte. Changer les
+bornes d'un domaine déjà figé en est une, et c'était précisément
+l'opération du jour.
+
+**Piège réutilisable, et c'est le même que celui de la jauge R2 juste
+en dessous** : corriger *une cause* d'un symptôme laisse le mécanisme
+qui transforme cette cause en dégât. ⚠️ **Le dégât est le bug ; la cause
+n'en est qu'un déclencheur.** Ici le dégât était « un `except` large
+avale une erreur de validation et vide l'axe » — deux corrections de
+cause de suite ne l'auraient jamais touché.
+
+**Fix** : `ArtefactAbsent(Abort)`, levée uniquement quand le fichier
+n'existe pas, et c'est la SEULE que `geler()` rattrape. Toute autre
+incohérence remonte à l'utilisateur. Le rebornage assumé passe par un
+drapeau explicite, `--rebornage <domaine>`, qui conserve l'axe.
+
+**Vérifié** : 222 → 303 balises, **0 identifiant perdu** (diff des
+ensembles d'IDs avant/après, comme le 15/08 — ce contrôle-là n'est
+toujours pas automatique).
+
+### Effet de bord : quatre bancs recopiaient le domaine au lieu de le lire
+
+`test_grille.py` portait `J0, I0, NJ, NI = 364, 700, 61, 85` et les
+quatre bornes `46.3 / 44.8 / 5.5 / 7.6` en dur ; `test_orographie.py`
+attendait `(61, 85)` et `(151, 211)` ; `test_transect.py` mesurait
+l'orthodromie contre une diagonale de « 233 km ». Tous sont tombés à
+l'élargissement — **pas sur une régression, sur leur propre copie
+périmée**.
+
+⚠️ **C'est exactement ce que `domaine.py` existe pour empêcher** (« les
+indices se DÉDUISENT des métadonnées, jamais codés en dur »), et ça
+s'était glissé dans les BANCS, où personne ne le cherchait. Un banc qui
+recopie une constante ne vérifie plus le code : il vérifie que personne
+n'a touché à la constante, et il devient un frein le jour où on y touche
+pour de bonnes raisons.
+
+**Fix** : les bancs dérivent de `fenetre(META)` et de `DOMAINE`. Pour
+`test_transect`, la section a été réécrite pour vérifier **la loi** (l'écart
+croît comme le carré de la longueur) plutôt que deux nombres — élargir
+les bornes pour les faire repasser aurait effacé ce qu'elle mesure.
+
+### Ce qui remplace le sha256 comme preuve de continuité
+
+L'interdit d'élargir `DOMAINE` reposait sur le sha256 de l'orographie de
+production. Il est levé, et remplacé par plus fort :
+`freeze_orographie.py --comparer-orographie <ancien.npz>` compare, balise
+par balise et grille par grille, le sol rendu avant et après.
+**Mesuré au regel : 0,000 m d'écart sur 252 couples.** ⛔ La règle qui
+reste : on n'élargit pas un domaine sans rejouer ce banc et publier son
+écart max.
+
+---
+
 ## 16/08/2026 — Jauge R2 : une MARCHE lue comme une PENTE, la troisième fois
 
 **Symptôme** : mail « au rythme mesuré (+7.26 Go/mois), palier atteint

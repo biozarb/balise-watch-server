@@ -62,6 +62,31 @@ class Abort(Exception):
     pass
 
 
+class ArtefactAbsent(Abort):
+    """⛔ LE SEUL CAS OÙ `geler()` A LE DROIT DE REPARTIR D'UN AXE VIDE.
+
+    ⚠️ CETTE CLASSE EXISTE À CAUSE D'UN BUG QUI A DÉJÀ COÛTÉ TROIS
+    BALISES, ET QUI ALLAIT RECOMMENCER. Le 15/08, `charger_artefact()` a
+    levé `Abort` sur un contrôle de cohérence trop strict ; `geler()`
+    rattrapait TOUT `Abort` en `existantes = []`, c'est-à-dire en lisant
+    « artefact incohérent » comme « artefact inexistant ». La discipline
+    d'AJOUT SEUL — la garantie centrale de ce fichier — sautait alors
+    entièrement, et toute balise qui n'était pas LIVE à l'instant précis
+    du gel disparaissait en silence (1333, 1361, 365 ce jour-là).
+
+    Le contrôle de 15/08 a été corrigé, mais le rattrapage aveugle, lui,
+    est resté — une deuxième cause suffisait à rejouer la même perte. Et
+    l'élargissement de `DOMAINE` du 16/08 en était une : changer les
+    bornes d'un domaine DÉJÀ FIGÉ fait lever `charger_artefact()`, donc
+    aurait vidé l'axe.
+
+    ⛔ La règle, désormais : `geler()` ne rattrape QUE cette exception-ci.
+    Toute autre incohérence remonte à l'utilisateur, qui décide — et
+    `--rebornage` est la façon de dire « oui, j'ai changé ces bornes
+    exprès », balises conservées.
+    """
+
+
 def distance_m(a, b):
     """Distance approchée entre deux (lat, lon), en mètres. Suffisante
     pour détecter un déménagement, pas pour de la navigation."""
@@ -89,11 +114,21 @@ def depuis_catalogue():
     return out
 
 
-def charger_artefact(chemin=ARTEFACT):
+def charger_artefact(chemin=ARTEFACT, rebornage=()):
+    """L'axe figé, et les bornes sous lesquelles il l'a été.
+
+    `rebornage` est la liste des domaines dont on ASSUME que les bornes
+    ont changé depuis le gel (cf. `--rebornage`). Un domaine cité là
+    n'est plus une incohérence : c'est une décision, prise ailleurs, et
+    l'axe est conservé — c'est tout l'intérêt, puisque le rattrapage
+    aveugle d'avant le 16/08 aurait au contraire tout perdu.
+    """
     p = Path(chemin)
+    rebornage = {str(x) for x in rebornage}
     if not p.exists():
-        raise Abort(f"artefact de balises absent ({p.name}) — le régénérer "
-                    f"avec `python3 agrume/freeze_balises.py`")
+        raise ArtefactAbsent(
+            f"artefact de balises absent ({p.name}) — le régénérer "
+            f"avec `python3 agrume/freeze_balises.py`")
     man = json.loads(p.read_text(encoding="utf-8"))
     # ⚠️ 12/08 — le garde-fou compare maintenant TOUS les domaines, et il
     # accepte encore l'ancienne forme à un seul (`domaine`). Ce n'est pas
@@ -129,12 +164,28 @@ def charger_artefact(chemin=ARTEFACT):
             f"({man.keys()}). Régénérer explicitement.")
     incoherents = {n: (fige[n], attendu.get(n)) for n in fige
                   if n not in attendu or attendu[n] != fige[n]}
+    # ⚠️ 16/08 — LE REBORNAGE ASSUMÉ SORT DE L'INCOHÉRENCE, ET RIEN
+    # D'AUTRE. Un domaine cité dans `--rebornage` a vu ses bornes changer
+    # SUR DÉCISION ; les autres continuent de faire lever. ⛔ On ne
+    # blanchit PAS un domaine DISPARU du code (`n not in attendu`) :
+    # celui-là reste une incohérence quoi qu'il arrive, parce que ses
+    # balises n'auraient plus aucun sol.
+    if rebornage:
+        blanchis = sorted(n for n in incoherents
+                          if n in rebornage and n in attendu)
+        for n in blanchis:
+            print(f"  ⚠️ REBORNAGE ASSUMÉ de « {n} » : {fige[n]} → "
+                  f"{attendu[n]}. L'axe est CONSERVÉ (ajout seul) ; les "
+                  f"balises que la nouvelle boîte couvre désormais "
+                  f"perdront leur marque `hors_domaine`.")
+            incoherents.pop(n)
     if incoherents:
         raise Abort(
             f"⚠️ l'artefact a été figé sur des BORNES DIFFÉRENTES de "
             f"celles du code pour {sorted(incoherents)} — {incoherents}. "
             f"Les colonnes archivées et celles à venir ne porteraient pas "
-            f"sur les mêmes balises. Régénérer explicitement.")
+            f"sur les mêmes balises. Régénérer explicitement, ou assumer "
+            f"le changement avec `--rebornage {' '.join(sorted(incoherents))}`.")
     nouveaux = [n for n in DOMAINES if n not in fige]
     if nouveaux:
         print(f"  ⚠️ axe figé AVANT l'ajout de {', '.join(nouveaux)} : "
@@ -199,6 +250,15 @@ def fusionner(existantes, candidates, crier=print):
         # (`verifier_domaines_disjoints`/le refus d'élargir un domaine
         # existant l'empêchent), donc seul `True → False` est un cas
         # légitime.
+        # ⚠️ 16/08 — `DOMAINE` A ÉTÉ ÉLARGI, ET CETTE ASYMÉTRIE TIENT
+        # TOUJOURS, mieux même : un élargissement ne peut faire entrer des
+        # balises que DANS une boîte, jamais les en sortir. C'est
+        # exactement le sens `True → False`, celui qu'on autorise. Un
+        # RÉTRÉCISSEMENT resterait interdit, et il n'est protégé par
+        # aucun code — seulement par le fait qu'on ne le fasse pas. Si
+        # ça devait arriver un jour, c'est ici que ça casserait : une
+        # balise sortie de la boîte garderait `hors_domaine=False` et on
+        # lui chercherait un sol dans un artefact qui ne la porte plus.
         etait_hors = ancienne.get("hors_domaine", False)
         est_hors = (not dans_domaine(ancienne["lat"], ancienne["lon"])
                    and ancienne.get("source") != "radiosondage")
@@ -258,10 +318,17 @@ def points_radiosondage():
             for s in STATIONS if s["active"]]
 
 
-def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print):
+def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print,
+          rebornage=()):
+    # ⛔⛔ NE PAS REMETTRE `except Abort` ICI. C'est le bug du 15/08, et il
+    # a coûté trois balises : lire « artefact incohérent » comme
+    # « artefact inexistant » fait sauter la discipline d'ajout seul, et
+    # toute balise hors ligne à cet instant est perdue en silence. Seul
+    # `ArtefactAbsent` — le fichier n'existe pas — autorise un axe vide.
+    # Le reste doit remonter à l'utilisateur, qui tranche.
     try:
-        existantes, _ = charger_artefact(chemin)
-    except Abort:
+        existantes, _ = charger_artefact(chemin, rebornage=rebornage)
+    except ArtefactAbsent:
         existantes = []
     # Les points de radiosondage entrent à CHAQUE gel, comme les balises
     # du catalogue : la discipline d'ajout seul s'occupe de ne pas les
@@ -341,11 +408,19 @@ def main(argv=None):
                    help="ajoute uniquement les points de radiosondage, sans "
                         "toucher aux balises")
     p.add_argument("--verifier", action="store_true")
+    p.add_argument("--rebornage", nargs="*", default=[], metavar="DOMAINE",
+                   help="assume que les bornes de ces domaines ont changé "
+                        "depuis le gel. ⚠️ À n'employer QUE le jour où on "
+                        "élargit un domaine sciemment, et après avoir "
+                        "rejoué `freeze_orographie.py "
+                        "--comparer-orographie` : sans ce drapeau le gel "
+                        "REFUSE de tourner, ce qui est le comportement "
+                        "voulu.")
     a = p.parse_args(argv)
 
     try:
         if a.verifier:
-            balises, man = charger_artefact()
+            balises, man = charger_artefact(rebornage=a.rebornage)
             # ⚠️⚠️ CETTE LIGNE A CASSÉ LA PRODUCTION LE 12/08 AU SOIR, et
             # elle mérite d'être racontée : la clé du manifeste est passée
             # de `domaine` à `domaines` avec le second domaine (commit
@@ -396,7 +471,7 @@ def main(argv=None):
                         "--radiosondages-seulement")
         suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                      if a.suspectes else [])
-        geler(candidates, suspectes)
+        geler(candidates, suspectes, rebornage=a.rebornage)
         return 0
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)

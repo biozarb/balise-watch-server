@@ -405,6 +405,17 @@ def decouper(values, meta, grille, bornes=None):
     pour les radiosondages, appliquée à un vrai domaine cette fois.
     ⛔ L'interdit d'origine, lui, tient toujours : ne pas élargir
     `DOMAINE`.
+    ⛔⛔ 16/08 — ET IL A ÉTÉ LEVÉ, une fois, explicitement : `DOMAINE` est
+    passé de 44,8-46,3 N × 5,5-7,6 E aux Alpes entières (43,70-46,45 ×
+    5,00-7,60). Le raisonnement complet est dans `domaine.py`, pas ici,
+    et il ne se résume pas à « on a changé d'avis » : l'archive est
+    passée en rétention 7 jours (13/08), et surtout élargir la fenêtre ne
+    déplace AUCUN point de grille — `z_at()` cherche le plus proche
+    voisin sur la grille native, donc le sol d'une balise donnée est le
+    même octet avant et après. ⚠️ Ce qui remplace le sha256 comme garde-
+    fou est `freeze_orographie.py --comparer-orographie`, qui le MESURE
+    balise par balise (0,000 m d'écart max au regel du 16/08). La règle
+    devient : élargir, oui — élargir sans rejouer ce banc, non.
     """
     j0, j1, i0, i1 = fenetre(meta) if bornes is None else bornes
     grille2d = np.asarray(values, dtype=np.float32).reshape(meta["Nj"], meta["Ni"])

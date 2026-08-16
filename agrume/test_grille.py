@@ -48,6 +48,7 @@ import quantification as CO  # noqa: E402
 from quantification import (erreur_quantification,  # noqa: E402
                             quantifier)
 from domaine import NIVEAUX_H_0025  # noqa: E402
+from domaine import fenetre as _fenetre  # noqa: E402
 from orographie import Orographie  # noqa: E402
 
 echecs = []
@@ -62,7 +63,23 @@ def verifier(nom, condition, detail=""):
 
 META = dict(Ni=1121, Nj=717, lat0=55.4, lon0=-12.0, di=0.025, dj=0.025,
             jScan=0)
-J0, I0, NJ, NI = 364, 700, 61, 85
+
+# ⚠️ 16/08 — CES QUATRE NOMBRES ÉTAIENT CODÉS EN DUR (364, 700, 61, 85),
+# c'est-à-dire l'ancien domaine Nord-Alpes recopié à la main dans un
+# banc. L'élargissement de `DOMAINE` les a rendus faux, et le banc est
+# tombé — pas sur une régression, sur sa propre copie périmée.
+#
+# ⛔ C'est exactement le défaut que `domaine.py` existe pour empêcher, et
+# il s'était glissé dans le banc plutôt que dans le code : « les indices
+# se DÉDUISENT des métadonnées du GRIB, ils ne sont jamais codés en
+# dur ». Un banc qui recopie une constante ne vérifie plus le code, il
+# vérifie que personne n'a touché à la constante — et il devient un frein
+# le jour où on y touche pour de bonnes raisons.
+#
+# Ils se déduisent donc de `fenetre()`, comme la production. Le banc suit
+# désormais le domaine tout seul.
+_J0, _J1, _I0, _I1 = _fenetre(META)
+J0, I0, NJ, NI = _J0, _I0, _J1 - _J0 + 1, _I1 - _I0 + 1
 
 
 def orog_bidon(meta=META, j0=J0, i0=I0, nj=NJ, ni=NI):
@@ -502,24 +519,41 @@ def main():
     print("\n── 1. Les axes, et le sens qui ne se voit pas ──")
     o = orog_bidon()
     lats, lons = GR.axes_depuis_orographie(o)
-    verifier("la fenêtre fait bien 61 × 85 points (§4.1, mesuré le 10/08)",
-             (len(lats), len(lons)) == (61, 85), f"{len(lats)}×{len(lons)}")
+    # ⚠️ 16/08 — la valeur attendue était « 61 × 85 (§4.1, mesuré le
+    # 10/08) », donc l'ancien domaine recopié. Elle se déduit maintenant
+    # de `fenetre()` : ce que ce contrôle doit prouver, c'est que
+    # `axes_depuis_orographie` rend UN AXE PAR POINT de la fenêtre, pas
+    # que la fenêtre vaut tel nombre — ça, c'est le travail de
+    # `test_orographie`, sur l'artefact réel.
+    verifier("la fenêtre rend un axe par point du domaine",
+             (len(lats), len(lons)) == (NJ, NI),
+             f"{len(lats)}×{len(lons)} (attendu {NJ}×{NI})")
     verifier("⚠️ lats DÉCROÎT — le premier point est au NORD",
              bool(np.all(np.diff(lats) < 0)),
              f"{lats[0]:.3f} → {lats[-1]:.3f}")
     verifier("lons croît — le premier point est à l'OUEST",
              bool(np.all(np.diff(lons) > 0)),
              f"{lons[0]:.3f} → {lons[-1]:.3f}")
-    verifier("les coins tombent sur le domaine Nord-Alpes",
-             abs(lats[0] - 46.3) < 1e-4 and abs(lats[-1] - 44.8) < 1e-4
-             and abs(lons[0] - 5.5) < 1e-4 and abs(lons[-1] - 7.6) < 1e-4)
+    # ⚠️ 16/08 — les quatre bornes étaient recopiées (46.3 / 44.8 / 5.5 /
+    # 7.6). Elles viennent maintenant de `DOMAINE`, pour la même raison
+    # que `J0/I0/NJ/NI` ci-dessus : un banc qui recopie une constante ne
+    # vérifie plus que personne ne l'a recopiée de travers.
+    from domaine import DOMAINE as _DOM  # noqa: PLC0415
+    verifier("les coins tombent sur le domaine",
+             abs(lats[0] - _DOM["latmax"]) < 1e-4
+             and abs(lats[-1] - _DOM["latmin"]) < 1e-4
+             and abs(lons[0] - _DOM["lonmin"]) < 1e-4
+             and abs(lons[-1] - _DOM["lonmax"]) < 1e-4,
+             f"{lats[0]:.3f}/{lats[-1]:.3f} N × "
+             f"{lons[0]:.3f}/{lons[-1]:.3f} E")
 
     # Une grille qui balaie du sud vers le nord doit donner des latitudes
     # CROISSANTES : si le code ignorait `jScan`, ce cas passerait quand
     # même et la convention deviendrait une supposition.
     # `lat0` est choisi pour que la fenêtre couvre EXACTEMENT le même
-    # domaine en balayage sud→nord : 44,8 = lat0 + 364 × 0,025.
-    meta_sud = dict(META, jScan=1, lat0=44.8 - J0 * META["dj"])
+    # domaine en balayage sud→nord : latmin = lat0 + J0 × dj.
+    # ⚠️ 16/08 — `44.8` était écrit en dur ici aussi.
+    meta_sud = dict(META, jScan=1, lat0=_DOM["latmin"] - J0 * META["dj"])
     lats_sud, _ = GR.axes_depuis_orographie(orog_bidon(meta_sud))
     verifier("jScansPositively = 1 → latitudes CROISSANTES "
              "(le sens est LU, pas supposé)",
@@ -573,8 +607,12 @@ def main():
 
     print("\n── 3. Le conteneur, et le piège de la maille fine ──")
     g = GR.Grille("2026-08-10T09:00:00Z", [0, 1, 2], lats, lons, o.z)
+    # ⚠️ 16/08 — `61, 85` était l'ancien domaine recopié une fois de plus.
+    # Ce que ce contrôle protège est l'ORDRE des axes (paramètre, niveau,
+    # échéance, lat, lon) : une transposition y serait invisible autrement.
+    # Les deux derniers viennent donc de la fenêtre.
     verifier("disposition (paramètre, niveau, échéance, lat, lon)",
-             g.h0025.shape == (5, 25, 3, 61, 85), str(g.h0025.shape))
+             g.h0025.shape == (5, 25, 3, NJ, NI), str(g.h0025.shape))
     verifier("float16 sur les champs, float32 sur le sol",
              g.h0025.dtype == np.float16 and g.zsol.dtype == np.float32)
     verifier("tableau vide = NaN partout, jamais 0 "

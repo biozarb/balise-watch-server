@@ -250,18 +250,95 @@ PAQUETS_INGESTION = (
 # paquet 0,025° ajouté à l'ingestion entre ici tout seul.
 PAQUETS_RALLONGE = tuple((g, p) for g, p in PAQUETS_INGESTION if g == GRID_3D)
 
-# ── Le domaine Nord-Alpes ─────────────────────────────────────────────
+# ── Le domaine ALPES (ex « Nord-Alpes ») ──────────────────────────────
 # ⚠️ Ce n'est pas un choix de confort, c'est ce qui rend le produit B
 # possible : la France entière en 0,025° fait 803 757 points par niveau,
-# le domaine en fait 5 185. Taille MESURÉE le 10/08 en découpant un GRIB
-# réel : 61 × 85 = 5 185 points, exactement la valeur annoncée au §4.1
-# du lot. Ce n'était qu'un calcul ; c'est maintenant une mesure.
+# le domaine en fait 11 655. La formule (Nj × Ni sur le pas de 0,025°)
+# est celle qui rendait exactement 5 185 sur l'ancienne boîte, 8 405 sur
+# les Pyrénées et 2 856 sur Tarn/Aveyron/Hérault — vérifiée trois fois
+# contre des découpes de GRIB réels.
 #
 # ⚠️ Les bornes sont INCLUSIVES et l'appartenance se teste sur les
 # coordonnées, jamais sur des indices codés en dur — les indices se
 # recalculent depuis les métadonnées du GRIB (cf. `fenetre()`), sinon un
 # changement de domaine de Météo-France passerait inaperçu.
-DOMAINE = dict(latmin=44.8, latmax=46.3, lonmin=5.5, lonmax=7.6)
+#
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔⛔ 16/08/2026 — CE DOMAINE A ÉTÉ ÉLARGI, ET L'INTERDIT DE LE FAIRE
+#  EST LEVÉ ICI, PAS EFFACÉ. Il vaut la peine d'être raconté en entier :
+#  le commentaire de `DOMAINE_PYRENEES` (12/08) disait « ÉLARGIR `DOMAINE`
+#  AURAIT CHANGÉ LE SHA256 DE L'OROGRAPHIE DE PRODUCTION — DONC ROMPU LA
+#  COMPARABILITÉ DE TOUTES LES ARCHIVES DÉJÀ ÉCRITES ». C'était juste le
+#  12/08. Deux faits l'ont périmé, et aucun des deux n'est un
+#  assouplissement de la règle :
+#
+#    1. ⚠️ L'ARCHIVE N'EST PLUS PERMANENTE. Depuis le 13/08 le produit A
+#       est en rétention glissante 7 jours. Ce que le sha256 protégeait —
+#       la comparabilité d'archives éternelles — s'évapore de toute façon
+#       en une semaine. Ce qui reste éternel, ce sont les SCORES, et les
+#       scores portent sur des VALEURS, pas sur un nom de fichier.
+#
+#    2. ⛔ ET LES VALEURS NE BOUGENT PAS. Élargir la fenêtre ne déplace
+#       AUCUN point de grille : `fenetre()` s'aligne sur la grille native
+#       et `Orographie.z_at()` cherche le plus proche voisin. Le sol servi
+#       à une balise donnée est le MÊME octet avant et après.
+#       ⓘ Ce n'est pas un raisonnement, c'est une mesure : le banc
+#       `--comparer-orographie` de `freeze_orographie.py` compare, balise
+#       par balise, le sol rendu par l'ancien artefact et par le nouveau.
+#       Écart max mesuré au regel du 16/08 : **0,000 m sur 123 balises**.
+#
+#  ⚠️ CE QUI REMPLACE L'INTERDIT N'EST DONC PAS « RIEN », C'EST UNE PREUVE
+#  PLUS FORTE QUE CELLE QU'IL DONNAIT. Un sha256 inchangé prouve qu'on n'a
+#  pas touché au fichier ; le banc prouve qu'on n'a pas touché aux
+#  ALTITUDES, ce qui est la seule chose dont dépende un pilote. ⛔ La règle
+#  qui reste, et qui n'a pas bougé : **on n'élargit pas un domaine sans
+#  rejouer ce banc et publier son écart max.** Un élargissement silencieux
+#  reste exactement aussi interdit qu'avant.
+#
+#  ⓘ Ce que ça change, mesuré sur le catalogue Pioupiou live du 16/08
+#  (747 balises) : 123 → 205 balises servies par le produit B. Le
+#  déclencheur est un pilote à Bernex (Haute-Savoie) dont la balise —
+#  1479, Pointe de Pelluaz, 46,3385 N — tombait 4,3 km au NORD de l'ancien
+#  `latmax`. ⛔ Et une zone d'intérêt n'y pouvait rien : elle ne donne
+#  qu'un sol pour le produit A, alors que l'onglet AGRUME lit le produit B
+#  (`localiserAgrume()` lève `hors-couverture` sur les bornes du
+#  manifeste). Pour qu'AGRUME marche quelque part, il faut que la BOÎTE
+#  contienne le point — il n'y a pas de demi-mesure possible.
+#
+#  Coût, chiffré depuis les mesures du 13/08 (254 Mo publiés pour 5 185
+#  colonnes nord-alpes, 413 Mo pour 8 405 pyrénées → 49 ko/colonne/run,
+#  les deux concordent à 0,2 % près) :
+#      colonnes    5 185 → 11 655       (+6 470)
+#      publié/run    254 Mo → 571 Mo    (+317 Mo)
+#      résident R2, 3 runs × 3 domaines : 2,42 Go → 3,37 Go / palier 10 Go
+#  ⚠️ LE POSTE À SURVEILLER RESTE LA DURÉE, PAS LE STOCKAGE — 20,97 min
+#  mesurés le 13/08 (alerte à 30, timeout 60), et ce chiffre est d'AVANT
+#  l'ajout de `tarn-aveyron-herault`. Le téléchargement (21 Go) ne bouge
+#  pas d'un octet, c'est la publication qui grossit. Si un run passe
+#  30 min, c'est ici qu'il faut revenir — et le §MAX_HOURS_GRILLE dit déjà
+#  que la rallonge 51 h avait mangé la moitié de cette marge.
+#
+#  ⚠️ Le nom « nord-alpes » est CONSERVÉ partout — clé de `DOMAINES`,
+#  préfixe R2 `agrume/grille/nord-alpes/`, `orographie-nord-alpes.npz`,
+#  `DOMAINES_AGRUME` côté client. Il ment désormais un peu (la boîte
+#  descend au Mercantour), et c'est le moindre mal : le renommer casserait
+#  les clés R2 des runs en ligne, l'index publié et le client déployé, en
+#  échange de zéro gain fonctionnel. Même arbitrage que
+#  `balises-nord-alpes.json`, qui porte les Pyrénées depuis le 12/08.
+# ══════════════════════════════════════════════════════════════════════
+#
+# Le choix des quatre bords, mesuré sur le catalogue live du 16/08 :
+#   latmax 46,45 — le Chablais et la rive française du Léman (Pelluaz
+#                  46,3385 · Windbird 2147 46,3799). Monter à 46,60
+#                  ajouterait 17 balises, mais suisses (Fribourg, Vaud).
+#   latmin 43,70 — le Verdon et l'arrière-pays niçois (Baouroux 43,7812 ·
+#                  Gréolières 43,8004 · Coursegoules 43,8015).
+#   lonmin 5,00  — le Ventoux et les Baronnies (Saint-Amand 5,0694 ·
+#                  Le Graveyron 5,0760). ⛔ Ne pas descendre sous 3,96 :
+#                  c'est `lonmax` de `DOMAINE_TAH`.
+#   lonmax 7,60  — le Mercantour et la Roya (Col de Tende 7,5706 ·
+#                  Cagnourine 7,5965).
+DOMAINE = dict(latmin=43.70, latmax=46.45, lonmin=5.00, lonmax=7.60)
 
 # ── Le SECOND domaine : les Pyrénées (12/08/2026) ─────────────────────
 # ⚠️ CE N'EST PAS UN ÉLARGISSEMENT DU PREMIER, ET LA DIFFÉRENCE EST TOUT.
@@ -269,6 +346,14 @@ DOMAINE = dict(latmin=44.8, latmax=46.3, lonmin=5.5, lonmax=7.6)
 # — donc rompu la comparabilité de toutes les archives déjà écrites. Un
 # SECOND domaine laisse le premier strictement intact : même bornes, même
 # artefact, même sha, mêmes colonnes qu'hier.
+# ⓘ 16/08 — ET C'EST TOUJOURS LE BON ARGUMENT POUR LES PYRÉNÉES, même si
+# `DOMAINE` a bel et bien été élargi depuis (cf. son commentaire). Les
+# deux cas ne se ressemblent pas : les Pyrénées sont à 400 km des Alpes,
+# la boîte qui couvrirait les deux ferait 60 000 colonnes de vide entre
+# elles. Ce qui a changé le 16/08 n'est pas « on peut élargir », c'est
+# « on peut élargir EN PROUVANT que les altitudes servies ne bougent
+# pas ». Fusionner deux massifs éloignés reste, lui, une mauvaise idée
+# pour une raison qui n'a rien à voir avec le sha256 : le budget.
 #
 # ⛔ ET LES PYRÉNÉES N'ONT PAS LA FORME DES ALPES. Mesuré le 12/08 sur les
 # 648 balises du catalogue : 76 balises dans la bande 42-44 N × −2,5-3,5 E,

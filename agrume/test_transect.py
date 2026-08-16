@@ -228,21 +228,35 @@ def main():
           "et ce n'est PAS négligeable ──")
     # ⚠️ Cette section a démenti un commentaire écrit une heure plus tôt
     # dans `transect.py`, qui annonçait « quelques dizaines de mètres ».
-    diagonale = T.ecart_droite_m((DOMAINE["latmin"], DOMAINE["lonmin"]),
-                                 (DOMAINE["latmax"], DOMAINE["lonmax"]))
-    verifier("⚠️ sur la diagonale du domaine (233 km), l'écart atteint "
-             "0,6 MAILLE — assez pour changer de colonne",
-             1000.0 < diagonale < 1400.0,
-             f"{diagonale:.0f} m contre 1950 m de maille")
+    # ⚠️ 16/08 — CES TROIS CONTRÔLES ÉTAIENT ÉCRITS SUR LA TAILLE DE
+    # L'ANCIEN DOMAINE, et l'élargissement les a fait tomber : « 233 km »
+    # et les bornes 1000-1400 m étaient la diagonale du Nord-Alpes
+    # d'avant. ⛔ Les rendre plus larges pour qu'ils repassent aurait été
+    # la mauvaise réponse — ça aurait effacé ce que la section mesure. Ce
+    # qu'elle doit établir est une LOI, pas deux nombres : l'écart entre
+    # la droite en lat/lon et l'orthodromie croît comme le CARRÉ de la
+    # longueur, donc il est négligeable sur un transect de vol et ne l'est
+    # plus sur la diagonale du domaine. Les longueurs sont donc calculées,
+    # et la loi est vérifiée sur le rapport des deux.
+    coin_sw = (DOMAINE["latmin"], DOMAINE["lonmin"])
+    coin_ne = (DOMAINE["latmax"], DOMAINE["lonmax"])
+    diagonale = T.ecart_droite_m(coin_sw, coin_ne)
+    L_diag = T.haversine_km(*coin_sw, *coin_ne)
+    L_court = T.haversine_km(*a, *b)
+    maille_m = 0.025 * 111.195 * 1000 * math.cos(math.radians(45.0))
+    verifier(f"⚠️ sur la diagonale du domaine ({L_diag:.0f} km), l'écart "
+             f"dépasse LA MAILLE — assez pour changer de colonne",
+             diagonale > maille_m,
+             f"{diagonale:.0f} m contre {maille_m:.0f} m de maille")
     court = T.ecart_droite_m(a, b)
-    verifier("sur un segment de 55 km il retombe sous 100 m, et là il est "
-             "vraiment négligeable", court < 100.0, f"{court:.0f} m")
+    verifier(f"sur un segment de {L_court:.0f} km il retombe sous 100 m, et "
+             f"là il est vraiment négligeable", court < 100.0, f"{court:.0f} m")
+    attendu = (L_diag / L_court) ** 2
     verifier("l'écart croît comme le CARRÉ de la longueur (ce qui explique "
              "les deux chiffres)",
-             abs(diagonale / max(court, 1e-9)
-                 - (233.0 / 55.0) ** 2) < 0.35 * (233.0 / 55.0) ** 2,
+             abs(diagonale / max(court, 1e-9) - attendu) < 0.35 * attendu,
              f"rapport mesuré {diagonale/max(court,1e-9):.1f}, "
-             f"attendu ~{(233.0/55.0)**2:.1f}")
+             f"attendu ~{attendu:.1f}")
     verifier("la réponse PUBLIE cet écart pour le segment demandé",
              abs(fin["segment"]["ecartDroiteLatLonM"] - court) < 5.0,
              f"{fin['segment']['ecartDroiteLatLonM']} m")
