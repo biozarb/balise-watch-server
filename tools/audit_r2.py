@@ -844,8 +844,12 @@ def main(argv=None) -> int:
         apercu = ", ".join(pentes["jeunes"][:5])
         if len(pentes["jeunes"]) > 5:
             apercu += f" … (+{len(pentes['jeunes']) - 5})"
+        # ⚠️ Sur stderr en mode `--json` : sinon cette ligne se retrouve
+        # AVANT l'objet sur stdout et casse tout lecteur machine — vu en
+        # vrai le 16/08 en voulant relire les orphelins en JSON.
         print(f"  ⓘ {len(pentes['jeunes'])} préfixe(s) sans pente (moins de "
-              f"{MINI_RELEVES} relevés) — hors échéance : {apercu}")
+              f"{MINI_RELEVES} relevés) — hors échéance : {apercu}",
+              file=sys.stderr if a.json else sys.stdout)
     v = verdict(inv, pente, a.seuil_go, a.horizon_jours,
                 couverture_partielle=not couverture_complete,
                 rapprochements=rapprochements)
