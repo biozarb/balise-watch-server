@@ -170,6 +170,57 @@ class Colonnes:
         out["isobares"]["altitude"] = part(self.ziso)
         return out
 
+    # ── Le run était-il venté ? ──────────────────────────────────────
+    def vent_10m(self):
+        """Vent horizontal à 10 m/sol (maille 0,025°) — publié pour que
+        le run VENTÉ SE SIGNALE TOUT SEUL dans le manifeste, au lieu
+        qu'une session aille sonder R2 à la main pour le savoir (l'idée
+        du 10/08, `claude/lot-h-etape-7-recherche-du-vent-10-08.md`
+        §4.1 : « la distribution de |V| à 10 m aux 127 points ne coûte
+        NI un octet NI une seconde » — `c0025` est déjà en mémoire ici).
+
+        ⚠️ PUBLIÉ GLOBAL **ET** PAR DOMAINE (16/08, ajouté pour le Lot K).
+        Depuis l'élargissement des Alpes et l'arrivée des Pyrénées et de
+        Tarn/Aveyron/Hérault, l'archive mélange des domaines de tailles
+        très différentes (207/55/23 balises mesuré le 16/08). Un vent
+        fort localisé à UN SEUL domaine serait noyé dans la médiane
+        d'ensemble, dominée par le plus grand — mesuré le 16/08 : le
+        15/08 les Pyrénées voyaient 80 couples ≥ 8 m/s à 100 m/sol quand
+        les Alpes n'en voyaient qu'1. Sans le détail par domaine,
+        `ensemble` resterait calme et cacherait un domaine qui vente.
+        """
+        k = self.i_niveau_0025.get(10)
+        iu, iv = self.i_param_0025.get("u"), self.i_param_0025.get("v")
+        if k is None or iu is None or iv is None:
+            return None
+        u = np.asarray(self.c0025[:, iu, k, :], dtype=np.float32)
+        v = np.asarray(self.c0025[:, iv, k, :], dtype=np.float32)
+        vitesse = np.hypot(u, v)
+
+        def stat(m):
+            m = m[np.isfinite(m)]
+            if not len(m):
+                return None
+            s = np.sort(m)
+            def q(p):
+                return float(s[min(len(s) - 1, int(p * len(s)))])
+            return dict(n=int(len(s)), mediane=round(q(0.5), 2),
+                        d9=round(q(0.9), 2), max=round(float(s[-1]), 2),
+                        n_ge_6ms=int((s >= 6).sum()),
+                        n_ge_8ms=int((s >= 8).sum()))
+
+        doms = [b.get("domaine") for b in self.balises]
+        par_domaine = {}
+        for dom in sorted({d for d in doms if d}):
+            lignes = vitesse[[k2 for k2, d in enumerate(doms) if d == dom]]
+            par_domaine[dom] = stat(lignes.ravel())
+        hors = [k2 for k2, d in enumerate(doms) if not d]
+        if hors:
+            par_domaine["hors_domaine"] = stat(vitesse[hors].ravel())
+
+        return dict(unite="m/s", niveau_agl_m=10,
+                    ensemble=stat(vitesse.ravel()), par_domaine=par_domaine)
+
     # ── Sérialisation ─────────────────────────────────────────────────
     def manifeste(self, extra=None):
         m = dict(
@@ -196,6 +247,7 @@ class Colonnes:
             balises=self.balises,
             remplissage=self.remplissage(),
             remplissage_par_parametre=self.remplissage_par_parametre(),
+            vent_10m=self.vent_10m(),
             avertissement=(
                 "Les deux mailles sont archivées SÉPARÉMENT, à leurs niveaux "
                 "natifs. Le raccord 0,01°/0,025° à 100 m/sol est une décision "

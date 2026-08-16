@@ -344,6 +344,59 @@ def main():
     verifier("il porte chaque balise, avec son identifiant",
              len(man["balises"]) == 3 and man["balises"][0]["id"] == "1")
 
+    print("\n── ⚠️ Le run était-il venté ? (`vent_10m`, ajouté 16/08) ──")
+    # Deux domaines de tailles très différentes — c'est EXACTEMENT ce que
+    # l'archive réelle porte depuis l'élargissement du 16/08 (207 Alpes,
+    # 55 Pyrénées, 23-26 TAH). Le point du banc : si un domaine PETIT
+    # vente fort pendant qu'un domaine GRAND est calme, `ensemble` doit
+    # rester lisible comme calme (dominé par le grand) — et c'est
+    # PRÉCISÉMENT le trou que `par_domaine` doit combler.
+    bal_vent = [
+        dict(id="v1", lat=42.9, lon=0.5, domaine="pyrenees"),
+        dict(id="v2", lat=42.9, lon=0.6, domaine="pyrenees"),
+        dict(id="c1", lat=45.0, lon=6.0, domaine="nord-alpes"),
+        dict(id="c2", lat=45.1, lon=6.1, domaine="nord-alpes"),
+        dict(id="c3", lat=45.2, lon=6.2, domaine="nord-alpes"),
+        dict(id="r1", lat=46.8, lon=6.9, domaine=None),  # radiosondage
+    ]
+    colv = C.Colonnes("2026-08-16T00:00:00Z", bal_vent, [0, 1])
+    k10 = NIVEAUX_H_0025.index(10)
+    iu = {p["nom"]: k for k, p in enumerate(Q.PARAMS_0025)}["u"]
+    iv = {p["nom"]: k for k, p in enumerate(Q.PARAMS_0025)}["v"]
+    # Pyrénées : 9 m/s plein est. Alpes : 1 m/s. Radiosondage : 0,5 m/s.
+    colv.c0025[0:2, iu, k10, :] = 9.0
+    colv.c0025[0:2, iv, k10, :] = 0.0
+    colv.c0025[2:5, iu, k10, :] = 1.0
+    colv.c0025[2:5, iv, k10, :] = 0.0
+    colv.c0025[5, iu, k10, :] = 0.5
+    colv.c0025[5, iv, k10, :] = 0.0
+    vv = colv.vent_10m()
+    verifier("l'ensemble penche vers le plus GRAND domaine (3 Alpes "
+             "contre 2 Pyrénées) — 1 m/s, pas 9",
+             vv["ensemble"]["mediane"] == 1.0, str(vv["ensemble"]))
+    verifier("⚠️ et LA MÉDIANE de l'ensemble (1 m/s) ne franchit AUCUN des "
+             "deux seuils publiés (6, 8 m/s) alors qu'un domaine entier "
+             "vente à 9 — un lecteur qui ne lirait que `ensemble.mediane` "
+             "conclurait « calme », à tort : c'est le trou que "
+             "`par_domaine` comble",
+             vv["ensemble"]["mediane"] < 6.0
+             and vv["par_domaine"]["pyrenees"]["mediane"] >= 8.0,
+             f"ensemble médiane={vv['ensemble']['mediane']} · "
+             f"pyrenees médiane={vv['par_domaine']['pyrenees']['mediane']}")
+    verifier("le domaine Pyrénées est bien détecté comme venté",
+             vv["par_domaine"]["pyrenees"]["mediane"] == 9.0)
+    verifier("le domaine Nord-Alpes reste mesuré calme",
+             vv["par_domaine"]["nord-alpes"]["mediane"] == 1.0)
+    verifier("la balise sans domaine (radiosondage) tombe dans "
+             "`hors_domaine`, pas perdue",
+             vv["par_domaine"]["hors_domaine"]["n"] == 2)  # 1 balise × 2 éch.
+    verifier("`vent_10m` entre bien dans le manifeste",
+             "vent_10m" in colv.manifeste())
+
+    vide = C.Colonnes("R", [dict(id="x", lat=45.0, lon=6.0)], [0])
+    verifier("aucune donnée finie → l'ensemble vaut None, pas une erreur",
+             vide.vent_10m()["ensemble"] is None)
+
     print("\n── Aller-retour sur disque ───────────────────────────────")
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / "c.npz"
