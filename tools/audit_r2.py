@@ -45,6 +45,16 @@
 #     de la finesse mais un calcul qui ne confonde pas une MARCHE avec
 #     une PENTE. Voir `_pente_mediane` et `MINI_RELEVES`.
 #
+#  ⛔ ET LA PENTE NE SUFFIT PAS. Elle répond à « ça monte ? » ; elle ne
+#     répondra jamais à « ce qui est là est-il légitime ? ». Une jauge
+#     qui n'a que la pente est aveugle à une croissance faite UNIQUEMENT
+#     de marches — un domaine de plus, une boîte élargie, et rien n'a de
+#     tendance. Pour les produits qui publient un index (`agrume/grille`,
+#     `agrume/pi/grille`), la jauge confronte donc l'index au bucket :
+#     tout objet présent doit être RÉCLAMÉ par quelqu'un. Un agrandissement
+#     ne crée aucun orphelin ; une purge qui cesse de mordre en crée dès
+#     la nuit suivante. Voir `PRODUITS_INDEXES` et `rapprocher`.
+#
 #  ⚠️ LECTURE SEULE. Ce script ne supprime RIEN, jamais, sous aucune
 #     option. Les purges sont ailleurs et séparées exprès
 #     (`purge_isobars_orphans.py`, `purge_windgrid_orphans.py`).
@@ -135,6 +145,36 @@ MINI_RELEVES = int(os.environ.get("BW_R2_MINI_RELEVES", "4"))
 # groupe qui compte : le 10/08, c'est celui qui voyait enfin les trois
 # buckets.
 ESPACEMENT_MINI_JOURS = float(os.environ.get("BW_R2_ESPACEMENT_MINI", "0.25"))
+
+# ⚠️ LES PRODUITS INDEXÉS — LE CONTRAT DE COMPTABILITÉ (16/08).
+#
+# La pente répond à « ça monte ? ». Elle ne répond PAS à « ce qui est là
+# est-il légitime ? », et c'est une autre question — celle qui compte
+# pour un produit à rétention, dont le poids est censé être un plateau.
+#
+# Ces produits publient un `index.json` qui déclare, CLÉ PAR CLÉ, tout
+# ce qui doit exister sous leur préfixe (c'est ce qui leur permet de
+# purger sans jamais faire de ListObjects). Le rapprochement est donc
+# gratuit ici : le listing est déjà fait pour la jauge, il ne manque que
+# la lecture de l'index — 1 opération classe B par produit.
+#
+# ⛔ CE QUE ÇA CHANGE : un octet de plus ne dit rien, un objet que
+# personne ne réclame dit tout. Agrandir une boîte augmente le poids
+# sans créer un seul orphelin ; une purge qui cesse de mordre en crée
+# immédiatement. La marche et la fuite, que la pente confond par
+# construction, sont ici SÉPARÉES — et la fuite se voit dès la nuit
+# suivante au lieu de trois jours plus tard.
+#
+# ⚠️ Contrôle du 16/08 avant d'écrire une ligne de ce code : 496 clés
+# réclamées / 496 présentes pour `agrume/grille` (0 orphelin, la
+# rétention mord), et 7 réclamées / 25 présentes pour `agrume/pi/grille`
+# — soit les 18 orphelins du `TypeError` de `purger()` des 12-13/08,
+# trouvés à la main ce jour-là et TOUJOURS là. Ce mécanisme les aurait
+# nommés le lendemain matin.
+PRODUITS_INDEXES = (
+    ("balise-watch-grids", "agrume/grille/index.json", "agrume/grille/"),
+    ("balise-watch-grids", "agrume/pi/grille/index.json", "agrume/pi/grille/"),
+)
 
 GO = 1_000_000_000  # R2 facture en Go décimaux, pas en Gio — ne pas
                     # « corriger » en 1024³ : ça sous-estimerait de 7 %
@@ -370,6 +410,53 @@ def pentes_des_prefixes(historique, prefixes_courants) -> dict:
             "par_prefixe": connues, "jeunes": sorted(jeunes)}
 
 
+def rapprocher(index, cle_index: str, prefixe: str, objets) -> dict:
+    """Confronte l'index d'un produit à ce que le bucket contient
+    VRAIMENT. `objets` = itérable de (bucket, cle, taille) déjà filtré
+    sur le bon bucket.
+
+    ORPHELIN  : présent dans R2, réclamé par personne — de la place
+                payée pour rien, et le symptôme d'une purge qui ne mord
+                plus (les 18 du `TypeError` du 12/08).
+    MANQUANT  : déclaré par l'index, absent du bucket — plus grave dans
+                l'autre sens : le produit servi a des trous, et c'est
+                l'index qui ment.
+    RESTE     : suppression ratée, déjà connue de l'index et reprise au
+                run suivant. Présent, réclamé, mais pas légitime pour
+                autant — compté à part plutôt que noyé dans l'un ou
+                l'autre.
+
+    ⚠️ Un index ILLISIBLE ne rend pas « 0 orphelin ». Il rend
+    `lu=False`, et c'est à l'appelant d'en faire un motif : même piège
+    que `couverture_partielle`, un rapprochement qui n'a pas eu lieu ne
+    doit jamais se lire comme un rapprochement réussi.
+    """
+    if not isinstance(index, dict):
+        return {"prefixe": prefixe, "lu": False,
+                "raison": "index absent ou illisible"}
+
+    reclamees = {cle_index}
+    for e in index.get("runs") or []:
+        reclamees.update(e.get("cles") or [])
+    restes = set(index.get("restes") or [])
+
+    presentes = {cle: taille for _, cle, taille in objets
+                 if cle.startswith(prefixe)}
+    orphelins = sorted(set(presentes) - reclamees - restes)
+    return {
+        "prefixe": prefixe, "lu": True,
+        "runs": len(index.get("runs") or []),
+        "retention": index.get("retention_runs"),
+        "reclamees": len(reclamees),
+        "presentes": len(presentes),
+        "orphelins": orphelins,
+        "octets_orphelins": sum(presentes[c] for c in orphelins),
+        "manquants": sorted(reclamees - set(presentes)),
+        "restes_presents": sorted(restes & set(presentes)),
+        "octets": sum(presentes.values()),
+    }
+
+
 def jours_avant(total_octets: int, pente_mois: float | None,
                 cible_go: float) -> float | None:
     """Combien de jours avant d'atteindre `cible_go` à cette pente.
@@ -389,7 +476,8 @@ def jours_avant(total_octets: int, pente_mois: float | None,
 def verdict(inventaire: dict, pente_mois: float | None,
             seuil_go: float = SEUIL_ALERTE_GO,
             horizon: int = HORIZON_ALERTE_JOURS,
-            couverture_partielle: bool = False) -> dict:
+            couverture_partielle: bool = False,
+            rapprochements=None) -> dict:
     """Décide, et dit POURQUOI. Le motif compte autant que le booléen :
     c'est lui qui part dans le mail, et un mail qui dit seulement
     « seuil dépassé » oblige à rouvrir un terminal pour savoir quoi
@@ -417,10 +505,34 @@ def verdict(inventaire: dict, pente_mois: float | None,
     if j_palier is not None and j_palier <= horizon and go < PALIER_STOCKAGE_GO:
         motifs.append(f"au rythme mesuré (+{pente_mois:.2f} Go/mois), palier "
                       f"atteint dans {j_palier:.0f} jours")
+    # ⛔ Le contrat de comptabilité, indépendant du poids et de la pente.
+    # Un orphelin n'est pas une croissance : c'est de la place payée que
+    # plus personne ne réclame, et un seul suffit à dire que la purge du
+    # produit ne mord plus. On ne tolère donc pas « un peu » d'orphelins
+    # — un seuil de tolérance ici, c'est une fuite qu'on autorise.
+    for r in rapprochements or []:
+        if not r.get("lu"):
+            motifs.append(f"RAPPROCHEMENT IMPOSSIBLE pour « {r['prefixe']} » "
+                          f"({r.get('raison', 'raison inconnue')}) — les "
+                          f"orphelins de ce produit ne sont PAS couverts "
+                          f"par ce bilan")
+            continue
+        if r["orphelins"]:
+            motifs.append(
+                f"{len(r['orphelins'])} objet(s) ORPHELIN(S) sous "
+                f"« {r['prefixe']} » ({r['octets_orphelins'] / GO:.3f} Go) : "
+                f"présents dans le bucket, réclamés par aucun index — la "
+                f"purge de ce produit ne mord plus")
+        if r["manquants"]:
+            motifs.append(
+                f"{len(r['manquants'])} clé(s) déclarée(s) par l'index de "
+                f"« {r['prefixe']} » sont ABSENTES du bucket — le produit "
+                f"servi a des trous")
     return {"alerte": bool(motifs), "motifs": motifs,
             "go": go, "pente_go_mois": pente_mois,
             "jours_avant_palier": j_palier,
-            "couverture_partielle": couverture_partielle}
+            "couverture_partielle": couverture_partielle,
+            "rapprochements": rapprochements or []}
 
 
 def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
@@ -474,12 +586,41 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
                else ("       (trop jeune)" if pentes else ""))
         log(f"│ {nom:38s} {e['octets'] / GO:8.3f} Go  "
             f"{e['objets']:7d} objets{col}")
+    # ⛔ Le contrat de comptabilité. Distinct du poids et de la pente :
+    #    il ne dit pas « combien » mais « est-ce que tout ce qui est là
+    #    est réclamé par quelqu'un ». C'est la seule ligne qui sépare un
+    #    plateau légitime d'une purge qui a cessé de mordre.
+    rapp = v.get("rapprochements") or []
+    if rapp:
+        log("├─ produits indexés : tout est-il réclamé ? ───────────────────")
+        for r in rapp:
+            if not r.get("lu"):
+                log(f"│ {r['prefixe']:38s} ⚠️  NON RAPPROCHÉ "
+                    f"({r.get('raison', '?')})")
+                continue
+            etat = ("✓ tout est réclamé" if not r["orphelins"]
+                    else f"⛔ {len(r['orphelins'])} orphelin(s) · "
+                         f"{r['octets_orphelins'] / GO:.3f} Go")
+            log(f"│ {r['prefixe']:38s} {r['presentes']:4d} présentes / "
+                f"{r['reclamees']:4d} réclamées   {etat}")
+            if r["restes_presents"]:
+                log(f"│ {'':38s} ⓘ {len(r['restes_presents'])} suppression(s) "
+                    f"ratée(s), reprise(s) au prochain run")
+            for cle in r["orphelins"][:3]:
+                log(f"│    ↳ {cle}")
+            if len(r["orphelins"]) > 3:
+                log(f"│    ↳ … (+{len(r['orphelins']) - 3})")
     log("├─ coût de cet audit ──────────────────────────────────────────")
     # ⚠️ Un audit qui surveille un quota et le consomme sans le dire est
     # une jauge malhonnête. `ListObjectsV2` EST une opération classe A.
     log(f"│ {class_a_consommees} opérations classe A consommées par ce listing "
         f"({class_a_consommees * 30 / PALIER_CLASS_A_MOIS * 100:.2f} % "
         f"du palier si nocturne)")
+    if rapp:
+        # Les GetObject des index sont de la classe B (palier séparé,
+        # 10 M/mois) — négligeable, mais le dire fait partie du contrat.
+        log(f"│ {len(rapp)} opérations classe B (lecture des index) — palier "
+            f"séparé de 10 M/mois")
     log("└──────────────────────────────────────────────────────────────")
     for m in v["motifs"]:
         log(f"⚠️  {m}")
@@ -592,6 +733,22 @@ def parcourir(c, buckets, log=print):
     return objets, requetes
 
 
+def lire_index(c, bucket: str, cle: str):
+    """L'index d'un produit — 1 GetObject, classe B.
+
+    ⚠️ Rend `None` quand il ne peut PAS être lu, quelle qu'en soit la
+    cause. Surtout pas `{}` : un index vide est une information (le
+    produit a perdu son index, tout devient orphelin — c'est l'incident
+    des 12-13/08), un index illisible en est une autre (le
+    rapprochement n'a pas eu lieu). Les confondre transformerait une
+    panne de lecture en accusation, ou l'inverse.
+    """
+    try:
+        return json.loads(c.get_object(Bucket=bucket, Key=cle)["Body"].read())
+    except Exception:  # noqa: BLE001 — NoSuchKey, réseau, JSON cassé : idem
+        return None
+
+
 def charger_historique(chemin: Path, maxi: int = 400) -> list[dict]:
     """JSONL, une ligne par relevé. Format choisi pour être appendable
     sans relire (un relevé nocturne ne doit jamais réécrire l'historique
@@ -639,6 +796,16 @@ def main(argv=None) -> int:
         c = client()
         buckets, couverture_complete = lister_buckets(c)
         objets, requetes = parcourir(c, buckets)
+        # ⛔ Le rapprochement ne coûte QUE la lecture de l'index : le
+        # listing vient d'être fait pour la jauge. C'est ce qui permet
+        # de poser un contrat de comptabilité sans nouvelle dépense.
+        # Un produit dont le bucket n'est pas dans la couverture du jour
+        # est écarté — l'accuser d'avoir 100 % d'orphelins parce qu'on
+        # n'a pas pu le lister serait le pire des faux positifs.
+        rapprochements = [
+            rapprocher(lire_index(c, b, cle), cle, prefixe,
+                       [o for o in objets if o[0] == b])
+            for b, cle, prefixe in PRODUITS_INDEXES if b in buckets]
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
         return 2
@@ -680,13 +847,16 @@ def main(argv=None) -> int:
         print(f"  ⓘ {len(pentes['jeunes'])} préfixe(s) sans pente (moins de "
               f"{MINI_RELEVES} relevés) — hors échéance : {apercu}")
     v = verdict(inv, pente, a.seuil_go, a.horizon_jours,
-                couverture_partielle=not couverture_complete)
+                couverture_partielle=not couverture_complete,
+                rapprochements=rapprochements)
 
     if a.json:
         print(json.dumps({"releve": releve, "verdict": v,
                           "par_prefixe": inv["par_prefixe"],
                           "pentes": pentes,
-                          "class_a": requetes}, ensure_ascii=False, indent=2))
+                          "class_a": requetes,
+                          "class_b": len(rapprochements)},
+                         ensure_ascii=False, indent=2))
     else:
         rendre(inv, pente, v, requetes, pentes=pentes)
 

@@ -46,7 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit_r2 import (  # noqa: E402
     GO, PALIER_STOCKAGE_GO, agreger, charger_historique, jours_avant,
     meme_perimetre, pente_du_prefixe, pente_go_par_mois, pentes_des_prefixes,
-    prefixe_de, verdict,
+    prefixe_de, rapprocher, verdict,
 )
 
 T0 = datetime(2026, 8, 1, 3, 0, tzinfo=timezone.utc)
@@ -686,6 +686,207 @@ class PenteParPrefixe(unittest.TestCase):
                         f"une fuite de {p2['total']:.2f} Go/mois doit crier")
         self.assertFalse(verdict(inv, p["total"], seuil_go=7.0,
                                  horizon=60)["alerte"])
+
+
+class Rapprochement(unittest.TestCase):
+    """⛔ LE CONTRAT DE COMPTABILITÉ, et la raison pour laquelle la pente
+    ne peut pas le remplacer.
+
+    Une jauge qui n'a que la pente est aveugle à une croissance faite
+    UNIQUEMENT de marches : un domaine de plus, une boîte élargie, et
+    aucune tendance n'apparaît jamais. Or ces produits publient un index
+    qui déclare, clé par clé, tout ce qui doit exister — la vraie
+    question n'est donc pas « combien ça pèse » mais **« est-ce que tout
+    ce qui est là est réclamé par quelqu'un »**.
+
+    Chiffres du 16/08, mesurés sur R2 avant d'écrire le code :
+    `agrume/grille` 496 présentes / 496 réclamées (0 orphelin) et
+    `agrume/pi/grille` 25 présentes / 7 réclamées — les 18 orphelins du
+    `TypeError` de `purger()` des 12-13/08, toujours là."""
+
+    CLE = "agrume/grille/index.json"
+    PREF = "agrume/grille/"
+
+    def index(self, *runs, restes=()):
+        return {"produit": "agrume-grille", "retention_runs": 3,
+                "runs": [{"run": r, "domaine": d, "cles": list(c)}
+                         for r, d, c in runs],
+                "restes": list(restes)}
+
+    def objets(self, *cles):
+        return [("grids", c, 1_000_000) for c in cles]
+
+    def test_tout_est_reclame(self):
+        idx = self.index(("R1", "alpes", [self.PREF + "alpes/R1/e00.bin"]))
+        r = rapprocher(idx, self.CLE, self.PREF,
+                       self.objets(self.PREF + "alpes/R1/e00.bin", self.CLE))
+        self.assertEqual(r["orphelins"], [])
+        self.assertEqual(r["manquants"], [])
+        self.assertEqual(r["presentes"], 2)
+
+    def test_l_index_se_reclame_lui_meme(self):
+        # Sinon `index.json` serait éternellement son propre orphelin.
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.CLE))
+        self.assertEqual(r["orphelins"], [])
+
+    def test_un_objet_que_personne_ne_reclame_est_un_orphelin(self):
+        # ⛔ Le cas des 12-13/08 : `purger()` lève, les clés restent, et
+        # rien dans le poids ne le dit — 24 Mo sur un compte de 3,4 Go.
+        idx = self.index(("R2", "alpes", [self.PREF + "alpes/R2/e00.bin"]))
+        r = rapprocher(idx, self.CLE, self.PREF, self.objets(
+            self.CLE, self.PREF + "alpes/R2/e00.bin",
+            self.PREF + "alpes/R1/e00.bin", self.PREF + "alpes/R1/e01.bin"))
+        self.assertEqual(len(r["orphelins"]), 2)
+        self.assertEqual(r["octets_orphelins"], 2_000_000)
+        self.assertIn(self.PREF + "alpes/R1/e00.bin", r["orphelins"])
+
+    def test_une_cle_declaree_mais_absente_est_un_MANQUANT(self):
+        # L'autre sens, plus grave : le produit servi a des trous et
+        # c'est l'index qui ment. Ne pas confondre les deux.
+        idx = self.index(("R1", "alpes", [self.PREF + "alpes/R1/e00.bin",
+                                          self.PREF + "alpes/R1/e01.bin"]))
+        r = rapprocher(idx, self.CLE, self.PREF,
+                       self.objets(self.CLE, self.PREF + "alpes/R1/e00.bin"))
+        self.assertEqual(r["manquants"], [self.PREF + "alpes/R1/e01.bin"])
+        self.assertEqual(r["orphelins"], [])
+
+    def test_un_reste_n_est_pas_un_orphelin_mais_est_compte(self):
+        # Une suppression ratée est DÉJÀ connue de l'index et reprise au
+        # run suivant. L'accuser d'orphelinat ferait crier sur un
+        # mécanisme qui fonctionne — mais la taire ferait disparaître de
+        # la place payée pour rien.
+        mort = self.PREF + "alpes/R0/e00.bin"
+        idx = self.index(("R1", "alpes", [self.PREF + "alpes/R1/e00.bin"]),
+                         restes=[mort])
+        r = rapprocher(idx, self.CLE, self.PREF, self.objets(
+            self.CLE, self.PREF + "alpes/R1/e00.bin", mort))
+        self.assertEqual(r["orphelins"], [])
+        self.assertEqual(r["restes_presents"], [mort])
+
+    def test_un_autre_prefixe_n_est_pas_concerne(self):
+        # `agrume/colonnes` n'a pas d'index (il se purge par
+        # arithmétique) : le rapprochement ne doit pas le regarder, et
+        # surtout pas le déclarer orphelin en bloc.
+        idx = self.index(("R1", "alpes", [self.PREF + "alpes/R1/e00.bin"]))
+        r = rapprocher(idx, self.CLE, self.PREF, self.objets(
+            self.CLE, self.PREF + "alpes/R1/e00.bin",
+            "agrume/colonnes/R1/colonnes.npz"))
+        self.assertEqual(r["orphelins"], [])
+        self.assertEqual(r["presentes"], 2)
+
+    def test_un_index_VIDE_rend_tout_orphelin(self):
+        # ⛔ C'est une information, pas une panne : un produit qui perd
+        # son index ne sait plus rien purger (incident des 12-13/08). Ça
+        # DOIT crier.
+        r = rapprocher(self.index(), self.CLE, self.PREF, self.objets(
+            self.CLE, self.PREF + "alpes/R1/e00.bin"))
+        self.assertEqual(len(r["orphelins"]), 1)
+
+    def test_un_index_ILLISIBLE_ne_rend_pas_zero_orphelin(self):
+        # ⚠️ Le piège central, jumeau de `couverture_partielle` : un
+        # rapprochement qui n'a pas eu lieu ne doit jamais se lire comme
+        # un rapprochement réussi.
+        r = rapprocher(None, self.CLE, self.PREF, self.objets(self.CLE))
+        self.assertFalse(r["lu"])
+        self.assertNotIn("orphelins", r)
+
+    # ── ce que le verdict en fait ────────────────────────────────────
+    def inv(self, go=3.4):
+        return {"octets": int(go * GO), "objets": 1,
+                "par_bucket": {}, "par_prefixe": {}}
+
+    def test_un_orphelin_suffit_a_declencher(self):
+        # ⛔ Pas de seuil de tolérance : un seuil ici serait une fuite
+        # qu'on autorise. Et le niveau (3,4 Go) comme la pente (0) sont
+        # parfaitement calmes — c'est bien le rapprochement qui parle.
+        idx = self.index()
+        r = rapprocher(idx, self.CLE, self.PREF,
+                       self.objets(self.CLE, self.PREF + "alpes/R1/e00.bin"))
+        v = verdict(self.inv(), 0.0, rapprochements=[r])
+        self.assertTrue(v["alerte"])
+        self.assertIn("ORPHELIN", v["motifs"][0])
+
+    def test_le_motif_NOMME_le_produit_et_le_poids(self):
+        # Un mail qui dit « orphelins » sans dire lesquels oblige à
+        # rouvrir un terminal pour savoir quoi faire.
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.CLE, self.PREF + "alpes/R1/e00.bin"))
+        m = verdict(self.inv(), 0.0, rapprochements=[r])["motifs"][0]
+        self.assertIn(self.PREF, m)
+        self.assertIn("0.001 Go", m)
+
+    def test_un_rapprochement_impossible_est_un_motif(self):
+        v = verdict(self.inv(), 0.0,
+                    rapprochements=[rapprocher(None, self.CLE, self.PREF, [])])
+        self.assertTrue(v["alerte"])
+        self.assertIn("RAPPROCHEMENT IMPOSSIBLE", v["motifs"][0])
+
+    def test_tout_propre_ne_dit_rien(self):
+        # L'autre moitié : pas de cri au loup. Un produit à son plateau,
+        # même gros, même après un agrandissement, reste silencieux.
+        idx = self.index(("R1", "alpes", [self.PREF + "alpes/R1/e00.bin"]))
+        r = rapprocher(idx, self.CLE, self.PREF,
+                       self.objets(self.CLE, self.PREF + "alpes/R1/e00.bin"))
+        v = verdict(self.inv(), 0.0, rapprochements=[r])
+        self.assertFalse(v["alerte"], f"faux positif : {v['motifs']}")
+
+    def test_sans_rapprochement_le_verdict_est_celui_d_avant(self):
+        # Compatibilité : appelé sans l'argument, rien ne change.
+        self.assertFalse(verdict(self.inv(), 0.0)["alerte"])
+
+
+class MarcheEtOrphelin(unittest.TestCase):
+    """⛔ LA QUESTION DE YANN, LE 16/08 : « si j'agrandis la boîte des
+    Alpes, on risque d'avoir la même chose — mais il ne faut pas non
+    plus qu'elle ne fasse plus son travail. »
+
+    Les deux moitiés, sur le MÊME jeu : un agrandissement (le poids
+    double, l'index suit) doit être MUET, et une purge qui cesse de
+    mordre (le poids double, l'index ne suit pas) doit CRIER. C'est
+    précisément ce qu'une pente, quelle qu'elle soit, ne peut pas
+    distinguer — les deux séries de poids sont identiques."""
+
+    CLE = "agrume/grille/index.json"
+    PREF = "agrume/grille/"
+
+    def cles(self, run, n=4):
+        return [f"{self.PREF}alpes/{run}/e{i:02d}.bin" for i in range(n)]
+
+    def test_agrandir_la_boite_ne_cree_AUCUN_orphelin(self):
+        # Même nombre d'objets, deux fois plus lourds : l'index déclare
+        # exactement les mêmes clés. Rien à signaler.
+        idx = {"runs": [{"cles": self.cles("R1")}], "restes": []}
+        gros = [("grids", c, 2_000_000) for c in self.cles("R1")]
+        r = rapprocher(idx, self.CLE, self.PREF,
+                       gros + [("grids", self.CLE, 500)])
+        self.assertEqual(r["orphelins"], [])
+        self.assertFalse(verdict({"octets": int(4.9 * GO), "objets": 1,
+                                  "par_bucket": {}, "par_prefixe": {}},
+                                 0.0, rapprochements=[r])["alerte"])
+
+    def test_une_purge_qui_ne_mord_plus_CRIE_des_la_nuit_suivante(self):
+        # Poids identique au cas précédent (2 runs légers = 1 run gros),
+        # mais un run que l'index ne réclame plus. La pente ne peut PAS
+        # les distinguer ; le rapprochement, si — et tout de suite.
+        idx = {"runs": [{"cles": self.cles("R2")}], "restes": []}
+        objets = [("grids", c, 1_000_000)
+                  for c in self.cles("R1") + self.cles("R2")]
+        r = rapprocher(idx, self.CLE, self.PREF,
+                       objets + [("grids", self.CLE, 500)])
+        self.assertEqual(len(r["orphelins"]), 4)
+        v = verdict({"octets": int(4.9 * GO), "objets": 1,
+                     "par_bucket": {}, "par_prefixe": {}},
+                    0.0, rapprochements=[r])
+        self.assertTrue(v["alerte"])
+
+    def test_les_deux_cas_pesent_PAREIL(self):
+        # ⛔ Le contrôle qui donne son sens aux deux précédents : si les
+        # poids différaient, on n'aurait pas prouvé que le poids ne
+        # suffit pas.
+        gros = sum(2_000_000 for _ in self.cles("R1"))
+        deux_runs = sum(1_000_000 for _ in self.cles("R1") + self.cles("R2"))
+        self.assertEqual(gros, deux_runs)
 
 
 if __name__ == "__main__":
