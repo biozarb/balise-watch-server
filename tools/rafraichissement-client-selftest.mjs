@@ -311,6 +311,11 @@ function colonnesBin({ nanTout = [], nanV = [] } = {}) {
  *  une tranche `t` — celle qui doit rester VIDE aux instants neufs. */
 function colonneB() {
   const nB = 9;
+  const platSurf = (base) => {
+    const a = new Float32Array(nB);
+    for (let e = 0; e < nB; e++) a[e] = base + e;
+    return a;
+  };
   const plat = (base, signe = 1) => {
     const a = new Float32Array(NBNIV * nB);
     for (let n = 0; n < NBNIV; n++) {
@@ -324,7 +329,10 @@ function colonneB() {
     // première version écrivait `plat(-100)`, soit −100 + 10n + e — donc
     // −94 là où le contrôle attendait −106. Un contrôle faux ne dit rien
     // du code qu'il prétend mesurer.
-    tranches: { u: plat(100), v: plat(100, -1), t: plat(200) },
+    // `pression_mer` est dans la LISTE BLANCHE, `t` et `tke` n'y sont
+    // pas : c'est le couple qui rend la section 13 discriminante.
+    tranches: { u: plat(100), v: plat(100, -1), t: plat(200),
+                pression_mer: platSurf(1000), tke: platSurf(5) },
   };
 }
 
@@ -706,6 +714,59 @@ await section('12. ⛔ Ce que la densification REFUSE de faire', async () => {
     + 'lui, est connu plus loin',
     Math.max(...dc.echeances) === 7 && dc.echeances.length === 5,
     JSON.stringify(dc.echeances));
+});
+
+await section('13. ⛔ L’interpolation : LISTE BLANCHE, et rien d’autre', async () => {
+  const man = manRaf();
+  man.service.colonnes = colonnesRaf();
+  const colR = await R.chargerColonneRafraichissement(
+    'http://x', man, 46.45, 5, 'j', serveurColonnes(colonnesBin()));
+  const d = R.densifierColonne(manB(), colonneB(), man, colR);
+  const n2 = d.echeances.length;
+  const p625 = d.echeances.indexOf(6.25);
+  const p65 = d.echeances.indexOf(6.5);
+
+  // `pression_mer` vaut 1000 + heure : 1006 à 6 h, 1007 à 7 h.
+  verifier('⛔ `pression_mer` est interpolée LINÉAIREMENT entre les deux '
+    + 'heures qui l’encadrent — 1006 et 1007 donnent 1006,25 à 6 h 15',
+    Math.abs(d.tranches.pression_mer[p625] - 1006.25) < 1e-4
+    && Math.abs(d.tranches.pression_mer[p65] - 1006.5) < 1e-4,
+    `${d.tranches.pression_mer[p625]} / ${d.tranches.pression_mer[p65]}`);
+  verifier('⛔⛔ …alors que `tke` reste VIDE : elle saute de ×5 en une '
+    + 'heure, et c’est la ligne que le pilote lit pour le rotor',
+    Number.isNaN(d.tranches.tke[p625]) && Number.isNaN(d.tranches.tke[p65]));
+  verifier('⛔ …et `t` aussi : elle n’est pas dans la liste blanche, donc '
+    + 'elle n’y entre pas « parce qu’on pourrait »',
+    Number.isNaN(d.tranches.t[0 * n2 + p625]));
+  verifier('`interpolees` NOMME ce qui a été touché, et rien de plus — '
+    + 'sans quoi l’écran ne saurait pas quoi distinguer',
+    d.interpolees.includes('pression_mer')
+    && !d.interpolees.includes('tke') && !d.interpolees.includes('t'),
+    JSON.stringify(d.interpolees));
+  // ── ⛔ ON N'EXTRAPOLE PAS AU BORD ────────────────────────────────
+  // ⚠️ Ce contrôle a été AJOUTÉ APRÈS COUP : le sabotage « extrapoler au
+  // lieu de refuser » passait au vert, parce qu'aucune fixture n'avait de
+  // trou au bord. Or le produit B EN A (`cc`, `tke`, la pluie et la
+  // rafale sont NaN à τ = 0). Un banc qui ne peut pas rencontrer le cas
+  // ne le protège pas.
+  const trou = colonneB();
+  // NaN à la SEULE dernière heure : 6h15 reste encadré (6 h et 7 h),
+  // 7h15 et 7h30 ne le sont plus à droite.
+  trou.tranches.pression_mer[8] = NaN;
+  const dt = R.densifierColonne(manB(), trou, man, colR);
+  const q7 = dt.echeances.indexOf(7.25);
+  const q6 = dt.echeances.indexOf(6.25);
+  verifier('⛔⛔ sans encadrant À DROITE, on ne sert RIEN — prolonger la '
+    + 'dernière valeur connue serait une tendance que personne n’a mesurée',
+    Number.isNaN(dt.tranches.pression_mer[q7]),
+    String(dt.tranches.pression_mer[q7]));
+  verifier('…alors qu’un instant CORRECTEMENT encadré, lui, est bien servi',
+    Math.abs(dt.tranches.pression_mer[q6] - 1006.25) < 1e-4,
+    String(dt.tranches.pression_mer[q6]));
+
+  verifier('⛔ chaque entrée de la liste blanche porte SA RAISON, en clair',
+    Object.values(R.TRANCHES_INTERPOLABLES).every(v => typeof v === 'string'
+      && v.length > 30), JSON.stringify(Object.keys(R.TRANCHES_INTERPOLABLES)));
 });
 
 // ══════════════════════════════════════════════════════════════════════
