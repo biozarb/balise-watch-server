@@ -269,6 +269,26 @@ class _Supabase:
                 return None
             raise
 
+    def get_range(self, path, debut, octets):
+        fin = debut + octets - 1
+        req = self._req(path, "GET", headers={"Range": f"bytes={debut}-{fin}"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                brut = r.read()
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+        # ⚠️ Un serveur qui IGNORE `Range` rend 200 et l'objet ENTIER. On
+        # ne rabote pas en silence : la longueur est le contrat.
+        if len(brut) != octets:
+            raise Abort(
+                f"Range {debut}+{octets} sur {path} : {len(brut)} octets "
+                f"rendus. ⚠️ Un Range raboté ou ignoré donne des octets "
+                f"VALIDES au mauvais endroit — c'est la moitié silencieuse "
+                f"du défaut du 13/08.")
+        return brut
+
     def exists(self, path):
         """HEAD. Gratuit chez Supabase — c'est ce qui permettait au
         `skip-if-exists` des isobares d'être écrit comme il l'est."""
@@ -342,6 +362,34 @@ class _R2:
             return self.client.get_object(Bucket=self.bucket, Key=path)["Body"].read()
         except self.client.exceptions.NoSuchKey:
             return None
+
+    def get_range(self, path, debut, octets):
+        """`GetObject` avec `Range` — **Class B, comme un Get entier**
+        (la facturation R2 compte l'OPÉRATION, pas les octets ; l'egress
+        est gratuit). C'est ce qui rend la lecture du produit B depuis le
+        VPS abordable : 8,2 Mo par run PI au lieu de 286.
+
+        ⚠️ On EXIGE la longueur demandée. Un `Range` ignoré rend 200 et
+        l'objet entier, un `Range` raboté rend 206 avec MOINS d'octets —
+        et dans les deux cas les octets rendus sont *valides*, seulement
+        pas ceux qu'on croit. C'est exactement la moitié silencieuse du
+        défaut du 13/08 (offset qui tombe dans un objet d'une autre
+        génération : 206, longueur correcte, colonne fausse).
+        """
+        try:
+            r = self.client.get_object(
+                Bucket=self.bucket, Key=path,
+                Range=f"bytes={debut}-{debut + octets - 1}")
+        except self.client.exceptions.NoSuchKey:
+            return None
+        brut = r["Body"].read()
+        if len(brut) != octets:
+            raise Abort(
+                f"Range {debut}+{octets} sur {path} : {len(brut)} octets "
+                f"rendus (statut {r.get('ResponseMetadata', {}).get('HTTPStatusCode')}). "
+                f"⚠️ Des octets valides au mauvais endroit ne lèvent nulle "
+                f"part ailleurs.")
+        return brut
 
     def exists(self, path):
         raise Abort(
@@ -425,6 +473,32 @@ class Storage:
         if DRY_RUN:
             return None
         return self.autorite.get(path)
+
+    def get_range(self, path, debut, octets):
+        """Un morceau d'objet, par `Range`. Renvoie les octets, ou None
+        si la clé est absente.
+
+        ⛔ EXISTE POUR LE LOT L (17/08) : le rafraîchissement PI tourne
+        sur le VPS et doit lire `u`/`v` du bloc `hauteur` dans le produit
+        B — 1 165 500 octets par échéance sur les 5 501 162 de l'objet.
+        Sans `Range`, la fusion horaire tirerait 286 Mo par run PI. AVEC,
+        elle en tire 8,2. Ce n'est pas une optimisation : c'est la
+        différence entre « faisable toutes les heures » et « pas
+        faisable ».
+
+        ⚠️ Les offsets se LISENT DANS LE MANIFESTE (`service.tranches`),
+        jamais ne se recalculent. C'est la même discipline que le client
+        web, et pour la même raison : un run écrit par une version
+        antérieure se relit selon SON manifeste.
+        """
+        if debut < 0 or octets <= 0:
+            raise Abort(f"Range absurde sur {path} : debut={debut}, "
+                        f"octets={octets}")
+        self.lectures += 1
+        self.octets += octets
+        if DRY_RUN:
+            return None
+        return self.autorite.get_range(path, debut, octets)
 
     def get_json(self, path):
         brut = self.get(path)

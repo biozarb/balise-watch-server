@@ -379,6 +379,39 @@ def ecrire(colonnes, grille, bilan, journal=crier):
         journal(f"  ⚠️ grille NON écrite ({type(e).__name__}: {e}) — le run "
                 f"reste VERT : elle est régénérée au réseau suivant, "
                 f"l'archive des colonnes ne l'est pas.")
+
+    # ── 3. Rafraîchissement du produit B — JETABLE, sous filet ────────
+    # ⛔ APRÈS la grille, et sous `except`, exactement comme elle. À ce
+    # point la grille PI est écrite et hors de danger ; un
+    # rafraîchissement raté ne doit donc PAS faire tomber le voyant —
+    # le prochain run PI repasse dans une heure et refera l'objet.
+    #
+    # ⚠️⚠️ MAIS IL DOIT CRIER, et fort. Ce que ce bloc publie n'est pas
+    # un supplément : c'est la couche que le client PRÉFÉRERA au produit
+    # B pour `u`/`v` sur 0–6 h. S'il cesse de s'écrire, l'écran ne
+    # cassera pas — il redeviendra silencieusement horaire, ce que
+    # personne ne remarquera. Un échec muet ici est exactement le « faux
+    # vert » que ce projet a déjà eu deux fois.
+    #
+    # ⓘ Il ne touche NI au produit A, NI aux tampons du produit B : il
+    # écrit sous `agrume/pi/rafraichissement/`, son propre index et sa
+    # propre rétention. Rien de ce qui nourrit le scoring ne bouge.
+    try:
+        from rafraichissement import rafraichir            # noqa: PLC0415
+        i_u, i_v = grille.i_param["u"], grille.i_param["v"]
+        raf = rafraichir(grille.donnees[[i_u, i_v]], grille.lats,
+                         grille.lons, grille.run, st=st,
+                         extra=dict(bilan=bilan), journal=journal)
+        journal(f"  ✅ rafraîchissement : composite {raf.run_pi} × produit B "
+                f"{raf.run_b} (décalage {raf.decalage_min // 60} h, "
+                f"échéances AROME {raf.steps_b[0]}–{raf.steps_b[-1]})")
+    except Exception as e:                                   # noqa: BLE001
+        journal(f"  ⚠️⚠️ RAFRAÎCHISSEMENT NON ÉCRIT ({type(e).__name__}: "
+                f"{e}) — le run reste VERT (la grille PI, elle, est "
+                f"écrite), mais le client servira de l'AROME HORAIRE sur "
+                f"0–6 h jusqu'au prochain run PI. Si cette ligne revient "
+                f"d'heure en heure, ce n'est plus un incident.")
+
     st.bilan(log=journal)
 
 

@@ -96,11 +96,12 @@ for B in tools/test_mf_s3.py tools/test_audit_r2.py agrume/test_orographie.py \\
          verif/test_confronter_quotidien.py agrume/test_grille.py \\
          agrume/test_profil.py agrume/test_radiosondage.py agrume/test_transect.py \\
          agrume/test_ingest_pi.py agrume/test_composite.py \\
+         agrume/test_rafraichissement.py \\
          agrume/test_freeze_balises.py agrume/test_calque.py agrume/test_front_altitude.py; do
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
 done
-echo "  ✓ 16/16 bancs verts sur le VPS"
+echo "  ✓ 17/17 bancs verts sur le VPS"
 EOF
 [ $? -eq 0 ] || echec "un banc a échoué sur le VPS — RIEN N'A ÉTÉ REDÉMARRÉ"
 
