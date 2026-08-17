@@ -211,6 +211,7 @@ jobs:
           sparse-checkout: |
             PWA/web/src/lib/altitudeLayer.ts
             PWA/web/src/lib/agrumeProfile.ts
+            PWA/web/src/lib/rafraichissement.ts
           sparse-checkout-cone-mode: false
 
       # ══════════════════════════════════════════════════════════════
@@ -227,11 +228,12 @@ jobs:
       #  Cette étape existe pour que ce silence-là ne se reproduise pas :
       #  le motif se prouve, à l'endroit où il est écrit.
       # ══════════════════════════════════════════════════════════════
-      - name: Le sparse-checkout a bien ramené les deux fichiers
+      - name: Le sparse-checkout a bien ramené les trois fichiers
         run: |
           manque=0
           for f in _web-repo-parite/PWA/web/src/lib/altitudeLayer.ts \
-                   _web-repo-parite/PWA/web/src/lib/agrumeProfile.ts; do
+                   _web-repo-parite/PWA/web/src/lib/agrumeProfile.ts \
+                   _web-repo-parite/PWA/web/src/lib/rafraichissement.ts; do
             if [ -s "$f" ]; then
               echo "✓ $f ($(wc -c < "$f") o)"
             else
@@ -269,6 +271,22 @@ jobs:
         env:
           BW_LAYER_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/altitudeLayer.ts
           BW_AGRUME_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/agrumeProfile.ts
+
+      # ⛔ LE BANC DU RAFRAÎCHISSEMENT CÔTÉ CLIENT (Lot L3a, 17/08).
+      # Hors ligne, sans clé : il vérifie que le client cherche l'échéance
+      # par INSTANTS (la faute que le Lot L2 a trouvée dans son propre
+      # cahier des charges le matin même), qu'il lit les offsets comme
+      # RELATIFS au bloc, qu'il refuse une grille aux axes voisins et
+      # qu'il n'affirme jamais « PI » sur une échéance à poids nul.
+      # ⚠️ `--production` n'est PAS ajouté ici : un banc de CI qui dépend
+      # de ce qui est en ligne à cet instant est un banc qui rougit pour
+      # une raison qui n'est pas la sienne.
+      - name: Banc du rafraîchissement PI, côté client
+        run: |
+          node --experimental-strip-types \
+            tools/rafraichissement-client-selftest.mjs
+        env:
+          BW_RAF_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/rafraichissement.ts
 
       - name: Ingérer les colonnes
         env:
