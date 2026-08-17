@@ -157,11 +157,27 @@ ORDRE_TAMPON = (
     ("surf", "pression_mer"),
 )
 
-# Combien de runs restent en ligne. ⚠️ Ce n'est PAS un réglage de
-# confort : à 32,4 Mo par run et 8 runs par jour, sans purge le palier
-# gratuit de 10 Go serait mangé en ~39 jours. Trois runs, c'est ~97 Mo
-# résidents — et de quoi comparer un run au précédent, ce qu'un seul ne
-# permettrait pas.
+# Combien de runs restent en ligne.
+#
+# ⛔⛔ CE COMMENTAIRE A ÉTÉ FAUX D'UN FACTEUR ~35, ET IL A SURVÉCU À DEUX
+# ÉLARGISSEMENTS DE DOMAINE. Il annonçait « 32,4 Mo par run […] trois
+# runs, c'est ~97 Mo résidents » — un chiffre du 12/08, quand nord-alpes
+# faisait 5 185 colonnes et 25 échéances. **Mesuré sur les manifestes en
+# ligne le 17/08 :**
+#
+#     nord-alpes  111 × 105 = 11 655 col. × 52 éch.   572 Mo/run
+#     pyrenees                                        413 Mo/run
+#     tarn-aveyron-herault                            140 Mo/run
+#     ⇒ résident, 3 runs × 3 domaines                 3,37 Go
+#
+# soit **78 % des 4,33 Go que `tools/audit_r2.py` compte**, sur un palier
+# de 10 Go. La CONCLUSION (trois runs) ne bouge pas ; son arithmétique,
+# si. ⚠️ Et la marge n'est plus « ×11 » comme l'écrit `cle_colonnes` :
+# elle est de ×3. Un quatrième domaine, ou la rallonge poussée au-delà
+# de 51 h, se chiffre AVANT d'être branché.
+#
+# ⓘ Ce que trois runs achètent, et qui n'a pas changé : de quoi comparer
+# un run au précédent, ce qu'un seul ne permettrait pas.
 RETENTION_RUNS = 3
 
 # La clé FIXE de l'index. ⚠️ C'est la pièce maîtresse de la purge, et

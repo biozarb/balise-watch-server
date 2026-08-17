@@ -70,7 +70,7 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `poller.py` | détection de run, back-off borné, **journal de la latence réelle** |
 | `quantification.py` | ⚠️ **le FORMAT du produit A** : PARAMS, unités, plafonds, sentinelle, `quantifier()`. Importé par le produit B, AROME-PI et le profil — c'est pourquoi il est resté ICI quand le conteneur est parti dans `verif/` (Lot J, 13/08) |
 | `ingest_colonnes.py` | l'ingestion elle-même — un fichier sur le disque à la fois |
-| `grille.py` | le produit B : grille 3D du domaine, index et **purge sans jamais lister** |
+| `grille.py` | le produit B : grille 3D du domaine, index, **purge sans jamais lister**, et **`provenance()`** — ce que chaque bloc de chaque échéance doit à quel modèle (Lot L, 17/08) |
 | `profil.py` | **le raccord vertical** : axe altitude-mer, masquage, mélange |
 | `sonder.py` | lire un profil en un point, en tableau ou en JSON |
 | `transect.py` | **la coupe verticale** le long d'un segment, découpée à la demande dans le produit B |

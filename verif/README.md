@@ -116,22 +116,59 @@ pente**.
 rattrapé. Sans conséquence au déploiement (l'archive avait 3 jours), mais
 c'est écrit et bancé plutôt que découvert.
 
-### ⛔ Où elle tourne, et pourquoi pas sur le VPS
+### ⛔ Où elle tourne — et la table qui a menti quatre jours
 
-Mesuré le 13/08, **opération par opération** :
+Mesuré le 13/08 puis **RE-mesuré le 17/08**, opération par opération :
 
-| jeton | Put | Get | List | Delete |
-|---|---|---|---|---|
-| ordinaire, VPS | ✅ | 403 | 403 | **403** |
-| audit (`BW_R2_AUDIT_*`) | — | ✅ | ✅ | ❌ |
-| GitHub Actions | ✅ | ✅ | — | **✅** |
+| jeton | fichier | bucket visé | Put | Get | List | Delete |
+|---|---|---|---|---|---|---|
+| **AGRUME, VPS** | `~/.balise-watch-agrume-r2.env` | `balise-watch-grids` | ✅ | **✅** | **✅** | **✅** |
+| packs, VPS | `~/.balise-watch-r2.env` | `balise-watch-packs` | ✅ | 403 | 403 | 403 |
+| audit | `~/.balise-watch-r2-audit.env` | `balise-watch-grids` | — | ✅ | ✅ | ❌ |
+| GitHub Actions | secrets du dépôt | `balise-watch-grids` | ✅ | ✅ | — | ✅ |
 
-C'est pour ça que la purge de la grille PI n'a jamais rien supprimé
-depuis le VPS. La preuve que celui des Actions supprime : l'index du
-produit B en ligne porte `restes = 0` (or `index_apres_purge` n'y laisse
-que les ÉCHECS), trois runs par domaine, et les runs évincés rendent 404
-quand les gardés rendent 200.
+⛔⛔ **CETTE TABLE A ÉTÉ FAUSSE DU 13/08 AU 17/08, ET ELLE PORTAIT UNE
+DÉCISION.** Elle disait « ordinaire, VPS : 403 sur Get, List ET Delete »
+et concluait « ne pas rebrancher la purge sur le VPS ». Re-sondée
+opération par opération le 17/08 (Lot L §4), la ligne était vraie — mais
+**pour le mauvais jeton**. Le VPS en porte DEUX, et `run-ingest-pi.sh`
+charge le second par-dessus le premier, exprès : `~/.balise-watch-r2.env`
+(les packs, qui ne sait rien faire sur `balise-watch-grids`) puis
+`~/.balise-watch-agrume-r2.env` (AGRUME, qui sait tout faire). La mesure
+du 13/08 a sondé le premier en croyant tenir le second.
+
+**Trois conséquences, et la première est une action de Yann qui disparaît :**
+
+- 🔴 **L'action « créer un jeton R2 en lecture/écriture » est SANS
+  OBJET** — il existe depuis le 10/08.
+- La purge de la grille PI **fonctionne** depuis le VPS : 7 objets en
+  ligne le 17/08 (3 runs × 2 + l'index), plus aucun orphelin. Les
+  « 18 objets orphelins (24 Mo) » de la roadmap sont un état périmé.
+- Ce qui a réellement empêché la purge PI de mordre n'était pas un
+  droit, c'était le `TypeError` d'`index_apres()` corrigé le 13/08.
+
+ⓘ **La leçon, et elle est plus large que R2 :** un sondage de droits qui
+ne NOMME pas le fichier d'environnement qu'il a chargé ne mesure rien de
+reproductible. La colonne « fichier » ci-dessus n'est pas décorative —
+c'est elle qui manquait. La sonde du 17/08 imprime désormais les six
+premiers caractères de la clé utilisée, pour que deux mesures du même
+jeton se reconnaissent.
+
+La preuve que le jeton des Actions supprime : l'index du produit B en
+ligne porte `restes = 0` (or `index_apres_purge` n'y laisse que les
+ÉCHECS), trois runs par domaine, et les runs évincés rendent 404 quand
+les gardés rendent 200.
 
 ⇒ `purger()` est appelée depuis `agrume/ingest_colonnes.py`, sur GitHub
-Actions. **Ne pas la rebrancher sur le VPS** tant que le jeton
-`Object Read & Write` demandé à Yann n'existe pas.
+Actions. ⚠️ **Elle y reste**, et l'argument n'est plus le droit — il est
+tombé le 17/08 — mais l'ENDROIT : la purge du produit A doit partir
+APRÈS l'écriture du run, dans le même processus, sinon elle ouvre le cas
+où l'écriture échoue derrière une purge réussie. La déplacer sur le VPS
+séparerait les deux et ne gagnerait rien.
+
+ⓘ **Ce que le droit retrouvé DÉBLOQUE, en revanche** (Lot L, 17/08) : le
+VPS peut désormais LIRE le produit B. C'est ce qui rend possible le
+rafraîchissement PI horaire (`agrume/pi.py`, `PREFIXE_RAFRAICHISSEMENT`)
+— il lit `u`/`v` hauteur des sept premières échéances par Range, calcule
+le composite, et écrit deux objets à lui. Sans Get, ce chemin était
+fermé et personne ne le savait.
