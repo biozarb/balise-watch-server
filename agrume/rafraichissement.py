@@ -688,7 +688,14 @@ INDEX_VIDE = dict(
     retention_runs=RETENTION_RUNS, runs=[], restes=[], dernier={})
 
 
-def _ecrire_index(st, run_pi, domaine, cles, avancer, journal=crier):
+def _horodatage():
+    """L'instant de publication, au format des deux index frères."""
+    import datetime as dt                                # noqa: PLC0415
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ecrire_index(st, run_pi, domaine, cles, avancer, journal=crier,
+                  maintenant=None):
     """Index d'abord, suppression ensuite — l'ordre évite les orphelins
     invisibles, exactement comme pour le produit B.
 
@@ -699,8 +706,30 @@ def _ecrire_index(st, run_pi, domaine, cles, avancer, journal=crier):
     payé** — une fuite, pas un déchet. Il entre donc, il sera purgé au
     troisième run suivant, et `dernier` NE BOUGE PAS : personne ne lira
     un couple dépareillé.
+
+    ⛔⛔ `ecrit_le` — LE TROU DE CACHE DU §7 DE L3a, ET IL SE REFERME ICI
+    (Lot L3b, 17/08). Le client prenait le RUN PI comme jeton de cache,
+    faute de mieux. Ça couvre le cas normal — une clé neuve chaque heure —
+    mais **pas un REJEU sous le même run PI** : `rafraichissement.py`
+    relancé à la main après la publication d'un nouveau run AROME réécrit
+    exactement les mêmes clés avec d'AUTRES octets. `CACHE_REECRIT` est
+    posé pour ça, mais les deux générations ont **la même longueur** :
+    ni 416, ni tampon court, rien à quoi se raccrocher côté client. Le
+    seul filet était `run_produit_b === run affiché`, qui n'attrape le
+    rejeu que s'il change de run AROME.
+    ⇒ L'index porte désormais son instant d'écriture, et `jetonDe()`
+    (web/src/lib/rafraichissement.ts) le préfère au run PI **depuis le
+    Lot L3a, sans qu'une ligne du client ne bouge** : il était écrit
+    `idx.ecrit_le || runPi`.
+
+    ⚠️ HORODATÉ UNE SEULE FOIS, pour les DEUX écritures. L'index est
+    republié après la purge quand des suppressions ont échoué ; deux
+    horodatages différents changeraient le jeton une seconde fois, donc
+    feraient retélécharger 58,3 Mo pour des octets identiques. Un jeton
+    n'a pas à être frais, il a à être JUSTE.
     """
     from storage import CACHE_REECRIT                     # noqa: PLC0415, F401
+    ecrit_le = maintenant or _horodatage()
     index = st.get_json(CLE_INDEX_RAFRAICHISSEMENT) or dict(INDEX_VIDE)
     dernier = dict(index.get("dernier") or {})
     nouveau, a_supprimer = index_apres(index, run_pi, domaine, cles,
@@ -713,11 +742,18 @@ def _ecrire_index(st, run_pi, domaine, cles, avancer, journal=crier):
     if avancer:
         dernier[domaine] = run_pi
     nouveau["dernier"] = dernier
+    # ⛔ Le jeton de cache du client (cf. la docstring). Il change à CHAQUE
+    # publication, y compris un rejeu sous le même run PI — c'est
+    # exactement ce que le run PI seul ne savait pas dire.
+    nouveau["ecrit_le"] = ecrit_le
     nouveau["note"] = (
         "⛔ `dernier[domaine]` est LE run à lire : il n'avance qu'après "
         "l'écriture des TROIS objets. `runs` liste ce qui est en ligne "
         "pour la purge, et peut contenir un run incomplet — ne pas le "
-        "lire pour choisir quoi servir.")
+        "lire pour choisir quoi servir. ⛔ `ecrit_le` est le JETON DE "
+        "CACHE : le client le colle en query sur le manifeste et sur les "
+        "octets, parce qu'un rejeu sous le même run PI réécrit les mêmes "
+        "clés avec d'autres octets, de MÊME LONGUEUR.")
     # ⚠️ `no-store`, comme les deux index frères (`agrume/grille/` et
     # `agrume/pi/grille/`). Un index mis en cache ferait lire un run PI
     # purgé une heure plus tôt : 404 sur les deux jumeaux, et le client
@@ -726,8 +762,31 @@ def _ecrire_index(st, run_pi, domaine, cles, avancer, journal=crier):
            cache_control="no-store", content_type="application/json")
     echecs = []
     for cle in a_supprimer:
+        # ⛔⛔ ON LIT LA VALEUR DE RETOUR, ET C'EST UN CORRECTIF (L3b,
+        # 17/08 — trouvé par le banc, pas par la relecture).
+        #
+        # `Storage.delete` (tools/storage.py) NE LÈVE JAMAIS : la façade
+        # attrape tout et rend `False` — « une purge ne doit jamais être
+        # bloquante », correctif du 30/07. Le `try/except Exception` qui
+        # était ici n'attrapait donc RIEN. `echecs` restait vide quoi
+        # qu'il arrive, `restes` ne se remplissait jamais, la clé n'était
+        # jamais réessayée au run suivant — et elle sortait de l'index à
+        # la rotation de rétention (3 runs, soit 3 h). ⇒ un objet EN
+        # LIGNE et HORS INDEX : invisible, jamais purgé, définitivement
+        # payé. C'est le motif EXACT des 18 orphelins des 12-13/08, et la
+        # branche « N échecs (réessayés au run suivant)  » du journal
+        # juste en dessous était du code MORT.
+        #
+        # ⓘ `ingest_colonnes.py` le fait bien depuis toujours
+        # (`if not store.delete(c)`) : les deux purges du même bucket ne
+        # posaient pas la même question à la même façade.
+        #
+        # ⚠️ Le `try` reste, mais en second rideau : la façade d'AUJOURD'HUI
+        # ne lève pas, un backend de DEMAIN pourrait. Les deux chemins
+        # mènent au même endroit — `restes`, donc un réessai.
         try:
-            st.delete(cle)
+            if not st.delete(cle):
+                echecs.append(cle)
         except Exception:                                  # noqa: BLE001
             echecs.append(cle)
     if a_supprimer:
@@ -741,7 +800,7 @@ def _ecrire_index(st, run_pi, domaine, cles, avancer, journal=crier):
     return nouveau
 
 
-def ecrire(st, raf, extra=None, journal=crier):
+def ecrire(st, raf, extra=None, journal=crier, maintenant=None):
     """Les deux jumeaux puis le manifeste, puis l'index. Dans cet ordre.
 
     ⛔ TOUT EST SÉRIALISÉ AVANT LA PREMIÈRE ÉCRITURE. Composer les octets
@@ -772,7 +831,8 @@ def ecrire(st, raf, extra=None, journal=crier):
                     f"dépareillé.")
             try:
                 _ecrire_index(st, raf.run_pi, raf.domaine, ecrites,
-                              avancer=False, journal=journal)
+                              avancer=False, journal=journal,
+                              maintenant=maintenant)
             except Exception as e:                         # noqa: BLE001
                 journal(f"  ⛔ …et l'index n'a pas pu être mis à jour "
                         f"({type(e).__name__}: {e}) : {len(ecrites)} objet(s) "
@@ -781,7 +841,7 @@ def ecrire(st, raf, extra=None, journal=crier):
     journal(f"  ✅ rafraîchissement écrit : {c_carte.rsplit('/', 1)[0]}/ "
             f"({raf.octets_publies() / 1e6:.1f} Mo, deux jumeaux)")
     _ecrire_index(st, raf.run_pi, raf.domaine, [c for c, _, _ in corps],
-                  avancer=True, journal=journal)
+                  avancer=True, journal=journal, maintenant=maintenant)
     return [c for c, _, _ in corps]
 
 

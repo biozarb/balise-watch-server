@@ -593,6 +593,105 @@ def section_10_ensemble_ou_pas():
              c_man not in stock.objets)
 
 
+def section_12_jeton_de_cache():
+    """⛔ `ecrit_le` — le trou du §7 de L3a, et il ne se voit qu'au REJEU.
+
+    Le client prenait le RUN PI comme jeton de cache. Ça couvre le cas
+    normal — une clé neuve chaque heure — mais pas le rejeu sous le MÊME
+    run PI après la publication d'un nouveau run AROME : mêmes clés,
+    autres octets, et **la même longueur**. Ni 416, ni tampon court, rien
+    à quoi se raccrocher. Le seul filet restant était
+    `run_produit_b === run affiché`, qui n'attrape le rejeu que s'il
+    change de run AROME — c'est-à-dire pas le cas qui nous occupe.
+    """
+    print("\n── 12. ⛔ Le jeton de cache : `ecrit_le`, et le REJEU ──")
+    import re                                            # noqa: PLC0415
+
+    stock, raf = fabriquer()
+    RA.ecrire(stock, raf, journal=lambda *_: None)
+    idx = stock.get_json(CLE_INDEX_RAFRAICHISSEMENT)
+    verifier("⛔ l'index publie `ecrit_le` — sans lui, un rejeu sous le "
+             "même run PI resert des octets périmés sous une clé "
+             "inchangée, de MÊME LONGUEUR",
+             bool(idx.get("ecrit_le")), str(idx.get("ecrit_le")))
+    verifier("…au format des deux index frères (`…Z`, seconde entière) — "
+             "il part en query, un format exotique casserait l'URL",
+             bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+                               str(idx.get("ecrit_le") or ""))))
+
+    # ── ⛔⛔ LE CONTRÔLE QUI PROUVE LE BRANCHEMENT, pas le champ ───────
+    # Leçon du Lot L2, payée le matin même : quatre contrôles au vert
+    # avec le garde-fou DÉBRANCHÉ. Ici la question n'est pas « le champ
+    # existe-t-il ? » mais « CHANGE-T-il quand les octets changent ? ».
+    # On rejoue donc le MÊME run PI, sur le MÊME domaine.
+    avant = idx["ecrit_le"]
+    RA.ecrire(stock, raf, journal=lambda *_: None,
+              maintenant="2026-08-17T11:07:00Z")
+    idx2 = stock.get_json(CLE_INDEX_RAFRAICHISSEMENT)
+    verifier("⛔⛔ un REJEU sous le MÊME run PI change `ecrit_le` — c'est "
+             "TOUT l'objet du champ, et c'est ce que le run PI seul ne "
+             "savait pas dire",
+             idx2.get("ecrit_le") == "2026-08-17T11:07:00Z" != avant,
+             f"{avant} → {idx2.get('ecrit_le')}")
+    verifier("…alors que les CLÉS, elles, n'ont pas bougé d'un caractère "
+             "— c'est bien le même objet, et c'est le problème",
+             set(idx2["runs"][0]["cles"])
+             == set(cles_du_rafraichissement(RUN_PI, DOMAINE)))
+    verifier("…et `dernier` désigne toujours ce run : un rejeu ne "
+             "dépareille rien", idx2["dernier"][DOMAINE] == RUN_PI)
+
+    # ── ⚠️ UN SEUL HORODATAGE POUR LES DEUX ÉCRITURES ────────────────
+    # L'index est republié après la purge quand des suppressions ont
+    # échoué. Deux horodatages différents changeraient le jeton une
+    # seconde fois, donc feraient retélécharger 58,3 Mo pour des octets
+    # identiques. Un jeton n'a pas à être frais, il a à être JUSTE.
+    stock2, raf2 = fabriquer()
+    corps = []
+    vrai_put = stock2.put
+
+    def put_espion(cle, corps_, **kw):
+        if cle == CLE_INDEX_RAFRAICHISSEMENT:
+            corps.append(json.loads(bytes(corps_)))
+        return vrai_put(cle, corps_, **kw)
+
+    stock2.put = put_espion
+    # ⛔ `Storage.delete` NE LÈVE PAS, il rend False (tools/storage.py).
+    # C'est LA forme d'échec réelle, et c'est celle que le code d'avant
+    # L3b n'attrapait pas : il n'écoutait que les exceptions.
+    stock2.delete = lambda _cle: False
+    # ⚠️ UN HORODATAGE DIFFÉRENT PAR RUN, sinon ce contrôle passe au vert
+    # par HASARD : sans injection, les quatre écritures tombent dans la
+    # même seconde et « les deux derniers sont égaux » est vrai quoi qu'il
+    # arrive. C'est exactement le faux positif qui apprend à ignorer un
+    # banc — celui-ci l'a fait à sa première écriture.
+    RA.ecrire(stock2, raf2, journal=lambda *_: None,
+              maintenant="2026-08-17T10:01:00Z")
+    for h in (11, 12, 13):                    # quatre runs ⇒ une purge
+        r = RA.Rafraichissement(f"2026-08-17T{h}:00:00Z", DOMAINE, RUN_B,
+                                raf2.steps_b, raf2.decalage_min,
+                                raf2.composite.astype(np.float64),
+                                raf2.diagnostic, LATS, LONS)
+        RA.ecrire(stock2, r, journal=lambda *_: None,
+                  maintenant=f"2026-08-17T{h}:01:00Z")
+    verifier("⛔⛔ une suppression qui rend False (et ne LÈVE pas) est "
+             "comptée comme un échec — sinon `restes` reste vide, la clé "
+             "n'est jamais réessayée, et elle sort de l'index à la "
+             "rotation : un objet EN LIGNE et HORS INDEX",
+             len(corps) >= 2 and bool(corps[-1].get("restes")),
+             f"{len(corps)} écriture(s) d'index, "
+             f"{len(corps[-1].get('restes') or [])} reste(s)")
+    verifier("⚠️ …et les DEUX écritures d'un MÊME passage portent le même "
+             "`ecrit_le` : un jeton qui bouge deux fois ferait "
+             "retélécharger 58,3 Mo pour des octets identiques",
+             corps[-1].get("ecrit_le") == corps[-2].get("ecrit_le")
+             == "2026-08-17T13:01:00Z",
+             f"{corps[-2].get('ecrit_le')} / {corps[-1].get('ecrit_le')}")
+    verifier("…et le passage PRÉCÉDENT portait bien un autre horodatage — "
+             "sans quoi le contrôle ci-dessus serait vrai par hasard",
+             corps[-3].get("ecrit_le") != corps[-1].get("ecrit_le"),
+             f"{corps[-3].get('ecrit_le')}")
+
+
 def section_11_sait_echouer():
     print("\n── 11. ⛔ LE CONTRÔLE QUI SAIT ÉCHOUER ──")
     # La version NAÏVE : le composite publié tel quel, avec le manifeste
@@ -638,7 +737,8 @@ def main():
                     section_4_invariant, section_5_horizon,
                     section_6_jumeaux, section_7_octets,
                     section_8_resolution, section_9_ecriture,
-                    section_10_ensemble_ou_pas, section_11_sait_echouer):
+                    section_10_ensemble_ou_pas, section_12_jeton_de_cache,
+                    section_11_sait_echouer):
         try:
             section()
         except Exception as e:                               # noqa: BLE001
