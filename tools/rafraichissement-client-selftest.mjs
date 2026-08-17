@@ -823,6 +823,59 @@ if (PROD) {
       source: 'rafraichissement', prov: R.provenanceEcheance(etat.man, 0),
       runPi: etat.man.run_pi, runB: man.run,
       partMailles: p.remplacees / p.total, octets: bloc0.octets })}`);
+
+    // ── c. ⛔⛔ LES DEUX JUMEAUX DISENT-ILS LE MÊME VENT ? (Lot L3b)
+    //
+    // `carte.bin` nourrit le calque, `colonnes.bin` la coupe. Ils sont
+    // écrits ENSEMBLE ou pas du tout, mais rien ne garantissait jusqu'ici
+    // qu'ils portent les mêmes valeurs UNE FOIS SERVIS : le serveur le
+    // vérifie sur ses tableaux en mémoire, pas sur les octets sortis de
+    // R2 par deux dispositions différentes ((échéance, tranche, niveau,
+    // lat, lon) d'un côté, (colonne, tranche, niveau, échéance) de
+    // l'autre). ⚠️ S'ils divergent, le MÊME vent au MÊME instant a deux
+    // valeurs selon l'écran regardé — et personne ne compare jamais les
+    // deux écrans côte à côte.
+    const a = etat.man.axes;
+    // Un point franchement à l'intérieur, pas un bord : les deux
+    // arrondis d'indice (lat décroissante, lon croissante) doivent
+    // tomber sur la MÊME colonne, et un bord masquerait un décalage
+    // en le saturant.
+    const latMi = (a.lat_premier + a.lat_dernier) / 2;
+    const lonMi = (a.lon_premier + a.lon_dernier) / 2;
+    const pos = R.colonneDuRafraichissement(etat.man, latMi, lonMi);
+    const colR = await R.chargerColonneRafraichissement(
+      BASE, etat.man, latMi, lonMi, etat.jeton);
+    verifier('la colonne du rafraîchissement tient dans UN Range',
+      colR.octets === etat.man.service.colonnes.octets_par_colonne,
+      `${colR.octets} o (contre ${(bloc0.octets / 1024).toFixed(0)} Ko pour `
+      + `UNE échéance de carte.bin)`);
+
+    const nEch = etat.man.echeances_min.length;
+    const nNiv = etat.man.niveaux_m_sol.length;
+    const iCol = pos.j * a.nb_lon + pos.i;
+    let pire = 0, comptees = 0, dep = 0;
+    for (let k = 0; k < nEch; k++) {
+      const blocK = k === 0 ? bloc0
+        : (k === kFin ? blocFin : await R.chargerBloc(BASE, etat.man, k, etat.jeton));
+      for (let L = 0; L < nNiv; L++) {
+        const carte = blocK.u[L * a.nb_lat * a.nb_lon + iCol];
+        const colonne = colR.u[L * nEch + k];
+        const fCarte = Number.isFinite(carte), fCol = Number.isFinite(colonne);
+        // ⛔ Une case finie d'un côté et non finie de l'autre est une
+        // divergence à part entière : le calque dessinerait une flèche
+        // là où la coupe ne montrerait rien.
+        if (fCarte !== fCol) { dep++; continue; }
+        if (!fCarte) continue;
+        comptees++;
+        pire = Math.max(pire, Math.abs(carte - colonne));
+      }
+    }
+    verifier('⛔⛔ `carte.bin` et `colonnes.bin` disent le MÊME vent à la '
+      + 'même colonne, au même niveau, à la même échéance — deux '
+      + 'dispositions, une seule vérité',
+      dep === 0 && pire === 0,
+      `n = ${comptees}, écart max ${pire.toExponential(3)} m/s, `
+      + `${dep} case(s) dépareillée(s)`);
   });
 }
 
