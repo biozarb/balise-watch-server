@@ -305,8 +305,17 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ vars.R2_BUCKET_WIND }}
         run: |
+          # ⛔ A11 (17/08) — `inputs.run` est enfin TRANSMIS. Il était
+          # documenté « indicatif, l'ingestion revérifie la couverture
+          # réelle » ; il était en réalité JETÉ, donc l'écart entre le run
+          # que le guet croyait publié et celui qui l'était vraiment ne
+          # pouvait pas être mesuré, même en le voulant.
+          # ⚠️ Il ne DÉCIDE toujours rien : `choisir_run()` tranche seul,
+          # sur la couverture en échéances. Il sert à COMPTER — arbitrage
+          # de Yann : « on ne change rien et on compte ».
           python3 agrume/ingest_colonnes.py \
             --max-heures "${{ inputs.max_heures || '24' }}" \
+            --run-vise "${{ inputs.run || '' }}" \
             --sortie "$RUNNER_TEMP/agrume"
 
       - name: Disque restant après le run

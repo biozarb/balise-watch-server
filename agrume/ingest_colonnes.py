@@ -133,6 +133,79 @@ def journal_horodate(msg):
 PAQUETS = PAQUETS_INGESTION
 
 
+def journaliser_ecart_dispatch(index, ref, vise, crier=journal_horodate,
+                               maintenant=None, garde=20):
+    """⛔ A11 (arbitrage de Yann, 17/08) — ON COMPTE, ON NE CORRIGE PAS.
+
+    Le poller dispatche sur la **PRÉSENCE** des paquets ; `choisir_run()`
+    tranche sur la **COUVERTURE en échéances**. Entre les deux, une
+    fenêtre de quelques minutes à une demi-heure pendant laquelle un
+    paquet EXISTE sans porter ses 25 échéances. Chacune, prise seule, a
+    raison — et l'écart ne se voit que du dehors.
+
+    **Mesuré le 17/08** : dispatch à 10:36:03 pour le run 06 Z, ingestion
+    du 03 Z à 10:53 — une RÉÉCRITURE d'un run déjà en ligne, ~7 Go
+    téléchargés et ~9 min de runner pour republier à l'identique. Trous
+    observés : 5 sur 54 runs (9,3 %). ⚠️ Rien dans l'archive n'est cassé
+    (le guet de RALLONGE rattrape) — c'est du gaspillage INVISIBLE.
+
+    ⛔⛔ ET L'INSTRUCTION A TROUVÉ PIRE QUE L'ÉCART : jusqu'au 17/08, le
+    `run` du `workflow_dispatch` **n'était pas transmis à l'ingestion**.
+    L'entrée était documentée « indicatif, l'ingestion revérifie la
+    couverture réelle » — elle était en réalité **jetée**. On ne pouvait
+    donc pas comparer, même en le voulant : il n'y avait rien à comparer
+    avec. C'est ce que cette fonction répare, et c'est tout ce qu'elle
+    répare.
+
+    ⚠️ **Trois cas, et un seul coûte quelque chose :**
+      · pas de run visé (cron, rejeu manuel) → rien à dire ;
+      · visé == retenu → le cas nominal, journalisé en une ligne calme ;
+      · visé != retenu ET le retenu est DÉJÀ dans l'index → **c'est la
+        réécriture**, et c'est elle qu'on crie et qu'on compte.
+
+    ⚠️ Le compteur est BORNÉ (les `garde` derniers) et il porte ses
+    horodatages : « un compteur qui ne redescend jamais n'est pas un
+    compteur ». On peut donc lire une fréquence, pas seulement un total.
+    """
+    if not vise:
+        return index
+    quand = (maintenant or datetime.now(timezone.utc)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    if vise == ref:
+        crier(f"  ✓ dispatch : le run demandé ({vise}) est bien celui retenu")
+        return index
+    deja = {e.get("run") for e in (index.get("runs") or [])}
+    reecriture = ref in deja
+    crier(
+        f"  {'⛔' if reecriture else '⚠️'} DISPATCH ET INGESTION NE SONT PAS "
+        f"D'ACCORD : le guet a demandé {vise}, la couverture réelle donne "
+        f"{ref}."
+        + (f" ⛔ Et {ref} est DÉJÀ en ligne : ce run vient d'être "
+           f"retéléchargé et republié À L'IDENTIQUE (~7 Go, ~9 min de "
+           f"runner) pour rien."
+           if reecriture else
+           " ⓘ Le run retenu n'était pas encore en ligne : le travail "
+           "n'est pas perdu, seule la FRAÎCHEUR l'est."))
+    hist = list(index.get("dispatch_ecarts") or [])
+    hist.append(dict(quand=quand, vise=vise, retenu=ref,
+                     reecriture=bool(reecriture)))
+    hist = hist[-garde:]
+    n_re = sum(1 for e in hist if e.get("reecriture"))
+    crier(f"     compteur : {n_re} réécriture(s) sur les {len(hist)} derniers "
+          f"écarts retenus (fenêtre glissante de {garde})")
+    return dict(
+        index,
+        dispatch_ecarts=hist,
+        dispatch_note=(
+            "⛔ A11 — le poller dispatche sur la PRÉSENCE des paquets, "
+            "l'ingestion choisit sur la COUVERTURE en échéances. Cette "
+            "liste COMPTE les désaccords, elle n'en corrige aucun "
+            "(arbitrage de Yann, 17/08) : elle rend le coût REFUSABLE, "
+            "ce qu'il n'était pas. `reecriture: true` = le run retenu "
+            "était DÉJÀ en ligne, donc ~7 Go et ~9 min de runner dépensés "
+            "pour republier à l'identique."))
+
+
 def choisir_run(max_heures, profondeur=5, crier=journal_horodate,
                 max_heures_grille=None, couverture=None, maintenant=None):
     """Run maximisant la couverture COMMUNE aux quatre paquets.
@@ -755,7 +828,7 @@ def ingerer(ref, run, steps, balises, paire_orog, crier=journal_horodate,
 #  Publication du produit B — APRÈS le produit A, et sans jamais
 #  mettre le produit A en danger
 # ══════════════════════════════════════════════════════════════════════
-def publier_grilles(paquets, ref, crier=journal_horodate):
+def publier_grilles(paquets, ref, crier=journal_horodate, run_vise=None):
     """Monte les grilles sur R2, met l'index à jour, purge les runs sortis.
 
     `paquets` : [(domaine, Grille, manifeste)] — un par domaine de
@@ -819,6 +892,12 @@ def publier_grilles(paquets, ref, crier=journal_horodate):
 
     # ── 1. l'index précédent — 1 GetObject, Class B ───────────────────
     index = store.get_json(CLE_INDEX) or dict(INDEX_VIDE)
+    # ⛔ A11 — l'écart entre le run DEMANDÉ et le run RETENU entre dans
+    # l'index AVANT tout le reste, et il y entre même quand il n'y a rien
+    # à signaler. C'est un compteur, pas une alerte : il doit pouvoir
+    # dire « zéro », sinon on ne saura jamais si le silence vient de
+    # l'absence d'écart ou de l'absence de mesure.
+    index = journaliser_ecart_dispatch(index, ref, run_vise)
     legs = [e for e in (index.get("runs") or []) if not e.get("domaine")]
     crier(f"▶ index : {len(index.get('runs') or [])} entrée(s) en ligne"
           + (f", dont {len(legs)} à l'ANCIEN format (sans domaine) — elles "
@@ -959,6 +1038,13 @@ def main(argv=None):
     p.add_argument("--suspectes", default=None,
                    help="fichier JSON [ids] des balises position_suspecte "
                         "(elles sont MARQUÉES, pas retirées)")
+    p.add_argument("--run-vise", default=None,
+                   help="Le run que le DISPATCH a demandé (A11, 17/08). "
+                        "⛔ Il ne DÉCIDE rien : c'est `choisir_run()` qui "
+                        "tranche, sur la couverture réelle en échéances. "
+                        "Il sert uniquement à RENDRE VISIBLE l'écart entre "
+                        "ce que le guet croyait publié et ce qui l'était "
+                        "vraiment — cf. `journaliser_ecart_dispatch()`.")
     p.add_argument("--max-heures", type=int, default=MAX_HOURS,
                    help="horizon de l'ARCHIVE (produit A). ⚠️ C'est aussi "
                         "lui qui décide quel run est retenu : un run qui "
@@ -1354,7 +1440,7 @@ def main(argv=None):
     # ══════════════════════════════════════════════════════════════════
     if paquets:
         try:
-            publier_grilles(paquets, ref)
+            publier_grilles(paquets, ref, run_vise=a.run_vise)
         except Exception as e:                              # noqa: BLE001
             print(f"⚠️ PRODUIT B NON PUBLIÉ : {type(e).__name__} — {e}\n"
                   f"   Le produit A est écrit et intact ; le run reste "

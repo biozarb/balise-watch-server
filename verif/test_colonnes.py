@@ -81,6 +81,84 @@ STATIONS = [
 ]
 
 
+def section_a11_ecart_dispatch():
+    """⛔ A11 — le compteur qui rend le gaspillage REFUSABLE (17/08).
+
+    Arbitrage de Yann : **on ne corrige rien, on compte.** Ce banc ne
+    vérifie donc PAS que le bon run est choisi (`choisir_run` en décide
+    seul, et il a raison de le faire sur la couverture réelle) : il
+    vérifie que **l'écart se voit**.
+
+    ⚠️ Un compteur qui ne sait pas dire « zéro » ne vaut rien : on
+    contrôle aussi le cas nominal, où l'index NE DOIT PAS être pollué.
+    """
+    from datetime import datetime, timezone            # noqa: PLC0415
+    print("\n── A11 : l'écart dispatch/ingestion se COMPTE ────────────")
+    dit = []
+    crier = dit.append
+    idx0 = {"runs": [{"run": "2026-08-17T03:00:00Z", "domaine": "nord-alpes"}]}
+
+    # a) Pas de run visé (cron, rejeu manuel) — rien à dire, rien à écrire.
+    r = I.journaliser_ecart_dispatch(dict(idx0), "2026-08-17T03:00:00Z",
+                                     None, crier=crier)
+    verifier("sans run visé (cron), l'index n'est pas touché",
+             "dispatch_ecarts" not in r and not dit)
+
+    # b) Le cas nominal — visé == retenu.
+    dit.clear()
+    r = I.journaliser_ecart_dispatch(dict(idx0), "2026-08-17T06:00:00Z",
+                                     "2026-08-17T06:00:00Z", crier=crier)
+    verifier("visé == retenu : une ligne calme, et RIEN dans l'index — "
+             "un compteur qui compte les non-événements ne compte plus rien",
+             "dispatch_ecarts" not in r and any("bien celui retenu" in m
+                                                for m in dit))
+
+    # c) ⛔ LE CAS QUI COÛTE : le run retenu est DÉJÀ en ligne.
+    #    C'est exactement le 17/08 à 10:36 — dispatch pour le 06 Z,
+    #    réécriture du 03 Z, ~7 Go pour republier à l'identique.
+    dit.clear()
+    r = I.journaliser_ecart_dispatch(
+        dict(idx0), "2026-08-17T03:00:00Z", "2026-08-17T06:00:00Z",
+        crier=crier, maintenant=datetime(2026, 8, 17, 10, 53,
+                                         tzinfo=timezone.utc))
+    e = (r.get("dispatch_ecarts") or [])
+    verifier("⛔ l'écart entre dans l'index, avec son horodatage",
+             len(e) == 1 and e[0]["quand"] == "2026-08-17T10:53:00Z"
+             and e[0]["vise"] == "2026-08-17T06:00:00Z"
+             and e[0]["retenu"] == "2026-08-17T03:00:00Z", str(e))
+    verifier("⛔⛔ …et il est marqué RÉÉCRITURE, parce que le run retenu "
+             "était DÉJÀ en ligne — c'est ça qui coûte 7 Go",
+             e and e[0]["reecriture"] is True)
+    verifier("…et le journal le CRIE, en nommant les deux runs",
+             any("10:36" not in m and "n'ont pas été" not in m
+                 and "DÉJÀ en ligne" in m for m in dit), " | ".join(dit)[:150])
+
+    # d) L'écart SANS réécriture — la fraîcheur est perdue, pas le travail.
+    dit.clear()
+    r2 = I.journaliser_ecart_dispatch(
+        dict(idx0), "2026-08-17T09:00:00Z", "2026-08-17T12:00:00Z",
+        crier=crier)
+    e2 = (r2.get("dispatch_ecarts") or [])
+    verifier("⚠️ un écart sur un run PAS encore en ligne n'est PAS une "
+             "réécriture : le travail n'est pas perdu, seule la fraîcheur "
+             "l'est — et les deux ne se réparent pas pareil",
+             e2 and e2[0]["reecriture"] is False)
+
+    # e) ⛔ LE COMPTEUR EST BORNÉ, et il redescend.
+    dit.clear()
+    idx = dict(idx0)
+    for k in range(25):
+        idx = I.journaliser_ecart_dispatch(
+            idx, "2026-08-17T03:00:00Z", f"2026-08-17T{k % 24:02d}:00:00Z",
+            crier=crier, garde=20)
+    verifier("⛔ le compteur est BORNÉ aux 20 derniers — « un compteur qui "
+             "ne redescend jamais n'est pas un compteur »",
+             len(idx["dispatch_ecarts"]) == 20,
+             str(len(idx["dispatch_ecarts"])))
+    verifier("…et il porte de quoi lire une FRÉQUENCE, pas juste un total",
+             all("quand" in x for x in idx["dispatch_ecarts"]))
+
+
 def section_horizons():
     """⛔ DEUX HORIZONS, ET TROIS FAÇONS DE LES CASSER EN SILENCE (13/08).
 
@@ -525,6 +603,7 @@ def main():
              M.quantiles([]) is None)
 
     section_horizons()
+    section_a11_ecart_dispatch()
 
     print("\n  colonnes :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1
