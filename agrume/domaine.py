@@ -429,6 +429,52 @@ DOMAINE_TAH = dict(latmin=43.43, latmax=44.26, lonmin=1.88, lonmax=3.96)
 DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES,
             "tarn-aveyron-herault": DOMAINE_TAH}
 
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ OÙ AROME-PI EXISTE VRAIMENT — arbitrage A9 de Yann, 17/08/2026
+# ══════════════════════════════════════════════════════════════════════
+#  ⚠️⚠️ CE N'EST PAS UN RÉGLAGE, C'EST UNE MESURE. `ingest_pi.py`
+#  n'ingère que la boîte Nord-Alpes, et ça s'est vu dans la DONNÉE avant
+#  de se voir dans le code : **207 balises servies sur les 288 de
+#  l'archive** le 17/08, aucune Pyrénées, aucune Tarn/Aveyron/Hérault.
+#
+#  ⛔ Cette constante existe parce que la portée de PI était écrite NULLE
+#  PART et déductible seulement d'un `from domaine import DOMAINE` au
+#  milieu d'`ingest_pi.py`. Conséquence payée le 17/08 : le run venté a
+#  soufflé sur le Roussillon, c'est-à-dire exactement là où PI n'existe
+#  pas, et personne ne l'a su avant de chercher pourquoi le composite ne
+#  se laissait pas juger.
+#
+#  ⛔ ELLE A TROIS LECTEURS, ET C'EST TOUT L'INTÉRÊT :
+#    · `ingest_pi.py`   — ce qu'il va chercher au portail ;
+#    · `grille.py`      — ce que le manifeste du produit B PUBLIE sur la
+#                         disponibilité de PI, domaine par domaine ;
+#    · `rafraichissement.py` — ce qu'il refuse de fabriquer ailleurs.
+#  Recopier « nord-alpes » dans l'un des trois serait le défaut `LEVELS`
+#  du projet, à l'identique : deux listes qui doivent bouger ensemble.
+#
+#  ⚠️ Étendre PI aux deux autres boîtes est un LOT À PART, à chiffrer en
+#  quota : 300 requêtes par run et par boîte (2 paramètres × 6 niveaux ×
+#  25 échéances), 24 runs par jour. Ce n'est pas un octet de stockage,
+#  c'est un budget de portail.
+DOMAINES_PI = ("nord-alpes",)
+
+#: Pourquoi PI n'est pas là, en une phrase SERVIE AU CLIENT. ⛔ Publiée
+#: plutôt que déduite d'une absence : « pas de champ » et « champ absent
+#: pour une raison connue » ne se lisent pas pareil, et l'écran doit
+#: pouvoir DIRE la seconde. Même discipline que `resolutionTemporelleMin`.
+POURQUOI_PAS_DE_PI = (
+    "AROME-PI n'est ingéré que sur la boîte {couverts} (mesuré le "
+    "17/08/2026 : 207 balises servies sur les 288 de l'archive). Le "
+    "domaine {domaine} n'en reçoit aucun champ — ce n'est pas une panne "
+    "ni un trou de données, c'est la portée actuelle de l'ingestion. "
+    "L'étendre est un lot à part, borné par le quota du portail "
+    "(300 requêtes par run et par boîte, 24 runs par jour).")
+
+
+def pi_couvre(domaine):
+    """PI est-il ingéré sur ce domaine ? ⛔ La seule façon de le savoir."""
+    return domaine in DOMAINES_PI
+
 # ── LES ZONES D'INTÉRÊT — ⛔ CE NE SONT PAS DES DOMAINES ──────────────
 # Une zone d'intérêt ne découpe AUCUNE grille, ne produit AUCUN artefact
 # de production, et rien de ce qui est servi à un pilote n'en dépend

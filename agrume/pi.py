@@ -150,6 +150,60 @@ PREFIXE_COLONNES = "agrume/pi/colonnes/"
 PREFIXE_GRILLE = "agrume/pi/grille/"
 CLE_INDEX_GRILLE = "agrume/pi/grille/index.json"
 
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ LE RAFRAÎCHISSEMENT — arbitrage A10 de Yann, 17/08/2026 (Lot L)
+# ══════════════════════════════════════════════════════════════════════
+#  Le composite PI n'entre PAS dans les tampons du produit B, et c'est
+#  un arbitrage, pas une commodité. Trois mesures l'ont dicté :
+#
+#  1. **La cadence.** Le produit B est publié 8 fois par jour (AROME),
+#     PI 24. Fusionner à l'ingestion AROME aurait servi une couche PI
+#     vieille de 3 h au pire — c'est-à-dire payer la fusion en perdant
+#     exactement ce qui la justifie.
+#  2. **Le cache.** Les `e{step}.bin` sont servis en `CACHE_IMMUABLE`
+#     PARCE QUE « les mêmes octets sortiront toujours de cette clé »
+#     (14/08). Les réécrire toutes les heures casse cette prémisse, et
+#     l'appariement « vieux octets, manifeste frais » ne lève RIEN : le
+#     Range tombe dans l'objet, rend 206, et la coupe trace une colonne
+#     plausible et fausse. C'est la moitié silencieuse du bug du 13/08.
+#  3. **Les octets.** Réécrire en place coûtait `colonnes.bin` ENTIER
+#     (286 Mo sur nord-alpes) à chaque heure, parce que l'échéance y est
+#     l'axe INTERNE d'un enregistrement de colonne. Un objet à part ne
+#     porte que ce que PI corrige — `u`/`v` sur les 25 niveaux
+#     hauteur — soit **29,14 Mo par disposition, 58,3 Mo par run PI**.
+#
+#  ⛔⛔ LES DEUX JUMEAUX S'ÉCRIVENT ENSEMBLE OU PAS DU TOUT. `carte.bin`
+#  nourrit le calque, `colonnes.bin` nourrit la coupe. Publier l'un sans
+#  l'autre ferait dire deux choses différentes au même vent au même
+#  instant — c'est précisément la divergence que le produit B a été
+#  redessiné pour éliminer le 12/08.
+#
+#  ⚠️ LE PRIX, PAYÉ SCIEMMENT : le client CHANGE de route de lecture
+#  pour `u`/`v` hauteur sur 0–6 h. La clause « le client ne change pas
+#  de route » de l'arbitrage A5 est donc TOMBÉE, et elle est tombée
+#  devant le chiffrage, pas par inadvertance.
+PREFIXE_RAFRAICHISSEMENT = "agrume/pi/rafraichissement/"
+CLE_INDEX_RAFRAICHISSEMENT = "agrume/pi/rafraichissement/index.json"
+
+# ⚠️ LE DOMAINE EST DANS LA CLÉ, comme pour le produit B depuis le
+# 12/08. Aujourd'hui `DOMAINES_PI` n'en contient qu'un — mais une clé
+# sans domaine devrait être migrée le jour où il y en a deux, et la
+# rétention se compte PAR DOMAINE (`grille.index_apres`).
+GABARIT_CLE_RAFRAICHISSEMENT = (
+    "agrume/pi/rafraichissement/{domaine}/{run_pi}/{objet}")
+
+
+def prefixe_rafraichissement(run_pi, domaine):
+    return f"{PREFIXE_RAFRAICHISSEMENT}{domaine}/{run_pi}"
+
+
+def cles_du_rafraichissement(run_pi, domaine):
+    """Les trois clés d'un rafraîchissement. ⚠️ `manifest.json` en
+    DERNIER dans cette liste et en dernier à l'écriture : il est ce qui
+    rend l'objet lisible, il ne doit jamais décrire des octets absents."""
+    b = prefixe_rafraichissement(run_pi, domaine)
+    return [f"{b}/carte.bin", f"{b}/colonnes.bin", f"{b}/manifest.json"]
+
 # ⚠️ 24 runs/jour, pas 8. À 3,1 Mo la grille, sans purge ce serait 27 Go
 # par an — presque trois fois le palier gratuit, pour une donnée dont
 # personne ne veut la version d'hier. Trois runs, comme le produit B, et

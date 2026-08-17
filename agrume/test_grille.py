@@ -848,9 +848,159 @@ def main():
 
     section_10_identite_ab()
     section_11_relecture_r2()
+    section_12_provenance()
 
     print("\n  grille :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  §12 — LA PROVENANCE (Lot L, arbitrage A4 · 17/08/2026)
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ CE QUE CE BANC EXISTE POUR ATTRAPER, ET C'EST UN SEUL DÉFAUT :
+#  **une fusion qui ne se dit pas.** Le jour où le rafraîchissement PI
+#  entrera dans la chaîne, la seule chose qui distinguera « cette valeur
+#  vient d'AROME » de « cette valeur vient de PI » sera ce champ. S'il
+#  ment, ou s'il se tait, l'écran affirmera quelque chose de faux SANS
+#  QU'AUCUNE REQUÊTE N'ÉCHOUE — c'est le mode de panne de tout ce
+#  fichier.
+#
+#  ⚠️ ET IL SAIT ÉCHOUER, par construction : le dernier contrôle rejoue
+#  le manifeste AMPUTÉ de son champ `provenance` — c'est-à-dire le code
+#  d'AVANT le Lot L — et exige qu'il devienne IMPOSSIBLE d'y distinguer
+#  un domaine servi par PI d'un domaine qui ne l'est pas. Si ce contrôle
+#  passait aussi sans le champ, le champ ne servirait à rien.
+def section_12_provenance():
+    import json                                          # noqa: PLC0415
+
+    print("\n── 12. La provenance : ce qui est dit, et ce qui est TU ──")
+    from domaine import DOMAINES_PI  # noqa: PLC0415
+
+    o = orog_bidon()
+    lats, lons = GR.axes_depuis_orographie(o)
+    steps = [0, 1, 2, 3]
+    run = "2026-08-17T03:00:00Z"
+
+    # ⚠️ DEUX domaines, et c'est tout l'objet du contrôle : un couvert
+    # par PI, un qui ne l'est pas. Un banc sur un seul domaine ne peut
+    # pas voir la différence qu'A9 demande de PUBLIER.
+    couvert = DOMAINES_PI[0]
+    sans_pi = next(d for d in ("pyrenees", "tarn-aveyron-herault")
+                   if d not in DOMAINES_PI)
+
+    g_ok = GR.Grille(run, steps, lats, lons, o.z, domaine=couvert)
+    g_no = GR.Grille(run, steps, lats, lons, o.z, domaine=sans_pi)
+    p_ok, p_no = g_ok.provenance(), g_no.provenance()
+
+    # ── a. La granularité, et rien de plus fin ────────────────────────
+    verifier("une entrée par ÉCHÉANCE, et les trois blocs à chacune",
+             len(p_ok["par_echeance"]) == len(steps)
+             and all(set(e["blocs"]) == {"hauteur", "isobare", "surface"}
+                     for e in p_ok["par_echeance"]),
+             f"{len(p_ok['par_echeance'])} échéances")
+    verifier("⛔ les noms de blocs sont EXACTEMENT ceux que "
+             "`service.tranches[*].bloc` publie — deux vocabulaires "
+             "pour un seul découpage, et le client choisit mal",
+             set(p_ok["blocs"])
+             == {t["bloc"] for t in g_ok.tranches().values()})
+
+    # ── b. Tant qu'il n'y a rien à fusionner, elle dit AROME ──────────
+    verifier("⛔ sans fusion, la provenance dit `arome` PARTOUT — une "
+             "affirmation vraie, pas un remplissage",
+             all(b["modele"] == "arome" and b["run"] == run
+                 for e in p_ok["par_echeance"] for b in e["blocs"].values()))
+
+    # ── c. ⛔ L'ÂGE N'EST PAS PUBLIÉ ──────────────────────────────────
+    # ⚠️ Il périme à la lecture. Un manifeste qui porterait « il y a
+    # 25 min » serait faux 25 minutes plus tard, et le client n'aurait
+    # aucun moyen de le savoir. Ce contrôle est là parce que c'est la
+    # pente naturelle : publier l'âge est plus commode pour l'écran.
+    plat = json.dumps(p_ok, ensure_ascii=False)
+    verifier("⛔ AUCUN âge publié — il se calcule à l'écran depuis `run`",
+             not any(cle in plat for cle in
+                     ('"age', '"ageMin', '"age_min', '"il_y_a', '"anciennete')))
+
+    # ── d. Le chiffrage, MESURÉ — et il dément la note du 13/08 ───────
+    # ⛔ La note `note-provenance-pyramide-priorites-13-08.md` annonçait
+    # « ~2–3 Ko dans le MANIFESTE ». **Mesuré ici le 17/08 : 11,1 Ko sur
+    # 52 échéances** — 3,7× l'estimation. L'écart vient d'un détail que
+    # l'estimation ne voyait pas : l'horodatage du run est répété
+    # 156 fois (3 blocs × 52 échéances), soit ~7 Ko de la facture.
+    #
+    # ⚠️ CE CHIFFRE NE ROUVRE PAS A4, et il faut dire pourquoi plutôt
+    # que de le corriger en douce : l'arbitrage opposait échéance×bloc à
+    # une carte PAR POINT chiffrée à **31,5 Mo**. 11 Ko contre 31,5 Mo,
+    # c'est le même verdict que 3 Ko contre 31,5 Mo — un facteur 2 800
+    # au lieu de 10 000. Ce qui aurait dû le rouvrir, c'est une dérive
+    # vers le mégaoctet ; le plafond est donc posé là où ça compte.
+    #
+    # ⓘ Et la redondance est GARDÉE sciemment : factoriser le run
+    # (« sauf mention contraire, c'est celui du manifeste ») ferait du
+    # champ un différentiel, donc un piège le jour où deux blocs d'une
+    # même échéance viendront de deux runs — exactement le cas que ce
+    # champ existe pour porter.
+    g52 = GR.Grille(run, list(range(52)), lats, lons, o.z, domaine=couvert)
+    ko = len(json.dumps(g52.provenance()["par_echeance"],
+                        ensure_ascii=False).encode()) / 1024
+    verifier("⚠️ sur 52 échéances, `par_echeance` tient sous 20 Ko — "
+             "la note du 13/08 disait ~3 Ko, la MESURE dit 11,1 ; "
+             "l'arbitrage tient quand même (contre 31,5 Mo par point)",
+             ko < 20.0, f"{ko:.1f} Ko")
+
+    # ── e. ⛔ L'ABSENCE SE DIT (A9) ───────────────────────────────────
+    verifier(f"⛔ sur `{sans_pi}`, PI est déclaré INDISPONIBLE",
+             p_no["arome_pi"]["disponible"] is False)
+    verifier("⛔ …AVEC sa raison, en toutes lettres — « pas de champ » et "
+             "« pas de champ POUR CETTE RAISON » ne se lisent pas pareil",
+             isinstance(p_no["arome_pi"]["pourquoi"], str)
+             and sans_pi in p_no["arome_pi"]["pourquoi"]
+             and len(p_no["arome_pi"]["pourquoi"]) > 80)
+    verifier("⚠️ …et il n'y a AUCUNE route de rafraîchissement à suivre — "
+             "une route publiée là rendrait des 404 pour toujours",
+             p_no["arome_pi"]["rafraichissement"] is None)
+    verifier(f"⛔ sur `{couvert}`, PI est déclaré DISPONIBLE, et sans "
+             "raison d'absence à inventer",
+             p_ok["arome_pi"]["disponible"] is True
+             and p_ok["arome_pi"]["pourquoi"] is None)
+
+    # ── f. La route est PUBLIÉE, pas déductible ──────────────────────
+    raf = p_ok["arome_pi"]["rafraichissement"]
+    verifier("la route du rafraîchissement est publiée (gabarit + index + "
+             "objets) — rien à coder en dur côté client",
+             isinstance(raf, dict)
+             and "{domaine}" in raf["gabarit_cle"]
+             and "{run_pi}" in raf["gabarit_cle"]
+             and raf["cle_index"].endswith("index.json")
+             and set(raf["objets"]) == {"carte.bin", "colonnes.bin",
+                                        "manifest.json"})
+    verifier("⛔ la préséance dit `u`/`v` du bloc `hauteur` et RIEN "
+             "D'AUTRE — un rafraîchissement qui déborderait sur les "
+             "isobares écraserait ce qu'il ne sait pas calculer",
+             raf["blocs_concernes"] == ["hauteur"]
+             and raf["parametres_concernes"] == ["u", "v"])
+    verifier("⚠️ …et le manifeste du produit B ne NOMME aucun run PI : il "
+             "est publié 8 fois par jour, PI 24 — le run que le client "
+             "lira n'existe pas encore quand ce manifeste s'écrit",
+             not any(k for k, v in raf.items()
+                     if isinstance(v, str) and v.endswith("00:00Z")))
+
+    # ── g. ⛔ LE CONTRÔLE QUI SAIT ÉCHOUER ────────────────────────────
+    # Le manifeste d'AVANT le Lot L, reconstitué : le même, moins
+    # `provenance`. Si un consommateur pouvait quand même distinguer les
+    # deux domaines, le champ serait décoratif.
+    man_ok = {k: v for k, v in g_ok.manifeste().items() if k != "provenance"}
+    man_no = {k: v for k, v in g_no.manifeste().items() if k != "provenance"}
+    neutre = {"produit", "domaine", "bornes", "axes", "remplissage",
+              "remplissage_par_parametre"}
+    verifier("⛔ SANS le champ, les deux manifestes ne diffèrent que par "
+             "leur GÉOGRAPHIE — rien n'y dit que l'un est servi par PI "
+             "et l'autre pas. C'est ce trou-là que le Lot L bouche.",
+             {k for k in man_ok if man_ok[k] != man_no.get(k)} <= neutre,
+             str(sorted({k for k in man_ok
+                         if man_ok[k] != man_no.get(k)} - neutre)))
+    verifier("…et AVEC le champ, la différence est explicite et lisible",
+             g_ok.manifeste()["provenance"]["arome_pi"]["disponible"]
+             is not g_no.manifeste()["provenance"]["arome_pi"]["disponible"])
 
 
 def section_11_relecture_r2():

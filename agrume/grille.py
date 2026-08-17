@@ -634,7 +634,133 @@ class Grille:
                    + self.surf.nbytes + self.psol.nbytes
                    + self.zsol.nbytes + self.lats.nbytes + self.lons.nbytes)
 
-    # ── Sérialisation ─────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  LA PROVENANCE — arbitrage A4 de Yann (17/08/2026), Lot L
+    # ══════════════════════════════════════════════════════════════════
+    #  ⛔ ELLE EST PUBLIÉE AVANT QU'IL Y AIT QUOI QUE CE SOIT À FUSIONNER,
+    #  et l'ordre n'est pas un détail de planning : fusionner sans le dire
+    #  est exactement le mensonge que ce projet refuse. Tant que le
+    #  rafraîchissement PI n'existe pas, ce champ dit `arome` partout —
+    #  et c'est une affirmation VRAIE, pas un remplissage.
+    #
+    #  ── LA GRANULARITÉ, ET POURQUOI PAS PLUS FINE ────────────────────
+    #  Par ÉCHÉANCE × BLOC (hauteur / isobare / surface), dans le
+    #  manifeste. ⛔ **Pas par point** : chiffré le 13/08, une carte par
+    #  point × niveau × échéance ferait **31,5 Mo par run et par
+    #  domaine** — plus lourd que la donnée qu'elle décrit — pour une
+    #  information qui NE VARIE PAS par point. Les fusions de ce projet
+    #  remplacent des TRANCHES entières : PI apporte des échéances
+    #  basses (0–6 h), ARPEGE apportera des échéances lointaines, le
+    #  relais isobare est déjà un bloc.
+    #  ⓘ Le jour improbable où une fusion découperait DANS une échéance,
+    #  on ajoutera la carte fine ce jour-là : rétention 3 runs, rien à
+    #  migrer.
+    #
+    #  ⚠️ CE QUE ÇA PÈSE VRAIMENT, ET LA NOTE DU 13/08 SE TROMPAIT.
+    #  Elle annonçait « ~2–3 Ko ». **Mesuré le 17/08 sur 52 échéances :
+    #  11,1 Ko** — 3,7× l'estimation, parce qu'elle n'avait pas compté
+    #  l'horodatage du run répété 156 fois (3 blocs × 52). Le verdict
+    #  d'A4 ne bouge pas pour autant : l'alternative chiffrée était
+    #  31,5 Mo par run et par domaine. `test_grille.py` §12 mesure ce
+    #  poids à chaque passage et refuse au-delà de 20 Ko, pour qu'une
+    #  dérive vers le mégaoctet rouvre l'arbitrage au lieu de se glisser.
+    #
+    #  ⛔ **L'ÂGE NE SE PUBLIE PAS.** Il périme à la lecture. Le client le
+    #  calcule depuis `run`, comme il le fait déjà pour la fraîcheur des
+    #  balises. Publier un âge, c'est publier une valeur qui est fausse
+    #  une seconde après l'écriture.
+    #
+    #  ⚠️ La forme diffère du §1 de
+    #  `claude/note-provenance-pyramide-priorites-13-08.md` sur UN point,
+    #  et il est assumé : la note proposait une LISTE nue. Ici c'est un
+    #  objet, parce que l'arbitrage A9 impose de publier AUSSI ce qui
+    #  N'EST PAS là (la couverture de PI, domaine par domaine) et où le
+    #  chercher quand il y est. Une liste nue n'aurait pas eu d'endroit
+    #  pour le dire, et une seconde clé sœur aurait fait deux vérités.
+    def provenance(self):
+        from domaine import (DOMAINES_PI, POURQUOI_PAS_DE_PI,  # noqa: PLC0415
+                             pi_couvre)
+        from pi import (CLE_INDEX_RAFRAICHISSEMENT,  # noqa: PLC0415
+                        ECHEANCES_MIN as ECHEANCES_PI,
+                        GABARIT_CLE_RAFRAICHISSEMENT,
+                        HORIZON_MINUTES as HORIZON_PI,
+                        NIVEAUX_DELTA)
+
+        couvert = pi_couvre(self.domaine)
+        # ⚠️ Une entrée par échéance ET par bloc, même quand toutes se
+        # ressemblent. Les répliquer coûte ~3 Ko ; les factoriser
+        # (« sauf mention contraire, c'est AROME ») obligerait le client
+        # à connaître un défaut implicite — et un défaut implicite est
+        # ce qui se met à mentir en silence le jour où il change.
+        ici = dict(modele="arome", run=self.run)
+        par_echeance = [
+            dict(echeance=int(s),
+                 blocs={"hauteur": dict(ici), "isobare": dict(ici),
+                        "surface": dict(ici)})
+            for s in self.steps]
+
+        rafraichissement = None
+        if couvert:
+            rafraichissement = dict(
+                gabarit_cle=GABARIT_CLE_RAFRAICHISSEMENT,
+                objets=["carte.bin", "colonnes.bin", "manifest.json"],
+                cle_index=CLE_INDEX_RAFRAICHISSEMENT,
+                domaine=self.domaine,
+                blocs_concernes=["hauteur"],
+                parametres_concernes=["u", "v"],
+                horizon_min=HORIZON_PI,
+                echeances_min=list(ECHEANCES_PI),
+                niveaux_delta_mesure=list(NIVEAUX_DELTA),
+                preseance=(
+                    "POUR `u` et `v` DU BLOC `hauteur` SEULEMENT, et pour "
+                    "les seules échéances que le manifeste du "
+                    "rafraîchissement énumère : le rafraîchissement gagne "
+                    "sur le produit B. Partout ailleurs — isobares, "
+                    "surface, `t`/`r`/`tke`, échéances au-delà de "
+                    "l'horizon — le produit B reste seul maître, et le "
+                    "rafraîchissement n'a rien à en dire."),
+                note=(
+                    "⛔ CE CHAMP NE NOMME PAS UN RUN, ET C'EST VOLONTAIRE. "
+                    "Le produit B est publié 8 fois par jour, le "
+                    "rafraîchissement 24 : au moment où ce manifeste est "
+                    "écrit, le run PI que le client lira n'existe pas "
+                    "encore. C'est `cle_index` qui fait foi, jamais ce "
+                    "manifeste-ci. Un client qui déduirait le run PI de "
+                    "`run` ci-dessus lirait un 404 sept fois sur huit."),
+                pourquoi_a_part=(
+                    "les tampons du produit B sont servis avec un cache "
+                    "long parce que leurs octets ne changent jamais ; les "
+                    "réécrire toutes les heures ferait servir des octets "
+                    "d'une génération sous un manifeste d'une autre, sans "
+                    "qu'aucune requête n'échoue"))
+
+        return dict(
+            granularite="echeance x bloc",
+            blocs=["hauteur", "isobare", "surface"],
+            note=(
+                "provenance de CE QUI EST DANS CET OBJET, bloc par bloc et "
+                "échéance par échéance. ⛔ L'ÂGE N'EST PAS PUBLIÉ : il "
+                "périme à la lecture, il se calcule à l'écran depuis "
+                "`run`. ⚠️ Le nom d'un bloc est celui que `service."
+                "tranches[*].bloc` publie — ce sont les mêmes trois mots, "
+                "et ils ne doivent pas être recopiés d'un côté à l'autre."),
+            modeles=dict(
+                arome=dict(nom="AROME 0,025°", runs_par_jour=8,
+                           resolution_temporelle_min=60)),
+            par_echeance=par_echeance,
+            # ── ⛔ CE QUI N'EST PAS LÀ, DIT PLUTÔT QUE TU — arbitrage A9
+            # ⚠️ Un domaine sans PI ne publie PAS un champ vide : il
+            # publie `disponible: false` AVEC sa raison. « Pas de
+            # donnée » et « pas de donnée POUR CETTE RAISON-LÀ » ne se
+            # lisent pas pareil, et l'écran doit pouvoir dire la
+            # seconde. Même discipline que `resolutionTemporelleMin`.
+            arome_pi=dict(
+                disponible=bool(couvert),
+                domaines_couverts=list(DOMAINES_PI),
+                pourquoi=None if couvert else POURQUOI_PAS_DE_PI.format(
+                    couverts=", ".join(DOMAINES_PI), domaine=self.domaine),
+                rafraichissement=rafraichissement))
+
     def manifeste(self, extra=None):
         from domaine import DOMAINES
         m = dict(
@@ -783,6 +909,11 @@ class Grille:
                 coupure=("400 hPa, choisi le 10/08 : ce n'est PAS « le max », "
                          "c'est la coupure qui couvre z_sol + 3000 m pour "
                          "toutes les balises du domaine.")),
+            # ── ⛔ LA PROVENANCE (A4, 17/08) ──────────────────────────
+            # Publiée AVANT toute fusion : fusionner sans le dire est le
+            # mensonge que ce projet refuse. Voir `provenance()` pour la
+            # granularité retenue et les deux chiffrages qui l'ont fixée.
+            provenance=self.provenance(),
             retention_runs=RETENTION_RUNS,
             remplissage=self.remplissage(),
             remplissage_par_parametre=self.remplissage_par_parametre(),
