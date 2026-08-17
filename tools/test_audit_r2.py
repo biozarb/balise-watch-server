@@ -440,11 +440,16 @@ class MarcheDeProduit(unittest.TestCase):
                                    "marche-là — c'est tout le problème")
 
     def test_la_somme_des_prefixes_ne_fabrique_plus_la_marche(self):
+        # ⚠️ DEPUIS LE 17/08, la réponse est encore plus tranchée qu'en
+        # août : le socle lui-même n'a que quatre relevés ce matin-là, et
+        # il en faut cinq. Le 13/08 au matin, ce code ne rend donc pas
+        # « une pente plus juste » mais PAS DE PENTE DU TOUT — et il le
+        # dit dans `jeunes`. C'est la même honnêteté que le 16/08 : mieux
+        # vaut refuser de calculer que trancher sur trop peu de points.
         p = pentes_des_prefixes(self.serie(), [self.SOCLE, self.NEUF])
         self.assertIn(self.NEUF, p["jeunes"], "un produit d'un seul relevé "
                                               "n'a pas de pente")
-        self.assertLess(p["total"], 1.0)
-        self.assertGreater(p["total"], 0.0)
+        self.assertIsNone(p["total"], "quatre relevés ne font plus une pente")
 
     def test_et_le_mail_ne_part_plus(self):
         serie = self.serie()
@@ -459,9 +464,11 @@ class MarcheDeProduit(unittest.TestCase):
 
     def test_le_prix_est_rendu_pas_tu(self):
         # Une échéance qui ne couvre pas tout doit le dire : c'est ce
-        # champ que `rendre()` et `main()` journalisent.
+        # champ que `rendre()` et `main()` journalisent. Le 13/08 au
+        # matin, avec la règle des cinq relevés, ce sont les DEUX
+        # préfixes qui sont hors échéance — et le rapport l'écrit.
         p = pentes_des_prefixes(self.serie(), [self.SOCLE, self.NEUF])
-        self.assertEqual(p["jeunes"], [self.NEUF])
+        self.assertEqual(p["jeunes"], sorted([self.SOCLE, self.NEUF]))
 
 
 class MarcheDeBucket(unittest.TestCase):
@@ -488,7 +495,8 @@ class MarcheDeBucket(unittest.TestCase):
         vieux = {self.VIEUX: 0.031}
         tous = {**vieux, self.NEUF: 0.785}
         serie = [rel(0, vieux), rel(0.01, vieux), rel(0.02, vieux),
-                 rel(0.03, tous), rel(1, tous), rel(2, tous), rel(3, tous)]
+                 rel(0.03, tous), rel(1, tous), rel(2, tous), rel(3, tous),
+                 rel(4, tous)]
         p = pentes_des_prefixes(serie, [self.VIEUX, self.NEUF])
         self.assertAlmostEqual(p["par_prefixe"][self.NEUF], 0.0, places=6,
                                msg="0,78 Go apparus ne sont pas 0,78 Go "
@@ -543,17 +551,20 @@ class MarcheDeDomaine(unittest.TestCase):
         self.assertEqual(p["jeunes"], sorted([self.SOCLE, self.GRILLE]))
         self.assertIsNone(p["total"])
 
-    def test_au_quatrieme_jour_la_marche_est_ignoree(self):
-        # ⛔ Et le lendemain, quand la pente redevient calculable, elle
-        # vaut ZÉRO : un domaine né à son plateau ne monte pas.
-        p = pentes_des_prefixes(self.serie(4), [self.SOCLE, self.GRILLE])
+    def test_au_cinquieme_jour_la_marche_est_ignoree(self):
+        # ⛔ Et deux jours après, quand la pente redevient calculable,
+        # elle vaut ZÉRO : un domaine né à son plateau ne monte pas.
+        # ⚠️ CINQUIÈME et plus quatrième depuis le 17/08 : le quantile
+        # bas coûte un relevé de plus, et c'est ce qui lui permet
+        # d'ignorer DEUX marches au lieu d'une.
+        p = pentes_des_prefixes(self.serie(5), [self.SOCLE, self.GRILLE])
         self.assertAlmostEqual(p["par_prefixe"][self.GRILLE], 0.0, places=6)
         self.assertAlmostEqual(p["par_prefixe"][self.SOCLE], 0.0, places=6)
 
     def test_et_le_mail_ne_part_plus(self):
         inv = {"octets": int(3.4049 * GO), "objets": 1913,
                "par_bucket": {}, "par_prefixe": {}}
-        juste = pentes_des_prefixes(self.serie(4),
+        juste = pentes_des_prefixes(self.serie(5),
                                     [self.SOCLE, self.GRILLE])["total"]
         self.assertTrue(verdict(inv, pente_go_par_mois(self.serie(3)),
                                 seuil_go=7.0, horizon=60)["alerte"],
@@ -566,25 +577,64 @@ class MarcheDeDomaine(unittest.TestCase):
 class PenteRobuste(unittest.TestCase):
     """Les propriétés du calcul du 16/08, isolées de tout contexte."""
 
-    def test_moins_de_quatre_releves_pas_de_pente(self):
-        serie = [rel(j, {"a": 1.0 + j}) for j in (0, 1, 2)]
+    def test_moins_de_cinq_releves_pas_de_pente(self):
+        serie = [rel(j, {"a": 1.0 + j}) for j in (0, 1, 2, 3)]
         self.assertIsNone(pente_du_prefixe(serie, "a"))
 
-    def test_quatre_releves_suffisent(self):
-        serie = [rel(j, {"a": 1.0 + j}) for j in (0, 1, 2, 3)]
+    def test_cinq_releves_suffisent(self):
+        serie = [rel(j, {"a": 1.0 + j}) for j in (0, 1, 2, 3, 4)]
         self.assertAlmostEqual(pente_du_prefixe(serie, "a"), 30.0, places=6)
 
-    def test_une_marche_isolee_ne_peut_pas_etre_la_mediane(self):
-        # ⛔ LA propriété qui rend le mécanisme indépendant de la
-        # granularité : quatre relevés font trois différences, une seule
-        # aberrante, et la médiane de trois valeurs ignore toujours
-        # l'extrême — où que la marche tombe dans la série.
-        for rang in range(3):
-            poids = [1.0 if k <= rang else 6.0 for k in range(4)]
+    def test_une_marche_isolee_ne_peut_pas_etre_la_pente(self):
+        # ⛔ La propriété du 16/08, rejouée sur le calcul du 17/08 : une
+        # marche unique, où qu'elle tombe dans la série, ne fabrique
+        # aucune pente. Cinq relevés au lieu de quatre — c'est le prix
+        # du quantile bas, et il est payé une fois pour toutes.
+        for rang in range(4):
+            poids = [1.0 if k <= rang else 6.0 for k in range(5)]
             serie = [rel(j, {"a": p}) for j, p in enumerate(poids)]
             self.assertAlmostEqual(
                 pente_du_prefixe(serie, "a"), 0.0, places=6,
                 msg=f"marche au rang {rang} : {poids}")
+
+    def test_DEUX_marches_dans_la_fenetre_ne_font_pas_de_pente(self):
+        # ⛔ LA PANNE DU 17/08, réduite à sa loi. La médiane du 16/08
+        # tenait à ce qu'il n'y ait qu'UNE marche parmi trois
+        # différences ; deux marches consécutives et elle tombe dessus.
+        # Le 25e centile de quatre différences ignore les DEUX plus
+        # grandes — c'est exactement ce qu'il fallait.
+        for a in range(4):
+            for b in range(a + 1, 4):
+                poids = [1.0] * 5
+                for k in range(5):
+                    poids[k] += (2.0 if k > a else 0.0) + (3.0 if k > b else 0.0)
+                serie = [rel(j, {"a": p}) for j, p in enumerate(poids)]
+                self.assertAlmostEqual(
+                    pente_du_prefixe(serie, "a"), 0.0, places=6,
+                    msg=f"marches aux rangs {a} et {b} : {poids}")
+
+    def test_les_vrais_chiffres_de_la_nuit_du_17_08(self):
+        # ⛔ Les relevés RÉELS de `agrume/grille` des 14, 15, 16 et 17/08
+        # (2,0016 · 2,0016 · 2,4223 · 4,0540 Go), plus la nuit suivante.
+        # La médiane du 16/08 a lu +11,12 Go/mois sur les quatre premiers
+        # et le mail est parti alors que l'index réclamait 496 clés sur
+        # 496 et que le plateau valait 3,375 Go.
+        #
+        # ⚠️ Deux cinquièmes relevés possibles, et AUCUN ne doit faire
+        # partir d'échéance : le plateau propre (3,375 — la purge a mordu
+        # avant l'audit) et le plateau + un run en vol (4,054 — l'audit
+        # est retombé dans la fenêtre de publication). Le second est le
+        # cas gênant : il ne DÉCROÎT pas, il stagne à une valeur haute.
+        for cinquieme in (3.3750, 4.0540):
+            reel = [2.0016, 2.0016, 2.4223, 4.0540, cinquieme]
+            serie = [rel(j, {"a": p}) for j, p in enumerate(reel)]
+            pente = pente_du_prefixe(serie, "a")
+            self.assertLessEqual(pente, 1e-6, f"5e relevé = {cinquieme}")
+            inv = {"octets": int(4.4 * GO), "objets": 1969,
+                   "par_bucket": {}, "par_prefixe": {}}
+            self.assertFalse(
+                verdict(inv, pente, seuil_go=7.0, horizon=60)["alerte"],
+                f"le mail du 17/08 ne doit plus partir ({cinquieme})")
 
     def test_deux_releves_a_24_secondes_ne_font_pas_une_vitesse(self):
         # ⚠️ Le piège que la médiane INTRODUIT et que les moindres carrés
@@ -599,13 +649,13 @@ class PenteRobuste(unittest.TestCase):
     def test_la_rafale_ne_pollue_pas_une_vraie_serie(self):
         serie = [rel(0.0, {"a": 1.0}), rel(0.01, {"a": 1.0}),
                  rel(0.02, {"a": 1.0}), rel(1, {"a": 1.0}),
-                 rel(2, {"a": 1.0}), rel(3, {"a": 1.0})]
+                 rel(2, {"a": 1.0}), rel(3, {"a": 1.0}), rel(4, {"a": 1.0})]
         self.assertAlmostEqual(pente_du_prefixe(serie, "a"), 0.0, places=6)
 
     def test_une_decroissance_reste_une_decroissance(self):
         # Un produit qui se range doit se lire comme tel, sinon la purge
         # qui mord ressemblerait à un plateau.
-        serie = [rel(j, {"a": 4.0 - j}) for j in (0, 1, 2, 3)]
+        serie = [rel(j, {"a": 4.0 - j}) for j in (0, 1, 2, 3, 4)]
         self.assertAlmostEqual(pente_du_prefixe(serie, "a"), -30.0, places=6)
 
 
@@ -618,7 +668,8 @@ class PenteParPrefixe(unittest.TestCase):
                  rel(2, {"a": 1.0, "b": 1.0}),
                  rel(3, {"a": 1.0, "b": 2.0}),
                  rel(4, {"a": 1.0, "b": 3.0}),
-                 rel(5, {"a": 1.0, "b": 4.0})]
+                 rel(5, {"a": 1.0, "b": 4.0}),
+                 rel(6, {"a": 1.0, "b": 5.0})]
         self.assertAlmostEqual(pente_du_prefixe(serie, "b"), 30.0, places=6)
 
     def test_absence_ne_compte_pas_comme_un_releve(self):
@@ -630,13 +681,15 @@ class PenteParPrefixe(unittest.TestCase):
         # série.
         serie = [rel(0, {"a": 1.0}), rel(1, {"a": 1.0}),
                  rel(2, {"a": 1.0, "b": 1.0}),
-                 rel(3, {"a": 1.0, "b": 1.0})]
+                 rel(3, {"a": 1.0, "b": 1.0}),
+                 rel(4, {"a": 1.0}), rel(5, {"a": 1.0})]
         p = pentes_des_prefixes(serie, ["a", "b"])
         self.assertEqual(p["jeunes"], ["b"])
         self.assertAlmostEqual(p["total"], 0.0, places=6)
 
     def test_la_somme_fait_le_total(self):
-        serie = [rel(j, {"a": 1.0 + j, "b": 2.0 + 2 * j}) for j in (0, 1, 2, 3)]
+        serie = [rel(j, {"a": 1.0 + j, "b": 2.0 + 2 * j})
+                 for j in (0, 1, 2, 3, 4)]
         p = pentes_des_prefixes(serie, ["a", "b"])
         self.assertAlmostEqual(p["par_prefixe"]["a"], 30.0, places=6)
         self.assertAlmostEqual(p["par_prefixe"]["b"], 60.0, places=6)
@@ -645,7 +698,8 @@ class PenteParPrefixe(unittest.TestCase):
     def test_un_prefixe_disparu_ne_compte_plus(self):
         # Une chaîne qu'on arrête laisse sa pente dans l'historique. La
         # compter encore projetterait une croissance qui n'existe plus.
-        serie = [rel(j, {"a": 1.0, "mort": float(j)}) for j in (0, 1, 2, 3)]
+        serie = [rel(j, {"a": 1.0, "mort": float(j)})
+                 for j in (0, 1, 2, 3, 4)]
         p = pentes_des_prefixes(serie, ["a"])   # « mort » n'est plus courant
         self.assertNotIn("mort", p["par_prefixe"])
         self.assertAlmostEqual(p["total"], 0.0, places=6)
@@ -887,6 +941,119 @@ class MarcheEtOrphelin(unittest.TestCase):
         gros = sum(2_000_000 for _ in self.cles("R1"))
         deux_runs = sum(1_000_000 for _ in self.cles("R1") + self.cles("R2"))
         self.assertEqual(gros, deux_runs)
+
+
+class PublicationEnVol(unittest.TestCase):
+    """⛔ LA COURSE DU 17/08, ET LA MOITIÉ QU'ELLE NE DOIT PAS EMPORTER.
+
+    L'audit de 04:32 UTC est tombé dans la fenêtre de publication du
+    réseau 00 Z : 82 objets écrits (les 55 clés de `nord-alpes/00Z` et 27
+    des 55 de `pyrenees/00Z`, 0,679 Go), index pas encore réécrit — il
+    l'a été à 05:29. Le mail a dit « la purge de ce produit ne mord
+    plus » alors que le contrôle du même matin donnait 496 présentes /
+    496 réclamées, 0 orphelin, plateau 3,375 Go.
+
+    Les deux moitiés du contrat, sur le MÊME jeu de clés : un run en vol
+    doit être MUET, et les mêmes clés encore là demain matin doivent
+    CRIER. La seule chose qui les sépare est l'ÂGE — et c'est ce qui
+    interdit de lire ce mécanisme comme un seuil de tolérance."""
+
+    CLE = "agrume/grille/index.json"
+    PREF = "agrume/grille/"
+    T = datetime(2026, 8, 17, 4, 32, tzinfo=timezone.utc)
+
+    def index(self, *cles):
+        return {"retention_runs": 3, "runs": [{"cles": list(cles)}],
+                "restes": []}
+
+    def run_00z(self, n=82):
+        """Les 82 clés du run en cours de publication, telles que le
+        listing les a rendues : avec leur `LastModified`."""
+        return [(f"{self.PREF}nord-alpes/2026-08-17T00:00:00Z/e{i:02d}.bin",
+                 8_280_000) for i in range(n)]
+
+    def objets(self, cles, minutes_avant):
+        # ⓘ `index.json` est TOUJOURS dans le listing — l'oublier ferait
+        #   crier « clé déclarée mais absente », qui est l'autre moitié du
+        #   rapprochement et un autre bug que celui qu'on teste ici.
+        ecrit = self.T - timedelta(minutes=minutes_avant)
+        return ([("grids", c, t, ecrit) for c, t in cles]
+                + [("grids", self.CLE, 500, ecrit)])
+
+    def inv(self):
+        return {"octets": int(5.096 * GO), "objets": 2045,
+                "par_bucket": {}, "par_prefixe": {}}
+
+    def test_un_run_en_vol_n_est_PAS_un_orphelin(self):
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.run_00z(), minutes_avant=8),
+                       maintenant=self.T)
+        self.assertEqual(r["orphelins"], [], "82 faux orphelins, le 17/08")
+        self.assertEqual(len(r["en_vol"]), 82)
+        self.assertEqual(r["octets_en_vol"], 82 * 8_280_000)
+
+    def test_et_le_mail_ne_part_plus(self):
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.run_00z(), minutes_avant=8),
+                       maintenant=self.T)
+        v = verdict(self.inv(), None, rapprochements=[r])
+        self.assertFalse(v["alerte"], f"faux positif : {v['motifs']}")
+
+    def test_les_MEMES_cles_le_lendemain_matin_CRIENT(self):
+        # ⛔ L'autre moitié, et celle qui fait que ce n'est pas un
+        # bâillon : une publication qui ne s'est jamais déclarée est une
+        # vraie fuite, et elle est nommée à l'audit suivant.
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.run_00z(), minutes_avant=24 * 60),
+                       maintenant=self.T)
+        self.assertEqual(len(r["orphelins"]), 82)
+        self.assertEqual(r["en_vol"], [])
+        self.assertTrue(verdict(self.inv(), None,
+                                rapprochements=[r])["alerte"])
+
+    def test_la_frontiere_est_le_delai_pas_le_nombre(self):
+        # Un SEUL objet non réclamé, mais vieux de quatre heures : ça
+        # crie. Le mécanisme ne tolère aucun orphelin — il attend
+        # seulement que la publication ait eu le temps de se déclarer.
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.run_00z(1), minutes_avant=4 * 60),
+                       maintenant=self.T)
+        self.assertEqual(len(r["orphelins"]), 1)
+        self.assertTrue(verdict(self.inv(), None,
+                                rapprochements=[r])["alerte"])
+
+    def test_les_18_orphelins_du_12_08_crient_toujours(self):
+        # La non-régression qui compte : le cas réel que ce contrôle
+        # existe pour attraper avait TROIS JOURS d'âge.
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       self.objets(self.run_00z(18), minutes_avant=3 * 24 * 60),
+                       maintenant=self.T)
+        self.assertEqual(len(r["orphelins"]), 18)
+
+    def test_sans_date_un_objet_est_juge_ANCIEN(self):
+        # ⚠️ Le même principe que `lu=False` : une vérification qui n'a
+        # pas pu avoir lieu ne doit jamais se lire comme une vérification
+        # réussie. Si l'absence de date valait grâce, un listing qui
+        # cesse de rendre `LastModified` bâillonnerait la jauge en
+        # silence — et c'est aussi ce qui garde valables les bancs
+        # d'avant le 17/08, écrits avec des triplets.
+        r = rapprocher(self.index(), self.CLE, self.PREF,
+                       [("grids", c, t) for c, t in self.run_00z(3)]
+                       + [("grids", self.CLE, 500)],
+                       maintenant=self.T)
+        self.assertEqual(len(r["orphelins"]), 3)
+        self.assertEqual(r["en_vol"], [])
+
+    def test_un_objet_reclame_ne_regarde_pas_l_age(self):
+        # Un objet réclamé par l'index est légitime, neuf ou vieux : la
+        # grâce ne s'applique qu'à ce que personne ne réclame.
+        cles = self.run_00z(4)
+        r = rapprocher(self.index(*[c for c, _ in cles]),
+                       self.CLE, self.PREF,
+                       self.objets(cles, minutes_avant=5 * 24 * 60),
+                       maintenant=self.T)
+        self.assertEqual(r["orphelins"], [])
+        self.assertEqual(r["en_vol"], [])
 
 
 if __name__ == "__main__":

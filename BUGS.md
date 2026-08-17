@@ -6,6 +6,63 @@
 
 ---
 
+## 17/08/2026 — jauge R2 : deux faux motifs dans le même mail, et le second n'était pas une pente
+
+**Contexte** : mail de 04:32 UTC, `garde-fou-r2` en ÉCHEC (code 1), deux
+motifs — « +12,22 Go/mois, palier atteint dans 12 jours » et « 82 objets
+ORPHELINS sous `agrume/grille/` ». Contrôlé à la main le même matin :
+**496 présentes / 496 réclamées, 0 orphelin, plateau à 3,375 Go, compte
+à 4,39 Go sur 10.** Les deux motifs étaient faux.
+
+### 1. La médiane de différences ne survit pas à DEUX marches
+
+Série réelle de `agrume/grille` : 2,002 · 2,002 · 2,422 · 4,054 Go →
+différences 0 · +0,420 · +1,632. Deux marches (tarn-aveyron-hérault le
+15/08, boîte élargie des Alpes le 16/08) pour trois différences : la
+médiane tombe **sur** une marche.
+
+⚠️ **Piège réutilisable, et c'est le troisième mail de suite qu'il
+produit** : la correction du 16/08 tenait à un mot non écrit — « une
+marche ISOLÉE ne peut pas être la médiane ». Rien n'avait jamais promis
+qu'il n'y en aurait qu'une par fenêtre. **Quand une correction repose sur
+une hypothèse de cardinalité (une seule, au plus deux…), l'écrire dans le
+banc, sinon c'est le prochain incident qui l'écrira.**
+
+**Fix** : 25e centile des différences au lieu de la médiane, et 5 relevés
+minimum au lieu de 4. Un quantile bas ignore les grandes différences *en
+nombre* : quatre différences en absorbent deux, cinq en absorbent trois.
+Une fuite reste vue parce que **toutes** ses différences sont positives.
+Prix payé et dit : une nuit de plus sans pente après un changement de
+méthode, et la croissance en escalier encore plus sous-estimée.
+
+### 2. Un objet non réclamé n'est pas forcément un orphelin
+
+La publication d'un run écrit les **objets** puis l'**index** (l'ordre
+inverse ferait des orphelins invisibles — décision de l'étape 6). Entre
+les deux, ces objets ressemblent trait pour trait à des orphelins.
+L'audit de 04:32 est tombé dedans : 55 clés de `nord-alpes/00Z` + 27 de
+`pyrenees/00Z` = **82 objets, 0,679 Go**, réclamés à 05:29.
+
+⛔ **Ce que l'ordre de lecture ne peut pas sauver** : `main()` lit déjà
+l'index APRÈS le listing, ce qui protège une fenêtre de 3 secondes. La
+fenêtre à couvrir était d'**une heure** — celle de la publication.
+
+**Fix** : le `LastModified` du listing (gratuit, déjà dans la réponse).
+Un objet non réclamé de moins de 3 h (le pas entre deux réseaux AROME)
+est « en vol » : dit dans le rapport, jamais fatal. **La frontière est
+l'ÂGE, pas un nombre toléré** — un seul objet non réclamé de 4 h crie
+encore, et un run en vol qui ne se déclare jamais devient orphelin tout
+seul en vieillissant. ⚠️ Un objet **sans** date est jugé ANCIEN : même
+principe que `lu=False`, une vérification qui n'a pas pu avoir lieu ne
+doit pas se lire comme une vérification réussie.
+
+**Vérifié** : 89 bancs verts (80 avant), dont les deux moitiés de chaque
+contrat — le run en vol est muet / les mêmes clés le lendemain crient, la
+marche double ne fait pas de pente / la fuite continue crie toujours.
+Essai à blanc du code corrigé sur le compte réel : **code 0**.
+
+---
+
 ## 16/08/2026 — AGRUME : le `except Abort` du 15/08 n'avait été corrigé qu'à moitié
 
 **Contexte** : élargissement de `DOMAINE` aux Alpes entières

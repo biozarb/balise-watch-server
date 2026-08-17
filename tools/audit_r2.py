@@ -32,18 +32,27 @@
 #  dit « dans 47 jours ».
 #
 #  ⚠️ LA PENTE EST LA SOMME DES PENTES PAR PRÉFIXE, et chaque pente est
-#     une MÉDIANE DE DIFFÉRENCES, jamais des moindres carrés. TROIS
-#     marches réelles ont chacune fabriqué une fausse échéance, et à
-#     chaque fois un cran plus bas que la précédente : un BUCKET apparu
-#     le 10/08, un PRODUIT le 13/08 dans un bucket déjà connu, un
-#     DOMAINE le 16/08 dans un préfixe déjà connu.
+#     un QUANTILE BAS DE DIFFÉRENCES (25e centile), jamais des moindres
+#     carrés. QUATRE marches réelles ont chacune fabriqué une fausse
+#     échéance, et les trois premières un cran plus bas que la
+#     précédente : un BUCKET apparu le 10/08, un PRODUIT le 13/08 dans un
+#     bucket déjà connu, un DOMAINE le 16/08 dans un préfixe déjà connu,
+#     puis le 17/08 DEUX marches dans la même fenêtre.
 #
 #     Les deux premiers correctifs ont déplacé la granularité ; le
 #     troisième a montré que c'était la mauvaise question. Descendre
 #     encore (profondeur 3) met 3,39 Go sur 3,41 « hors échéance »
 #     — mesuré le 16/08 sur le compte réel. Ce qui manquait n'était pas
 #     de la finesse mais un calcul qui ne confonde pas une MARCHE avec
-#     une PENTE. Voir `_pente_mediane` et `MINI_RELEVES`.
+#     une PENTE ; le quatrième a montré qu'ignorer UNE marche ne suffit
+#     pas, il faut en ignorer plusieurs. Voir `_pente_basse` et
+#     `MINI_RELEVES`.
+#
+#  ⚠️ ET UN OBJET NON RÉCLAMÉ N'EST PAS FORCÉMENT UN ORPHELIN : pendant
+#     la publication d'un run, les objets existent et l'index ne les
+#     déclare pas encore. C'est ce qui a fait partir le second faux mail
+#     du 17/08. La frontière est l'ÂGE, jamais un nombre toléré — voir
+#     `GRACE_EN_VOL_H`.
 #
 #  ⛔ ET LA PENTE NE SUFFIT PAS. Elle répond à « ça monte ? » ; elle ne
 #     répondra jamais à « ce qui est là est-il légitime ? ». Une jauge
@@ -89,7 +98,6 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from statistics import median
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -122,18 +130,47 @@ HORIZON_ALERTE_JOURS = int(os.environ.get("BW_R2_HORIZON_JOURS", "60"))
 # tableau sous les échéances.
 PROFONDEUR_PREFIXE = int(os.environ.get("BW_R2_PROFONDEUR", "2"))
 
-# ⚠️ QUATRE RELEVÉS, PAS TROIS — LA LEÇON DU 16/08. Avec trois points,
-# aucun calcul ne sait distinguer une PENTE d'une MARCHE : le domaine
-# tarn-aveyron-hérault, né à son plateau (+0,421 Go, 165 objets comme
-# ses deux voisins), a été lu +6,31 Go/mois et le mail « palier dans
-# 27 jours » est parti sur un compte à 3,4 Go sur 10.
+# ⚠️ CINQ RELEVÉS, PAS QUATRE — LA LEÇON DU 17/08, qui corrige celle du
+# 16/08 sans l'effacer. Le 16/08 disait : quatre relevés font TROIS
+# différences, et la médiane de trois valeurs ignore toujours l'extrême,
+# donc une marche ISOLÉE ne peut plus être la médiane. C'était vrai — et
+# le mot qui coûtait était ISOLÉE.
 #
-# Quatre relevés font TROIS différences, et la médiane de trois valeurs
-# ignore toujours l'extrême — donc une marche isolée, où qu'elle tombe
-# dans la série, ne peut plus être la médiane. C'est ce qui rend le
-# mécanisme indépendant de la granularité : bucket, produit, domaine, et
-# ce qui viendra ensuite.
-MINI_RELEVES = int(os.environ.get("BW_R2_MINI_RELEVES", "4"))
+# Dans la nuit du 16 au 17/08, la série de `agrume/grille` valait
+# 2,002 · 2,002 · 2,422 · 4,054 Go : DEUX marches consécutives
+# (tarn-aveyron-hérault le 15, la boîte élargie des Alpes le 16) pour
+# trois différences — 0 · +0,420 · +1,632. La médiane est tombée PILE
+# sur la première marche : +11,12 Go/mois pour ce préfixe, « palier
+# atteint dans 12 jours », et le mail est parti sur un compte à 4,4 Go
+# sur 10 dont le plateau mesuré valait 3,375 Go et l'index 0 orphelin.
+#
+# ⛔ Le motif est celui écrit dans BUGS.md le 16/08 au soir : corriger
+# UNE cause laisse en place le mécanisme qui transforme cette cause en
+# dégât. Le dégât, ici, c'est qu'une différence entre deux relevés
+# serve d'estimateur de tendance ; une marche n'en est qu'un
+# déclencheur, et rien n'a jamais promis qu'il n'y en aurait qu'une par
+# fenêtre.
+#
+# D'où le 25e CENTILE plutôt que la médiane. Sur n différences il ignore
+# les trois quarts les plus grandes : quatre différences (donc CINQ
+# relevés) rendent l'estimateur insensible aux DEUX plus grandes, cinq
+# différences aux TROIS plus grandes. Ajouter un domaine ne peut donc
+# plus faire partir un mail, quel qu'en soit le nombre dans la fenêtre.
+#
+# ⚠️ ET LE PRIX, DIT PLUTÔT QUE DÉCOUVERT. Une fuite reste vue parce que
+# TOUTES ses différences sont positives : un quantile bas sur une série
+# de fuite vaut le débit de la fuite (`test_une_vraie_fuite_reste_vue`).
+# Ce qui se paie, c'est la croissance en ESCALIER, désormais
+# sous-estimée plus fort qu'avec la médiane. C'est le contrat de
+# comptabilité (`PRODUITS_INDEXES`) qui couvre ce trou pour les produits
+# à rétention — et il le couvre mieux qu'une pente ne l'a jamais fait.
+MINI_RELEVES = int(os.environ.get("BW_R2_MINI_RELEVES", "5"))
+
+# Le quantile pris sur les différences. 0,25 : assez bas pour ignorer
+# deux marches sur quatre différences, assez haut pour ne pas se réduire
+# au MINIMUM — un minimum ferait taire la jauge dès qu'une seule nuit est
+# plate, ce qu'une purge à cadence irrégulière produit toute seule.
+QUANTILE_PENTE = float(os.environ.get("BW_R2_QUANTILE_PENTE", "0.25"))
 
 # ⚠️ Deux relevés à 24 SECONDES d'intervalle ne mesurent pas une vitesse.
 # L'historique réel en contient : le 10/08, la jauge a tourné six fois
@@ -176,6 +213,39 @@ PRODUITS_INDEXES = (
     ("balise-watch-grids", "agrume/pi/grille/index.json", "agrume/pi/grille/"),
 )
 
+# ⚠️ LE DÉLAI DE GRÂCE — LA COURSE DU 17/08, ET POURQUOI ELLE N'EST PAS
+# UNE ERREUR DE L'ORDRE D'ÉCRITURE.
+#
+# La publication d'un run écrit les OBJETS d'abord, l'INDEX ensuite (voir
+# `grille.py` : l'inverse laisserait, en cas de panne, des objets que
+# rien ne sait plus nommer — une fuite invisible plutôt qu'un 404
+# visible). Entre les deux, ces objets sont présents et réclamés par
+# personne : ils ressemblent trait pour trait à un orphelin.
+#
+# Mesuré la nuit du 17/08 : l'audit de 04:32 UTC est tombé PILE dedans —
+# les 55 clés de `nord-alpes/2026-08-17T00:00:00Z` et 27 des 55 de
+# `pyrenees/…`, soit 82 objets, 0,679 Go. L'index les a réclamées à
+# 05:29, une heure plus tard. Le mail est parti sur « la purge de ce
+# produit ne mord plus » alors qu'elle mordait : contrôlé le même matin,
+# 496 présentes / 496 réclamées, 0 orphelin, plateau à 3,375 Go.
+#
+# ⛔ Lire l'index APRÈS le listing (ce que `main` fait déjà) ne suffit
+# pas : la fenêtre à couvrir n'est pas la durée de l'audit (3 s) mais
+# celle de la publication (une heure).
+#
+# Ce qui sépare vraiment les deux, c'est l'ÂGE, et le listing le donne
+# gratuitement (`LastModified`) : un run en vol vient d'être écrit, un
+# orphelin, lui, ne rajeunit jamais — les 18 du `TypeError` du 12/08
+# avaient trois jours quand on les a trouvés. Un objet non réclamé plus
+# jeune que ce délai est donc compté « en vol » : dit dans le rapport,
+# jamais fatal. S'il est encore là demain matin, il a vieilli, et il
+# crie.
+#
+# 3 h = LE PAS ENTRE DEUX RÉSEAUX AROME. Une publication qui n'a pas
+# fini de se déclarer avant le réseau suivant n'est plus « en cours » :
+# c'est une anomalie, et elle doit crier.
+GRACE_EN_VOL_H = float(os.environ.get("BW_R2_GRACE_EN_VOL_H", "3.0"))
+
 GO = 1_000_000_000  # R2 facture en Go décimaux, pas en Gio — ne pas
                     # « corriger » en 1024³ : ça sous-estimerait de 7 %
                     # et le palier est justement ce qu'on frôle.
@@ -214,7 +284,13 @@ def agreger(objets) -> dict:
     nb = 0
     par_bucket: dict[str, dict] = {}
     par_prefixe: dict[str, dict] = {}
-    for bucket, cle, taille in objets:
+    # ⚠️ Déballage par INDEX et pas par motif : depuis le 17/08, les
+    #    tuples portent une quatrième valeur (`LastModified`, dont
+    #    `rapprocher` a besoin pour l'âge). L'inventaire n'en a que faire,
+    #    et les bancs écrits avant cette date passent des triplets — les
+    #    deux formes doivent vivre côte à côte.
+    for o in objets:
+        bucket, cle, taille = o[0], o[1], o[2]
         total += taille
         nb += 1
         b = par_bucket.setdefault(bucket, {"octets": 0, "objets": 0})
@@ -255,7 +331,7 @@ def _moindres_carres(pts) -> float | None:
     """Pente en Go/mois d'une série de (datetime, Go).
 
     ⚠️ CE N'EST PLUS LE CALCUL DE PRODUCTION depuis le 16/08 — voir
-    `_pente_mediane`. Gardé parce qu'il reste le CONTRE-EXEMPLE des
+    `_pente_basse`. Gardé parce qu'il reste le CONTRE-EXEMPLE des
     bancs : c'est lui qui rejoue, sur les trois marches réelles, le faux
     qu'on a corrigé. Le supprimer effacerait la démonstration en même
     temps que le code.
@@ -298,20 +374,41 @@ def _degrouper(pts, mini: float = ESPACEMENT_MINI_JOURS):
     return garde
 
 
-def _pente_mediane(pts) -> float | None:
-    """Pente en Go/mois : la MÉDIANE des vitesses entre relevés
-    consécutifs. C'est le calcul de production depuis le 16/08.
+def _quantile(valeurs, q: float) -> float:
+    """Le quantile `q` par interpolation linéaire entre rangs — la
+    définition usuelle (celle de `numpy.percentile`), écrite ici parce
+    que `statistics.quantiles` découpe en classes et ne rend pas la même
+    chose sur quatre valeurs.
 
-    Voir `MINI_RELEVES` pour le pourquoi : la médiane de trois
-    différences est insensible à l'une quelconque d'entre elles, donc
-    une marche isolée — un bucket, un produit ou un domaine qui naît à
-    son plateau — ne se lit plus comme une croissance, quelle que soit
-    la profondeur de préfixe à laquelle elle tombe. Les deux correctifs
-    précédents dépendaient de la granularité ; celui-ci n'en dépend pas.
+    ⚠️ Interpolation et pas rang le plus proche : sur quatre différences,
+    le rang le plus proche du 25e centile EST le minimum, et un minimum
+    est justement ce qu'on ne veut pas (voir `QUANTILE_PENTE`).
+    """
+    s = sorted(valeurs)
+    if len(s) == 1:
+        return s[0]
+    pos = q * (len(s) - 1)
+    bas = int(pos)
+    haut = min(bas + 1, len(s) - 1)
+    return s[bas] + (s[haut] - s[bas]) * (pos - bas)
+
+
+def _pente_basse(pts) -> float | None:
+    """Pente en Go/mois : le 25e CENTILE des vitesses entre relevés
+    consécutifs. C'est le calcul de production depuis le 17/08 — il
+    remplace la médiane du 16/08, qui ne survivait pas à DEUX marches
+    dans la même fenêtre (voir `MINI_RELEVES`, où l'incident est chiffré).
+
+    La propriété visée, et elle est plus forte que celle de la médiane :
+    un quantile bas ignore les grandes différences *en nombre*, pas
+    seulement l'extrême. Quatre différences en absorbent deux, cinq en
+    absorbent trois — donc ajouter un domaine, ou deux, ou une boîte
+    élargie par-dessus, ne fabrique plus de pente.
 
     ⚠️ LE PRIX, DIT PLUTÔT QUE DÉCOUVERT : une croissance réellement EN
-    ESCALIER (un palier tous les trois jours) est sous-estimée. Une
-    fuite, elle, est continue — c'est le cas qu'on surveille, et
+    ESCALIER est sous-estimée, et plus fort qu'avant. Une fuite, elle,
+    est continue — toutes ses différences valent le débit, donc un
+    quantile bas le rend aussi — c'est le cas qu'on surveille, et
     `test_une_vraie_fuite_reste_vue` le cloue pour que ce compromis
     reste un compromis et ne devienne pas un trou.
     """
@@ -322,7 +419,7 @@ def _pente_mediane(pts) -> float | None:
     # points consécutifs : la division ne peut pas être par zéro.
     vitesses = [(y1 - y0) / ((t1 - t0).total_seconds() / 86400.0)
                 for (t0, y0), (t1, y1) in zip(pts, pts[1:])]
-    return median(vitesses) * 30.0
+    return _quantile(vitesses, QUANTILE_PENTE) * 30.0
 
 
 def pente_go_par_mois(historique, perimetre=None) -> float | None:
@@ -359,7 +456,7 @@ def pente_du_prefixe(historique, nom: str) -> float | None:
         if not h.get("t") or not isinstance(p, dict) or p.get(nom) is None:
             continue
         pts.append((datetime.fromisoformat(h["t"]), p[nom] / GO))
-    return _pente_mediane(pts)
+    return _pente_basse(pts)
 
 
 def pentes_des_prefixes(historique, prefixes_courants) -> dict:
@@ -390,8 +487,9 @@ def pentes_des_prefixes(historique, prefixes_courants) -> dict:
     préfixe qui, lui, avait ses trois relevés. Le mécanisme ci-dessous
     n'a rien pu faire, parce que le problème n'était plus la
     granularité mais le CALCUL : sur trois points, les moindres carrés
-    ne savent pas séparer une marche d'une pente. C'est `_pente_mediane`
-    qui répond à ça, et il répond pour toutes les granularités à la fois.
+    ne savent pas séparer une marche d'une pente. C'est `_pente_basse`
+    qui répond à ça, et il répond pour toutes les granularités à la fois
+    — puis le 17/08 pour plusieurs marches à la fois.
 
     ⚠️ LE PRIX, ET IL EST RÉEL : pendant ses 4 premiers relevés (3 avant
     le 16/08), un produit ne compte PAS dans l'échéance. Une chaîne qui
@@ -410,14 +508,21 @@ def pentes_des_prefixes(historique, prefixes_courants) -> dict:
             "par_prefixe": connues, "jeunes": sorted(jeunes)}
 
 
-def rapprocher(index, cle_index: str, prefixe: str, objets) -> dict:
+def rapprocher(index, cle_index: str, prefixe: str, objets,
+               maintenant=None, grace_h: float = GRACE_EN_VOL_H) -> dict:
     """Confronte l'index d'un produit à ce que le bucket contient
-    VRAIMENT. `objets` = itérable de (bucket, cle, taille) déjà filtré
-    sur le bon bucket.
+    VRAIMENT. `objets` = itérable de (bucket, cle, taille[, ecrit_le])
+    déjà filtré sur le bon bucket.
 
-    ORPHELIN  : présent dans R2, réclamé par personne — de la place
-                payée pour rien, et le symptôme d'une purge qui ne mord
-                plus (les 18 du `TypeError` du 12/08).
+    ORPHELIN  : présent dans R2, réclamé par personne, et ASSEZ VIEUX
+                pour que ce ne soit pas une publication en cours — de la
+                place payée pour rien, et le symptôme d'une purge qui ne
+                mord plus (les 18 du `TypeError` du 12/08).
+    EN VOL    : présent, réclamé par personne, mais écrit il y a moins de
+                `grace_h` — les objets d'un run dont l'index n'est pas
+                encore publié (voir `GRACE_EN_VOL_H` : la course du
+                17/08). Dit, jamais fatal, et devenu orphelin demain s'il
+                est encore là.
     MANQUANT  : déclaré par l'index, absent du bucket — plus grave dans
                 l'autre sens : le produit servi a des trous, et c'est
                 l'index qui ment.
@@ -440,9 +545,25 @@ def rapprocher(index, cle_index: str, prefixe: str, objets) -> dict:
         reclamees.update(e.get("cles") or [])
     restes = set(index.get("restes") or [])
 
-    presentes = {cle: taille for _, cle, taille in objets
-                 if cle.startswith(prefixe)}
-    orphelins = sorted(set(presentes) - reclamees - restes)
+    presentes = {o[1]: o[2] for o in objets if o[1].startswith(prefixe)}
+    ecrit_le = {o[1]: (o[3] if len(o) > 3 else None) for o in objets
+                if o[1].startswith(prefixe)}
+
+    # ⚠️ SANS DATE, UN OBJET EST JUGÉ ANCIEN — donc orphelin s'il n'est
+    #    réclamé par personne. C'est le même principe que `lu=False` :
+    #    une vérification qui n'a pas pu avoir lieu ne doit jamais se
+    #    lire comme une vérification réussie. Un `LastModified` absent
+    #    ferait taire la jauge s'il valait grâce.
+    maintenant = maintenant or datetime.now(timezone.utc)
+    limite = maintenant - timedelta(hours=grace_h)
+
+    def en_vol(cle: str) -> bool:
+        t = ecrit_le.get(cle)
+        return t is not None and t > limite
+
+    non_reclamees = set(presentes) - reclamees - restes
+    orphelins = sorted(c for c in non_reclamees if not en_vol(c))
+    vol = sorted(c for c in non_reclamees if en_vol(c))
     return {
         "prefixe": prefixe, "lu": True,
         "runs": len(index.get("runs") or []),
@@ -451,6 +572,9 @@ def rapprocher(index, cle_index: str, prefixe: str, objets) -> dict:
         "presentes": len(presentes),
         "orphelins": orphelins,
         "octets_orphelins": sum(presentes[c] for c in orphelins),
+        "en_vol": vol,
+        "octets_en_vol": sum(presentes[c] for c in vol),
+        "grace_h": grace_h,
         "manquants": sorted(reclamees - set(presentes)),
         "restes_presents": sorted(restes & set(presentes)),
         "octets": sum(presentes.values()),
@@ -510,6 +634,12 @@ def verdict(inventaire: dict, pente_mois: float | None,
     # plus personne ne réclame, et un seul suffit à dire que la purge du
     # produit ne mord plus. On ne tolère donc pas « un peu » d'orphelins
     # — un seuil de tolérance ici, c'est une fuite qu'on autorise.
+    #
+    # ⚠️ `en_vol` N'EST PAS UN MOTIF, ET CE N'EST PAS UN SEUIL DE
+    # TOLÉRANCE DÉGUISÉ : la frontière est l'ÂGE, pas le nombre. Zéro
+    # objet non réclamé de plus de `GRACE_EN_VOL_H` reste la règle, et un
+    # objet en vol qui ne se déclare pas devient orphelin tout seul en
+    # vieillissant (voir `GRACE_EN_VOL_H`, la course du 17/08).
     for r in rapprochements or []:
         if not r.get("lu"):
             motifs.append(f"RAPPROCHEMENT IMPOSSIBLE pour « {r['prefixe']} » "
@@ -549,7 +679,7 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
             f"(moins de {MINI_RELEVES} relevés)")
     else:
         log(f"│ pente mesurée             : {pente_mois:+8.3f} Go/mois"
-            f"   (somme des préfixes, médiane des différences)")
+            f"   (somme des préfixes, 25e centile des différences)")
     # ⚠️ Ce que l'échéance NE couvre pas doit se lire à côté d'elle, pas
     #    dans une note de bas de page : un produit trop jeune pour avoir
     #    une pente pèse 0 dans le calcul, et son poids réel est là.
@@ -606,6 +736,15 @@ def rendre(inventaire: dict, pente_mois, v: dict, class_a_consommees: int,
             if r["restes_presents"]:
                 log(f"│ {'':38s} ⓘ {len(r['restes_presents'])} suppression(s) "
                     f"ratée(s), reprise(s) au prochain run")
+            # ⓘ Dit, et pas tu : c'est la ligne qui explique un écart
+            #   entre « présentes » et « réclamées » sans orphelin, et
+            #   qui aurait fait comprendre le mail du 17/08 en un
+            #   coup d'œil au lieu d'un audit à la main.
+            if r.get("en_vol"):
+                log(f"│ {'':38s} ⏳ {len(r['en_vol'])} objet(s) en vol "
+                    f"({r['octets_en_vol'] / GO:.3f} Go) — écrits depuis "
+                    f"moins de {r.get('grace_h', GRACE_EN_VOL_H):.0f} h, "
+                    f"index pas encore publié")
             for cle in r["orphelins"][:3]:
                 log(f"│    ↳ {cle}")
             if len(r["orphelins"]) > 3:
@@ -719,7 +858,12 @@ def parcourir(c, buckets, log=print):
                             f"{type(e).__name__} {e}")
             requetes += 1
             for o in r.get("Contents", []):
-                objets.append((bucket, o["Key"], int(o.get("Size", 0))))
+                # ⓘ `LastModified` est déjà dans la réponse du listing :
+                #   le porter ne coûte pas une opération de plus, et
+                #   c'est lui qui sépare un run en vol d'un orphelin
+                #   (voir `GRACE_EN_VOL_H`).
+                objets.append((bucket, o["Key"], int(o.get("Size", 0)),
+                               o.get("LastModified")))
             if not r.get("IsTruncated"):
                 break
             jeton = r.get("NextContinuationToken")
@@ -802,9 +946,15 @@ def main(argv=None) -> int:
         # Un produit dont le bucket n'est pas dans la couverture du jour
         # est écarté — l'accuser d'avoir 100 % d'orphelins parce qu'on
         # n'a pas pu le lister serait le pire des faux positifs.
+        # ⚠️ `maintenant` est pris UNE fois et passé : deux produits
+        # rapprochés à deux instants différents n'auraient pas la même
+        # frontière d'âge, et un objet à la seconde près pourrait être
+        # « en vol » pour l'un et orphelin pour l'autre.
+        maintenant = datetime.now(timezone.utc)
         rapprochements = [
             rapprocher(lire_index(c, b, cle), cle, prefixe,
-                       [o for o in objets if o[0] == b])
+                       [o for o in objets if o[0] == b],
+                       maintenant=maintenant)
             for b, cle, prefixe in PRODUITS_INDEXES if b in buckets]
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
