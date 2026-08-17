@@ -250,6 +250,99 @@ function serveur({ index, man, carte = CARTE }) {
 const INDEX = { dernier: { 'nord-alpes': RUN_PI }, runs: [], retention_runs: 3 };
 
 // ══════════════════════════════════════════════════════════════════════
+//  Lot L3b — le jumeau COLONNE, et la densification de l'axe
+// ══════════════════════════════════════════════════════════════════════
+//  ⚠️ `colonnes.bin` a une disposition (niveau, échéance) PAR COLONNE, et
+//  un pas qui N'EST PAS celui du produit B. C'est le piège principal du
+//  lot : le couple (j, i) est le même, la taille de l'enregistrement ne
+//  l'est pas.
+const OCT_TR_COL = NBNIV * ECH_MIN.length * 2;
+const OCT_PAR_COL = 2 * OCT_TR_COL;
+
+const colonnesRaf = (extra = {}) => ({
+  disposition: 'un enregistrement par colonne, ordre (lat, lon)',
+  octets_par_colonne: OCT_PAR_COL,
+  offset: '(j * nb_lon + i) * octets_par_colonne',
+  tranches: {
+    u: { offset: 0, octets: OCT_TR_COL, dtype: 'float16', niveaux: NBNIV,
+         echeances: ECH_MIN.length, bloc: 'hauteur' },
+    v: { offset: OCT_TR_COL, octets: OCT_TR_COL, dtype: 'float16',
+         niveaux: NBNIV, echeances: ECH_MIN.length, bloc: 'hauteur' },
+  },
+  ...extra,
+});
+
+/** `u = 400 + 100·colonne + 10·niveau + k`, `v = −u`. Chaque octet dit
+ *  d'où il vient : la colonne, le niveau ET l'échéance.
+ *
+ *  ⛔⛔ ET LES VALEURS TIENNENT SOUS 2048, PARCE QUE C'EST UNE CONTRAINTE
+ *  DU FORMAT, PAS UNE COQUETTERIE. Ce banc a été écrit une première fois
+ *  avec une base à 7000 : au-dessus de 4096, le pas du float16 vaut 4, et
+ *  7613 s'écrit 7612. Trois contrôles sont partis au rouge en accusant le
+ *  code — qui était juste. L'en-tête de ce fichier le disait déjà (« des
+ *  valeurs EXACTEMENT représentables en float16 ») ; je l'ai enfreint en
+ *  ajoutant une fixture. ⚠️ Un banc qui mesure l'arrondi au lieu de la
+ *  préséance est pire qu'un banc absent : il envoie chercher un défaut
+ *  là où il n'y en a pas. Sous 2048, le pas vaut 1 et les entiers sont
+ *  exacts. */
+function colonnesBin({ nanTout = [], nanV = [] } = {}) {
+  const buf = new ArrayBuffer(NBCOL * OCT_PAR_COL);
+  const vue = new DataView(buf);
+  let o = 0;
+  for (let c = 0; c < NBCOL; c++) {
+    for (const signe of [1, -1]) {
+      for (let n = 0; n < NBNIV; n++) {
+        for (let k = 0; k < ECH_MIN.length; k++) {
+          // `nanTout` : l'échéance est vide À TOUS LES NIVEAUX → aucune
+          // colonne ne doit s'ouvrir. `nanV` : seul `v` manque → u ET v
+          // ensemble, donc on ne remplace RIEN.
+          const vide = nanTout.includes(k) || (signe < 0 && nanV.includes(k));
+          const val = vide ? NaN : signe * (400 + 100 * c + 10 * n + k);
+          vue.setUint16(o, enc16(val), true);
+          o += 2;
+        }
+      }
+    }
+  }
+  return buf;
+}
+
+/** La colonne du produit B : 9 échéances horaires, `u`/`v` hauteur plus
+ *  une tranche `t` — celle qui doit rester VIDE aux instants neufs. */
+function colonneB() {
+  const nB = 9;
+  const plat = (base, signe = 1) => {
+    const a = new Float32Array(NBNIV * nB);
+    for (let n = 0; n < NBNIV; n++) {
+      for (let e = 0; e < nB; e++) a[n * nB + e] = signe * (base + 10 * n + e);
+    }
+    return a;
+  };
+  return {
+    echeances: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    // ⚠️ `v` est l'OPPOSÉ de `u`, pas « u avec une base négative ». La
+    // première version écrivait `plat(-100)`, soit −100 + 10n + e — donc
+    // −94 là où le contrôle attendait −106. Un contrôle faux ne dit rien
+    // du code qu'il prétend mesurer.
+    tranches: { u: plat(100), v: plat(100, -1), t: plat(200) },
+  };
+}
+
+/** Un serveur pour `colonnes.bin` seul — le reste n'est pas sollicité. */
+function serveurColonnes(octets) {
+  return async (url, init) => {
+    const m = /bytes=(\d+)-(\d+)/.exec(init?.headers?.Range || '');
+    if (!m) return { ok: true, status: 200, arrayBuffer: async () => octets };
+    const a = Number(m[1]), b = Number(m[2]);
+    return {
+      ok: true, status: 206,
+      headers: { get: () => `bytes ${a}-${b}/${octets.byteLength}` },
+      arrayBuffer: async () => octets.slice(a, b + 1),
+    };
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════
 await section('1. La découverte passe par le manifeste du produit B', () => {
   const sans = R.pointeurDe(manB({ provenance: undefined }));
   verifier('manifeste sans provenance → raison nommée',
@@ -485,6 +578,134 @@ await section('8. ⛔ L’âge n’est publié nulle part — il périme à la l
   verifier('ageTexte : 0 min, 59 min, 60 min, 104 min',
     R.ageTexte(0) === 'il y a 0 min' && R.ageTexte(59) === 'il y a 59 min'
     && R.ageTexte(60) === 'il y a 1 h' && R.ageTexte(104) === 'il y a 1 h 44');
+});
+
+// ══════════════════════════════════════════════════════════════════════
+//  Lot L3b — LA COLONNE, ET LES 18 QUARTS D'HEURE
+// ══════════════════════════════════════════════════════════════════════
+await section('10. ⛔ Le PAS de la colonne n’est PAS celui du produit B', async () => {
+  const man = manRaf();
+  man.service.colonnes = colonnesRaf();
+  // Sur la fixture : 3 × 4 colonnes, pas de 28 o. La colonne (j=1, i=2)
+  // commence donc à (1×4 + 2) × 28 = 168.
+  const pos = R.colonneDuRafraichissement(man, 46.425, 5.05);
+  verifier('⛔ l’offset se calcule avec le pas DU RAFRAÎCHISSEMENT — le '
+    + 'couple (j, i) est le même que dans le produit B, le PAS ne l’est pas',
+    pos.j === 1 && pos.i === 2 && pos.offset === 6 * OCT_PAR_COL,
+    `j=${pos.j} i=${pos.i} offset=${pos.offset} (attendu ${6 * OCT_PAR_COL})`);
+  verifier('…et le pas de latitude NÉGATIF est dérivé des bornes, pas supposé',
+    Math.abs(pos.lat - 46.425) < 1e-9, String(pos.lat));
+
+  const oct = colonnesBin();
+  const col = await R.chargerColonneRafraichissement(
+    'http://x', man, 46.425, 5.05, 'jeton', serveurColonnes(oct));
+  verifier('un SEUL Range suffit à toute la colonne (u, v, 2 niveaux, 7 échéances)',
+    col.octets === OCT_PAR_COL, `${col.octets} o`);
+  // u = 400 + 100·colonne + 10·niveau + k, colonne 6, niveau 1, k = 3
+  verifier('⛔ les octets décodés sont ceux de CETTE colonne-là, pas d’une voisine',
+    col.u[1 * ECH_MIN.length + 3] === 400 + 600 + 10 + 3
+    && col.v[1 * ECH_MIN.length + 3] === -(400 + 600 + 10 + 3),
+    `u=${col.u[1 * ECH_MIN.length + 3]}`);
+});
+
+await section('11. ⛔⛔ La densification : 18 quarts d’heure, et RIEN d’interpolé', async () => {
+  const man = manRaf();
+  man.service.colonnes = colonnesRaf();
+  const colR = await R.chargerColonneRafraichissement(
+    'http://x', man, 46.45, 5, 'jeton', serveurColonnes(colonnesBin()));
+  const b = colonneB();
+  const d = R.densifierColonne(manB(), b, man, colR);
+
+  // Décalage 360 min : les instants PI tombent à 360, 375, 390, 405, 420,
+  // 435, 450 min — soit 6 h, 6.25, 6.5, 6.75, 7 h, 7.25, 7.5. Deux
+  // coïncident avec une heure ronde du produit B (6 h et 7 h), CINQ sont
+  // neufs. 9 + 5 = 14.
+  verifier('⛔ l’axe est densifié en INSTANTS : 9 heures + 5 quarts d’heure',
+    d.echeances.length === 14 && d.ajoutees === 5,
+    `${d.echeances.length} instants, ${d.ajoutees} neufs`);
+  verifier('…et les échéances neuves sont FRACTIONNAIRES, à leur place',
+    JSON.stringify(d.echeances)
+      === JSON.stringify([0, 1, 2, 3, 4, 5, 6, 6.25, 6.5, 6.75, 7, 7.25, 7.5, 8]),
+    JSON.stringify(d.echeances));
+  const p625 = d.echeances.indexOf(6.25);
+  const p6 = d.echeances.indexOf(6);
+  const p8 = d.echeances.indexOf(8);
+
+  // ⛔ LE CONTRÔLE QUI COMPTE : rien n'est inventé aux instants neufs.
+  const n2 = d.echeances.length;
+  verifier('⛔⛔ à un instant NEUF, la tranche `t` du produit B est NaN — '
+    + 'RIEN n’a été interpolé pour remplir la colonne',
+    Number.isNaN(d.tranches.t[0 * n2 + p625])
+    && Number.isNaN(d.tranches.t[1 * n2 + p625]));
+  verifier('…alors qu’elle est bien PRÉSERVÉE aux heures du produit B',
+    d.tranches.t[0 * n2 + p6] === 206 && d.tranches.t[1 * n2 + p8] === 218,
+    `${d.tranches.t[0 * n2 + p6]} / ${d.tranches.t[1 * n2 + p8]}`);
+  verifier('⛔ à un instant NEUF, u/v viennent de PI et de personne d’autre',
+    d.tranches.u[0 * n2 + p625] === 401 && d.tranches.v[0 * n2 + p625] === -401,
+    `u=${d.tranches.u[0 * n2 + p625]}`);
+  verifier('⛔ à une heure COUVERTE par PI, la préséance a écrasé le produit B',
+    d.tranches.u[0 * n2 + p6] === 400 && d.tranches.u[0 * n2 + p6] !== 106,
+    `u=${d.tranches.u[0 * n2 + p6]} (produit B : 106)`);
+  verifier('⚠️ …et à une heure HORS de la fenêtre PI, le produit B reste maître',
+    d.tranches.u[0 * n2 + p8] === 108, `u=${d.tranches.u[0 * n2 + p8]}`);
+  verifier('la provenance est posée sur les instants COUVERTS, et nulle part ailleurs',
+    d.provenance[p6]?.modele === 'arome+pi' && d.provenance[p625]?.modele === 'arome+pi'
+    && d.provenance[p8] === null);
+  verifier('`ajoutee` distingue le quart d’heure neuf de l’heure du produit B',
+    d.ajoutee[p625] === true && d.ajoutee[p6] === false && d.ajoutee[p8] === false);
+});
+
+await section('12. ⛔ Ce que la densification REFUSE de faire', async () => {
+  const man = manRaf();
+  man.service.colonnes = colonnesRaf();
+  const b = colonneB();
+
+  // a) Une échéance PI vide à tous les niveaux n'ouvre PAS de colonne.
+  const vide = await R.chargerColonneRafraichissement(
+    'http://x', man, 46.45, 5, 'j', serveurColonnes(colonnesBin({ nanTout: [1] })));
+  const dv = R.densifierColonne(manB(), b, man, vide);
+  verifier('⛔ un quart d’heure sans AUCUN couple (u, v) fini n’ouvre pas de '
+    + 'colonne — une grille vide se lit comme un modèle qui a échoué',
+    dv.ajoutees === 4 && dv.echeances.indexOf(6.25) === -1,
+    `${dv.ajoutees} neufs, 6.25 ${dv.echeances.includes(6.25) ? 'présent' : 'absent'}`);
+
+  // b) `u` seul ne remplace RIEN.
+  const sansV = await R.chargerColonneRafraichissement(
+    'http://x', man, 46.45, 5, 'j', serveurColonnes(colonnesBin({ nanV: [0] })));
+  const ds = R.densifierColonne(manB(), b, man, sansV);
+  const n2 = ds.echeances.length;
+  const q6 = ds.echeances.indexOf(6);
+  verifier('⛔⛔ `v` absent à l’échéance 6 h → `u` de PI n’est PAS pris : le '
+    + 'produit B reste maître. Une vitesse plausible et une direction '
+    + 'fausse est le pire des deux mondes',
+    ds.tranches.u[0 * n2 + q6] === 106 && ds.tranches.v[0 * n2 + q6] === -106,
+    `u=${ds.tranches.u[0 * n2 + q6]}`);
+
+  // c) Un décalage qui contredit le manifeste fait REFUSER, pas deviner.
+  const menteur = manRaf({ decalage_min: 120 });
+  menteur.service.colonnes = colonnesRaf();
+  let leve = false, msg = '';
+  try {
+    R.densifierColonne(manB(), b, menteur, vide);
+  } catch (e) { leve = true; msg = String(e.message); }
+  verifier('⛔ un `decalage_min` contredit par les deux horodatages fait '
+    + 'REFUSER — un décalage faux place les colonnes neuves à côté de leur '
+    + 'instant, et la coupe reste parfaitement lisse',
+    leve && /se contredit/.test(msg), msg.slice(0, 90));
+
+  // d) Un instant PI hors des bornes du produit B n'allonge pas l'horizon.
+  const court = { echeances: [6, 7], tranches: {
+    u: new Float32Array([1, 2, 11, 12]), v: new Float32Array([-1, -2, -11, -12]),
+  } };
+  const manCourt = manB({ echeances: [6, 7] });
+  const dc = R.densifierColonne(manCourt, court, man,
+    await R.chargerColonneRafraichissement(
+      'http://x', man, 46.45, 5, 'j', serveurColonnes(colonnesBin())));
+  verifier('⛔ un instant PI au-delà de la dernière échéance du produit B '
+    + 'n’ouvre pas de colonne : l’horizon ne grandit pas parce que le vent, '
+    + 'lui, est connu plus loin',
+    Math.max(...dc.echeances) === 7 && dc.echeances.length === 5,
+    JSON.stringify(dc.echeances));
 });
 
 // ══════════════════════════════════════════════════════════════════════
