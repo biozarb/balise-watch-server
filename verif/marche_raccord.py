@@ -102,6 +102,35 @@ BACS_VITESSE_MS = ((0.0, 3.0, "< 3 m/s"), (3.0, 5.0, "3-5 m/s"),
 # absolus, jamais dans le relatif — et leur compte est publié, pas tu.
 SEUIL_RELATIF_MS = 1.0
 
+# ── LE CRITÈRE QUI JUGE VRAIMENT LE RACCORD (17/08, arbitrage de Yann) ─
+# ⛔ L'ABSOLU « < 1 m/s » MESURE L'OROGRAPHIE, PAS LE RACCORD. Mesuré sur
+# le run venté du 17/08 (front sur le Roussillon) et six autres runs :
+#
+#   · nord-alpes DÉPASSE (d9 2,93 m/s au bac ≥ 8 m/s), pyrenees TIENT
+#     (d9 0,62) — sur le MÊME run. Le classement se dissout dès qu'on
+#     stratifie par |z_0025 − z_001| : à |dz| ≥ 150 m, la marche vaut
+#     déjà **0,97 m/s en médiane PAR VENT FAIBLE** (< 3 m/s). Ce n'est
+#     donc pas le vent qui la fabrique.
+#   · et 90 % des couples ≥ 8 m/s des Pyrénées tombent sur des balises à
+#     |dz| < 25 m : ce domaine n'a pas PASSÉ le test, il ne l'a pas SUBI.
+#     Le vent a soufflé là où les deux mailles ont le même sol.
+#   · ρ de Spearman(|dz|, écart) = +0,61 tous domaines confondus.
+#
+# ⇒ L'écart RELATIF, lui, DÉCROÎT quand le vent monte, dans les trois
+#   domaines et dans toutes les tranches d'orographie (nord-alpes,
+#   |dz| ≥ 150 m : 63 % à < 3 m/s → 23 % à ≥ 8 m/s). C'est la grandeur
+#   qui parle du raccord.
+#
+# ⚠️ CE SEUIL N'EST PAS DÉRIVÉ D'UNE EXIGENCE PHYSIQUE, et il ne faut pas
+# le lire comme tel. Il est posé à ~1,5× le pire observé (9,7 % —
+# nord-alpes, run 2026-08-16T00:00:00Z) sur 7 runs × 3 domaines, pour
+# qu'un franchissement veuille dire « quelque chose a changé » et non
+# « l'échantillon a bougé ». Il se resserrera quand n grandira.
+# Le bac de référence est ≥ 8 m/s : au-dessous, le relatif est dominé par
+# le bruit du calme (≈ 30 % en médiane à < 3 m/s, mesuré).
+SEUIL_RELATIF_VERDICT_PCT = 15.0
+BAC_VERDICT = "≥ 8 m/s"
+
 
 def par_bacs(vitesse_ref, ecart_abs):
     """Stratifie `ecart_abs` (m/s) par tranche de `vitesse_ref` (m/s, la
@@ -227,6 +256,30 @@ def mesurer(col, man, crier=print, domaine=None):
               f"le calme. Lire le tableau par bac ci-dessus pour la "
               f"tranche ≥ 8 m/s avant de le croire par vent fort.")
 
+    # ── Le verdict qui porte sur le RACCORD, pas sur l'orographie ────
+    bac_v = next((b for b in resultats.get(100, {}).get("par_bac", [])
+                  if b["bac"] == BAC_VERDICT), None)
+    rel = bac_v["relatif_pct"] if bac_v else None
+    verdict_rel = None
+    if rel:
+        tenu = rel["mediane"] < SEUIL_RELATIF_VERDICT_PCT
+        verdict_rel = dict(bac=BAC_VERDICT, seuil_pct=SEUIL_RELATIF_VERDICT_PCT,
+                           mediane_pct=rel["mediane"], d9_pct=rel["d9"],
+                           n=rel["n"], tenu=bool(tenu))
+        crier(f"   ⚠️ CRITÈRE RELATIF (17/08), bac {BAC_VERDICT} au raccord : "
+              f"écart médian {rel['mediane']:.1f} % du vent de référence "
+              f"(d9 {rel['d9']:.1f} %, n = {rel['n']}) — seuil "
+              f"{SEUIL_RELATIF_VERDICT_PCT:.0f} % : "
+              f"{'TENU' if tenu else 'DÉPASSÉ'}.")
+        crier("   ⓘ C'est CE chiffre qui juge le raccord. L'absolu au-dessus "
+              "juge d'abord l'écart d'OROGRAPHIE entre les deux mailles — "
+              "il est dépassé par vent faible là où les deux sols diffèrent, "
+              "et tenu par construction là où ils coïncident.")
+    elif bac_v is not None:
+        crier(f"   ⓘ bac {BAC_VERDICT} : aucun couple au-dessus du seuil "
+              f"relatif ({SEUIL_RELATIF_MS:.0f} m/s) — pas de verdict "
+              f"relatif sur ce run, et c'est DIT plutôt que tu.")
+
     # ── Et le sol, lui, n'est pas le même ─────────────────────────────
     dz = [b["z_0025"] - b["z_001"] for b in balises
           if b.get("z_0025") is not None and b.get("z_001") is not None]
@@ -242,7 +295,7 @@ def mesurer(col, man, crier=print, domaine=None):
           "différence vue par un pilote.")
     return dict(run=col.run, domaine=domaine, par_niveau=resultats,
                orographie=qz, n_balises=len(balises),
-               n_echeances=len(col.steps))
+               n_echeances=len(col.steps), verdict_relatif=verdict_rel)
 
 
 def main(argv=None):

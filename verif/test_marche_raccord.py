@@ -151,6 +151,68 @@ def main():
              "`par_niveau` VIDE, pas une exception",
              r_absent["n_balises"] == 0 and r_absent["par_niveau"] == {})
 
+    print("\n── ⛔ LE DÉFAUT nº 2, REJOUÉ : l'ABSOLU CONDAMNE UN ─────")
+    print("   raccord sain, et absout un raccord malade — le CRITÈRE")
+    print("   RELATIF (17/08) tranche là où l'absolu se trompe")
+    # Deux populations, toutes deux DANS le bac ≥ 8 m/s :
+    #   · `fort_propre` : 20 m/s de référence, marche 1,5 m/s → 7,5 %.
+    #     Le raccord est BON (les deux mailles s'accordent à 7,5 % du
+    #     signal) et pourtant l'absolu (1,5 > 1) crie « DÉPASSÉ ».
+    #     C'est le cas réel de nord-alpes le 17/08 — dépassement porté
+    #     par l'orographie, pas par le raccord.
+    #   · `fort_sale`   : 8 m/s de référence, marche 2,0 m/s → 25 %.
+    #     Là, le raccord est VRAIMENT en défaut, et les deux critères
+    #     doivent le dire.
+    # Les quatre valeurs (20 · 21,5 · 8 · 10) sont exactement
+    # représentables en float16 : le banc mesure le critère, pas
+    # l'arrondi du conteneur.
+    n_propre, n_sale = 10, 5
+    bal2 = ([dict(id=f"p{k}", lat=45.0, lon=6.0, domaine="fort_propre")
+             for k in range(n_propre)]
+            + [dict(id=f"s{k}", lat=42.9, lon=0.5, domaine="fort_sale")
+               for k in range(n_sale)])
+    col2 = C.Colonnes("2026-08-17T03:00:00Z", bal2, [0])
+    col2.c0025[:n_propre, iu0, j0, 0] = 20.0
+    col2.c0025[:n_propre, iv0, j0, 0] = 0.0
+    col2.c001[:n_propre, iu1, j1, 0] = 21.5
+    col2.c001[:n_propre, iv1, j1, 0] = 0.0
+    col2.c0025[n_propre:, iu0, j0, 0] = 8.0
+    col2.c0025[n_propre:, iv0, j0, 0] = 0.0
+    col2.c001[n_propre:, iu1, j1, 0] = 10.0
+    col2.c001[n_propre:, iv1, j1, 0] = 0.0
+
+    r2 = M.mesurer(col2, None, crier=silence)
+    abs_med = r2["par_niveau"][100]["vitesse"]["mediane"]
+    vr = r2["verdict_relatif"]
+    verifier("⛔ LE DÉFAUT EXISTE : l'absolu dit « DÉPASSÉ » (médiane "
+             "1,50 m/s > 1) sur un échantillon dont 10 couples sur 15 "
+             "s'accordent à 7,5 % du vent",
+             abs_med >= 1.0, f"médiane absolue {abs_med:.2f} m/s")
+    verifier("✅ CORRECTIF : le verdict RELATIF existe, porte sur le bac "
+             "≥ 8 m/s, et compte les 15 couples",
+             vr is not None and vr["bac"] == "≥ 8 m/s" and vr["n"] == 15,
+             f"{vr}")
+    verifier("il vaut 7,5 % en médiane et il est TENU — le raccord est "
+             "sain là où l'absolu le condamnait",
+             abs(vr["mediane_pct"] - 7.5) < 1e-6 and vr["tenu"] is True,
+             f"{vr['mediane_pct']:.2f} %")
+
+    r2_sale = M.mesurer(col2, None, crier=silence, domaine="fort_sale")
+    vs = r2_sale["verdict_relatif"]
+    verifier("⚠️ ET IL SAIT ÉCHOUER : sur le seul domaine vraiment en "
+             "défaut, le relatif monte à 25 % et le verdict passe à "
+             "DÉPASSÉ — un critère qui ne dirait jamais non ne dirait rien",
+             abs(vs["mediane_pct"] - 25.0) < 1e-6 and vs["tenu"] is False,
+             f"{vs['mediane_pct']:.2f} %")
+    verifier("le seuil publié est bien celui du module, pas une constante "
+             "recopiée dans le verdict",
+             vs["seuil_pct"] == M.SEUIL_RELATIF_VERDICT_PCT)
+
+    r_calme = M.mesurer(col, None, crier=silence, domaine="calme_dom")
+    verifier("un run sans AUCUN couple ≥ 8 m/s rend `verdict_relatif` à "
+             "None — pas de verdict inventé, pas d'exception",
+             r_calme["verdict_relatif"] is None)
+
     print("\n  marche_raccord :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1
 
