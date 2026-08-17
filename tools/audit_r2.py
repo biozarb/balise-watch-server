@@ -208,9 +208,22 @@ ESPACEMENT_MINI_JOURS = float(os.environ.get("BW_R2_ESPACEMENT_MINI", "0.25"))
 # — soit les 18 orphelins du `TypeError` de `purger()` des 12-13/08,
 # trouvés à la main ce jour-là et TOUJOURS là. Ce mécanisme les aurait
 # nommés le lendemain matin.
+#
+# ⛔ 17/08 (Lot L2) — LE RAFRAÎCHISSEMENT PI ENTRE ICI DANS LE MÊME
+# COMMIT QUE SA PUBLICATION, et pas « au prochain passage ». C'est le
+# produit le plus exposé des trois : il s'écrit 24 fois par jour (contre
+# 8), il pèse 58,3 Mo par run, et ses deux jumeaux peuvent rester
+# DÉPAREILLÉS si une écriture casse au milieu — auquel cas
+# `rafraichissement.ecrire()` inscrit quand même les clés déjà écrites
+# dans l'index pour qu'elles soient purgées. Sans cette ligne-ci, une
+# purge qui cesserait de mordre ferait croître le bucket de 1,4 Go par
+# jour sans qu'aucun voyant ne s'allume : `ListObjects` n'est pas une
+# route de production, et la pente confondrait la fuite avec une marche.
 PRODUITS_INDEXES = (
     ("balise-watch-grids", "agrume/grille/index.json", "agrume/grille/"),
     ("balise-watch-grids", "agrume/pi/grille/index.json", "agrume/pi/grille/"),
+    ("balise-watch-grids", "agrume/pi/rafraichissement/index.json",
+     "agrume/pi/rafraichissement/"),
 )
 
 # ⚠️ LE DÉLAI DE GRÂCE — LA COURSE DU 17/08, ET POURQUOI ELLE N'EST PAS

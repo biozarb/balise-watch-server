@@ -71,6 +71,7 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `quantification.py` | ⚠️ **le FORMAT du produit A** : PARAMS, unités, plafonds, sentinelle, `quantifier()`. Importé par le produit B, AROME-PI et le profil — c'est pourquoi il est resté ICI quand le conteneur est parti dans `verif/` (Lot J, 13/08) |
 | `ingest_colonnes.py` | l'ingestion elle-même — un fichier sur le disque à la fois |
 | `grille.py` | le produit B : grille 3D du domaine, index, **purge sans jamais lister**, et **`provenance()`** — ce que chaque bloc de chaque échéance doit à quel modèle (Lot L, 17/08) |
+| `rafraichissement.py` | **le composite PI publié À PART** (Lot L2, 17/08) : lit `u`/`v` hauteur du produit B par Range, appelle `composite.composer()`, écrit deux jumeaux (`carte.bin` + `colonnes.bin`) sous `agrume/pi/rafraichissement/{domaine}/{run_pi}/`, toutes les heures, depuis le VPS |
 | `profil.py` | **le raccord vertical** : axe altitude-mer, masquage, mélange |
 | `sonder.py` | lire un profil en un point, en tableau ou en JSON |
 | `transect.py` | **la coupe verticale** le long d'un segment, découpée à la demande dans le produit B |
@@ -105,7 +106,13 @@ python3 agrume/test_profil.py [--archive <colonnes.npz> <manifeste.json>]
 python3 agrume/test_radiosondage.py
 python3 agrume/test_grille.py
 python3 agrume/test_transect.py
+python3 agrume/test_composite.py
+python3 agrume/test_rafraichissement.py
 ```
+
+⚠️ **`tools/deploy-agrume-vps.sh` en rejoue 17 SUR LE VPS** avant tout
+redémarrage, et s'arrête au premier échec. La liste ci-dessus est celle
+qu'on tape à la main ; c'est celle du script qui fait foi.
 
 Tous tournent **sans réseau et sans clé**. Ils ne vérifient pas que le
 code « marche » : ils vérifient les quatre façons qu'il aurait de casser
@@ -128,6 +135,80 @@ en silence.
 - **quantifier l'axe d'altitude en float16** : le pas y vaut 4 m entre
   4 096 et 8 192 m, donc 2 m d'erreur — mesuré — sur l'axe même où l'on
   raccorde deux sources.
+
+---
+
+## Le rafraîchissement PI (Lot L2, 17/08/2026)
+
+Le composite temporel de `composite.py` existait, bancé, depuis le
+10/08 — et **il n'avait jamais quitté la mémoire**. Il est désormais
+publié, dans un objet à part, écrit par le VPS à chaque ingestion PI.
+
+```
+  agrume/pi/rafraichissement/{domaine}/{run_pi}/carte.bin       29,14 Mo
+                                              /colonnes.bin     29,14 Mo
+                                              /manifest.json
+  agrume/pi/rafraichissement/index.json     ← `dernier[domaine]` FAIT FOI
+```
+
+**Trois choses à savoir avant de s'en servir.**
+
+- ⛔ **La préséance est publiée, jamais devinée** : cet objet gagne sur
+  le produit B **pour `u` et `v` du bloc `hauteur` seulement**, et pour
+  les seules échéances qu'il énumère (25 pas de 15 min, 0 → 6 h).
+  Partout ailleurs — isobares, surface, `t`/`r`/`tke`, au-delà de
+  l'horizon — le produit B reste seul maître. ⚠️ Une valeur non finie
+  ici veut dire « rien à en dire » : le client retombe sur le produit B,
+  il n'affiche pas un trou.
+- ⛔ **C'est `index["dernier"][domaine]` qui désigne le run à lire**, pas
+  le `run` du manifeste du produit B (publié 8 fois par jour quand PI
+  l'est 24 : le run PI que le client lira n'existe pas encore quand ce
+  manifeste-là s'écrit). `dernier` n'avance qu'après les TROIS
+  écritures — les deux jumeaux s'écrivent ensemble ou pas du tout.
+- ⛔ **`resolutionTemporelleMin` survit au passage, et la provenance
+  porte ce qu'il ne peut pas porter.** La table par niveau dit
+  « observée (PI), 15 min » sous 500 m/sol — c'est vrai **à `w_PI = 1`**,
+  donc jusqu'à 4 h. Au-delà la rampe éteint Δ, et à 6 h la valeur est de
+  l'AROME horaire interpolé **à tous les niveaux, 20 m compris**. C'est
+  `provenance.par_echeance[*].blocs.hauteur` qui le dit, échéance par
+  échéance.
+
+⚠️ **Le cahier des charges du lot se trompait d'échéances, et c'est
+mesuré.** Il annonçait « lire les échéances 0→7 du produit B ». Ce n'est
+vrai que si les deux runs partent à la même heure. Le 17/08 à 09:37 UTC :
+dernier run PI **09 Z**, dernier produit B *ingéré* **03 Z** — donc les
+échéances **6 → 12**. Les échéances se déduisent du décalage
+(`steps_necessaires()`), et le module **refuse** plutôt que d'extrapoler.
+ⓘ Même à décalage nul c'est **0 → 6**, sept échéances et non huit :
+l'horizon de PI est 6 h pile.
+
+⛔ **`CACHE_REECRIT`, pas `CACHE_IMMUABLE`.** La clé porte le run PI,
+mais les octets dépendent AUSSI du run du produit B disponible à la
+composition : « les mêmes octets sortiront toujours de cette clé » est
+**faux** ici. Et `CACHE_IMMUABLE` vaut 6 h pour un objet dont la
+rétention est de 3 h.
+
+**Mesuré sur le VPS (2 vCPU), run PI 09 Z du 17/08, domaine
+111 × 105 :**
+
+| | valeur |
+|---|---|
+| lu dans le produit B, par Range | **8,16 Mo** (39 Mo en tirant les 7 tampons entiers, 286 Mo pour le run complet) |
+| composition | **0,52 s** |
+| durée totale du passage | 4,5 s (dont ~3 s de réseau) |
+| pic RSS | **363 Mo** (VPS : 3,4 Go disponibles) |
+| publié | **58,3 Mo** par run PI · **175 Mo** résidents à 3 runs |
+
+✅ **Vérifié sur les octets SERVIS**, pas sur ceux de la mémoire :
+`composite == PI` aux 5 niveaux de Δ tant que `w_PI = 1`, écart max
+**0,000e+00 m/s** sur 50 tranches ; et `carte.bin` == `colonnes.bin`
+case par case (`--verifier`).
+
+```
+python3 agrume/rafraichissement.py --sans-ecriture   # chiffrer sans écrire
+python3 agrume/rafraichissement.py                   # rejouer un run à la main
+python3 agrume/rafraichissement.py --verifier        # relire ce qui est SERVI
+```
 
 ---
 
