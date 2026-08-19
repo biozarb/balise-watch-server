@@ -96,7 +96,15 @@ NJ, NI = 5, 7
 RUN_PI = "2026-08-17T10:00:00Z"
 RUN_B = "2026-08-17T03:00:00Z"
 DOMAINE = DOMAINES_PI[0]
-SANS_PI = "pyrenees"
+
+# ⛔⛔ 19/08 (Lot M) — IL N'Y A PLUS DE DOMAINE SANS PI EN PRODUCTION.
+# `SANS_PI` valait `"pyrenees"` tant que `DOMAINES_PI` n'avait qu'une
+# entrée ; les trois domaines sont couverts depuis l'arbitrage A13. Ce
+# banc FABRIQUE donc son domaine découvert (§3), au lieu d'en emprunter
+# un à la production — sans quoi le refus de `composer_rafraichissement`
+# ne serait plus bancé du tout, alors que c'est lui qui empêche de
+# publier une couche PI là où aucun champ PI n'a été ingéré.
+SANS_PI = "domaine-sans-pi-du-banc"
 STEPS_B = list(range(0, 20))
 
 LATS = np.array([46.45 - 0.025 * k for k in range(NJ)], dtype=np.float32)
@@ -318,6 +326,24 @@ def section_3_sans_pi():
              "pouvoir dire — pas un code, pas un silence",
              len(msg) > 120 and "portée actuelle" in msg,
              f"{len(msg)} caractères")
+
+    # ── ⛔⛔ ET LE PENDANT, DEPUIS LE LOT M : LES DOMAINES COUVERTS LE
+    #    SONT TOUS, ET CHACUN CHEZ LUI ──────────────────────────────────
+    # ⚠️ Le contrôle ci-dessus prouve qu'on refuse là où PI n'existe pas.
+    # Il ne prouve RIEN sur le cas neuf : trois domaines couverts, trois
+    # objets à écrire, et des clés qui doivent être TROIS. Un gabarit qui
+    # oublierait `{domaine}` passerait le contrôle du dessus sans broncher
+    # et ferait écrire les trois composites sur la même clé — le dernier
+    # écrit gagnant, les deux autres servant le vent d'un autre massif.
+    cles = {d: tuple(cles_du_rafraichissement(RUN_PI, d))
+            for d in DOMAINES_PI}
+    verifier("⛔ chaque domaine PI a ses PROPRES clés de rafraîchissement "
+             "— trois domaines, trois jeux, aucun partagé",
+             len(set(cles.values())) == len(DOMAINES_PI),
+             f"{len(DOMAINES_PI)} domaines → {len(set(cles.values()))} jeux")
+    verifier("⛔ …et le domaine apparaît dans le CHEMIN, pas seulement "
+             "dans le manifeste : c'est la clé qui sépare les octets",
+             all(f"/{d}/" in c for d, jeu in cles.items() for c in jeu))
     stock2 = StockBidon()
     leve("⛔ et sans AUCUN run du produit B en ligne, on refuse aussi : "
          "un objet vide serait pire qu'aucun objet",

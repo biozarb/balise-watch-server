@@ -290,8 +290,28 @@ def main():
          lambda: verifier_prefixe(["agrume/colonnes/2026-08-10T09:00:00Z/x.npz"],
                                   prefixe=PI.PREFIXE_GRILLE))
     verifier("les clés de grille PI passent",
-             verifier_prefixe(PI.cles_du_run_grille("2026-08-10T16:00:00Z"),
-                              prefixe=PI.PREFIXE_GRILLE) is None or True)
+             verifier_prefixe(
+                 PI.cles_du_run_grille("2026-08-10T16:00:00Z", "nord-alpes"),
+                 prefixe=PI.PREFIXE_GRILLE) is None or True)
+    # ⛔⛔ 19/08 (Lot M) — LE DOMAINE EST DANS LA CLÉ, ET C'EST BANCÉ ICI.
+    # Sans lui, les trois domaines d'un même run écriraient sur la MÊME
+    # clé : le dernier écrit gagnerait, et le calque des Alpes servirait
+    # la grille des Pyrénées sans qu'une requête n'échoue. Le contrôle
+    # est écrit en COMPARANT deux domaines, pas en cherchant une chaîne
+    # dans un chemin : une clé qui contiendrait le nom du domaine « pour
+    # la lisibilité » sans s'en servir pour séparer les objets passerait
+    # une recherche de sous-chaîne et échouerait celui-ci.
+    from domaine import DOMAINES_PI as _DPI                # noqa: PLC0415
+    par_dom = {d: tuple(PI.cles_du_run_grille("2026-08-10T16:00:00Z", d))
+               for d in _DPI}
+    verifier("⛔ deux domaines d'un MÊME run n'écrivent jamais sur la même "
+             "clé de grille",
+             len(set(par_dom.values())) == len(_DPI),
+             f"{len(_DPI)} domaines → {len(set(par_dom.values()))} jeux")
+    verifier("⛔ …et l'archive des COLONNES reste unique, elle : son axe "
+             "de balises porte déjà les trois domaines, il n'a pas de "
+             "couture où le découper",
+             len({cles_du_run_colonnes("2026-08-10T16:00:00Z")[0]}) == 1)
     verifier("⚠️ les colonnes sont rangées PAR JOUR (24 runs/jour × 365 "
              "feraient 8 760 préfixes plats sans ça)",
              "/2026-08-10/" in cles_du_run_colonnes("2026-08-10T16:00:00Z")[0])
@@ -312,8 +332,22 @@ def main():
              list(g.manifeste()["niveaux_delta"]) == list(NIVEAUX_DELTA))
     verifier("⚠️ le manifeste écrit le SENS des latitudes en toutes lettres",
              "DÉCROISSANTES" in g.manifeste()["axes"]["sens"])
-    verifier("il dit que la fenêtre est réalignée sur le GRIB reçu",
-             "réalignée" in g.manifeste()["fenetre"])
+    verifier("il dit que la fenêtre est DÉCOUPÉE dans le GRIB reçu, et "
+             "non prise telle que le WCS l'a choisie",
+             "aligner_sur_axes" in g.manifeste()["fenetre"]
+             and "découpée" in g.manifeste()["fenetre"])
+    # ⛔ 19/08 (Lot M) — ET IL DIT AUSSI QUE LA BOÎTE DEMANDÉE N'EST PLUS
+    # CELLE DU DOMAINE. C'est la seule ligne du manifeste qui empêche un
+    # lecteur de conclure, du fait que la fenêtre servie fait 34 × 84,
+    # que 34 × 84 est ce qui a été demandé au portail. Les deux ont
+    # cessé de coïncider, et le silence là-dessus ferait chercher un
+    # défaut d'alignement là où il n'y en a pas.
+    verifier("⛔ …et que la boîte DEMANDÉE au portail est l'englobante "
+             "des domaines PI, pas celle de ce domaine-ci",
+             "englobant" in g.manifeste()["fenetre"])
+    verifier("le manifeste NOMME son domaine — sans ça, deux grilles PI "
+             "téléchargées côte à côte sont indiscernables",
+             g.manifeste()["domaine"] == g.domaine)
 
     print("\n── 9. ⚠️⚠️ « Publié » ne veut pas dire « complet » ──")
     # MESURÉ le 10/08 à 17:23:51 UTC : le run 17 Z répondait au
@@ -481,7 +515,7 @@ def main():
     # « quand une fonction à paramètres change, grepper TOUS ses appels ».
     import json as _json
     import ingest_pi as IP  # noqa: PLC0415
-    from pi import CLE_INDEX_GRILLE as _CLE, DOMAINE_INDEX as _DOM
+    from pi import CLE_INDEX_GRILLE as _CLE, DOMAINE_INDEX_LEGS as _LEGS
 
     class _FauxStore:
         def __init__(self):
@@ -493,29 +527,80 @@ def main():
         def delete(self, k):
             self.supprimes.append(k); return True
 
+    # ⛔⛔ 19/08 (Lot M) — `purger()` PREND MAINTENANT UN DICTIONNAIRE
+    # {domaine: clés}, ET LA RÉTENTION SE COMPTE PAR DOMAINE. Le contrôle
+    # décisif est celui-ci : avec trois domaines et une rétention de 3,
+    # un compteur GLOBAL ne garderait que le dernier run et demi — les
+    # deux tiers des grilles en ligne partiraient à la purge à chaque
+    # run. C'est exactement la panne que le produit B a eue le 12/08,
+    # et `grille.index_apres` la documente ; ce banc vérifie que PI en
+    # bénéficie vraiment, au lieu de le supposer.
+    from domaine import DOMAINES_PI as _DPI                # noqa: PLC0415
+
     _st = _FauxStore()
     _runs = ["2026-08-13T0%d:00:00Z" % h for h in (1, 2, 3, 4, 5)]
+
+    def _cles(r):
+        return {d: PI.cles_du_run_grille(r, d) for d in _DPI}
+
     try:
         for _r in _runs:
-            IP.purger(_st, _r, ["agrume/pi/grille/%s/grille.npz" % _r],
-                      journal=lambda *a, **k: None)
+            IP.purger(_st, _r, _cles(_r), journal=lambda *a, **k: None)
         _idx = _json.loads(_st.objets[_CLE])
         verifier("⛔ `purger()` tourne de bout en bout — c'est CE "
                  "TypeError qui a fait perdre l'index PI du 12 au 13/08",
                  True)
-        verifier("la rétention de 3 runs tient",
-                 len(_idx["runs"]) == 3, str(len(_idx["runs"])))
-        verifier("… et chaque entrée porte son domaine (sans lui, "
-                 "`index_apres` l'enverrait à la suppression au run "
-                 "suivant, comme une entrée d'ancien format)",
-                 all(e.get("domaine") == _DOM for e in _idx["runs"]),
+        verifier("⛔ la rétention de 3 runs tient POUR CHAQUE DOMAINE — "
+                 "un compteur global n'en garderait que 3 en tout, donc "
+                 "un seul run sur trois domaines",
+                 len(_idx["runs"]) == 3 * len(_DPI)
+                 and all(sum(1 for e in _idx["runs"]
+                             if e.get("domaine") == d) == 3 for d in _DPI),
+                 f"{len(_idx['runs'])} entrées pour {len(_DPI)} domaines")
+        verifier("… et chaque entrée porte SON domaine, celui de sa clé "
+                 "(sans lui, `index_apres` l'enverrait à la suppression "
+                 "au run suivant, comme une entrée d'ancien format)",
+                 all(e.get("domaine") in _DPI for e in _idx["runs"])
+                 and all(f"/{e['domaine']}/" in e["cles"][0]
+                         for e in _idx["runs"]),
                  str(sorted({e.get("domaine") for e in _idx["runs"]})))
-        verifier("les deux plus vieux runs partent, et EUX SEULS",
-                 _st.supprimes == ["agrume/pi/grille/%s/grille.npz" % r
-                                   for r in _runs[:2]],
-                 str(_st.supprimes))
+        _attendu = sorted(c for r in _runs[:2] for d in _DPI
+                          for c in PI.cles_du_run_grille(r, d))
+        verifier("les deux plus vieux runs partent, sur TOUS les domaines, "
+                 "et EUX SEULS",
+                 sorted(_st.supprimes) == _attendu,
+                 f"{len(_st.supprimes)} supprimées pour {len(_attendu)} "
+                 f"attendues")
     except TypeError as exc:
         verifier(f"⛔ `purger()` lève encore : {exc}", False)
+
+    # ── ⛔⛔ LA MIGRATION DES ENTRÉES `pi` — UNE FUITE, PAS UN DÉCHET ──
+    # Avant le Lot M, l'index PI ne connaissait qu'un domaine, nommé
+    # `"pi"`, et ses clés n'avaient pas de domaine dans le chemin.
+    # Laissées telles quelles, ces entrées ne recevraient plus jamais de
+    # nouvelle entrée sous leur nom : leur compteur de rétention resterait
+    # à 3 pour toujours, donc elles ne sortiraient JAMAIS de l'index, donc
+    # leurs octets resteraient facturés — et invisibles, `ListObjects`
+    # étant hors de portée du jeton ordinaire.
+    _st2 = _FauxStore()
+    _vieilles = ["agrume/pi/grille/2026-08-12T0%d:00:00Z/grille.npz" % h
+                 for h in (1, 2, 3)]
+    _st2.objets[_CLE] = _json.dumps(dict(
+        runs=[dict(run="2026-08-12T0%d:00:00Z" % (k + 1), domaine=_LEGS,
+                   cles=[c]) for k, c in enumerate(_vieilles)],
+        restes=[]))
+    IP.purger(_st2, "2026-08-13T06:00:00Z", _cles("2026-08-13T06:00:00Z"),
+              journal=lambda *a, **k: None)
+    _idx2 = _json.loads(_st2.objets[_CLE])
+    verifier(f"⛔ les entrées de l'ancien format (`domaine: {_LEGS!r}`) "
+             f"sont PURGÉES au premier run du Lot M, pas laissées à "
+             f"pourrir dans l'index",
+             all(e.get("domaine") != _LEGS for e in _idx2["runs"])
+             and sorted(_st2.supprimes) == sorted(_vieilles),
+             f"{len(_st2.supprimes)} supprimée(s) sur {len(_vieilles)}")
+    verifier("… et les grilles du run NEUF, elles, sont bien indexées — "
+             "la migration ne mange pas ce qu'elle vient d'écrire",
+             len(_idx2["runs"]) == len(_DPI))
 
     # ⛔ ET LE FRÈRE SUIVANT, MÉCANIQUEMENT. Un banc qui ne teste qu'UN
     # site d'appel ne protège que celui-là ; c'est justement ce qui a
@@ -543,6 +628,165 @@ def main():
     verifier("⛔ tous les appels à `index_apres` du paquet ont le bon "
              "nombre d'arguments requis (%s)" % ", ".join(_requis),
              not _mauvais, " · ".join(_mauvais))
+
+    # ══════════════════════════════════════════════════════════════════
+    print("\n── 12. ⛔⛔ PLUSIEURS DOMAINES, UN SEUL GRIB (Lot M, 19/08) ──")
+    # ⛔ CE QUE CETTE SECTION EXISTE POUR ATTRAPER, ET C'EST NEUF.
+    # Jusqu'au 19/08 l'ingestion PI n'avait qu'une fenêtre : un champ
+    # aligné, une pose, terminé. Depuis l'arbitrage A13 elle demande UNE
+    # boîte englobante et la recoupe en trois. Deux fautes deviennent
+    # alors possibles, et AUCUNE des onze sections ci-dessus ne les voit :
+    #
+    #   a. **poser un domaine EFFACE le précédent.** Les trois découpes
+    #      remplissent la MÊME tranche (paramètre, niveau, échéance) de
+    #      l'archive des colonnes. Une affectation de tranche entière —
+    #      l'écriture naturelle, celle d'avant le lot — écraserait à
+    #      chaque fois ce que le domaine précédent vient de poser. Le
+    #      symptôme : une archive où seul le DERNIER domaine ingéré porte
+    #      des valeurs, et 100 % de remplissage annoncé sur les balises
+    #      de celui-là. Rien ne lève.
+    #   b. **poser un domaine avec le champ d'un AUTRE.** Un (j, i) n'a de
+    #      sens que relativement à sa fenêtre. Croiser les deux rend une
+    #      valeur finie, plausible, prise 400 km plus loin.
+    njG, niG = 14, 24
+    metaG = meta_recu(njG, niG)
+    # ⚠️ Les valeurs restent DANS la plage physique du vent — sinon
+    # `quantifier()` les rend NaN (son plafond de plausibilité) et le
+    # contrôle passerait au vert en comparant deux NaN… ce qu'il ne
+    # ferait pas, NaN != NaN, mais il échouerait pour la mauvaise raison.
+    # Elles restent toutes DISTINCTES : une erreur d'indexation rend donc
+    # les coordonnées de l'endroit où on est allé chercher, divisées par
+    # cent.
+    champG = champ_positionnel(njG, niG) / 1000.0
+    latsG, lonsG = geometrie_grib(metaG)
+
+    # Deux fenêtres DISJOINTES dans un seul GRIB — l'analogue exact des
+    # Alpes et des Pyrénées dans l'englobante du 19/08.
+    fen = {"alpha": (slice(1, 5), slice(2, 8)),
+           "beta": (slice(8, 12), slice(13, 21))}
+    axes = {n: (latsG[fj], lonsG[fi]) for n, (fj, fi) in fen.items()}
+    alignes = {n: aligner_sur_axes(champG, metaG, la, lo)
+               for n, (la, lo) in axes.items()}
+    verifier("chaque domaine reçoit SA découpe du même GRIB, à la bonne "
+             "forme",
+             alignes["alpha"].shape == (4, 6)
+             and alignes["beta"].shape == (4, 8),
+             f"{alignes['alpha'].shape} · {alignes['beta'].shape}")
+    verifier("⚠️ …et les deux découpes ne se recouvrent pas — sinon le "
+             "contrôle suivant serait vrai par hasard",
+             not set(np.ravel(alignes["alpha"]).tolist())
+             & set(np.ravel(alignes["beta"]).tolist()))
+
+    params12 = params_actifs()
+    bal12 = [dict(id="A1", lat=0.0, lon=0.0, nom="dans alpha", source="",
+                  position_suspecte=False),
+             dict(id="B1", lat=0.0, lon=0.0, nom="dans beta", source="",
+                  position_suspecte=False)]
+    # ⛔⛔ LES MÊMES (j, i) DANS LES DEUX FENÊTRES, ET C'EST DÉLIBÉRÉ.
+    # Des indices valides ici et invalides là feraient lever un
+    # `IndexError` au premier croisement — c'est-à-dire que la faute se
+    # signalerait toute seule, et le garde-fou ne servirait à rien. Le
+    # cas DANGEREUX est celui où les indices tombent dans les deux
+    # fenêtres : la valeur est alors finie, plausible, et prise ailleurs.
+    ji12 = [(1, 2), (3, 5)]
+    doms12 = ["alpha", "beta"]
+
+    # ⚠️ LA RÉFÉRENCE PASSE PAR `quantifier()`, PAS PAR LE float64 BRUT.
+    # L'archive est en float16 : comparer à la valeur d'origine ferait
+    # échouer ce contrôle pour une raison qui n'a rien à voir avec le
+    # domaine (2,004 → 2,00390625). On compare donc ce que l'archive
+    # DEVRAIT contenir, arrondi compris.
+    from quantification import quantifier as _q             # noqa: PLC0415
+
+    def _attendu(nom, j, i):
+        return float(_q(np.array([alignes[nom][j, i]], dtype=np.float64),
+                        params12[0])[0])
+
+    vrai = {"A1": _attendu("alpha", 1, 2), "B1": _attendu("beta", 3, 5)}
+
+    c12 = ColonnesPI("2026-08-19T14:00:00Z", params12, bal12, ji12,
+                     domaines=doms12)
+    for nom in fen:
+        for pp in params12:
+            c12.poser_depuis_champ(pp, 100, 15, alignes[nom], domaine=nom)
+    ku, kn, km = c12.i_param["u"], c12.i_niveau[100], c12.i_min[15]
+    verifier("⛔ APRÈS les deux poses, les DEUX balises portent leur "
+             "propre valeur — celle de leur fenêtre, pas celle du voisin",
+             float(c12.donnees[ku, kn, km, 0]) == vrai["A1"]
+             and float(c12.donnees[ku, kn, km, 1]) == vrai["B1"],
+             f"A1={float(c12.donnees[ku, kn, km, 0])} (vrai {vrai['A1']}) · "
+             f"B1={float(c12.donnees[ku, kn, km, 1])} (vrai {vrai['B1']})")
+
+    # ── ⛔ SABOTAGE nº 1 : la pose GLOBALE, celle d'avant le lot ───────
+    # ⚠️ Un banc qui ne rejoue pas la faute ne prouve pas que le garde-fou
+    # sert. C'est la méthode du Lot L2, et c'est elle qui a montré qu'un
+    # banc peut prouver l'EXISTENCE d'un garde-fou sans prouver son
+    # BRANCHEMENT.
+    c_sab = ColonnesPI("2026-08-19T14:00:00Z", params12, bal12, ji12,
+                       domaines=doms12)
+    for nom in fen:                       # ⛔ sans `domaine=` : la faute
+        for pp in params12:
+            c_sab.poser_depuis_champ(pp, 100, 15, alignes[nom])
+    verifier("⛔ SABOTAGE — sans le filtre par domaine, la seconde pose "
+             "ÉCRASE la première : A1 reçoit une valeur de la fenêtre "
+             "`beta`, finie et plausible, prise ailleurs",
+             float(c_sab.donnees[ku, kn, km, 0]) != vrai["A1"],
+             f"A1 saboté = {float(c_sab.donnees[ku, kn, km, 0])} au lieu "
+             f"de {vrai['A1']}")
+
+    # ── ⛔ SABOTAGE nº 2 : `aligner_sur_axes()` retiré sur UN chemin ───
+    # ⚠️ C'est LE sabotage demandé par le Lot M, et il vise précisément ce
+    # que le Lot L2 a appris : le garde-fou existe (section 1), mais rien
+    # ne prouvait qu'il était branché sur CHAQUE domaine. Ici on le
+    # court-circuite sur le seul chemin `beta` — les autres restent
+    # corrects, ce qui est exactement la forme qu'aurait la faute réelle.
+    c_sab2 = ColonnesPI("2026-08-19T14:00:00Z", params12, bal12, ji12,
+                        domaines=doms12)
+    for pp in params12:
+        c_sab2.poser_depuis_champ(pp, 100, 15, alignes["alpha"],
+                                  domaine="alpha")
+        c_sab2.poser_depuis_champ(pp, 100, 15, champG, domaine="beta")
+    verifier("⛔ SABOTAGE — `beta` posé sur le GRIB BRUT (sans découpe) "
+             "rend une valeur finie et fausse ; `alpha`, lui, reste juste "
+             "— une faute par domaine ne se voit pas sur les autres",
+             np.isfinite(float(c_sab2.donnees[ku, kn, km, 1]))
+             and float(c_sab2.donnees[ku, kn, km, 1]) != vrai["B1"]
+             and float(c_sab2.donnees[ku, kn, km, 0]) == vrai["A1"],
+             f"B1 saboté = {float(c_sab2.donnees[ku, kn, km, 1])} au lieu "
+             f"de {vrai['B1']}")
+    leve("⛔ …et sur une fenêtre que le GRIB ne couvre PAS, l'alignement "
+         "refuse au lieu de rendre le plus proche",
+         lambda: aligner_sur_axes(champG, metaG, latsG[:3] + 0.01,
+                                  lonsG[:3]), "ne couvre pas")
+
+    # ── ⛔ LA BOÎTE ENGLOBANTE, ET POURQUOI ELLE EST ÉLARGIE ───────────
+    from domaine import (DOMAINES as _DOMS, DOMAINES_PI as _DPI2,
+                         MARGE_PI_DEG, boite_pi)      # noqa: PLC0415
+    _b = boite_pi()
+    verifier("⛔ la boîte demandée ENGLOBE chaque domaine PI — une "
+             "englobante recopiée cesserait d'englober au premier "
+             "domaine ajouté",
+             all(_b["latmin"] <= _DOMS[d]["latmin"]
+                 and _DOMS[d]["latmax"] <= _b["latmax"]
+                 and _b["lonmin"] <= _DOMS[d]["lonmin"]
+                 and _DOMS[d]["lonmax"] <= _b["lonmax"] for d in _DPI2))
+    # ⛔⛔ LA MESURE DU 19/08, TRANSFORMÉE EN GARDE-FOU. `DOMAINE_TAH`
+    # n'a AUCUNE de ses quatre bornes sur la grille 0,025° : sans marge,
+    # le WCS a rendu 33 × 83 là où l'orographie attend 34 × 84, et
+    # `aligner_sur_axes()` a refusé. Si quelqu'un remet `MARGE_PI_DEG` à
+    # zéro « parce que les bornes ont l'air rondes », c'est ce contrôle
+    # qui doit crier — pas un run de production perdu.
+    _pas = 0.025
+    _non_alignes = [d for d in _DPI2
+                    if any(abs(round(_DOMS[d][k] / _pas) * _pas
+                               - _DOMS[d][k]) > 1e-9
+                           for k in ("latmin", "latmax", "lonmin", "lonmax"))]
+    verifier("⚠️ au moins un domaine PI a des bornes HORS grille 0,025° — "
+             "c'est le fait mesuré le 19/08 qui rend la marge obligatoire",
+             bool(_non_alignes), f"hors grille : {_non_alignes}")
+    verifier("⛔ …et la marge vaut au moins un pas de grille, sinon la "
+             "découpe de ce domaine-là refuse (mesuré : écart 0,025001°)",
+             MARGE_PI_DEG >= _pas, f"marge = {MARGE_PI_DEG}°")
 
     print("\n  ingestion PI :",
           "OK" if not echecs else f"ÉCHEC ({len(echecs)})")

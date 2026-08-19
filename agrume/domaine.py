@@ -456,19 +456,125 @@ DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES,
 #  quota : 300 requêtes par run et par boîte (2 paramètres × 6 niveaux ×
 #  25 échéances), 24 runs par jour. Ce n'est pas un octet de stockage,
 #  c'est un budget de portail.
-DOMAINES_PI = ("nord-alpes",)
+#
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔⛔ 19/08/2026 — LOT M : LE LOT À PART A EU LIEU, ET SON CHIFFRAGE A
+#  DÉMENTI SA PROPRE PRÉMISSE. Arbitrage A13 de Yann.
+# ══════════════════════════════════════════════════════════════════════
+#  Le paragraphe ci-dessus posait la bonne question — « combien de
+#  requêtes ? » — et la mauvaise réponse : « 300 PAR BOÎTE ». Les deux
+#  options ont été MESURÉES le 19/08 sur le run PI 14 Z, depuis le VPS,
+#  run complet, rien écrit :
+#
+#      3 boîtes séparées   926 requêtes réelles   9,40 min   11,0 Mo
+#      1 boîte englobante  304 requêtes réelles   3,06 min   27,7 Mo
+#
+#  Et les DEUX rendent EXACTEMENT les mêmes fenêtres après découpe :
+#  111×105 · 41×205 · 34×84, sur les trois orographies gelées, sur les
+#  300 champs, sans un refus. **Les produits écrits sont donc octet pour
+#  octet les mêmes ; seul le chemin d'approvisionnement change.**
+#
+#  ⛔ POURQUOI L'ARGUMENT DE `DOMAINE_PYRENEES` NE S'APPLIQUE PAS ICI,
+#  ALORS QU'IL RESTE JUSTE POUR AROME. « La boîte qui couvrirait les
+#  deux ferait 60 000 colonnes de vide entre elles » parle du produit
+#  STOCKÉ, où la boîte EST le produit. Pour PI la boîte ne décide que du
+#  TRANSPORT : on recoupe en trois fenêtres juste après le décodage
+#  (0,5 s pour 300 champs, mesuré), et rien de mort n'est écrit nulle
+#  part. La ressource rare de cette chaîne est le QUOTA, pas la bande
+#  passante — c'est écrit depuis le 10/08 dans `ingest_pi.py` (« ce
+#  n'est pas le volume qui gêne, c'est l'OCCUPATION PERMANENTE DU
+#  QUOTA »). L'option qui gaspille 63 % des octets occupe le quota
+#  3 minutes par heure au lieu de 9,4 : c'est elle qui préserve la
+#  ressource rare.
+#
+#  ⓘ Effet de bord mesuré, et il a tranché le périmètre : la boîte
+#  englobant Alpes + Pyrénées contient DÉJÀ tout Tarn/Aveyron/Hérault
+#  (42,40–46,45 N × −1,80–7,60 E). Ajouter TAH coûte **zéro requête et
+#  zéro octet** — d'où « les deux d'un coup », et non « Pyrénées
+#  d'abord ».
+#
+#  ⚠️ CE QUE CETTE OPTION NE REND PAS GRATUIT, et qu'il faut surveiller :
+#  le payload par requête grossit avec la SURFACE de la boîte englobante
+#  (mesuré : 4 288 o pour TAH, 17 662 pour Nord-Alpes, 92 356 pour
+#  l'englobante, 1 099 000 pour la France entière). Un quatrième domaine
+#  très éloigné (Vosges, Corse) élargirait la boîte sans rien coûter en
+#  requêtes mais multiplierait les octets. Le plafond dur est la France
+#  entière : 330 Mo/run, 7,9 Go/jour — pas un mur, mais le jour où on
+#  s'en approche, c'est ICI qu'il faut revenir.
+DOMAINES_PI = ("nord-alpes", "pyrenees", "tarn-aveyron-herault")
+
+# ⛔⛔ LA MARGE N'EST PAS UN CONFORT, ELLE CORRIGE UN REFUS MESURÉ.
+#
+# Le WCS rend les points STRICTEMENT DANS la boîte demandée ; `fenetre()`
+# arrondit au point de grille le PLUS PROCHE, donc parfois vers
+# l'EXTÉRIEUR. Tant que les quatre bornes d'un domaine tombent sur la
+# grille 0,025° les deux coïncident — c'est le cas de `DOMAINE`
+# (43,70 / 46,45 / 5,00 / 7,60) et de `DOMAINE_PYRENEES`
+# (42,40 / 43,40 / −1,80 / 3,30), vérifié le 19/08 : 111×105 et 41×205
+# rendus, attendus, alignés.
+#
+# ⛔ `DOMAINE_TAH` (43,43 / 44,26 / 1,88 / 3,96) n'a AUCUNE de ses quatre
+# bornes sur la grille. Mesuré le 19/08 sans marge : le WCS rend
+# **33 × 84 − 1 = 33 × 83** là où l'orographie gelée attend 34 × 84, et
+# `aligner_sur_axes()` REFUSE, écart maximal 0,025001° — soit exactement
+# un pas de grille, soit 2,78 km de décalage sur tout le domaine.
+#
+# ⚠️ LA RÉPONSE N'EST PAS D'ÉLARGIR LA TOLÉRANCE D'ALIGNEMENT. C'est
+# écrit dans le message d'erreur de `pi.py` et ça reste vrai mot pour
+# mot : un décalage d'un point rendrait un delta PI−AROME lisse,
+# plausible et faux partout. La réponse est de DEMANDER PLUS LARGE et de
+# laisser `aligner_sur_axes()` recouper — un pas de grille suffit, aucun
+# point servi ne bouge, et ça coûte le liseré (4 288 → 4 823 o/champ sur
+# TAH, mesuré).
+#
+# ⓘ Elle est appliquée MÊME quand les bornes tombent juste : une marge
+# conditionnelle serait un garde-fou qui s'éteint tout seul le jour où
+# quelqu'un déplace une borne de 0,01°.
+MARGE_PI_DEG = 0.03
+
+
+def boite_pi(noms=None, marge=MARGE_PI_DEG):
+    """La boîte à DEMANDER au portail — ⛔ pas celle qu'on sert.
+
+    L'englobante des domaines de `DOMAINES_PI`, élargie de `marge`. Elle
+    est CALCULÉE et jamais écrite en dur : une englobante recopiée
+    cesserait d'englober au premier domaine ajouté, et le symptôme
+    serait un `aligner_sur_axes()` qui refuse — bruyamment, heureusement,
+    mais un run perdu quand même.
+
+    ⚠️ Ce que cette boîte contient EN PLUS des trois domaines n'est pas
+    servi, pas écrit, pas stocké : c'est jeté à la découpe, dans la même
+    seconde. 63 % de ses colonnes sont mortes, et c'est le prix assumé
+    de l'arbitrage A13 (cf. `DOMAINES_PI`).
+    """
+    noms = list(DOMAINES_PI if noms is None else noms)
+    if not noms:
+        raise ValueError("aucun domaine PI — il n'y a pas de boîte à demander")
+    boites = [DOMAINES[n] for n in noms]
+    return dict(latmin=min(b["latmin"] for b in boites) - marge,
+                latmax=max(b["latmax"] for b in boites) + marge,
+                lonmin=min(b["lonmin"] for b in boites) - marge,
+                lonmax=max(b["lonmax"] for b in boites) + marge)
 
 #: Pourquoi PI n'est pas là, en une phrase SERVIE AU CLIENT. ⛔ Publiée
 #: plutôt que déduite d'une absence : « pas de champ » et « champ absent
 #: pour une raison connue » ne se lisent pas pareil, et l'écran doit
 #: pouvoir DIRE la seconde. Même discipline que `resolutionTemporelleMin`.
+#: ⚠️ 19/08 — LE TEXTE A CHANGÉ AVEC LA PORTÉE, ET C'EST LE POINT DE
+#: CETTE CONSTANTE. Depuis le Lot M, `DOMAINES_PI` porte les trois
+#: domaines de production : plus aucun domaine ne reçoit cette phrase
+#: aujourd'hui. Elle reste, et elle reste JUSTE, parce que le jour où un
+#: quatrième domaine entrera dans `DOMAINES` sans entrer dans
+#: `DOMAINES_PI`, l'écran devra pouvoir dire pourquoi — et le dire avec
+#: le bon chiffrage, pas avec celui d'avant-hier.
 POURQUOI_PAS_DE_PI = (
-    "AROME-PI n'est ingéré que sur la boîte {couverts} (mesuré le "
-    "17/08/2026 : 207 balises servies sur les 288 de l'archive). Le "
-    "domaine {domaine} n'en reçoit aucun champ — ce n'est pas une panne "
-    "ni un trou de données, c'est la portée actuelle de l'ingestion. "
-    "L'étendre est un lot à part, borné par le quota du portail "
-    "(300 requêtes par run et par boîte, 24 runs par jour).")
+    "AROME-PI est ingéré sur {couverts}. Le domaine {domaine} n'en "
+    "reçoit aucun champ — ce n'est pas une panne ni un trou de données, "
+    "c'est la portée actuelle de l'ingestion. L'étendre demande "
+    "d'élargir la boîte demandée au portail : depuis le 19/08/2026 "
+    "l'ingestion tire UNE boîte englobante et la recoupe par domaine, "
+    "donc le coût est en octets par requête, plus en requêtes par "
+    "boîte.")
 
 
 def pi_couvre(domaine):

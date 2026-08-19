@@ -880,15 +880,21 @@ def rafraichir(pi_uv, lats, lons, run_pi, domaine=None, st=None,
 # ══════════════════════════════════════════════════════════════════════
 #  CLI — pour VOIR, et pour rejouer sans attendre une ingestion
 # ══════════════════════════════════════════════════════════════════════
-def _grille_pi_en_ligne(st, run_pi):
+def _grille_pi_en_ligne(st, run_pi, domaine=None):
     """Relit la grille PI publiée (`grille.npz`) et rend `(uv, lats, lons)`.
 
     ⓘ Existe pour que « déployé » puisse devenir « VU » sans attendre le
     prochain top d'heure : la chaîne réelle passe par la grille en
     mémoire, celle-ci par les octets en ligne — deux chemins, un seul
     résultat attendu.
+
+    ⚠️ 19/08 (Lot M) — LE DOMAINE EST DANS LA CLÉ. Sans lui cette
+    fonction relirait `agrume/pi/grille/{run}/grille.npz`, un chemin que
+    plus personne n'écrit : le symptôme serait un `absent (rétention
+    3 runs)` parfaitement trompeur, qui accuserait la purge d'un défaut
+    de chemin.
     """
-    c_npz, _c_man = cles_du_run_grille(run_pi)
+    c_npz, _c_man = cles_du_run_grille(run_pi, domaine or DOMAINES_PI[0])
     brut = st.get(c_npz)
     if brut is None:
         raise Abort(f"{c_npz} : absent (rétention 3 runs)")
@@ -920,15 +926,22 @@ def main(argv=None):
 
     run_pi = a.run_pi
     if not run_pi:
+        # ⚠️ 19/08 (Lot M) — FILTRÉ SUR LE DOMAINE DEMANDÉ. L'index porte
+        # désormais une entrée par domaine ET par run : prendre « le plus
+        # récent, tous domaines confondus » rendrait un run dont la
+        # grille n'existe pas forcément pour CE domaine-là (une ingestion
+        # pyrénéenne peut avoir échoué là où l'alpine a réussi), et le
+        # message d'erreur accuserait alors la rétention.
         idx = st.get_json(CLE_INDEX_GRILLE) or {}
         runs = sorted(e.get("run") for e in (idx.get("runs") or [])
-                      if e.get("run"))
+                      if e.get("run") and e.get("domaine") == a.domaine)
         if not runs:
-            crier("⛔ aucune grille PI en ligne")
+            crier(f"⛔ aucune grille PI en ligne pour le domaine "
+                  f"{a.domaine!r}")
             return 1
         run_pi = runs[-1]
     crier(f"AGRUME — rafraîchissement PI · run {run_pi} · {a.domaine}")
-    uv, lats, lons = _grille_pi_en_ligne(st, run_pi)
+    uv, lats, lons = _grille_pi_en_ligne(st, run_pi, domaine=a.domaine)
     raf = rafraichir(uv, lats, lons, run_pi, domaine=a.domaine, st=st,
                      sans_ecriture=a.sans_ecriture,
                      extra=dict(fabrique_par="rafraichissement.py --run-pi"))

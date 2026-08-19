@@ -210,13 +210,12 @@ def cles_du_rafraichissement(run_pi, domaine):
 # pour la même raison : de quoi comparer un run au précédent.
 RETENTION_RUNS = 3
 
-#: ⛔ LE DOMAINE SOUS LEQUEL LA GRILLE PI SE COMPTE DANS SON INDEX.
+#: ⛔ L'ANCIEN NOM DE DOMAINE DE L'INDEX DE LA GRILLE PI — À PURGER.
 #: `grille.index_apres` compte la rétention PAR DOMAINE depuis le
 #: 12/08 (deux domaines AROME dans un même run se purgeaient
-#: mutuellement). PI n'en a qu'un — la grille 0,025° du portail —
-#: mais il lui faut quand même un nom : une entrée SANS `domaine`
-#: est envoyée à la suppression par `index_apres`, qui traite ainsi
-#: les entrées de l'ancien format.
+#: mutuellement). Tant que PI n'avait qu'une boîte, il lui fallait
+#: quand même un nom, et ce nom était `"pi"` : une entrée SANS
+#: `domaine` est envoyée à la suppression par `index_apres`.
 #: ⚠️ Cette constante est née d'une PANNE, pas d'une relecture :
 #: `index_apres` a gagné un paramètre positionnel le 12/08 et deux
 #: sites d'appel ne l'ont jamais reçu (`ingest_pi.purger` et
@@ -225,23 +224,60 @@ RETENTION_RUNS = 3
 #: invisibles, puisque `ListObjects` est hors de portée du jeton
 #: ordinaire. Exactement la fratrie de défauts décrite dans BUGS.md
 #: le 13/08 : « le défaut voyage en fratrie ».
-DOMAINE_INDEX = "pi"
+#:
+#: ⛔⛔ 19/08 (Lot M) — ELLE N'EST PLUS UN NOM DE DOMAINE, ELLE EST UNE
+#: CONSIGNE DE PURGE. PI écrit désormais UNE grille PAR DOMAINE, sous
+#: son vrai nom (`nord-alpes`, `pyrenees`, …). Les entrées d'index
+#: écrites avant ce lot portent toutes `domaine: "pi"` et pointent sur
+#: `agrume/pi/grille/{run}/…`, un chemin que plus personne n'écrit.
+#: Laissées telles quelles, elles ne seraient JAMAIS purgées : leur
+#: compteur de rétention ne recevrait plus de nouvelle entrée, donc
+#: elles resteraient éternellement sous le seuil de 3. Trois grilles
+#: orphelines, ~9 Mo, invisibles — une fuite, pas un déchet, exactement
+#: ce que le §« migration » de `index_apres` refuse pour les entrées
+#: sans domaine. `ingest_pi.purger()` les envoie donc à la suppression
+#: au premier run qui suit le déploiement, et cette constante est ce
+#: qui les désigne.
+DOMAINE_INDEX_LEGS = "pi"
 
 
-def prefixe_run_grille(run):
-    return f"{PREFIXE_GRILLE}{run}"
+def prefixe_run_grille(run, domaine):
+    """⛔ LE DOMAINE EST DANS LA CLÉ DEPUIS LE LOT M (19/08).
+
+    Sans lui, les trois domaines d'un même run PI écriraient sur la MÊME
+    clé `agrume/pi/grille/{run}/grille.npz` : le dernier écrit gagnerait,
+    et le calque des Alpes servirait la grille des Pyrénées sans qu'une
+    seule requête n'échoue. C'est la faute que le produit B a déjà payée
+    le 12/08, à l'identique, et que `GABARIT_CLE_RAFRAICHISSEMENT` avait
+    déjà anticipée ici même (« une clé sans domaine devrait être migrée
+    le jour où il y en a deux »). Ce jour est arrivé.
+    """
+    return f"{PREFIXE_GRILLE}{domaine}/{run}"
 
 
-def cles_du_run_grille(run):
-    b = prefixe_run_grille(run)
+def cles_du_run_grille(run, domaine):
+    b = prefixe_run_grille(run, domaine)
     return [f"{b}/grille.npz", f"{b}/manifest.json"]
 
 
 def cles_du_run_colonnes(run):
-    # ⚠️ Rangées par JOUR : 24 runs/jour × 365 font 8 760 préfixes plats
-    # par an. Sans `ListObjects` (Class A, hors budget), un préfixe plat
-    # rend l'archive impossible à parcourir à la main le jour où on en
-    # aura besoin.
+    """⛔ ET CELLES-CI N'ONT PAS DE DOMAINE — CE N'EST PAS UN OUBLI.
+
+    Les colonnes sont indexées sur **l'axe des balises**, celui de
+    `quantification.balises_du_domaine()`, qui porte DÉJÀ les balises des
+    trois domaines (c'est ce qui rendait « 207 servies sur 288 » avant le
+    Lot M : l'axe était complet, seul le remplissage ne l'était pas).
+    Un run PI produit donc UNE archive de colonnes, et une seule, qu'elle
+    soit nourrie par une boîte ou par trois. Y mettre un domaine
+    couperait en trois une archive dont l'axe est unique — et obligerait
+    tout consommateur à recoller des morceaux dont il ne connaît pas le
+    découpage.
+
+    ⚠️ Rangées par JOUR : 24 runs/jour × 365 font 8 760 préfixes plats
+    par an. Sans `ListObjects` (Class A, hors budget), un préfixe plat
+    rend l'archive impossible à parcourir à la main le jour où on en
+    aura besoin.
+    """
     jour = run[:10]
     b = f"{PREFIXE_COLONNES}{jour}/{run}"
     return [f"{b}/colonnes.npz", f"{b}/manifest.json"]
@@ -409,8 +445,12 @@ class GrillePI(_Base):
     ressembleraient toujours à des Alpes. D'où les axes DANS l'archive.
     """
 
-    def __init__(self, run, params, lats, lons, zsol):
+    def __init__(self, run, params, lats, lons, zsol, domaine=None):
         super().__init__(run, params)
+        # ⚠️ Le domaine par défaut est le Nord-Alpes, et c'est le SEUL
+        # défaut de ce fichier qui reste après le Lot M : il tient les
+        # bancs écrits avant, pas la production, qui le passe toujours.
+        self.domaine = domaine or "nord-alpes"
         self.lats = np.asarray(lats, dtype=np.float32)
         self.lons = np.asarray(lons, dtype=np.float32)
         self.zsol = np.asarray(zsol, dtype=np.float32)
@@ -427,9 +467,10 @@ class GrillePI(_Base):
 
     def manifeste(self, extra=None):
         m = dict(
-            produit="AGRUME PI — grille du domaine Nord-Alpes (jetable)",
+            produit=(f"AGRUME PI — grille du domaine {self.domaine} "
+                     f"(jetable)"),
             modele="AROME-PI", route="WCS portail (clé)", grille=GRID_3D,
-            run=self.run,
+            run=self.run, domaine=self.domaine,
             echeances_min=list(ECHEANCES_MIN),
             pas_min=PAS_MINUTES,
             niveaux_m_sol=list(NIVEAUX_PI),
@@ -448,10 +489,15 @@ class GrillePI(_Base):
                             "jScansPositively = 0) ; lons croissantes")),
             reference_verticale=("niveaux AGL au-dessus du sol DU MODÈLE ; "
                                  "altitude_ASL = zsol[j, i] + niveau"),
-            fenetre=("héritée de l'artefact d'orographie 0,025°, PUIS "
-                     "réalignée sur le GRIB reçu (cf. aligner_sur_axes) — "
-                     "le WCS choisit sa propre fenêtre et elle a déjà "
-                     "différé d'une colonne le 10/08"),
+            fenetre=("héritée de l'artefact d'orographie 0,025° de CE "
+                     "domaine, PUIS découpée dans le GRIB reçu (cf. "
+                     "aligner_sur_axes). ⛔ Depuis le Lot M (19/08) la "
+                     "boîte DEMANDÉE au portail est l'englobante de tous "
+                     "les domaines PI, élargie d'un pas de grille, et c'est "
+                     "la découpe qui rend les trois fenêtres — le WCS "
+                     "choisit sa propre fenêtre et elle a déjà différé "
+                     "d'une colonne le 10/08 (Nord-Alpes) et d'une ligne "
+                     "ET d'une colonne le 19/08 (Tarn/Aveyron/Hérault)"),
             remplissage=self.remplissage_par_parametre(),
             remplissage_par_niveau=self.remplissage_par_niveau(),
             octets=self.octets(),
@@ -487,11 +533,25 @@ class ColonnesPI(_Base):
     pour savoir à quelle balise correspond la colonne 47.
     """
 
-    def __init__(self, run, params, balises, ji):
+    def __init__(self, run, params, balises, ji, domaines=None):
         super().__init__(run, params)
         self.balises = list(balises)
-        # (j, i) LOCAUX dans la fenêtre du domaine, -1 hors fenêtre.
+        # (j, i) LOCAUX dans la fenêtre du domaine, None hors fenêtre.
         self.ji = list(ji)
+        # ⛔ LE DOMAINE DE CHAQUE BALISE, DEPUIS LE LOT M (19/08).
+        # `self.ji` seul ne suffit plus : un couple (j, i) n'a de sens
+        # que RELATIVEMENT à une fenêtre, et il y en a désormais trois.
+        # Poser un champ pyrénéen sur les indices d'une balise alpine
+        # rendrait une valeur finie, plausible, et prise 400 km plus
+        # loin — le genre de faute qui ne lève jamais.
+        # ⚠️ `None` = « toutes les balises dans la même fenêtre », le
+        # comportement d'avant le Lot M ; c'est ce que les bancs écrits
+        # avant continuent d'exercer.
+        self.domaines = (list(domaines) if domaines is not None
+                         else [None] * len(self.balises))
+        if len(self.domaines) != len(self.balises):
+            raise Abort(f"{len(self.domaines)} domaines pour "
+                        f"{len(self.balises)} balises")
         self.donnees = np.full(
             (len(self.params), len(NIVEAUX_PI), len(ECHEANCES_MIN),
              len(self.balises)), np.nan, dtype=np.float16)
@@ -506,7 +566,8 @@ class ColonnesPI(_Base):
     def hors_fenetre(self):
         return [b["id"] for b, x in zip(self.balises, self.ji) if x is None]
 
-    def poser_depuis_champ(self, param, niveau, minute, champ2d):
+    def poser_depuis_champ(self, param, niveau, minute, champ2d,
+                           domaine=None):
         """Prélève les balises dans un champ DÉJÀ aligné.
 
         ⚠️ On prélève dans le champ aligné plutôt que de refaire une
@@ -515,15 +576,33 @@ class ColonnesPI(_Base):
         de deux calculs qui se ressemblent. C'est la leçon de
         `axes_depuis_orographie()`, dont le premier garde-fou ne prouvait
         rien parce qu'il comparait deux formules à la même source.
+
+        ⛔⛔ `domaine` RESTREINT LA POSE AUX BALISES DE CETTE FENÊTRE, ET
+        NE TOUCHE PAS AUX AUTRES. Depuis le Lot M cette méthode est
+        appelée UNE FOIS PAR DOMAINE sur le même (paramètre, niveau,
+        échéance) : trois appels remplissent une seule tranche, chacun sa
+        part. D'où l'écriture par INDICES et non par tranche entière —
+        une affectation globale effacerait ce que l'appel précédent vient
+        de poser, et le symptôme serait une archive où seul le dernier
+        domaine ingéré porte des valeurs. `domaine=None` garde le
+        comportement d'avant : tout ce qui est dans la fenêtre.
         """
         a = np.asarray(champ2d)
         vals = np.full(len(self.balises), np.nan, dtype=np.float64)
+        vises = []
         for k, ji in enumerate(self.ji):
             if ji is None:
                 continue
+            if domaine is not None and self.domaines[k] != domaine:
+                continue
             vals[k] = a[ji[0], ji[1]]
+            vises.append(k)
+        if not vises:
+            return 0
+        q = quantifier(vals, param)
         self.donnees[self.i_param[param["nom"]], self.i_niveau[niveau],
-                     self.i_min[minute]] = quantifier(vals, param)
+                     self.i_min[minute], vises] = q[vises]
+        return len(vises)
 
     def manifeste(self, extra=None):
         m = dict(
@@ -541,6 +620,14 @@ class ColonnesPI(_Base):
             balises=[dict(id=b["id"], lat=b["lat"], lon=b["lon"],
                           nom=b["nom"], source=b["source"],
                           position_suspecte=b["position_suspecte"],
+                          # ⛔ Le domaine qui a NOURRI cette colonne, pas
+                          # celui qui contient géométriquement la balise.
+                          # Les deux coïncident aujourd'hui ; ils
+                          # cesseraient de coïncider si un domaine était
+                          # retiré de `DOMAINES_PI` sans l'être de
+                          # `DOMAINES`, et c'est précisément ce cas-là
+                          # que le consommateur doit pouvoir lire.
+                          domaine_pi=self.domaines[k],
                           servie=self.ji[k] is not None)
                      for k, b in enumerate(self.balises)],
             reference_verticale=("niveaux AGL au-dessus du sol DU MODÈLE — "

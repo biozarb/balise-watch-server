@@ -21,17 +21,34 @@
 #  de `portail.py` lui-même : « lancer les requêtes portail DEPUIS le
 #  VPS, jamais en rapatriant la clé ».
 #
-#  ── LE BUDGET, MESURÉ ────────────────────────────────────────────────
+#  ── LE BUDGET, MESURÉ — ET REMESURÉ LE 19/08 ─────────────────────────
 #      2 paramètres × 6 niveaux × 25 échéances = 300 requêtes
-#      ~7 957 octets par champ, constant quel que soit le niveau
-#      → ~2,4 Mo par run, ~3,2 min (le quota, pas le réseau, fixe la durée)
-#      × 24 runs/jour = 7 200 requêtes et 57 Mo par jour
+#      → ~3,2 min (le quota, pas le réseau, fixe la durée)
+#      × 24 runs/jour = 7 200 requêtes par jour
 #
 #  ⚠️ **Ce n'est pas le volume qui gêne, c'est l'OCCUPATION PERMANENTE
 #  DU QUOTA.** À 95 requêtes/min utilisables, un run de PI occupe la
 #  fenêtre 3 minutes sur 60. Le reste du temps elle est libre — mais si
 #  un jour une autre chaîne veut le portail, c'est ici qu'il faudra
 #  regarder en premier.
+#
+#  ⛔⛔ 19/08 (LOT M) — ET C'EST CETTE PHRASE-LÀ QUI A DÉCIDÉ DE
+#  L'ARCHITECTURE À TROIS DOMAINES. Puisque la ressource rare est le
+#  quota et non les octets, on ne demande PAS trois boîtes : on demande
+#  leur ENGLOBANTE et on la recoupe. Mesuré sur le run 14 Z, run complet,
+#  rien écrit :
+#
+#      3 boîtes séparées   926 requêtes   9,40 min   11,0 Mo
+#      1 boîte englobante  304 requêtes   3,06 min   27,7 Mo
+#
+#  Les deux rendent les mêmes fenêtres après découpe (111×105 · 41×205 ·
+#  34×84, 300 champs, aucun refus). Trois domaines coûtent donc
+#  aujourd'hui **exactement le même quota qu'un seul** — et le chiffre
+#  du paragraphe ci-dessus, 3 minutes sur 60, n'a pas bougé.
+#
+#  ⓘ Le poids par champ n'est plus celui de 2026-08-10 : la boîte
+#  Nord-Alpes a doublé le 16/08 (5 185 → 11 655 colonnes), donc 17 662
+#  octets par champ et non 7 957. L'englobante en fait 92 356.
 #
 #  ── L'ORDRE D'ÉCRITURE EST UN CONTRAT ────────────────────────────────
 #  Les colonnes sont DÉFINITIVES, la grille est jetable. Les colonnes
@@ -44,6 +61,7 @@
 #      python3 agrume/ingest_pi.py --run 2026-08-10T16:00:00Z
 #      python3 agrume/ingest_pi.py --sans-ecriture --limite-champs 12
 #      python3 agrume/ingest_pi.py --tke               # +50 % de requêtes
+#      python3 agrume/ingest_pi.py --domaines-pi pyrenees --sans-ecriture
 # ══════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -64,14 +82,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
 from quantification import balises_du_domaine  # noqa: E402
-from domaine import DOMAINE, GRID_3D  # noqa: E402
+from domaine import (DOMAINES, DOMAINES_PI, GRID_3D,  # noqa: E402
+                     boite_pi, domaine_de)
 from freeze_balises import charger_artefact as charger_balises  # noqa: E402
-from grille import (axes_depuis_orographie, index_apres,  # noqa: E402
-                    index_apres_purge, verifier_prefixe)
-from orographie import charger_artefact, norm_lon  # noqa: E402
-from pi import (CLE_INDEX_GRILLE, DOMAINE_INDEX, ECHEANCES_MIN,  # noqa: E402
-                NIVEAUX_PI, PREFIXE_GRILLE, RETENTION_RUNS, Abort,
-                ColonnesPI, GrillePI,
+from grille import (INDEX_VIDE, axes_depuis_orographie,  # noqa: E402
+                    index_apres, index_apres_purge, verifier_prefixe)
+from orographie import charger_artefacts, norm_lon  # noqa: E402
+from pi import (CLE_INDEX_GRILLE, DOMAINE_INDEX_LEGS,  # noqa: E402
+                ECHEANCES_MIN, NIVEAUX_PI, PREFIXE_GRILLE, RETENTION_RUNS,
+                Abort, ColonnesPI, GrillePI,
                 aligner_sur_axes, cles_du_run_colonnes, cles_du_run_grille,
                 instants_du_run, json_octets, params_actifs)
 from portail import (SERVICE_AROMEPI, CouvertureAbsente,  # noqa: E402
@@ -179,7 +198,11 @@ def run_complet(portail, champ, run, niveau_sonde=100):
     """
     dernier = instants_du_run(run)[-1]
     try:
-        portail.get_coverage(champ, run, dernier, niveau_sonde, DOMAINE)
+        # ⚠️ On sonde LA BOÎTE QU'ON DEMANDERA, pas une plus petite. Une
+        # sonde sur une boîte réduite rendrait « complet » un run que la
+        # vraie requête refuserait — et depuis le Lot M la boîte demandée
+        # n'est plus celle d'aucun domaine, c'est leur englobante.
+        portail.get_coverage(champ, run, dernier, niveau_sonde, boite_pi())
         return True
     except (ErreurPortail, CouvertureAbsente):
         return False
@@ -231,25 +254,145 @@ def dernier_run_utile(portail, champ, deja=(), maintenant=None, recul_max=8,
 # ══════════════════════════════════════════════════════════════════════
 #  Le corps
 # ══════════════════════════════════════════════════════════════════════
-def ingerer(run, params, orog, balises, portail, limite_champs=None,
-            journal=crier):
-    """Remplit les deux produits. Renvoie (colonnes, grille, bilan)."""
-    lats, lons = axes_depuis_orographie(orog)
-    ji = [orog.indices(b["lat"], b["lon"]) for b in balises]
+class Cadre:
+    """Une fenêtre de domaine : ses axes, son sol, sa grille en cours.
+
+    ⛔ Elle existe pour qu'un (j, i) ne circule JAMAIS sans le domaine
+    auquel il se rapporte. Depuis le Lot M il y a trois fenêtres et un
+    seul GRIB : un couple d'indices seul ne veut plus rien dire.
+    """
+
+    def __init__(self, nom, orog, run, params):
+        self.nom = nom
+        self.orog = orog
+        self.lats, self.lons = axes_depuis_orographie(orog,
+                                                      domaine=DOMAINES[nom])
+        self.grille = GrillePI(run, params, self.lats, self.lons, orog.z,
+                               domaine=nom)
+
+    @property
+    def points(self):
+        return len(self.lats) * len(self.lons)
+
+
+def cadres_des_domaines(run, params, noms=None, journal=crier):
+    """Un `Cadre` par domaine PI dont l'orographie est GELÉE.
+
+    ⚠️ Un domaine sans artefact est CRIÉ et SAUTÉ, jamais fatal — même
+    règle que `charger_artefacts()`, et pour la même raison mesurée : le
+    gel se lance à la main APRÈS le commit qui ajoute le domaine, et
+    faire échouer tous les runs entre les deux punirait les domaines qui
+    n'ont rien demandé. Le manifeste du run dit qui a réellement servi.
+    ⛔ Nord-Alpes reste obligatoire : sans lui il n'y a pas de produit.
+    """
+    noms = list(DOMAINES_PI if noms is None else noms)
+    arts, absents = charger_artefacts(noms, obligatoires=("nord-alpes",))
+    if absents:
+        journal(f"  ⚠️ orographie NON GELÉE pour {absents} — ces domaines "
+                f"ne seront PAS ingérés ce run (lancer "
+                f"`freeze_orographie.py` puis relancer)")
+    cadres = {}
+    for nom in noms:
+        if nom not in arts:
+            continue
+        paire, man = arts[nom]
+        cadres[nom] = Cadre(nom, paire[GRID_3D], run, params)
+        journal(f"  {nom} : fenêtre {len(cadres[nom].lats)} × "
+                f"{len(cadres[nom].lons)} = {cadres[nom].points} points "
+                f"· orographie du run {man['run_source']}")
+    if not cadres:
+        raise Abort("aucun domaine PI n'a son orographie gelée")
+    return cadres
+
+
+def repartir_balises(balises, cadres, journal=crier):
+    """(ji, domaines) — où chaque balise tombe, et DANS QUELLE fenêtre.
+
+    ⛔⛔ LE DOMAINE SE DEMANDE À `domaine_de()`, PAS À LA PREMIÈRE
+    FENÊTRE QUI RÉPOND. Les trois orographies sont découpées sur la
+    grille NATIVE et `Orographie.indices()` rend un couple dès que le
+    point tombe dans SA découpe — or `fenetre()` arrondit au point de
+    grille, donc une balise posée à moins d'une demi-maille du bord d'un
+    domaine peut tomber dans DEUX découpes (le cas mesuré le 12/08 :
+    balise 1661/LFMG, 43,4069 N pour un `latmax` de 43,40). Prendre « la
+    première qui répond » ferait dépendre le domaine servi de l'ordre
+    d'un dictionnaire — exactement ce que
+    `verifier_domaines_disjoints()` refuse de laisser au hasard.
+
+    ⓘ Une balise dont le domaine n'est PAS ingéré (orographie non gelée,
+    ou domaine hors `DOMAINES_PI`) sort avec `None` : sa colonne restera
+    NaN et le manifeste le dira. C'est ce que « 207 servies sur 288 »
+    voulait dire avant ce lot.
+    """
+    ji, doms = [], []
+    par_domaine = {}
+    for b in balises:
+        nom = domaine_de(b["lat"], b["lon"])
+        cadre = cadres.get(nom)
+        x = cadre.orog.indices(b["lat"], b["lon"]) if cadre else None
+        if x is None:
+            ji.append(None)
+            doms.append(None)
+        else:
+            ji.append(x)
+            doms.append(nom)
+            par_domaine[nom] = par_domaine.get(nom, 0) + 1
     hors = [b["id"] for b, x in zip(balises, ji) if x is None]
+    journal(f"  balises servies : "
+            + " · ".join(f"{n} {c}" for n, c in sorted(par_domaine.items()))
+            + f" · hors fenêtre {len(hors)} (sur {len(balises)})")
+    return ji, doms, hors, par_domaine
 
-    colonnes = ColonnesPI(run, params, balises, ji)
-    grille = GrillePI(run, params, lats, lons, orog.z)
 
-    journal(f"  fenêtre : {len(lats)} × {len(lons)} = {len(lats) * len(lons)} "
-            f"points · {len(balises)} balises"
-            + (f" dont {len(hors)} HORS fenêtre" if hors else ""))
+def ingerer(run, params, cadres, balises, portail, limite_champs=None,
+            journal=crier):
+    """Remplit les produits. Renvoie (colonnes, cadres, bilan).
+
+    ⛔⛔ UNE REQUÊTE, TROIS DÉCOUPES — arbitrage A13 du 19/08, et il a
+    été MESURÉ avant d'être écrit. Demander les trois boîtes séparément
+    coûtait 926 requêtes et 9,40 min ; demander leur englobante en coûte
+    304 et 3,06 min, et rend les MÊMES fenêtres après découpe (111×105,
+    41×205, 34×84, sur les 300 champs, sans un refus). La ressource rare
+    de cette chaîne est le quota, pas la bande passante : c'est écrit en
+    tête de ce fichier depuis le 10/08.
+
+    ⚠️ Ce qui est en trop dans l'englobante — 63 % de ses colonnes — est
+    jeté à la découpe, dans la même seconde (0,5 s pour 300 champs). Rien
+    de mort n'est écrit nulle part.
+    """
+    boite = boite_pi(list(cadres))
+    ji, doms, hors, par_domaine = repartir_balises(balises, cadres,
+                                                   journal=journal)
+    colonnes = ColonnesPI(run, params, balises, ji, domaines=doms)
+
+    journal(f"  boîte demandée au portail : lat {boite['latmin']:.2f}→"
+            f"{boite['latmax']:.2f} · long {boite['lonmin']:.2f}→"
+            f"{boite['lonmax']:.2f} (englobante de {len(cadres)} domaines, "
+            f"élargie d'un pas de grille)")
 
     instants = instants_du_run(run)
     attendus = len(params) * len(NIVEAUX_PI) * len(ECHEANCES_MIN)
     journal(f"  {attendus} champs à demander "
             f"({len(params)} paramètres × {len(NIVEAUX_PI)} niveaux × "
-            f"{len(ECHEANCES_MIN)} échéances)")
+            f"{len(ECHEANCES_MIN)} échéances) — pour {len(cadres)} domaines")
+
+    def decouper_et_poser(param, niveau, minute, champ, meta):
+        """⛔ TOUT OU RIEN. Si UNE découpe refuse, le champ entier est
+        compté manquant et AUCUN domaine ne le reçoit.
+
+        Un champ posé sur deux domaines et absent du troisième donnerait
+        un produit DENTELÉ — et un trou en escalier ressemble à de la
+        donnée, alors qu'un trou franc se voit. C'est mot pour mot la
+        leçon du run 17 Z du 10/08.
+        """
+        alignes = {}
+        for nom, cadre in cadres.items():
+            alignes[nom] = aligner_sur_axes(champ, meta, cadre.lats,
+                                            cadre.lons)
+        for nom, cadre in cadres.items():
+            cadre.grille.poser(param, niveau, minute, alignes[nom])
+            colonnes.poser_depuis_champ(param, niveau, minute, alignes[nom],
+                                        domaine=nom)
 
     faits = 0
     t0 = time.monotonic()
@@ -259,11 +402,13 @@ def ingerer(run, params, orog, balises, portail, limite_champs=None,
             for minute, instant in zip(ECHEANCES_MIN, instants):
                 if limite_champs is not None and faits >= limite_champs:
                     journal(f"  ⓘ arrêt sur --limite-champs={limite_champs}")
-                    return colonnes, grille, _bilan(t0, faits, attendus, hors)
+                    return colonnes, cadres, _bilan(t0, faits, attendus, hors,
+                                                    cadres, par_domaine)
                 try:
                     octets = portail.get_coverage(
-                        param["wcs"], run, instant, niveau, DOMAINE, axe=axe)
+                        param["wcs"], run, instant, niveau, boite, axe=axe)
                     champ, meta = lire_grib_2d(octets)
+                    decouper_et_poser(param, niveau, minute, champ, meta)
                 except (ErreurPortail, CouvertureAbsente, Abort) as e:
                     # ⚠️ UN CHAMP MANQUANT DOIT DISPARAÎTRE, PAS ÊTRE
                     # COMBLÉ. On le note et on continue : c'est exactement
@@ -274,9 +419,6 @@ def ingerer(run, params, orog, balises, portail, limite_champs=None,
                         dict(param=param["nom"], niveau=niveau, minute=minute,
                              cause=f"{type(e).__name__}: {e}"[:200]))
                     continue
-                aligne = aligner_sur_axes(champ, meta, lats, lons)
-                grille.poser(param, niveau, minute, aligne)
-                colonnes.poser_depuis_champ(param, niveau, minute, aligne)
                 faits += 1
             journal(f"    {param['nom']} · {niveau:>4} m : "
                     f"{faits}/{attendus} champs "
@@ -296,6 +438,8 @@ def ingerer(run, params, orog, balises, portail, limite_champs=None,
     #
     # ⓘ Le coût est proportionnel aux trous, pas au run : trois requêtes
     # pour trois manquants. Sur un run parfait, cette passe ne coûte rien.
+    # ⚠️ 19/08 — ET ELLE EN VAUT TROIS FOIS PLUS DEPUIS LE LOT M : un
+    # champ récupéré ici l'est pour les TROIS domaines à la fois.
     #
     # ⚠️ ON ÉCRIT QUAND MÊME S'IL EN RESTE. Refuser d'écrire perdrait le
     # run ENTIER : `dernier_run_utile()` s'arrête au premier run archivé,
@@ -311,38 +455,52 @@ def ingerer(run, params, orog, balises, portail, limite_champs=None,
             k = ECHEANCES_MIN.index(m["minute"])
             try:
                 octets = portail.get_coverage(
-                    param["wcs"], run, instants[k], m["niveau"], DOMAINE)
+                    param["wcs"], run, instants[k], m["niveau"], boite)
                 champ, meta = lire_grib_2d(octets)
+                decouper_et_poser(param, m["niveau"], m["minute"], champ, meta)
             except (ErreurPortail, CouvertureAbsente, Abort) as e:
                 m["cause_2"] = f"{type(e).__name__}: {e}"[:200]
                 restants.append(m)
                 continue
-            aligne = aligner_sur_axes(champ, meta, lats, lons)
-            grille.poser(param, m["niveau"], m["minute"], aligne)
-            colonnes.poser_depuis_champ(param, m["niveau"], m["minute"], aligne)
             faits += 1
             reussis += 1
         colonnes.manquants = restants
         journal(f"  ⟳ {reussis} récupérés, {len(restants)} définitivement "
                 f"manquants")
 
-    grille.manquants = colonnes.manquants
-    return colonnes, grille, _bilan(t0, faits, attendus, hors)
+    for cadre in cadres.values():
+        cadre.grille.manquants = colonnes.manquants
+    return colonnes, cadres, _bilan(t0, faits, attendus, hors, cadres,
+                                    par_domaine)
 
 
-def _bilan(t0, faits, attendus, hors):
+def _bilan(t0, faits, attendus, hors, cadres, par_domaine):
     return dict(secondes=round(time.monotonic() - t0, 1), champs=faits,
-                champs_attendus=attendus, balises_hors_fenetre=hors)
+                champs_attendus=attendus, balises_hors_fenetre=hors,
+                # ⛔ QUI A RÉELLEMENT SERVI. Le manifeste doit le DIRE et
+                # non le laisser déduire d'une absence : un domaine sauté
+                # faute d'orographie gelée et un domaine vide faute de
+                # données ne se réparent pas pareil.
+                domaines_ingeres=sorted(cadres),
+                balises_par_domaine=dict(sorted(par_domaine.items())),
+                boite_demandee={k: round(v, 4)
+                                for k, v in boite_pi(list(cadres)).items()})
 
 
 # ══════════════════════════════════════════════════════════════════════
 #  Écriture
 # ══════════════════════════════════════════════════════════════════════
-def ecrire(colonnes, grille, bilan, journal=crier):
-    """Colonnes d'abord (définitif), grille ensuite (sous filet), purge.
+def ecrire(colonnes, cadres, bilan, journal=crier):
+    """Colonnes d'abord (définitif), grilles ensuite (sous filet), purge.
 
     ⚠️ L'ordre EST le contrat. Une grille qui échoue laisse le run VERT ;
     des colonnes qui échouent le font tomber.
+
+    ⛔ ET IL Y A UNE ARCHIVE DE COLONNES POUR N GRILLES. L'axe des
+    balises est unique (les trois domaines y sont depuis toujours, cf.
+    `cles_du_run_colonnes`) ; les fenêtres, elles, sont trois. Écrire
+    trois archives de colonnes couperait en trois un axe qui n'a pas de
+    couture.
     """
     from storage import Storage
 
@@ -364,25 +522,41 @@ def ecrire(colonnes, grille, bilan, journal=crier):
            content_type="application/json")
     journal(f"  ✅ colonnes écrites : {c_npz} ({colonnes.octets() / 1024:.0f} ko)")
 
-    # ── 2. Grille — JETABLE, sous filet ───────────────────────────────
-    try:
-        g_npz, g_man = cles_du_run_grille(grille.run)
-        st.put(g_npz, grille.npz(), cache_control="public, max-age=3600",
-               content_type="application/octet-stream")
-        st.put(g_man, json_octets(grille.manifeste(dict(bilan=bilan))),
-               cache_control="public, max-age=3600",
-               content_type="application/json")
-        journal(f"  ✅ grille écrite : {g_npz} "
-                f"({grille.octets() / 1e6:.1f} Mo en mémoire)")
-        purger(st, grille.run, [g_npz, g_man], journal=journal)
-    except Exception as e:                                   # noqa: BLE001
-        journal(f"  ⚠️ grille NON écrite ({type(e).__name__}: {e}) — le run "
-                f"reste VERT : elle est régénérée au réseau suivant, "
-                f"l'archive des colonnes ne l'est pas.")
+    # ── 2. Grilles — JETABLES, chacune sous son filet ─────────────────
+    # ⚠️ UN `except` PAR DOMAINE, et non un pour les trois : une grille
+    # pyrénéenne qui échoue ne doit pas empêcher la grille alpine d'être
+    # écrite. Elles ne dépendent d'aucune façon les unes des autres — le
+    # seul couplage entre domaines, c'est la requête, et elle a déjà
+    # rendu ses octets à ce stade.
+    ecrites = {}
+    for nom, cadre in cadres.items():
+        try:
+            g_npz, g_man = cles_du_run_grille(cadre.grille.run, nom)
+            st.put(g_npz, cadre.grille.npz(),
+                   cache_control="public, max-age=3600",
+                   content_type="application/octet-stream")
+            st.put(g_man, json_octets(cadre.grille.manifeste(dict(bilan=bilan))),
+                   cache_control="public, max-age=3600",
+                   content_type="application/json")
+            ecrites[nom] = [g_npz, g_man]
+            journal(f"  ✅ grille écrite : {g_npz} "
+                    f"({cadre.grille.octets() / 1e6:.1f} Mo en mémoire)")
+        except Exception as e:                               # noqa: BLE001
+            journal(f"  ⚠️ grille {nom} NON écrite ({type(e).__name__}: {e}) "
+                    f"— le run reste VERT : elle est régénérée au réseau "
+                    f"suivant, l'archive des colonnes ne l'est pas.")
 
-    # ── 3. Rafraîchissement du produit B — JETABLE, sous filet ────────
-    # ⛔ APRÈS la grille, et sous `except`, exactement comme elle. À ce
-    # point la grille PI est écrite et hors de danger ; un
+    # ── 3. La purge, UNE FOIS pour tous les domaines ──────────────────
+    if ecrites:
+        try:
+            purger(st, colonnes.run, ecrites, journal=journal)
+        except Exception as e:                               # noqa: BLE001
+            journal(f"  ⚠️ purge NON faite ({type(e).__name__}: {e}) — les "
+                    f"grilles sont écrites et indexées au prochain run.")
+
+    # ── 4. Rafraîchissement du produit B — JETABLE, sous filet ────────
+    # ⛔ APRÈS les grilles, et sous `except`, exactement comme elles. À ce
+    # point les grilles PI sont écrites et hors de danger ; un
     # rafraîchissement raté ne doit donc PAS faire tomber le voyant —
     # le prochain run PI repasse dans une heure et refera l'objet.
     #
@@ -393,47 +567,97 @@ def ecrire(colonnes, grille, bilan, journal=crier):
     # personne ne remarquera. Un échec muet ici est exactement le « faux
     # vert » que ce projet a déjà eu deux fois.
     #
+    # ⛔ UN PAR DOMAINE, ET CHACUN SON `except` — même raison que les
+    # grilles. Un produit B pyrénéen absent (ingestion AROME en retard)
+    # ferait tomber la composition pyrénéenne et ELLE SEULE ; les Alpes
+    # n'ont pas à en pâtir.
+    #
     # ⓘ Il ne touche NI au produit A, NI aux tampons du produit B : il
-    # écrit sous `agrume/pi/rafraichissement/`, son propre index et sa
-    # propre rétention. Rien de ce qui nourrit le scoring ne bouge.
-    try:
-        from rafraichissement import rafraichir            # noqa: PLC0415
-        i_u, i_v = grille.i_param["u"], grille.i_param["v"]
-        raf = rafraichir(grille.donnees[[i_u, i_v]], grille.lats,
-                         grille.lons, grille.run, st=st,
-                         extra=dict(bilan=bilan), journal=journal)
-        journal(f"  ✅ rafraîchissement : composite {raf.run_pi} × produit B "
-                f"{raf.run_b} (décalage {raf.decalage_min // 60} h, "
-                f"échéances AROME {raf.steps_b[0]}–{raf.steps_b[-1]})")
-    except Exception as e:                                   # noqa: BLE001
-        journal(f"  ⚠️⚠️ RAFRAÎCHISSEMENT NON ÉCRIT ({type(e).__name__}: "
-                f"{e}) — le run reste VERT (la grille PI, elle, est "
-                f"écrite), mais le client servira de l'AROME HORAIRE sur "
-                f"0–6 h jusqu'au prochain run PI. Si cette ligne revient "
-                f"d'heure en heure, ce n'est plus un incident.")
+    # écrit sous `agrume/pi/rafraichissement/{domaine}/`, son propre index
+    # et sa propre rétention. Rien de ce qui nourrit le scoring ne bouge.
+    for nom, cadre in cadres.items():
+        if nom not in ecrites:
+            continue
+        try:
+            from rafraichissement import rafraichir            # noqa: PLC0415
+            g = cadre.grille
+            i_u, i_v = g.i_param["u"], g.i_param["v"]
+            raf = rafraichir(g.donnees[[i_u, i_v]], g.lats, g.lons, g.run,
+                             domaine=nom, st=st, extra=dict(bilan=bilan),
+                             journal=journal)
+            journal(f"  ✅ rafraîchissement {nom} : composite {raf.run_pi} × "
+                    f"produit B {raf.run_b} (décalage "
+                    f"{raf.decalage_min // 60} h, échéances AROME "
+                    f"{raf.steps_b[0]}–{raf.steps_b[-1]})")
+        except Exception as e:                                 # noqa: BLE001
+            journal(f"  ⚠️⚠️ RAFRAÎCHISSEMENT {nom} NON ÉCRIT "
+                    f"({type(e).__name__}: {e}) — le run reste VERT (la "
+                    f"grille PI, elle, est écrite), mais le client servira "
+                    f"de l'AROME HORAIRE sur 0–6 h pour {nom} jusqu'au "
+                    f"prochain run PI. Si cette ligne revient d'heure en "
+                    f"heure, ce n'est plus un incident.")
 
     st.bilan(log=journal)
 
 
-def purger(st, run, cles, journal=crier):
+def _migrer_index_legs(index, journal=crier):
+    """⛔ LES ENTRÉES `domaine: "pi"` DE L'AVANT-LOT-M PARTENT À LA PURGE.
+
+    Elles pointent sur `agrume/pi/grille/{run}/…`, un chemin que plus
+    personne n'écrit depuis que le domaine est dans la clé. Laissées
+    telles quelles, elles ne seraient JAMAIS purgées : leur compteur de
+    rétention ne recevrait plus de nouvelle entrée, donc elles resteraient
+    éternellement sous le seuil de 3, et les octets resteraient facturés
+    et invisibles (`ListObjects` est hors de portée du jeton ordinaire).
+    Même traitement que les entrées SANS domaine, pour la même raison,
+    écrite dans `grille.index_apres` : « un objet qui sort de l'index
+    devient invisible et définitivement perdu — une fuite, pas un
+    déchet ».
+    """
+    entrees = list((index or {}).get("runs") or [])
+    legs = [e for e in entrees if e.get("domaine") == DOMAINE_INDEX_LEGS]
+    if not legs:
+        return index
+    restes = list((index or {}).get("restes") or [])
+    for e in legs:
+        restes.extend(e.get("cles") or [])
+    journal(f"  ⟳ migration Lot M : {len(legs)} entrée(s) d'index au nom "
+            f"{DOMAINE_INDEX_LEGS!r} (avant le domaine dans la clé) → purge")
+    return dict(index, runs=[e for e in entrees
+                             if e.get("domaine") != DOMAINE_INDEX_LEGS],
+                restes=restes)
+
+
+def purger(st, run, cles_par_domaine, journal=crier):
     """Index d'abord, suppression ensuite. ⚠️ L'ordre évite les orphelins
     invisibles — c'est la démonstration du §« purge » de `grille.py`, et
-    elle s'applique mot pour mot ici."""
+    elle s'applique mot pour mot ici.
+
+    ⛔ UNE SEULE LECTURE ET UNE SEULE ÉCRITURE D'INDEX POUR N DOMAINES.
+    `index_apres` se chaîne : son `restes` de sortie est le point de
+    départ du `a_supprimer` de l'appel suivant. Écrire l'index entre
+    chaque domaine coûterait des opérations Class A pour rien, et
+    laisserait surtout des états intermédiaires où un domaine est indexé
+    et pas les autres.
+    """
     index = st.get_json(CLE_INDEX_GRILLE) or dict(
-        produit="AGRUME PI — index des grilles en ligne",
+        INDEX_VIDE, produit="AGRUME PI — index des grilles en ligne",
         retention_runs=RETENTION_RUNS, runs=[], restes=[])
-    # ⚠️ `DOMAINE_INDEX` n'est pas décoratif : sans lui, `cles`
-    # atterrit dans le paramètre `domaine` et l'appel lève un
-    # `TypeError` — ce qui s'est produit à chaque run du 12 au
-    # 13/08, en laissant des grilles hors index.
-    nouveau, a_supprimer = index_apres(index, run, DOMAINE_INDEX, cles,
-                                       retention=RETENTION_RUNS)
+    index = _migrer_index_legs(index, journal=journal)
+    a_supprimer = []
+    for domaine, cles in sorted(cles_par_domaine.items()):
+        # ⚠️ `domaine` n'est pas décoratif : sans lui, `cles` atterrit
+        # dans le paramètre `domaine` et l'appel lève un `TypeError` — ce
+        # qui s'est produit à chaque run du 12 au 13/08, en laissant des
+        # grilles hors index.
+        index, a_supprimer = index_apres(index, run, domaine, cles,
+                                         retention=RETENTION_RUNS)
     # ⚠️ LE GARDE-FOU QUI EMPÊCHE LA PURGE DE DÉBORDER : les colonnes PI
     # sont DÉFINITIVES et vivent dans le même bucket, sous
     # `agrume/pi/colonnes/`. Une purge qui s'y égarerait détruirait une
     # archive irremplaçable — la rétention du portail est de 4,25 jours.
     verifier_prefixe(a_supprimer, prefixe=PREFIXE_GRILLE)
-    st.put(CLE_INDEX_GRILLE, json_octets(nouveau),
+    st.put(CLE_INDEX_GRILLE, json_octets(index),
            cache_control="no-store", content_type="application/json")
     echecs = []
     for cle in a_supprimer:
@@ -445,7 +669,7 @@ def purger(st, run, cles, journal=crier):
         journal(f"  purge : {len(a_supprimer) - len(echecs)} clés supprimées"
                 + (f", {len(echecs)} échecs (réessayés au run suivant)"
                    if echecs else ""))
-        st.put(CLE_INDEX_GRILLE, json_octets(index_apres_purge(nouveau, echecs)),
+        st.put(CLE_INDEX_GRILLE, json_octets(index_apres_purge(index, echecs)),
                cache_control="no-store", content_type="application/json")
 
 
@@ -481,6 +705,13 @@ def main(argv=None):
                    help="réingérer même si le run est déjà dans l'index")
     p.add_argument("--stations", default=None,
                    help="chemin du stations.json (défaut : artefact figé)")
+    p.add_argument("--domaines-pi", default=None,
+                   type=lambda x: [n.strip() for n in x.split(",") if n.strip()],
+                   help="restreindre les domaines ingérés (défaut : "
+                        "DOMAINES_PI). ⚠️ Ne change PAS ce que le manifeste "
+                        "du produit B annonce : c'est `DOMAINES_PI` qui "
+                        "fait foi à l'écran, pas cette option de mise au "
+                        "point.")
     p.add_argument("--suspectes", default=None,
                    help="JSON des identifiants à position suspecte — "
                         "⚠️ MARQUÉS dans l'archive, jamais retirés")
@@ -535,15 +766,13 @@ def main(argv=None):
     crier(f"  run retenu : {run}"
           + (f" (COMPLET, {recul} h de recul)" if recul is not None else ""))
 
-    # ⚠️ `charger_artefact()` rend la PAIRE d'orographies (0,01° et
-    # 0,025°), pas une seule. PI vit en 0,025° et rien d'autre : prendre
-    # la mauvaise décalerait toute la colonne verticalement, en silence,
-    # de 30 m en médiane et jusqu'à 643 m (19 % des balises au-delà de
-    # 100 m — mesuré le 10/08).
-    paire, man_orog = charger_artefact()
-    orog = paire[GRID_3D]
-    crier(f"  orographie figée du run {man_orog['run_source']} · "
-          f"grille {GRID_3D} retenue (sur {', '.join(sorted(paire))})")
+    # ⚠️ `charger_artefacts()` rend la PAIRE d'orographies (0,01° et
+    # 0,025°) PAR DOMAINE, pas une seule. PI vit en 0,025° et rien
+    # d'autre : prendre la mauvaise décalerait toute la colonne
+    # verticalement, en silence, de 30 m en médiane et jusqu'à 643 m
+    # (19 % des balises au-delà de 100 m — mesuré le 10/08).
+    crier(f"  domaines PI : {', '.join(DOMAINES_PI)}")
+    cadres = cadres_des_domaines(run, params, noms=a.domaines_pi)
 
     suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                  if a.suspectes else [])
@@ -556,13 +785,14 @@ def main(argv=None):
         balises = balises_du_domaine(figees, suspectes)
         origine = f"axe figé du {man_bal['ecrit_le'][:10]}"
     if not balises:
-        raise Abort("aucune balise ne tombe dans le domaine Nord-Alpes")
+        raise Abort("aucune balise ne tombe dans aucun domaine de "
+                    "production — l'axe de l'archive serait vide")
     marquees = sum(1 for b in balises if b["position_suspecte"])
     crier(f"  {len(balises)} balises — {origine}"
           + (f", dont {marquees} à position suspecte (marquées, pas "
              f"retirées)" if marquees else ""))
 
-    colonnes, grille, bilan = ingerer(run, params, orog, balises, portail,
+    colonnes, cadres, bilan = ingerer(run, params, cadres, balises, portail,
                                       limite_champs=a.limite_champs)
 
     crier()
@@ -573,13 +803,15 @@ def main(argv=None):
         vus = sorted({(m["param"], m["niveau"]) for m in colonnes.manquants})
         crier(f"  ⚠️ {len(colonnes.manquants)} champs manquants, sur "
               f"{len(vus)} couples (paramètre, niveau) : {vus[:8]}")
+    crier(f"  domaines ingérés : {bilan['domaines_ingeres']} · balises "
+          f"servies par domaine : {bilan['balises_par_domaine']}")
     crier(f"  {portail.bilan()}")
     crier(f"  octets reçus : {portail.compteur['octets'] / 1e6:.2f} Mo")
 
     if a.sans_ecriture:
         crier("  ⓘ --sans-ecriture : rien n'a été écrit.")
     else:
-        ecrire(colonnes, grille, bilan)
+        ecrire(colonnes, cadres, bilan)
 
     minutes = (time.monotonic() - debut) / 60
     crier(f"  durée totale : {minutes:.1f} min")

@@ -884,13 +884,37 @@ def section_12_provenance():
     # ⚠️ DEUX domaines, et c'est tout l'objet du contrôle : un couvert
     # par PI, un qui ne l'est pas. Un banc sur un seul domaine ne peut
     # pas voir la différence qu'A9 demande de PUBLIER.
+    #
+    # ⛔⛔ 19/08 (Lot M) — ET DEPUIS CE LOT, LA PRODUCTION N'A PLUS DE
+    # DOMAINE SANS PI. Ce banc ne peut donc plus en trouver un : il en
+    # FABRIQUE un, en retirant temporairement un domaine de
+    # `DOMAINES_PI`. Ce n'est pas un contournement — c'est la seule façon
+    # de garder bancée la garantie A9 (« l'absence se DIT ») alors qu'elle
+    # n'a plus de cas réel. Le jour où un quatrième domaine entrera dans
+    # `DOMAINES` sans entrer dans `DOMAINES_PI`, c'est ce contrôle-là qui
+    # dira si l'écran sait encore l'annoncer.
+    # ⓘ On restaure dans un `finally` : une constante laissée modifiée
+    # ferait passer ou échouer les sections suivantes pour une raison
+    # invisible, et ce banc s'exécute d'un seul tenant.
+    import domaine as DOM                                # noqa: PLC0415
+
     couvert = DOMAINES_PI[0]
-    sans_pi = next(d for d in ("pyrenees", "tarn-aveyron-herault")
-                   if d not in DOMAINES_PI)
+    autre_couvert = next((d for d in DOMAINES_PI if d != couvert), None)
+    sans_pi = next(d for d in DOM.DOMAINES
+                   if d not in (couvert, autre_couvert))
 
     g_ok = GR.Grille(run, steps, lats, lons, o.z, domaine=couvert)
     g_no = GR.Grille(run, steps, lats, lons, o.z, domaine=sans_pi)
-    p_ok, p_no = g_ok.provenance(), g_no.provenance()
+    p_ok = g_ok.provenance()
+    _vrai_pi = DOM.DOMAINES_PI
+    try:
+        DOM.DOMAINES_PI = tuple(d for d in _vrai_pi if d != sans_pi)
+        p_no = g_no.provenance()
+        man_no = {k: v for k, v in g_no.manifeste().items()
+                  if k != "provenance"}
+        man_no_complet = g_no.manifeste()
+    finally:
+        DOM.DOMAINES_PI = _vrai_pi
 
     # ── a. La granularité, et rien de plus fin ────────────────────────
     verifier("une entrée par ÉCHÉANCE, et les trois blocs à chacune",
@@ -989,7 +1013,6 @@ def section_12_provenance():
     # `provenance`. Si un consommateur pouvait quand même distinguer les
     # deux domaines, le champ serait décoratif.
     man_ok = {k: v for k, v in g_ok.manifeste().items() if k != "provenance"}
-    man_no = {k: v for k, v in g_no.manifeste().items() if k != "provenance"}
     neutre = {"produit", "domaine", "bornes", "axes", "remplissage",
               "remplissage_par_parametre"}
     verifier("⛔ SANS le champ, les deux manifestes ne diffèrent que par "
@@ -1000,7 +1023,44 @@ def section_12_provenance():
                          if man_ok[k] != man_no.get(k)} - neutre)))
     verifier("…et AVEC le champ, la différence est explicite et lisible",
              g_ok.manifeste()["provenance"]["arome_pi"]["disponible"]
-             is not g_no.manifeste()["provenance"]["arome_pi"]["disponible"])
+             is not man_no_complet["provenance"]["arome_pi"]["disponible"])
+
+    # ── h. ⛔⛔ DEUX DOMAINES COUVERTS SE DISTINGUENT QUAND MÊME ───────
+    # (Lot M, 19/08.) Jusqu'ici ce banc ne prouvait qu'une chose :
+    # « domaine AVEC PI » ≠ « domaine SANS PI ». C'était suffisant tant
+    # qu'il n'y avait qu'un domaine couvert. Il y en a trois.
+    #
+    # ⚠️ LE DÉFAUT QUE ÇA ATTRAPE EST PIRE QUE CELUI D'AVANT. Deux
+    # domaines couverts publient tous deux `disponible: true` et le MÊME
+    # gabarit de clé ; si la provenance ne portait pas le domaine, un
+    # client qui a chargé le manifeste des Pyrénées irait chercher le
+    # rafraîchissement des Alpes — et il le TROUVERAIT. La coupe
+    # tracerait un vent alpin sur un profil pyrénéen, à 400 km de là,
+    # sans un seul 404 pour le signaler. C'est exactement le mode de
+    # panne que tout ce fichier existe pour attraper.
+    if autre_couvert:
+        g_b = GR.Grille(run, steps, lats, lons, o.z, domaine=autre_couvert)
+        p_b = g_b.provenance()
+        verifier(f"⛔ `{couvert}` et `{autre_couvert}` sont TOUS DEUX "
+                 f"servis par PI — le cas que ce banc ne voyait pas avant "
+                 f"le Lot M",
+                 p_ok["arome_pi"]["disponible"] is True
+                 and p_b["arome_pi"]["disponible"] is True)
+        verifier("⛔⛔ …et leurs routes de rafraîchissement se distinguent "
+                 "PAR LE DOMAINE — sans ce champ, un client lirait le "
+                 "rafraîchissement du voisin et le trouverait",
+                 p_ok["arome_pi"]["rafraichissement"]["domaine"] == couvert
+                 and (p_b["arome_pi"]["rafraichissement"]["domaine"]
+                      == autre_couvert))
+        verifier("⚠️ …alors que le GABARIT, lui, est le MÊME pour les deux "
+                 "— c'est le domaine qui l'instancie, pas une seconde "
+                 "convention de nommage",
+                 (p_ok["arome_pi"]["rafraichissement"]["gabarit_cle"]
+                  == p_b["arome_pi"]["rafraichissement"]["gabarit_cle"]))
+        verifier("⛔ les deux domaines couverts sont ÉNUMÉRÉS, pas "
+                 "seulement comptés — l'écran doit pouvoir dire lesquels",
+                 couvert in p_ok["arome_pi"]["domaines_couverts"]
+                 and autre_couvert in p_ok["arome_pi"]["domaines_couverts"])
 
 
 def section_11_relecture_r2():
