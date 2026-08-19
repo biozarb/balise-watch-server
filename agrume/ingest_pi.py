@@ -348,7 +348,7 @@ def ingerer(run, params, cadres, balises, portail, limite_champs=None,
             journal=crier):
     """Remplit les produits. Renvoie (colonnes, cadres, bilan).
 
-    ⛔⛔ UNE REQUÊTE, TROIS DÉCOUPES — arbitrage A13 du 19/08, et il a
+    ⛔⛔ UNE REQUÊTE, TROIS DÉCOUPES — arbitrage A14 du 19/08, et il a
     été MESURÉ avant d'être écrit. Demander les trois boîtes séparément
     coûtait 926 requêtes et 9,40 min ; demander leur englobante en coûte
     304 et 3,06 min, et rend les MÊMES fenêtres après découpe (111×105,

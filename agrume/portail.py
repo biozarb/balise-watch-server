@@ -430,9 +430,18 @@ class Portail:
         exactement ce qu'on ajoute d'instinct, puisque le fichier reçu
         EST du GRIB2.
 
-        ⓘ Mesuré : 7 957 octets par champ en 0,025° sur la boîte
-        Nord-Alpes, **constant quel que soit le niveau**, et 0,180 s par
-        requête hors attente de quota.
+        ⓘ Mesuré le 10/08 : 7 957 octets par champ en 0,025° sur la
+        boîte Nord-Alpes, **constant quel que soit le niveau**, et
+        0,180 s par requête hors attente de quota.
+
+        ⚠️ 19/08 — CE CHIFFRE A VIEILLI, ET PAS PARCE QUE LE PORTAIL A
+        CHANGÉ : la boîte Nord-Alpes a doublé le 16/08 (5 185 → 11 655
+        colonnes). Remesuré le même jour, à la même heure, sur le même
+        service : **17 662 octets** pour Nord-Alpes, 12 787 pour les
+        Pyrénées, 4 288 pour Tarn/Aveyron/Hérault, et **92 356 pour leur
+        boîte englobante** — celle que `ingest_pi.py` demande depuis le
+        Lot M. Le poids suit la SURFACE, il ne suit ni le niveau ni
+        l'échéance, et c'est ce qui rend l'englobante payable.
         """
         axe = axe or self.axe_vertical(champ, run_iso)
         cid = self.id_couverture(champ, run_iso)

@@ -633,7 +633,7 @@ def main():
     print("\n── 12. ⛔⛔ PLUSIEURS DOMAINES, UN SEUL GRIB (Lot M, 19/08) ──")
     # ⛔ CE QUE CETTE SECTION EXISTE POUR ATTRAPER, ET C'EST NEUF.
     # Jusqu'au 19/08 l'ingestion PI n'avait qu'une fenêtre : un champ
-    # aligné, une pose, terminé. Depuis l'arbitrage A13 elle demande UNE
+    # aligné, une pose, terminé. Depuis l'arbitrage A14 elle demande UNE
     # boîte englobante et la recoupe en trois. Deux fautes deviennent
     # alors possibles, et AUCUNE des onze sections ci-dessus ne les voit :
     #

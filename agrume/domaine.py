@@ -459,7 +459,7 @@ DOMAINES = {"nord-alpes": DOMAINE, "pyrenees": DOMAINE_PYRENEES,
 #
 # ══════════════════════════════════════════════════════════════════════
 #  ⛔⛔ 19/08/2026 — LOT M : LE LOT À PART A EU LIEU, ET SON CHIFFRAGE A
-#  DÉMENTI SA PROPRE PRÉMISSE. Arbitrage A13 de Yann.
+#  DÉMENTI SA PROPRE PRÉMISSE. Arbitrage A14 de Yann.
 # ══════════════════════════════════════════════════════════════════════
 #  Le paragraphe ci-dessus posait la bonne question — « combien de
 #  requêtes ? » — et la mauvaise réponse : « 300 PAR BOÎTE ». Les deux
@@ -545,7 +545,7 @@ def boite_pi(noms=None, marge=MARGE_PI_DEG):
     ⚠️ Ce que cette boîte contient EN PLUS des trois domaines n'est pas
     servi, pas écrit, pas stocké : c'est jeté à la découpe, dans la même
     seconde. 63 % de ses colonnes sont mortes, et c'est le prix assumé
-    de l'arbitrage A13 (cf. `DOMAINES_PI`).
+    de l'arbitrage A14 (cf. `DOMAINES_PI`).
     """
     noms = list(DOMAINES_PI if noms is None else noms)
     if not noms:

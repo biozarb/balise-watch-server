@@ -99,7 +99,7 @@ DOMAINE = DOMAINES_PI[0]
 
 # ⛔⛔ 19/08 (Lot M) — IL N'Y A PLUS DE DOMAINE SANS PI EN PRODUCTION.
 # `SANS_PI` valait `"pyrenees"` tant que `DOMAINES_PI` n'avait qu'une
-# entrée ; les trois domaines sont couverts depuis l'arbitrage A13. Ce
+# entrée ; les trois domaines sont couverts depuis l'arbitrage A14. Ce
 # banc FABRIQUE donc son domaine découvert (§3), au lieu d'en emprunter
 # un à la production — sans quoi le refus de `composer_rafraichissement`
 # ne serait plus bancé du tout, alors que c'est lui qui empêche de
