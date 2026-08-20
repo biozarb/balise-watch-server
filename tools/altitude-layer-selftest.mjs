@@ -1254,5 +1254,347 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
   }
 }
 
+console.log('\n── 12. ⛔ LE RECOLLEMENT DU RUN PRÉCÉDENT (A25) ──');
+// ══════════════════════════════════════════════════════════════════════
+//  La coupe d'AGRUME commençait à l'heure du RUN, pas à l'heure du JOUR :
+//  un run 09 Z ouvrait la journée à 11:00 locales et le matin de vol
+//  n'existait pas. A25 va relire, dans les runs antérieurs encore en
+//  ligne, l'échéance qui tombe sur chaque heure manquante.
+//
+//  ⛔ LE DÉFAUT QUE CETTE SECTION EXISTE POUR ATTRAPER : indexer la
+//  colonne recollée par le RANG de l'heure dans la frise au lieu de
+//  l'INDICE DE SON ÉCHÉANCE dans le run antérieur. Un run de 08:00 qui
+//  sert 10:00 le sert à son échéance 2 ; une couture par rang lirait son
+//  échéance 0 — la bonne heure affichée, la mauvaise prévision dedans,
+//  et pas une requête en échec.
+//
+//  ⛔ ET LE SECOND : préférer le run le plus RÉCENT sans regarder τ. À
+//  τ = 0 le produit n'archive ni pluie, ni rafale, ni nébulosité
+//  (`absent_a_tau0`) — servir l'échéance 0 du run précédent aurait troué
+//  la ligne « Précipitation » à l'heure pile où ce run démarre.
+{
+  const A = await import(process.env.BW_AGRUME_MODULE
+    || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeProfile.ts'));
+
+  const H = 3_600_000;
+  const DOM = 'nord-alpes';
+  const NB_LAT = 2, NB_LON = 2;
+  // Les sept tranches : six de colonne + `precipitation`, qui est une
+  // tranche de surface à UN niveau (c'est ainsi que `serieSurf` la lit).
+  const CLES = ['ziso', 'psol', 'u', 'v', 'iso_u', 'iso_v', 'precipitation'];
+
+  // ⚠️ L'HEURE DE RÉFÉRENCE EST DÉRIVÉE DE `debutJourneeLocale`, pas
+  // écrite en dur : le banc doit rendre le même verdict sur le Mac de
+  // Yann (Europe/Paris) et sur un runner en UTC. Écrire « 05:00 Z »
+  // aurait fait un banc vert chez l'un et rouge chez l'autre — c'est-à-
+  // dire un banc qu'on finit par désactiver.
+  const MAINTENANT = Date.UTC(2026, 7, 20, 9, 30);
+  const BORNE = A.debutJourneeLocale(MAINTENANT, 7);   // 07:00 locales
+  const iso = (t) => new Date(t).toISOString();
+  const R_COURANT = iso(BORNE + 4 * H);   // ouvre la journée à borne+4
+  const R_PREC = iso(BORNE + 1 * H);
+  const R_VIEUX = iso(BORNE - 2 * H);
+
+  const tr = (offset, octets) => ({ offset, octets, dtype: 'float32' });
+  const manifeste = (run, nbEch, opts = {}) => ({
+    run, domaine: opts.domaine ?? DOM,
+    echeances: Array.from({ length: nbEch }, (_, k) => k),
+    niveaux_m_sol: [10], niveaux_hpa: [900],
+    bornes: { latmin: 45, latmax: 46, lonmin: 6, lonmax: 7 },
+    axes: {
+      nb_lat: NB_LAT, nb_lon: opts.nbLon ?? NB_LON,
+      lat_premier: 46, lat_dernier: 45,
+      lon_premier: 6, lon_dernier: 7, sens: 'lats DÉCROISSANTES',
+    },
+    retention_runs: 3,
+    parametres_surface: [
+      { nom: 'psol', unite: 'hPa', paquet: 'SP1', pas_de_temps: 'instant',
+        absent_a_tau0: false, decalage_precision: 0 },
+      { nom: 'precipitation', unite: 'mm', paquet: 'SP1',
+        pas_de_temps: 'cumul', absent_a_tau0: true,
+        decalage_precision: opts.decPrecip ?? 0 },
+    ],
+    service: {
+      cle_echeance: `agrume/grille/{domaine}/{run}/e{step:02d}.bin`,
+      cle_zsol: `agrume/grille/{domaine}/{run}/zsol.bin`,
+      cle_colonnes: `agrume/grille/{domaine}/{run}/colonnes.bin`,
+      disposition_tampon: '', encodage: 'float32', tranches: {},
+      octets_par_echeance: 64,
+      colonnes: {
+        disposition: '', offset: '', note: '',
+        octets_par_colonne: CLES.length * 4 * nbEch,
+        tranches: Object.fromEntries(
+          CLES.map((c, k) => [c, tr(k * 4 * nbEch, 4 * nbEch)])),
+      },
+    },
+  });
+
+  // La marque d'une valeur : `1000 × rang du run + τ`. Elle dit à la fois
+  // DE QUEL RUN et DE QUELLE ÉCHÉANCE vient chaque case — c'est tout ce
+  // qu'il faut pour prendre une couture par rang la main dans le sac.
+  const octetsDe = (nbEch, rang) => {
+    const pas = CLES.length * 4 * nbEch;
+    const buf = new ArrayBuffer(NB_LAT * NB_LON * pas);
+    const vue = new DataView(buf);
+    for (let c = 0; c < NB_LAT * NB_LON; c++) {
+      for (let k = 0; k < CLES.length; k++) {
+        for (let e = 0; e < nbEch; e++) {
+          const o = c * pas + k * 4 * nbEch + 4 * e;
+          if (CLES[k] === 'ziso') vue.setFloat32(o, 1500, true);
+          else if (CLES[k] === 'psol') vue.setFloat32(o, 910, true);
+          else vue.setFloat32(o, 1000 * rang + e, true);
+        }
+      }
+    }
+    return buf;
+  };
+
+  const MAN = {
+    [R_COURANT]: manifeste(R_COURANT, 4),
+    [R_PREC]: manifeste(R_PREC, 7),
+    [R_VIEUX]: manifeste(R_VIEUX, 10),
+  };
+  const OCTETS = {
+    [R_COURANT]: octetsDe(4, 0),
+    [R_PREC]: octetsDe(7, 1),
+    [R_VIEUX]: octetsDe(10, 2),
+  };
+  const ZSOL = Float32Array.from([1000, 1000, 1000, 1000]);
+  const IDX = {
+    runs: [R_COURANT, R_PREC, R_VIEUX].map(run => ({ run, domaine: DOM })),
+    ecrit_le: '2026-08-20T09:31:00Z',
+  };
+
+  const serveur = (mans = MAN) => async (url, init) => {
+    const chemin = String(url).split('?')[0];
+    if (chemin.endsWith('index.json')) return Response.json(IDX);
+    const m = /\/grille\/[^/]+\/([^/]+)\/([^/]+)$/.exec(chemin);
+    if (!m) return new Response(null, { status: 404 });
+    const [, run, objet] = m;
+    if (objet === 'manifest.json') {
+      return mans[run]
+        ? Response.json(mans[run]) : new Response(null, { status: 404 });
+    }
+    if (objet === 'zsol.bin') return new Response(ZSOL.buffer);
+    const corps = OCTETS[run];
+    if (!corps) return new Response(null, { status: 404 });
+    const r = /bytes=(\d+)-(\d+)/.exec(init?.headers?.Range ?? '');
+    if (!r) return new Response(corps, { status: 200 });
+    const [d, f] = [Number(r[1]), Number(r[2])];
+    if (d >= corps.byteLength) return new Response(null, { status: 416 });
+    const fin = Math.min(f, corps.byteLength - 1);
+    return new Response(corps.slice(d, fin + 1), {
+      status: 206,
+      headers: { 'Content-Range': `bytes ${d}-${fin}/${corps.byteLength}` },
+    });
+  };
+
+  // ── a. Les runs antérieurs, et l'ordre ─────────────────────────────
+  verifier('les runs antérieurs sortent du plus RÉCENT au plus ancien, et '
+    + 'le run courant n\'en fait pas partie',
+    A.runsAnterieurs(IDX, DOM, R_COURANT).join() === [R_PREC, R_VIEUX].join());
+  verifier('⚠️ un autre domaine ne se glisse pas dans la liste — une '
+    + 'colonne prise sur une autre grille serait une coupe plausible au '
+    + 'mauvais endroit',
+    A.runsAnterieurs(
+      { runs: [{ run: R_PREC, domaine: 'pyrenees' }] }, DOM, R_COURANT,
+    ).length === 0);
+
+  // ── b. LE PLAN : quelle heure, quel run, quelle échéance ───────────
+  const plan = A.planRecollement(BORNE + 4 * H,
+    [MAN[R_PREC], MAN[R_VIEUX]], MAINTENANT, 7);
+  verifier('le plan couvre les QUATRE heures qui manquent, et pas une de '
+    + 'plus : on ne remonte pas avant la première heure affichable',
+    plan.length === 4
+      && plan[0].instant === BORNE && plan[3].instant === BORNE + 3 * H,
+    plan.map(c => new Date(c.instant).toISOString()).join(' '));
+  verifier('⛔ L\'INDICE EST CELUI DE L\'ÉCHÉANCE, PAS LE RANG DE L\'HEURE : '
+    + 'borne+3 est servie par le run de borne+1 à son échéance 2',
+    plan[3].run === R_PREC && plan[3].tau === 2 && plan[3].e === 2,
+    `${plan[3].run} τ=${plan[3].tau} e=${plan[3].e}`);
+  verifier('⛔ ET L\'ÉCHÉANCE 0 EST ÉVITÉE : borne+1 est l\'échéance 0 du run '
+    + 'de borne+1 (ni pluie, ni rafale, ni nébulosité) — c\'est le run '
+    + 'PLUS ANCIEN qui la sert, à τ = 3',
+    plan[1].run === R_VIEUX && plan[1].tau === 3,
+    `${plan[1].run} τ=${plan[1].tau}`);
+  verifier('…et aucune des quatre heures ne tombe sur un τ = 0',
+    plan.every(c => c.tau > 0));
+  {
+    // Le run le plus ancien retiré : il ne reste que celui qui commence à
+    // borne+1. Deux heures deviennent inatteignables, et la troisième ne
+    // peut plus être servie qu'à τ = 0 — ce qui doit se DIRE.
+    const seul = A.planRecollement(BORNE + 4 * H, [MAN[R_PREC]], MAINTENANT, 7);
+    verifier('⚠️ faute de mieux, τ = 0 est accepté — mais il reste '
+      + 'identifiable, et l\'écran le dit',
+      seul.length === 3 && seul[0].tau === 0 && seul[0].instant === BORNE + H,
+      seul.map(c => `τ=${c.tau}`).join(' '));
+  }
+  verifier('⚠️ un run courant qui ouvre lui-même la journée ne demande rien',
+    A.planRecollement(BORNE, [MAN[R_PREC], MAN[R_VIEUX]], MAINTENANT, 7)
+      .length === 0);
+
+  // ── c. LA COUTURE, et la version naïve qui doit échouer ────────────
+  const colDe = async (run) => L.chargerColonne(
+    '', MAN[run], 45.5, 6.5, ZSOL, serveur());
+  {
+    const courant = await colDe(R_COURANT);
+    const morceaux = [];
+    for (const c of plan) morceaux.push({ choix: c, col: await colDe(c.run) });
+    const { colonne, runs, tau0 } = A.coudreColonnes(
+      MAN[R_COURANT], courant, morceaux);
+    verifier('la colonne cousue porte les 4 heures recollées PUIS les 4 du '
+      + 'run courant, et les échéances deviennent négatives devant',
+      colonne.echeances.join() === '-4,-3,-2,-1,0,1,2,3',
+      colonne.echeances.join());
+    // ⛔ LE CONTRÔLE QUI COMPTE. `u` vaut `1000 × rang + τ` : la valeur
+    // dit d'où elle vient. Attendu, dans l'ordre :
+    //   borne+0 ← vieux τ=2 → 2002   borne+1 ← vieux τ=3 → 2003
+    //   borne+2 ← préc  τ=1 → 1001   borne+3 ← préc  τ=2 → 1002
+    const lus = Array.from(colonne.tranches.u.slice(0, 4));
+    verifier('⛔ CHAQUE HEURE RECOLLÉE PORTE LA VALEUR DE SON ÉCHÉANCE, pas '
+      + 'celle de son rang dans la frise',
+      lus.join() === '2002,2003,1001,1002', lus.join());
+    // …et la preuve que le banc sait échouer : la couture NAÏVE, celle
+    // qui indexe par le rang `p` au lieu de `choix.e`.
+    const naif = plan.map((c, p) => morceaux[p].col.tranches.u[p]);
+    verifier('⚠️ …et la couture par RANG donne autre chose — le banc sait '
+      + 'donc échouer sur exactement ce défaut',
+      naif.join() !== lus.join(), `naïf = ${naif.join()}`);
+    verifier('le run courant n\'est pas touché : ses 4 échéances restent en '
+      + 'place, à la suite',
+      Array.from(colonne.tranches.u.slice(4)).join() === '0,1,2,3');
+    verifier('la provenance par instant est indexée comme la colonne — '
+      + '4 heures nommées, puis `null` sur tout le run courant',
+      runs.length === 8 && runs[0] === R_VIEUX && runs[3] === R_PREC
+        && runs.slice(4).every(r => r === null));
+    verifier('…et aucune des quatre n\'est marquée τ = 0',
+      tau0.length === 8 && tau0.every(x => x === false));
+  }
+
+  // ── d. `memeDecoupage` — ce qu'on refuse de coudre ─────────────────
+  verifier('deux runs du même produit se cousent, même avec un nombre '
+    + 'd\'échéances DIFFÉRENT (25 contre 52 en production)',
+    A.memeDecoupage(MAN[R_COURANT], MAN[R_PREC]) === null);
+  verifier('⛔ un run dont un `decalage_precision` diffère est ÉCARTÉ — '
+    + 'c\'est le seul écart qui donnerait une valeur finie et FAUSSE',
+    /décalage de précision/.test(
+      A.memeDecoupage(MAN[R_COURANT],
+        manifeste(R_PREC, 7, { decPrecip: -1000 })) ?? ''));
+  verifier('⛔ …et un run dont la grille a bougé aussi',
+    /axes différents/.test(
+      A.memeDecoupage(MAN[R_COURANT],
+        manifeste(R_PREC, 7, { nbLon: 3 })) ?? ''));
+  verifier('⛔ …et un run d\'un autre domaine',
+    /domaine/.test(
+      A.memeDecoupage(MAN[R_COURANT],
+        manifeste(R_PREC, 7, { domaine: 'pyrenees' })) ?? ''));
+
+  // ── e. LE DÉCALAGE DU RAFRAÎCHISSEMENT ────────────────────────────
+  // ⛔ `provenance`/`ajoutee` sont indexés comme `profil.times`. Coudre
+  // 4 heures devant SANS les décaler attribuerait à 07:00 la provenance
+  // de 11:00 — et l'écran refuserait même de l'afficher, puisqu'il
+  // compare les longueurs.
+  {
+    const raf = {
+      etat: 'applique',
+      provenance: [{ modele: 'arome+pi', poids_pi: 1, regime_temporel: 'x' }, null],
+      ajoutee: [true, false],
+      runPi: 'x', runB: 'y', ajoutees: 1, remplacees: 1, total: 2,
+      octets: 0, interpolees: [],
+    };
+    const d = A.decalerRafraichissement(raf, 4);
+    verifier('⛔ le rafraîchissement est décalé de 4, et le poids PI reste '
+      + 'sur SON instant — pas sur celui d\'à côté',
+      d.provenance.length === 6 && d.ajoutee.length === 6
+        && d.provenance.slice(0, 4).every(p => p === null)
+        && d.provenance[4]?.poids_pi === 1 && d.ajoutee[4] === true);
+    verifier('⚠️ zéro heure cousue = l\'objet d\'origine, intact',
+      A.decalerRafraichissement(raf, 0) === raf);
+    verifier('⚠️ et un rafraîchissement ABSENT ne se décale pas — il n\'a '
+      + 'pas de tableau à décaler',
+      A.decalerRafraichissement({ etat: 'absent', raison: 'x', texte: 'y' }, 4)
+        .etat === 'absent');
+  }
+
+  // ── f. LE CHEMIN COMPLET, de l'index au profil ────────────────────
+  {
+    const r = await A.chargerProfilAgrume('', 45.5, 6.5, serveur(),
+      { maintenant: MAINTENANT, heureDebut: 7 });
+    verifier('⛔ la journée commence à 07:00 locales, pas à l\'heure du run',
+      r.profil.times[0] === BORNE,
+      `${new Date(r.profil.times[0]).toISOString()} contre ${iso(BORNE)}`);
+    verifier('le recollement est appliqué et NOMME ses runs, du plus récent '
+      + 'au plus ancien',
+      r.recol.etat === 'applique'
+        && r.recol.detail.map(d => `${d.run}:${d.heures}`).join()
+          === `${R_PREC}:2,${R_VIEUX}:2`,
+      JSON.stringify(r.recol.detail));
+    verifier('⛔ les tableaux de provenance ont EXACTEMENT la longueur de '
+      + '`times` — c\'est ce que l\'écran vérifie avant d\'afficher un '
+      + 'liseré, et une longueur fausse le ferait disparaître en silence',
+      r.recol.runs.length === r.profil.times.length
+        && r.recol.tau0.length === r.profil.times.length);
+    // La précipitation porte la même marque que `u` : elle prouve que la
+    // ligne de surface suit la couture, et pas seulement la colonne d'air.
+    const p = r.profil.surface.precipitation.slice(0, 4);
+    verifier('⚠️ la ligne de SURFACE suit la couture elle aussi — la pluie '
+      + 'des heures recollées vient de la bonne échéance du bon run',
+      p.join() === '2002,2003,1001,1002', p.join());
+    verifier('le vent des heures recollées est bien du vent, pas des `null` '
+      + 'polis', r.profil.levels[0].windSpeed.slice(0, 4).every(v => v != null));
+  }
+
+  // ── g. QUAND ON NE RECOLLE PAS, ON DIT POURQUOI ───────────────────
+  {
+    const seul = { runs: [{ run: R_COURANT, domaine: DOM }], ecrit_le: IDX.ecrit_le };
+    const srv = async (url, init) => (String(url).includes('index.json')
+      ? Response.json(seul) : serveur()(url, init));
+    const r = await A.chargerProfilAgrume('', 45.5, 6.5, srv,
+      { maintenant: MAINTENANT, heureDebut: 7 });
+    verifier('⛔ aucun run antérieur en ligne : la coupe reste servie, et la '
+      + 'raison est NOMMÉE — jamais un silence',
+      r.recol.etat === 'absent' && r.recol.raison === 'aucun-run-anterieur'
+        && r.profil.times.length === 4,
+      r.recol.texte);
+  }
+  {
+    // Le run précédent a changé de découpe : on l'écarte, on le DIT, et
+    // le plus ancien prend le relais sur les heures qu'il sait dire.
+    const mans = { ...MAN, [R_PREC]: manifeste(R_PREC, 7, { decPrecip: -1000 }) };
+    const r = await A.chargerProfilAgrume('', 45.5, 6.5, serveur(mans),
+      { maintenant: MAINTENANT, heureDebut: 7 });
+    verifier('⛔ un run d\'une autre génération est ÉCARTÉ NOMMÉMENT, et le '
+      + 'plus ancien prend le relais',
+      r.recol.etat === 'applique'
+        && r.recol.ecartes.length === 1 && r.recol.ecartes[0].run === R_PREC
+        && r.recol.detail.every(d => d.run === R_VIEUX),
+      JSON.stringify(r.recol.ecartes));
+    // ⚠️ ET LE MATIN N'EST PAS PERDU POUR AUTANT : le run le plus ancien
+    // couvre les quatre heures, toutes à τ ≥ 1. C'est précisément ce que
+    // la rétention à trois runs achète — le premier repli existe.
+    verifier('⚠️ …et le plus ancien couvre les QUATRE heures à lui seul : '
+      + 'la journée commence quand même à 07:00',
+      r.recol.detail.length === 1 && r.recol.detail[0].heures === 4
+        && r.profil.times[0] === BORNE,
+      JSON.stringify(r.recol.detail));
+  }
+  {
+    // Le run courant ouvre lui-même la journée : il n'y a rien à recoller,
+    // et ce n'est pas un incident. ⚠️ Aucun manifeste antérieur n'est
+    // même lu — un Range pour rien est un coût sans question.
+    let lus = 0;
+    const compte = async (url, init) => {
+      if (String(url).includes('manifest.json')) lus++;
+      return serveur()(url, init);
+    };
+    const r = await A.chargerProfilAgrume('', 45.5, 6.5, compte,
+      { maintenant: MAINTENANT, heureDebut: 12 });
+    verifier('⚠️ « rien à recoller » ne coûte AUCUNE requête de plus — un '
+      + 'seul manifeste lu, celui du run affiché',
+      r.recol.etat === 'absent' && r.recol.raison === 'rien-a-recoller'
+        && lus === 1, `${lus} manifeste(s) lu(s)`);
+  }
+}
+
 console.log(`\n  calque altitude (JS) : ${echecs ? `ÉCHEC (${echecs})` : 'OK'}`);
 process.exit(echecs ? 1 : 0);
