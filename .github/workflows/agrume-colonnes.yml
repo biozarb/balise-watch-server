@@ -212,6 +212,7 @@ jobs:
             PWA/web/src/lib/altitudeLayer.ts
             PWA/web/src/lib/agrumeProfile.ts
             PWA/web/src/lib/rafraichissement.ts
+            PWA/web/src/lib/piaf.ts
           sparse-checkout-cone-mode: false
 
       # ══════════════════════════════════════════════════════════════
@@ -228,12 +229,13 @@ jobs:
       #  Cette étape existe pour que ce silence-là ne se reproduise pas :
       #  le motif se prouve, à l'endroit où il est écrit.
       # ══════════════════════════════════════════════════════════════
-      - name: Le sparse-checkout a bien ramené les trois fichiers
+      - name: Le sparse-checkout a bien ramené les quatre fichiers
         run: |
           manque=0
           for f in _web-repo-parite/PWA/web/src/lib/altitudeLayer.ts \
                    _web-repo-parite/PWA/web/src/lib/agrumeProfile.ts \
-                   _web-repo-parite/PWA/web/src/lib/rafraichissement.ts; do
+                   _web-repo-parite/PWA/web/src/lib/rafraichissement.ts \
+                   _web-repo-parite/PWA/web/src/lib/piaf.ts; do
             if [ -s "$f" ]; then
               echo "✓ $f ($(wc -c < "$f") o)"
             else
@@ -287,6 +289,25 @@ jobs:
             tools/rafraichissement-client-selftest.mjs
         env:
           BW_RAF_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/rafraichissement.ts
+
+      # ⛔ LE BANC DE LA PLUIE À VENIR, CÔTÉ CLIENT (Lot Q3, 20/08).
+      # Hors ligne, sans clé. Il tient six façons de mentir sans erreur :
+      # l'instant nommé pris pour le DÉBUT de la tranche, la latitude lue
+      # comme croissante, l'indice de maille arrondi au lieu d'être
+      # tronqué, un manifeste servi pour les octets d'une autre passe,
+      # une grille au compte IMPAIR, et l'échéance de BORD rendue au lieu
+      # d'un refus.
+      # ⚠️ C'est ce banc qui a trouvé, le jour de son écriture, que
+      # `(50,01 − 46,45) / 0,02` rend 177 et non 178 — la pluie peinte
+      # 2 km trop au nord sur les lignes de frontière de bloc, sans
+      # qu'aucune requête n'échoue (BUGS.md 20/08).
+      # ⚠️ `--production` n'est PAS ajouté ici, même raison que ci-dessus.
+      - name: Banc de la pluie à venir, côté client
+        run: |
+          node --experimental-strip-types \
+            tools/piaf-client-selftest.mjs
+        env:
+          BW_PIAF_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/piaf.ts
 
       - name: Ingérer les colonnes
         env:
