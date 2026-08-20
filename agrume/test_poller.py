@@ -441,12 +441,20 @@ def main():
         service, grille = "aromepi", "0025"
         def __init__(self):
             self.vus = []
-        def describe(self, champ, run):
+        # ⚠️ `**kw` DEPUIS LE 20/08, et ce n'est pas de la complaisance.
+        # `portail.describe` a gagné un paramètre `agregation` (la
+        # prévision immédiate suffixe ses identifiants de couverture), et
+        # cette doublure l'a fait tomber : `TypeError: describe() got an
+        # unexpected keyword argument`. Une doublure qui reproduit une
+        # signature à l'exact transforme tout élargissement en panne de
+        # banc — alors que ce qu'elle simule ici, c'est un portail MUET,
+        # ce qui n'a rien à voir avec ses arguments.
+        def describe(self, champ, run, **kw):
             self.vus.append(run)
             raise W.CouvertureAbsente("NoSuchCoverage",
                                       exception_wcs="NoSuchCoverage")
-        def valider_champ(self, champ, runs):
-            return W.Portail.valider_champ(self, champ, runs)
+        def valider_champ(self, champ, runs, **kw):
+            return W.Portail.valider_champ(self, champ, runs, **kw)
 
     src = PIfactice()
     src.portail = PortailMuet()
@@ -462,7 +470,7 @@ def main():
                  len(src.portail.vus) == 3, f"{len(src.portail.vus)}")
 
     class PortailBavard(PortailMuet):
-        def describe(self, champ, run):
+        def describe(self, champ, run, **kw):      # cf. `PortailMuet`
             self.vus.append(run)
             if run.endswith("06:00:00Z"):
                 return "ok"

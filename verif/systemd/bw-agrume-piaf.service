@@ -1,0 +1,74 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-piaf.service — l'ingestion de la pluie à venir (20/08/2026)
+#                                                           Lot Q2
+#
+#  ⛔ CE FICHIER N'EST PAS INSTALLÉ PAR `tools/deploy-agrume-vps.sh`.
+#  Le script de déploiement ne touche jamais aux unités systemd — c'est
+#  une action de Yann, une fois, à la main, avec sudo :
+#
+#      sudo cp verif/systemd/bw-agrume-piaf.{service,timer} \
+#              /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now bw-agrume-piaf.timer
+#      systemctl list-timers bw-agrume-piaf.timer
+#
+#  ⚠️ AVANT d'activer : poser `BW_AGRUME_PIAF_PING_URL` dans
+#  `~/.balise-watch-alertes.env` (check healthchecks.io, période 10 min,
+#  grâce 25 min). Sans lui, la chaîne tourne SANS AUCUNE SURVEILLANCE, et
+#  à 144 exécutions par jour une panne ne se verrait nulle part.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — ingestion de la pluie à venir (Lot Q2, prévision immédiate)
+Documentation=file:///home/debian/balise-watch/balise-watch-server/agrume/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server
+ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-ingest-piaf.sh
+
+# ⛔ LE PLAFOND DE TEMPS, ET IL EST PLUS COURT QUE LA CADENCE.
+# Budget mesuré le 20/08 : ~40 s (39 requêtes, 71 Mo, 14,9 s de portail).
+# 300 s laisse une marge de 7× pour un portail qui rame et des reprises
+# réseau, et reste SOUS les 600 s du timer : une passe qui déborderait
+# est tuée avant que la suivante ne parte. Le verrou `flock` du lanceur
+# est la seconde ceinture ; les deux ensemble rendent impossible que deux
+# processus écrivent le même index.
+TimeoutStartSec=300
+
+# ⚠️ Aucun redémarrage automatique. Un `Restart=` sur un oneshot déclenché
+# par timer transformerait un portail indisponible en boucle de requêtes,
+# et le quota est partagé avec l'ingestion PI. La passe suivante sort
+# dans 5 minutes : ne rien faire est la bonne réponse.
+Restart=no
+
+Nice=5
+IOSchedulingClass=idle
+# ⚠️ `idle` sur les E/S et `Nice=5` : cette chaîne tourne 144 fois par
+# jour sur un VPS à 2 vCPU qui fait aussi tourner l'ingestion PI (3,9 min
+# par heure), le scoring nocturne et le serveur de push. Elle doit céder
+# le pas, pas le prendre.
+
+# Durcissement — mesuré à la plus petite dose qui serve à quelque chose.
+# ⛔ `PrivateTmp` reste à `no` **exprès** : le verrou du lanceur est un
+# `flock` sur `/tmp/bw-agrume-piaf.lock`. Avec un `/tmp` privé, chaque
+# exécution poserait son verrou dans son propre espace — deux processus
+# le prendraient tous les deux, et le verrou ne servirait plus à rien
+# tout en ayant l'air d'être là. C'est le pire des deux mondes.
+# ⚠️ `ProtectSystem=full` et non `strict` : `strict` rend `/tmp` et
+# `/var` en lecture seule et demande de lister chaque chemin écrit. Une
+# unité installée à la main qui échoue à son premier tir pour une raison
+# de montage coûte plus qu'elle ne protège ici — le processus tourne déjà
+# sans privilèges, sous l'utilisateur qui possède la clé.
+NoNewPrivileges=yes
+PrivateTmp=no
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target

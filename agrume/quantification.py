@@ -237,6 +237,68 @@ PLAFOND_PHYSIQUE = {"u": 200.0, "v": 200.0, "t": 100.0, "r": 110.0,
 # pas à la valeur horaire. Écrit à part pour que la raison reste lisible.
 PLAFOND_PHYSIQUE["rayonnement"] = 40000.0
 
+# ══════════════════════════════════════════════════════════════════════
+#  LA PLUIE DE PRÉVISION IMMÉDIATE — LOT Q2, 20/08/2026
+#
+#  ⛔ MÊME `tp`, MÊME UNITÉ, MAIS PAS LE MÊME PAS DE TEMPS — et c'est
+#  toute la raison de ce paramètre séparé.
+#
+#  La source (Météo-France, produit de prévision immédiate agrégée,
+#  Licence Ouverte 2.0) publie `shortName = tp`, discipline 0, catégorie
+#  1, numéro 52, `units = kg m**-2` — MESURÉ le 20/08 sur les octets,
+#  contre une description du portail qui annonce « rainrate ».
+#  ⚠️ `typeOfStatisticalProcessing = 1` et `stepType = accum` : c'est un
+#  CUMUL en mm, pas un débit. Le mot « RATE » du nom de la couverture est
+#  faux, et le croire aurait fait diviser par 12 une valeur déjà juste.
+#
+#  C'est donc le MÊME paramètre physique que `precipitation` ci-dessus —
+#  ce qui est exactement ce qui rend l'agrégat horaire du Lot Q4
+#  légitime : une somme de cumuls DISJOINTS, sans conversion.
+#
+#  ⛔ CE QUI CHANGE, ET POURQUOI LE PLAFOND NE PEUT PAS ÊTRE LE MÊME.
+#  `precipitation` est cumulé DEPUIS LE DÉBUT DU RUN (`pas_de_temps
+#  = "cumul"`, `absent_a_tau0`), d'où son plafond de 2 000 mm : il doit
+#  accepter 51 h de pluie continue. Ici chaque tranche est un cumul de
+#  CINQ MINUTES, disjoint du précédent. Garder 2 000 laisserait passer
+#  une erreur de facteur 1 000 ou la lecture accidentelle d'un champ
+#  cumulé, avec une nappe parfaitement crédible à l'affichage.
+#
+#  100 mm en 5 min est au-dessus de tout ce que la Terre a mesuré (le
+#  record de 5 minutes est de l'ordre de 60 mm) et très en dessous de ce
+#  que produirait une erreur de décodage. Le 20/08 à 07:35 Z, sur une
+#  journée pluvieuse, le maximum réel de la boîte valait 11,16 mm.
+PARAM_PLUIE_IMMEDIATE = dict(
+    nom="pluie_5min", court="tp", unite="mm",
+    facteur=1.0, decalage=0.0,
+    pas_de_temps="cumul disjoint de 5 min",
+    source="Météo-France — prévision immédiate agrégée (Licence Ouverte 2.0)")
+PLAFOND_PHYSIQUE["pluie_5min"] = 100.0
+
+# ⛔ ET LE CONTRÔLE QUI EMPÊCHE LES DEUX DE DIVERGER. `precipitation` et
+# `pluie_5min` doivent porter la MÊME unité et le MÊME facteur, sans quoi
+# l'agrégat horaire du Lot Q4 additionnerait deux échelles différentes
+# dans la même colonne — lisse, plausible, et faux d'un facteur inconnu.
+def _controle_pluie():
+    ref = next((p for p in PARAMS_SURFACE if p["nom"] == "precipitation"),
+               None)
+    if ref is None:
+        raise AssertionError(
+            "`precipitation` a disparu de PARAMS_SURFACE — `pluie_5min` "
+            "s'y adosse pour que l'agrégat horaire du Lot Q4 additionne "
+            "la même grandeur que la ligne existante de la coupe.")
+    for cle in ("unite", "court"):
+        if ref[cle] != PARAM_PLUIE_IMMEDIATE[cle]:
+            raise AssertionError(
+                f"`precipitation` porte {cle}={ref[cle]!r} et `pluie_5min` "
+                f"{PARAM_PLUIE_IMMEDIATE[cle]!r}. ⛔ Les deux nourrissent la "
+                f"MÊME ligne de la coupe : les additionner supposerait la "
+                f"même unité, et elle ne l'est plus.")
+    if ref.get("facteur", 1.0) != PARAM_PLUIE_IMMEDIATE["facteur"]:
+        raise AssertionError(
+            "`precipitation` et `pluie_5min` n'ont plus le même facteur "
+            "de conversion — l'agrégat horaire additionnerait deux "
+            "échelles différentes.")
+
 # Paramètre fictif décrivant l'altitude géopotentielle, pour que
 # `quantifier()` lui applique les mêmes garde-fous qu'aux autres (NaN,
 # sentinelle, plafond physique) sans la faire passer par le float16.
@@ -552,3 +614,10 @@ def erreur_quantification(valeurs, param, dtype=np.float16):
     a = (np.asarray(valeurs, dtype=np.float64) * param.get("facteur", 1.0)
          + param["decalage"] + param.get("decalage_precision", 0.0))
     return float(np.nanmax(np.abs(a - a.astype(dtype).astype(np.float64))))
+
+
+# ⛔ APPELÉ À L'IMPORT, pas laissé au banc. `PARAMS_SURFACE` est défini
+# plus bas que `PARAM_PLUIE_IMMEDIATE` — d'où l'appel ici, à la fin, où
+# les deux existent. Un contrôle qui ne s'exécute qu'au banc laisse
+# passer une divergence en production jusqu'au prochain déploiement.
+_controle_pluie()

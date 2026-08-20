@@ -45,13 +45,39 @@ import xml.etree.ElementTree as ET
 # y passer un moment.
 SERVICE_AROME = "arome"
 SERVICE_AROMEPI = "aromepi"
+SERVICE_PIAF = "piaf"
 
 # ── Piège nº 5 : l'URL des capabilities ment sur le chemin ────────────
 # Le `xlink:href` déclaré dans le GetCapabilities OMET le `/1.0/` du
 # chemin réel. Les deux formes fonctionnent, mais un client qui suit
 # aveuglément le lien ne s'en rend pas compte — et ne le découvre que le
 # jour où l'une des deux cesse de répondre. On écrit le chemin réel.
-BASE = "https://public-api.meteofrance.fr/public/{service}/1.0/wcs/{couverture}"
+#
+# ── ⛔ Piège nº 7 : IL Y A DEUX CIRCUITS, ET PAS SEULEMENT DEUX ────────
+#    PRÉFIXES (20/08/2026, Lot Q2)
+#
+# La prévision immédiate agrégée n'est PAS servie par `public-api`. Elle
+# vit sur un AUTRE HOTE et sous un AUTRE préfixe :
+#
+#     AROME / AROME-PI  https://public-api.meteofrance.fr/public/…
+#     immédiate (piaf)  https://api.meteofrance.fr/pro/…
+#
+# ⚠️ Sept chemins ont rendu HTTP 404 avant que ce fait ne soit établi, et
+# ils ressemblaient tous à « la clé n'est pas abonnée » — parce que le
+# piège nº 2 fait arriver à peu près tout en 404. La clé, elle, était
+# abonnée depuis le début. **Un 404 sur ce portail ne dit jamais
+# pourquoi ; seul le corps le dit, et parfois il ne le dit pas non plus.**
+BASES = {
+    "public": ("https://public-api.meteofrance.fr/public/{service}"
+               "/1.0/wcs/{couverture}"),
+    "pro": "https://api.meteofrance.fr/pro/{service}/1.0/wcs/{couverture}",
+}
+#: Rétrocompatibilité : `BASE` désignait le circuit public, et il n'y en
+#: avait qu'un. Le nom reste pour ne pas casser un appel existant.
+BASE = BASES["public"]
+
+CIRCUITS = {SERVICE_AROME: "public", SERVICE_AROMEPI: "public",
+            SERVICE_PIAF: "pro"}
 
 COUVERTURES = {
     (SERVICE_AROME, "0025"): "MF-NWP-HIGHRES-AROME-0025-FRANCE-WCS",
@@ -63,6 +89,12 @@ COUVERTURES = {
     # `U_COMPONENT_OF_WIND`, `V_`, `WIND_SPEED` et `TKE` y sont TOUS
     # ABSENTS. Il n'y a pas de vent moyen. On ne le déclare donc pas.
     (SERVICE_AROMEPI, "001"): "MF-NWP-HIGHRES-AROMEPI-001-FRANCE-WCS",
+    # ⛔ La prévision immédiate agrégée, en 0,01°. ⚠️ Le service publie
+    # AUSSI un WMS (`GetMap`), et on ne s'en sert PAS : il rendrait des
+    # images toutes faites, mais la clé devrait alors voyager jusqu'au
+    # navigateur. Il faudrait un proxy — c'est-à-dire exactement le rendu
+    # d'image côté serveur que l'arbitrage A16 a écarté.
+    (SERVICE_PIAF, "001"): "MF-NWP-HIGHRES-PIAF-001-FRANCE-WCS",
 }
 
 # ── Piège nº 4 : le nom du format ─────────────────────────────────────
@@ -170,8 +202,20 @@ class Portail:
                 f"couple service/grille inconnu : {service}/{grille} — "
                 f"connus : {sorted(COUVERTURES)}")
         self.service, self.grille = service, grille
-        self.base = BASE.format(service=service,
-                                couverture=COUVERTURES[(service, grille)])
+        # ⚠️ Le circuit se LIT dans `CIRCUITS`, il ne se devine pas au nom
+        # du service : `piaf` vit sur un autre hôte (piège nº 7). Un
+        # service inconnu de la table est un service dont on ignore le
+        # circuit — on refuse plutôt que de replier sur « public », ce
+        # qui rendrait sept 404 indiscernables d'un défaut d'abonnement.
+        if service not in CIRCUITS:
+            raise ErreurPortail(
+                f"service {service!r} sans circuit déclaré — connus : "
+                f"{sorted(CIRCUITS)}. ⚠️ NE PAS replier sur `public` : le "
+                f"portail rend HTTP 404 pour un mauvais hôte comme pour "
+                f"un run absent.")
+        self.circuit = CIRCUITS[service]
+        self.base = BASES[self.circuit].format(
+            service=service, couverture=COUVERTURES[(service, grille)])
         self.cle = cle or os.environ.get("METEOFRANCE_API_KEY")
         if not self.cle:
             raise ErreurPortail(
@@ -306,13 +350,30 @@ class Portail:
 
     # ── Couvertures ───────────────────────────────────────────────────
     @staticmethod
-    def id_couverture(champ, run_iso):
+    def id_couverture(champ, run_iso, agregation=None):
         """`{CHAMP}___{run}` où le run porte des POINTS et non des
         deux-points : `2026-08-10T08.00.00Z`. C'est la forme relevée dans
-        le GetCapabilities, et le portail ne reconnaît qu'elle."""
-        return f"{champ}___{run_iso.replace(':', '.')}"
+        le GetCapabilities, et le portail ne reconnaît qu'elle.
 
-    def describe(self, champ, run_iso, timeout=30):
+        ⚠️⚠️ ET LA PRÉVISION IMMÉDIATE Y AJOUTE UN SUFFIXE, AVEC UN SEUL
+        SOULIGNÉ (20/08). Relevé dans son GetCapabilities :
+
+            TOTAL_PRECIPITATION_RATE__GROUND_OR_WATER_SURFACE___2026-08-20T07.35.00Z_PT5M
+                                                              ^^^            ^
+                                                          trois            UN
+
+        Le séparateur du run est `___`, celui de l'agrégation `_`. Écrire
+        `___PT5M` par symétrie rend un `NoSuchCoverage` — c'est-à-dire
+        exactement ce que rend un run non publié (cf. `CouvertureAbsente`),
+        donc un poller lancé là-dessus attendrait pour toujours.
+
+        ⓘ Cinq agrégations sont publiées pour chaque passe : `PT5M`,
+        `PT15M`, `PT30M`, `PT1H`, `PT3H`.
+        """
+        cid = f"{champ}___{run_iso.replace(':', '.')}"
+        return f"{cid}_{agregation}" if agregation else cid
+
+    def describe(self, champ, run_iso, timeout=30, agregation=None):
         """`DescribeCoverage` — LA primitive de détection de run.
 
         ✅ Mesuré le 10/08 : 5 687 octets en 0,12 s quand le run est en
@@ -324,12 +385,12 @@ class Portail:
 
         Renvoie l'arbre XML parsé, ou lève `CouvertureAbsente`.
         """
-        cid = self.id_couverture(champ, run_iso)
+        cid = self.id_couverture(champ, run_iso, agregation)
         url = (f"{self.base}/DescribeCoverage?service=WCS&version=2.0.1"
                f"&coverageid={urllib.parse.quote(cid)}")
         return ET.fromstring(self._http(url, timeout=timeout))
 
-    def existe(self, champ, run_iso):
+    def existe(self, champ, run_iso, agregation=None):
         """Le run est-il publié pour ce champ ? True / False.
 
         ⚠️ Un False ici ne prouve PAS que le run n'est pas publié : il
@@ -338,12 +399,12 @@ class Portail:
         appeler `valider_champ()` d'abord.
         """
         try:
-            self.describe(champ, run_iso)
+            self.describe(champ, run_iso, agregation=agregation)
             return True
         except CouvertureAbsente:
             return False
 
-    def valider_champ(self, champ, runs_temoins):
+    def valider_champ(self, champ, runs_temoins, agregation=None):
         """⚠️ LE GARDE-FOU CONTRE L'ATTENTE INFINIE.
 
         Vérifie que `champ` répond sur AU MOINS UN des `runs_temoins`
@@ -356,7 +417,7 @@ class Portail:
         """
         for r in runs_temoins:
             try:
-                self.describe(champ, r)
+                self.describe(champ, r, agregation=agregation)
                 return r
             except CouvertureAbsente:
                 continue
@@ -409,7 +470,7 @@ class Portail:
         return axe
 
     def get_coverage(self, champ, run_iso, instant_iso, niveau, domaine,
-                     axe=None, timeout=60):
+                     axe=None, timeout=60, agregation=None):
         """Un champ 2D en GRIB2 : UN paramètre × UN niveau × UNE échéance
         × UNE boîte. Renvoie les octets bruts — le décodage appartient à
         l'appelant, pour que ce module reste sans dépendance lourde.
@@ -443,15 +504,29 @@ class Portail:
         Lot M. Le poids suit la SURFACE, il ne suit ni le niveau ni
         l'échéance, et c'est ce qui rend l'englobante payable.
         """
-        axe = axe or self.axe_vertical(champ, run_iso)
-        cid = self.id_couverture(champ, run_iso)
+        # ⛔ `niveau=None` — LE CHAMP DE SURFACE, ET IL N'A PAS D'AXE
+        # VERTICAL DU TOUT (20/08, Lot Q2). Mesuré sur le DescribeCoverage
+        # de la prévision immédiate : `axisLabels="long lat time"`, trois
+        # axes, pas quatre. Demander `height(…)` sur un champ qui n'a pas
+        # cet axe est refusé — et le refus arrive en 404, indiscernable
+        # d'un run absent. Appeler `axe_vertical()` ici lèverait d'ailleurs
+        # tout seul (« aucun axe vertical reconnu »), ce qui est le bon
+        # comportement pour AROME et le mauvais diagnostic pour celui-ci.
+        #
+        # ⚠️ `None` et `0` ne sont PAS la même chose : `subset_niveau(axe,
+        # 0)` écrirait `height(0)`, une requête syntaxiquement valide sur
+        # un axe inexistant. C'est pourquoi le test est `is None`.
+        surface = niveau is None
+        if not surface:
+            axe = axe or self.axe_vertical(champ, run_iso)
+        cid = self.id_couverture(champ, run_iso, agregation)
         boite = subset_boite(domaine["latmin"], domaine["latmax"],
                              domaine["lonmin"], domaine["lonmax"])
         url = (f"{self.base}/GetCoverage?service=WCS&version=2.0.1"
                f"&coverageid={urllib.parse.quote(cid)}"
                f"&subset={subset_temps(instant_iso)}"
-               f"&subset={subset_niveau(axe, niveau)}"
-               f"&subset={boite}"
+               + ("" if surface else f"&subset={subset_niveau(axe, niveau)}")
+               + f"&subset={boite}"
                f"&format={FORMAT_GRIB}")
         octets = self._http(url, timeout=timeout)
         self.compteur["octets"] += len(octets)

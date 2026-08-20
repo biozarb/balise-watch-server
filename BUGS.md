@@ -6,6 +6,51 @@
 
 ---
 
+## 20/08/2026 — `zip()` tronque en silence, et écrivait un domaine sous le nom d'un autre
+
+**Contexte** : Lot Q2, écriture de la pluie à venir. `piaf.ecrire()`
+construisait sa liste de clés avec `cles_de_la_passe(p.passe)`, qui
+lisait la constante de module `DOMAINES_COUPE` **en dur**, puis appariait
+clés et corps par `zip(p.domaines, cles[1:-1])`.
+
+Tant que la passe portait les trois domaines de production, les deux
+listes avaient la même longueur et tout allait bien. Appelée avec un
+autre jeu de domaines — le banc, ou un futur `--domaines` — `zip`
+s'arrêtait **à la plus courte, sans un mot** : les octets du premier
+domaine partaient sous le nom `colonnes-nord-alpes.bin`, et la coupe
+alpine aurait affiché la pluie d'ailleurs. Aucune exception, aucune
+trace, une carte parfaitement crédible.
+
+⚠️ **Piège réutilisable** : `zip` est un troncateur silencieux, et il
+est l'outil qu'on prend d'instinct pour apparier deux listes qu'on
+« sait » de même longueur. `strict=True` existe **depuis Python 3.10
+seulement** — le Mac de ce projet tourne en 3.9, donc il ne protège pas
+là où les bancs tournent aussi. **Quand deux listes doivent avoir la même
+longueur, l'écrire en toutes lettres avant de les apparier.**
+
+**Trouvé par le banc**, pas par relecture : `test_piaf.py` construit
+volontairement une passe sur un domaine factice, et c'est le contrôle
+« les clés de la passe la plus ancienne ont été supprimées » qui a rougi.
+
+**Fix** : `cles_de_la_passe(passe, domaines)` prend les domaines en
+paramètre, et `ecrire()` compare les longueurs avant d'apparier.
+
+### Et, dans la foulée : un contrôle VERT qui ne prouvait rien
+
+`ingest_piaf.py --verifier` confronte le calque et la coupe sur les
+octets servis. Premier jet : trois points par domaine, tirés aux coins et
+au centre. Première exécution réelle → « 27 mailles confrontées, écart
+maximal 0,000e+00 » ✅ — **et pas une goutte de pluie dedans**. Zéro
+égale zéro quel que soit l'offset : le contrôle aurait été aussi vert
+avec deux jeux d'octets totalement décalés.
+
+⚠️ **Piège réutilisable** : un contrôle d'égalité sur une grandeur
+majoritairement nulle est vide tant qu'on n'a pas compté les valeurs NON
+NULLES qu'il a réellement mordues. **Publier ce compte, et dire
+« contrôle vide » plutôt qu'afficher un ✅ quand il vaut zéro.**
+
+---
+
 ## 17/08/2026 — jauge R2 : deux faux motifs dans le même mail, et le second n'était pas une pente
 
 **Contexte** : mail de 04:32 UTC, `garde-fou-r2` en ÉCHEC (code 1), deux

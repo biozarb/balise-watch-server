@@ -78,6 +78,9 @@ de la documentation Météo-France, et trois d'entre eux la contredisent.
 | `couper.py` | lire une coupe, en dessin ASCII ou en JSON |
 | `radiosondage.py`, `confronter_sondage.py` | la confrontation au ballon (étape 5 bis) |
 | `marche_raccord.py` | **mesure** la marche entre les deux mailles (critère d'acceptation) |
+| `piaf.py` | ⚠️ **le FORMAT de la pluie à venir** (Lot Q2, 20/08) : géométrie, réduction du calque, manifeste, index, purge — importé par l'ingestion et par le banc |
+| `ingest_piaf.py` | l'ingestion elle-même : 39 tranches de 5 min, une requête chacune, depuis le VPS toutes les 10 min |
+| `run-ingest-piaf.sh` | le lanceur — trois fichiers d'environnement, **verrou `flock`**, voyant healthchecks |
 | `sonde_r2.py` | sonde de droits et de purge, sur R2 réel |
 | `front_altitude.py` | **étape 10** : fabrique, pour un niveau AGL donné, la grille au format que `gfDetectModel` attend — et ne détecte rien lui-même |
 | `test_*.py` | huit bancs hors-ligne, sans réseau ni clé |
@@ -108,9 +111,10 @@ python3 agrume/test_grille.py
 python3 agrume/test_transect.py
 python3 agrume/test_composite.py
 python3 agrume/test_rafraichissement.py
+python3 agrume/test_piaf.py
 ```
 
-⚠️ **`tools/deploy-agrume-vps.sh` en rejoue 17 SUR LE VPS** avant tout
+⚠️ **`tools/deploy-agrume-vps.sh` en rejoue 18 SUR LE VPS** avant tout
 redémarrage, et s'arrête au premier échec. La liste ci-dessus est celle
 qu'on tape à la main ; c'est celle du script qui fait foi.
 
@@ -212,6 +216,101 @@ python3 agrume/rafraichissement.py --verifier        # relire ce qui est SERVI
 
 ---
 
+## La pluie à venir (Lot Q2, 20/08/2026)
+
+Ingestion de la **prévision immédiate agrégée de Météo-France**
+(Licence Ouverte 2.0), depuis le VPS, toutes les 10 minutes.
+
+> ⛔ **On CITE la source, on ne s'en réclame pas.** La licence exige
+> l'attribution (le manifeste la porte, `source.attribution`) et
+> interdit d'induire un tiers en erreur sur l'origine : le nom « PIAF »
+> désigne le produit de Météo-France, jamais ce que nous fabriquons.
+
+```
+  agrume/piaf/{passe}/carte.bin                17,8 Mo  calque, 0,02°
+                     /colonnes-nord-alpes.bin   5,6 Mo  coupe, 0,01° natif
+                     /colonnes-pyrenees.bin     4,0 Mo
+                     /colonnes-tarn-aveyron-herault.bin 1,4 Mo
+                     /manifest.json
+  agrume/piaf/index.json    ← `dernier.passe` FAIT FOI
+```
+
+**Six faits mesurés le 20/08, dont quatre démentent la documentation :**
+
+1. ⛔ grille **lat/lon 0,01°** (`2DLongLat`), pas du Lambert — aucune
+   reprojection, c'est la maille du calque vent SOL ;
+2. ⛔ **39 échéances**, 300 → 11 700 s, soit **5 → 195 min**. La
+   description du portail dit 180 ; sa propre donnée dit 195 ;
+3. ⛔ `stepType = accum`, `units = kg m**-2` ⇒ un **CUMUL en mm**,
+   malgré le mot « RATE » dans le nom de la couverture. Ne rien diviser ;
+4. ⛔ **l'instant nommé est la FIN de la tranche** (l'échéance +5 min
+   porte `stepRange = 0m-5m`) — décaler le ruban de 5 min ne lève jamais ;
+5. ⛔ **une passe toutes les 5 minutes** (1 223 écarts de 5 min sur
+   1 226, rétention 4,32 j). On en prend une sur deux : c'est notre
+   cadence, pas la sienne ;
+6. ⛔ **aucun drapeau de qualité radar n'est publié** — 256 clés eccodes
+   lues, rien. Le produit annonce qu'en dessous de 74 % de qualité radar
+   la fusion vaut AROME-PI seul ; **nous ne pouvons pas savoir quand**,
+   et le manifeste doit le dire plutôt que de laisser le silence passer
+   pour « qualité bonne ».
+
+**Trois choses à savoir avant de s'en servir.**
+
+- ⛔ **Le calque est un MAXIMUM de bloc 2×2, pas une décimation.** Pour
+  le vent, décimer est à peu près neutre — le champ est lisse. Pour la
+  pluie, une cellule d'averse d'un kilomètre tombée entre deux points
+  gardés **disparaît de l'écran alors qu'elle mouille**. Le maximum ne
+  perd jamais une cellule ; il l'élargit d'au plus 1 km. Le calque
+  SURESTIME donc l'étendue et jamais l'intensité — et la coupe, au
+  0,01° natif, donne la valeur exacte au point.
+  ⚠️ **0,025° (A19 bis) était arithmétiquement impossible** : 0,025 /
+  0,01 = 2,5, il aurait fallu interpoler entre des points publiés.
+- ⛔ **Le 0,01° n'est publié que sur les trois domaines AGRUME**, parce
+  que la coupe n'est dessinable nulle part ailleurs (elle lit UNE
+  colonne d'un `colonnes.bin` publié par domaine). Le refus « hors
+  emprise » est donc **le même que celui du produit B** — même
+  géographie, même message. Sur toute la boîte, ce jeu pèserait 65,7 Mo
+  par passe au lieu de 11.
+- ⚠️ **La boîte n'est pas celle qu'A19 écrivait.** `−1 → 9,5 E` ne
+  contient pas le domaine Pyrénées (`lonmin = −1,80`) : elle aurait
+  publié une coupe pyrénéenne tronquée de 80 colonnes, juste et muette.
+  Élargie à **42,00 → 50,01 N × −1,85 → 9,50 E**, et `latmax` est à
+  50,01 pour que les deux comptes de mailles soient **pairs** — sinon la
+  dernière maille du calque couvrirait deux fois moins de terrain que
+  ses voisines, en silence. `piaf.verifier_parite()` le contrôle.
+
+**Mesuré sur le VPS, passe `2026-08-20T09:05:00Z` :**
+
+| | valeur |
+|---|---|
+| tiré du portail | **71,07 Mo** en **16 s** (39 requêtes, médiane 0,371 s) |
+| durée totale, écriture comprise | **23 s** |
+| publié | **28,8 Mo** · 5 objets · 6 écritures (plafond 12) |
+| latence de publication du producteur | **11,9 → 12,6 min** |
+| mailles renseignées | **100,00 %** (`bitmapPresent = 0`) |
+| quota portail consommé | **3,9 req/min** sur 100 mesurées |
+| régime | 144 passes/jour ⇒ **~10 Go/jour entrants**, ~4,1 Go/jour écrits |
+
+⚠️ **« Renseigné » ne veut PAS dire « vu par un radar ».** La boîte
+déborde largement les radars français et *toutes* ses mailles portent une
+valeur : hors couverture radar, la fusion se réduit au modèle, et rien ne
+dit où passe la frontière. C'est ce qui a clos la question « resserrer la
+boîte là où la donnée est réelle » — par un **non mesuré**, pas par un
+oubli.
+
+```
+python3 agrume/ingest_piaf.py --sans-ecriture   # chiffrer sans écrire
+python3 agrume/ingest_piaf.py                   # une passe, à la main
+python3 agrume/ingest_piaf.py --verifier        # relire ce qui est SERVI
+```
+
+⚠️ `--verifier` confronte le calque et la coupe **sur les octets servis**
+et compte les mailles PLUVIEUSES de l'échantillon : sur une passe sèche
+il dit « CONTRÔLE VIDE » plutôt qu'un ✅ — zéro égale zéro quel que soit
+l'offset, et un contrôle qui n'a rien eu à mordre n'est pas une preuve.
+
+---
+
 ## La coupe verticale (étape 8, 10/08/2026)
 
 `transect.py` découpe une coupe **à la demande** dans le produit B —
@@ -291,7 +390,30 @@ ne vient jamais de la météo** — elle vient d'une conversion fausse.
 
 La seule propriété unique du VPS est d'être **allumé en permanence** :
 une Action est un cron, elle ne peut pas guetter. Le VPS **décide
-quand**, l'Action **fait le travail**. Le VPS ne touche jamais un GRIB.
+quand**, l'Action **fait le travail**.
+
+⛔ **« Le VPS ne touche jamais un GRIB » N'EST PLUS VRAI, et ne l'est
+plus depuis le Lot L.** Cette phrase décrivait le produit A/B, et elle
+reste juste pour lui : 7 Go par run, le miroir S3, un runner. Mais
+`ingest_pi.py` tire **300 champs WCS depuis le VPS toutes les heures**
+(28,3 Mo, 3,9 min) et `ingest_piaf.py` en tire **39 toutes les dix
+minutes** (71 Mo, 16 s). La ligne de partage n'est pas « le VPS ne
+télécharge pas » — c'est :
+
+| ressource rare | la machine |
+|---|---|
+| la BANDE PASSANTE et le disque (7 Go, 14 Go de disque) | le runner |
+| le QUOTA du portail — et **la clé, qui ne sort pas du VPS** | le VPS |
+| être ALLUMÉ, donc pouvoir guetter ou tenir une cadence | le VPS |
+
+⚠️ **Et la cadence est une ressource rare que GitHub ne fournit pas.**
+Mesuré le 20/08 sur les 500 derniers runs du `keepalive.yml` de ce
+dépôt : un cron `*/10` y **saute 81 % de ses créneaux** (médiane 41 min
+entre deux exécutions, p90 93 min, max 6 h 39). GitHub dégrade en
+priorité les crons les plus fréquents, donc demander `*/5` empire le
+taux. C'est ce chiffre — et lui seul — qui a fait passer l'ingestion de
+la pluie sur un timer systemd : à 53 min d'âge médian, onze des
+trente-neuf échéances d'une passe sont déjà du passé.
 
 **⛔ Et il déclenche DEUX FOIS par réseau, depuis le 14/08.**
 `bw-agrume-poller-paquets` part dès que l'archive 0–24 h est complète —

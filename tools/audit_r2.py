@@ -224,6 +224,24 @@ PRODUITS_INDEXES = (
     ("balise-watch-grids", "agrume/pi/grille/index.json", "agrume/pi/grille/"),
     ("balise-watch-grids", "agrume/pi/rafraichissement/index.json",
      "agrume/pi/rafraichissement/"),
+    # ⛔ 20/08 (Lot Q2) — LA PLUIE À VENIR ENTRE ICI DANS LE MÊME COMMIT
+    # QUE SA PUBLICATION, et c'est le produit le plus exposé des quatre :
+    # il s'écrit **144 fois par jour** (contre 24 pour le rafraîchissement
+    # et 8 pour le produit B) et pèse 28,8 Mo par passe.
+    #
+    # Le calcul qui décide de cette ligne : si la purge cessait de mordre,
+    # ce produit ajouterait **4,1 Go par jour**. La jauge était à 4,4 Go
+    # sur 10 le 17/08 — le palier serait donc franchi en un peu plus de
+    # VINGT-QUATRE HEURES. Une pente ne verrait rien avant trois relevés,
+    # c'est-à-dire trois nuits ; le rapprochement index/bucket, lui, nomme
+    # l'orphelin dès le lendemain matin.
+    #
+    # ⚠️ Et le délai de grâce joue en notre faveur ici : une passe se
+    # publie en quelques secondes, très loin des 3 h de `GRACE_EN_VOL_H`.
+    # Un objet non réclamé sous ce préfixe est donc un vrai orphelin, pas
+    # une publication en vol — contrairement au produit B, dont la
+    # publication dure une heure.
+    ("balise-watch-grids", "agrume/piaf/index.json", "agrume/piaf/"),
 )
 
 # ⚠️ LE DÉLAI DE GRÂCE — LA COURSE DU 17/08, ET POURQUOI ELLE N'EST PAS

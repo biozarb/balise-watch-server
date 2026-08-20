@@ -1,0 +1,42 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-piaf.timer — toutes les 10 minutes             (20/08/2026)
+#
+#  ⛔ POURQUOI UN TIMER SYSTEMD ET PAS UN CRON GITHUB, ET C'EST MESURÉ.
+#  Le cron `*/10` d'Actions a été relevé sur les 500 derniers runs de
+#  `keepalive.yml`, dans ce dépôt : **81 % des créneaux sautés**, médiane
+#  41 min entre deux exécutions, p90 93 min, maximum 6 h 39. GitHub
+#  dégrade en priorité les crons les plus fréquents — demander `*/5`
+#  pour compenser EMPIRE le taux de saut.
+#  À 53 min d'âge médian, onze des trente-neuf échéances d'une passe sont
+#  déjà du passé. Pour un produit qui s'appelle « prévision immédiate »,
+#  ce n'est pas un compromis, c'est un autre produit.
+#
+#  ⓘ La différence d'ingestion PURE entre les deux, elle, est dérisoire :
+#  ~14 s sur le VPS contre ~21 s sur un runner (7 s de préparation). Tout
+#  l'écart vient du DÉCLENCHEUR.
+#
+#  ⚠️ ET LE PRODUCTEUR PUBLIE TOUTES LES 5 MINUTES (mesuré : 1 223 écarts
+#  de 5 min sur 1 226). On en prend une sur deux — c'est l'arbitrage A18,
+#  et il s'achète : passer à 5 min doublerait le trafic entrant du VPS
+#  (9,5 → 19 Go/jour) pour gagner 2,5 min d'âge moyen.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — déclenche l'ingestion de la pluie à venir toutes les 10 min
+
+[Timer]
+OnCalendar=*:0/10
+# ⚠️ `Persistent=false` : au redémarrage du VPS, on NE RATTRAPE PAS les
+# passages manqués. Rattraper ingérerait une passe déjà périmée, et
+# `dernier` reculerait — le client verrait la pluie remonter le temps.
+# La passe suivante sort dans 5 minutes.
+Persistent=false
+# ⚠️ 30 s de dispersion : le timer tombe sur les minutes rondes, et le
+# producteur publie AUSSI sur les minutes rondes. Partir pile à l'instant
+# où tout le monde interroge le portail est le meilleur moyen de prendre
+# un 429 ou une connexion coupée. ⓘ La dispersion est TIRÉE UNE FOIS par
+# systemd et reste stable — elle ne fait pas dériver la cadence.
+RandomizedDelaySec=30
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
