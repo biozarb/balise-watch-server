@@ -583,6 +583,100 @@ section("8. l'axe en MINUTES, jamais en heures", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════
+// 8 bis. LES HEURES À CHEVAL — marquées, JAMAIS remplies   (20/08, soir)
+//
+//  ⛔ Le pavé du ruban a été retiré de la coupe (« le texte mange toute
+//  la place »). Ce qu'il disait de la portée se replie sur la ligne
+//  « Précipitation » — et pour que le retrait ne coûte rien, les heures
+//  que la passe ne couvre QU'EN PARTIE doivent être marquées : sinon une
+//  averse annoncée de 18:00 à 18:45 n'apparaît nulle part.
+//  ⚠️ Le piège à éviter est l'exact SYMÉTRIQUE de celui d'A15 : remplir
+//  la cellule avec une somme de 45 min. Ce banc vérifie donc autant ce
+//  que la fonction REND que ce qu'elle ne prétend PAS être.
+// ══════════════════════════════════════════════════════════════════════
+section("8 bis. les heures à cheval sur la passe", () => {
+  // Passe de 10:30 UTC, 39 tranches → 10:30 → 13:45. Entières : 11:00 et
+  // 12:00 (désignées par le manifeste). À cheval : 10:00 et 13:00.
+  const man = manifesteFactice({
+    heures_entieres: [
+      { heure: new Date(T0 + 30 * 60_000).toISOString().replace(".000", ""),
+        rangs: [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        debut_min: 30, fin_min: 90 },
+      { heure: new Date(T0 + 90 * 60_000).toISOString().replace(".000", ""),
+        rangs: [18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+        debut_min: 90, fin_min: 150 },
+    ],
+  });
+  const col = new Float32Array(39);
+  for (let r = 0; r < 6; r++) col[r] = 0.2;      // 10:30 → 11:00
+  for (let r = 6; r <= 29; r++) col[r] = 0.1;    // les deux heures entières
+  for (let r = 30; r < 39; r++) col[r] = 0.5;    // 13:00 → 13:45
+
+  const part = P.heuresPartiellesPiaf(man, col);
+  const parHeure = new Map(part.map(h => [h.heureMs, h]));
+  const h10 = parHeure.get(Date.parse("2026-08-20T10:00:00Z"));
+  const h13 = parHeure.get(Date.parse("2026-08-20T13:00:00Z"));
+
+  verifier("⛔ exactement DEUX heures à cheval — 10:00 (couverte à partir "
+    + "de 10:30) et 13:00 (couverte jusqu'à 13:45)",
+    part.length === 2 && h10 && h13,
+    part.map(h => new Date(h.heureMs).toISOString().slice(11, 16)).join(" · "));
+
+  verifier("⛔⛔ LES HEURES ENTIÈRES N'Y SONT PAS : elles appartiennent à "
+    + "`agregatHorairePiaf`, et deux marques sur la même cellule diraient "
+    + "deux choses contradictoires",
+    !parHeure.has(Date.parse("2026-08-20T11:00:00Z"))
+    && !parHeure.has(Date.parse("2026-08-20T12:00:00Z")));
+
+  verifier("⚠️ la portion couverte est DITE, en minutes : 30 sur 60 pour "
+    + "10:00, 45 sur 60 pour 13:00 — c'est ce qui interdit de lire la "
+    + "somme comme une heure",
+    h10?.minutes === 30 && h13?.minutes === 45,
+    `${h10?.minutes} · ${h13?.minutes}`);
+
+  verifier("⛔ la somme est celle des tranches COUVERTES, et d'elles "
+    + "seules : 6 × 0,2 = 1,2 mm sur 10:30→11:00, 9 × 0,5 = 4,5 mm sur "
+    + "13:00→13:45", Math.abs(h10.mm - 1.2) < 1e-6 && Math.abs(h13.mm - 4.5) < 1e-6,
+    `${h10?.mm.toFixed(2)} · ${h13?.mm.toFixed(2)}`);
+
+  verifier("⚠️ les bornes rendues sont celles de la PORTION, pas celles de "
+    + "l'heure : 10:30→11:00, jamais 10:00→11:00",
+    h10.debutMs === T0 && h10.finMs === T0 + 30 * 60_000,
+    `${new Date(h10.debutMs).toISOString().slice(11, 16)} → `
+    + `${new Date(h10.finMs).toISOString().slice(11, 16)}`);
+
+  verifier("⛔ l'heure ronde reste un epoch ENTIER, et c'est le MODULO sur "
+    + "l'epoch qui le garantit — pas un `Date.setMinutes(0)`, qui aurait "
+    + "suivi le fuseau LOCAL et cessé de recouper `heures_entieres` sur un "
+    + "décalage d'une demi-heure",
+    part.every(h => Number.isInteger(h.heureMs) && h.heureMs % 3_600_000 === 0));
+
+  const troue = new Float32Array(col);
+  troue[35] = NaN;
+  const p2 = P.heuresPartiellesPiaf(man, troue);
+  verifier("⛔ UN SEUL rang non fini retire l'heure à cheval — une somme "
+    + "trouée ne dit pas qu'elle est trouée (même règle que l'agrégat)",
+    p2.length === 1 && p2[0].heureMs === Date.parse("2026-08-20T10:00:00Z"),
+    `${p2.length} heure(s) rendue(s)`);
+
+  // ⚠️ LE SABOTAGE — la règle A15 doit rester intacte : si quelqu'un
+  // « améliore » un jour la fonction en versant les heures partielles
+  // dans l'agrégat, ce contrôle vire au rouge.
+  const agg = P.agregatHorairePiaf(man, col);
+  verifier("⛔⛔ SABOTAGE A15 : l'agrégat horaire ne connaît TOUJOURS que "
+    + "les heures entières — les heures à cheval ne s'y sont pas glissées",
+    agg.length === 2
+    && agg.every(h => h.heureMs !== Date.parse("2026-08-20T10:00:00Z")),
+    `${agg.length} heure(s) dans l'agrégat`);
+
+  const sansEntieres = P.heuresPartiellesPiaf(manifesteFactice(), col);
+  verifier("⚠️ sur une passe dont AUCUNE heure n'est entière, toutes les "
+    + "heures touchées sont partielles — et aucune n'est promue",
+    sansEntieres.length === 4,
+    sansEntieres.map(h => new Date(h.heureMs).toISOString().slice(11, 16)).join(" · "));
+});
+
+// ══════════════════════════════════════════════════════════════════════
 // 9. LES OCTETS SERVIS — la seule vérification qui compte  (--production)
 // ══════════════════════════════════════════════════════════════════════
 if (!PROD) {
