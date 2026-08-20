@@ -674,6 +674,72 @@ section("8 bis. les heures à cheval sur la passe", () => {
     + "heures touchées sont partielles — et aucune n'est promue",
     sansEntieres.length === 4,
     sansEntieres.map(h => new Date(h.heureMs).toISOString().slice(11, 16)).join(" · "));
+
+  // ══════════════════════════════════════════════════════════════════
+  // LA MICRO-FRISE — le pas de 5 min DANS la cellule d'heure
+  // ⛔ Trois états à ne jamais confondre : `null` (hors passe), `NaN`
+  // (le producteur n'a rien dit) et un nombre. Les fondre ferait lire un
+  // trou de donnée comme un bord de portée, et un bord de portée comme
+  // du beau temps.
+  // ══════════════════════════════════════════════════════════════════
+  const frises = P.frisesPiaf(man, col);
+  const fParHeure = new Map(frises.map(f => [f.heureMs, f]));
+  const f10 = fParHeure.get(Date.parse("2026-08-20T10:00:00Z"));
+  const f11 = fParHeure.get(Date.parse("2026-08-20T11:00:00Z"));
+  const f13 = fParHeure.get(Date.parse("2026-08-20T13:00:00Z"));
+
+  verifier("⛔ la frise couvre les QUATRE heures touchées, entières "
+    + "comprises — c'est la découpe complète, pas le complément des "
+    + "heures entières", frises.length === 4,
+    frises.map(f => new Date(f.heureMs).toISOString().slice(11, 16)).join(" · "));
+
+  verifier("⛔ chaque frise porte 60 / pas_min tranches, quelle que soit "
+    + "la portion couverte", frises.every(f => f.tranches.length === 12));
+
+  verifier("⛔⛔ L'INDEX EST LA MINUTE ÷ 5, PAS LE RANG. La passe de 10:30 "
+    + "commence au rang 0, mais celui-ci est la 7ᵉ tranche de l'heure "
+    + "10:00 : une frise indexée par rang aurait dessiné l'averse une "
+    + "demi-heure trop tôt",
+    // ⚠️ Tolérance, pas égalité : la colonne est un `Float32Array`, et
+    // 0,2 y vaut 0,200 000 002 98. Comparer à l'identique ferait un banc
+    // rouge sur une donnée juste — et pousserait à « corriger » le code.
+    f10.tranches.slice(0, 6).every(v => v === null)
+    && f10.tranches.slice(6).every(v => v != null && Math.abs(v - 0.2) < 1e-6),
+    JSON.stringify(f10.tranches.map(v => v == null ? null : +v.toFixed(3))));
+
+  verifier("⚠️ une heure ENTIÈREMENT couverte n'a aucune tranche `null`, "
+    + "et le manifeste seul en décide (`entiere`)",
+    f11.entiere === true && f11.tranches.every(v => v != null)
+    && f10.entiere === false);
+
+  verifier("⚠️ la queue de portée laisse des `null` à la FIN de l'heure "
+    + "(13:45 → 14:00 n'existe pas), pas au début",
+    f13.tranches.slice(0, 9).every(v => v === 0.5)
+    && f13.tranches.slice(9).every(v => v === null),
+    JSON.stringify(f13.tranches));
+
+  const avecTrou = new Float32Array(col);
+  avecTrou[8] = NaN;      // 11:10 → 11:15, dans une heure ENTIÈRE
+  const fT = P.frisesPiaf(man, avecTrou)
+    .find(f => f.heureMs === Date.parse("2026-08-20T11:00:00Z"));
+  verifier("⛔ un TROU de donnée reste distinct d'un hors-passe : `NaN` "
+    + "dans la tranche, `null` nulle part, et la somme de l'heure devient "
+    + "`NaN` — trois signaux, trois dessins",
+    Number.isNaN(fT.tranches[2]) && fT.tranches.every(v => v !== null)
+    && Number.isNaN(fT.mm));
+
+  verifier("⛔⛔ SABOTAGE — la frise et le marquage des heures à cheval "
+    + "lisent la MÊME découpe : les heures partielles sont EXACTEMENT les "
+    + "frises non entières et sans trou",
+    JSON.stringify(part.map(h => h.heureMs))
+    === JSON.stringify(frises.filter(f => !f.entiere && Number.isFinite(f.mm))
+      .map(f => f.heureMs)));
+
+  const pasImpair = manifesteFactice({ pas_min: 7 });
+  verifier("⚠️ un pas qui NE DIVISE PAS 60 rend une liste VIDE, pas un "
+    + "regroupement faux : une tranche enjamberait alors l'heure ronde, et "
+    + "toute la découpe perdrait son sens",
+    P.frisesPiaf(pasImpair, col).length === 0);
 });
 
 // ══════════════════════════════════════════════════════════════════════
