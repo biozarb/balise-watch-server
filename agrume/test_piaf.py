@@ -207,6 +207,27 @@ def banc_geometrie():
     leve(lambda: verifier_parite(dict(piaf.BOITE, latmax=50.00)),
          "une boîte à compte impair est REFUSÉE", "IMPAIR")
 
+    # ⛔ A24 (20/08) — CE QUE LA BOÎTE DOIT CONTENIR, ÉCRIT EN POINTS
+    # PLUTÔT QU'EN BORNES. Une borne recopiée de travers ne se voit pas ;
+    # « Brest est dedans » se voit. Ces quatre points sont les extrêmes
+    # de la métropole hors Corse du sud, qui reste dehors ASSUMÉE.
+    b = piaf.BOITE
+    dedans = lambda la, lo: (b["latmin"] <= la <= b["latmax"]      # noqa: E731
+                             and b["lonmin"] <= lo <= b["lonmax"])
+    for nom, la, lo in (("Ouessant (pointe ouest)", 48.46, -5.14),
+                        ("Brest", 48.39, -4.49),
+                        ("Bray-Dunes (pointe nord)", 51.09, 2.53),
+                        ("Lille", 50.63, 3.06),
+                        ("Perpignan", 42.70, 2.90),
+                        ("Bastia", 42.70, 9.45)):
+        verifie(dedans(la, lo), f"{nom} est DANS la boîte", f"{la} N, {lo} E")
+    # ⚠️ Et ce qui reste dehors est dehors EXPRÈS — le dire évite qu'on
+    # « corrige » un jour un refus qui est une décision.
+    verifie(not dedans(41.39, 9.16),
+            "⚠️ Bonifacio reste HORS boîte — la Corse du sud coûterait "
+            "0,7° de latitude sur toute la largeur (×1,60 au lieu de "
+            "×1,47), arbitrage de Yann le 20/08")
+
     # ⛔ LE DÉFAUT DU CADRAGE, transformé en banc. A19 écrivait
     # `lonmin = −1,0` ; le domaine Pyrénées descend à −1,80.
     a19_ecrit = dict(latmin=42.0, latmax=50.0, lonmin=-1.0, lonmax=9.5)
@@ -266,9 +287,11 @@ def banc_quantification():
 # ══════════════════════════════════════════════════════════════════════
 #  5. LES DEUX JEUX — décodés PAR LES RÈGLES DU MANIFESTE
 # ══════════════════════════════════════════════════════════════════════
-#: ⚠️ Une boîte de banc, minuscule. La vraie fait 802 × 1136 × 39, soit
-#: 142 Mo de float32 — un banc n'a pas à peser ça pour prouver une
-#: disposition d'octets.
+#: ⚠️ Une boîte de banc, minuscule. La vraie fait 912 × 1472 × 39, soit
+#: 209 Mo de float32 — un banc n'a pas à peser ça pour prouver une
+#: disposition d'octets. (142 Mo avant l'élargissement A24 du 20/08 : un
+#: chiffre mesuré qui vieillit sans le dire a déjà fait dériver une
+#: décision sur ce chantier.)
 BOITE_BANC = dict(latmin=44.00, latmax=44.09, lonmin=5.00, lonmax=5.09)
 DOMAINE_BANC = dict(latmin=44.02, latmax=44.06, lonmin=5.01, lonmax=5.05)
 

@@ -61,6 +61,33 @@
 #  passe à 50,01 pour que les DEUX comptes de mailles soient PAIRS —
 #  sans quoi le dernier bloc du calque serait incomplet et sa maille
 #  couvrirait deux fois moins de terrain que les autres, en silence.
+#
+#  ── A24 (20/08, soir) — LA BOÎTE S'OUVRE À L'OUEST ET AU NORD ────────
+#  Retour Yann, la carte sous les yeux : la boîte laissait dehors la
+#  Bretagne à l'ouest de Rennes (Brest, Quimper, Lorient) et la pointe
+#  nord (Lille, Calais, Dunkerque). Nouvelle boîte : **42,00 → 51,11 N ×
+#  −5,21 → 9,50 E**, soit **912 × 1 472** — ×1,473 en surface.
+#  ⓘ Ouessant est à −5,14 E et Bray-Dunes à 51,09 N : les deux bornes
+#  portent une marge d'un pas, comme −1,85 en portait une pour les
+#  Pyrénées. Les comptes restent PAIRS (912 et 1 472), et
+#  `verifier_parite` le vérifie.
+#  ⛔ ET C'EST MESURÉ, PAS SUPPOSÉ, sur les deux points qui pouvaient
+#  tuer la chaîne (20/08, une requête sur la passe 16:30 Z) :
+#    · le producteur SERT la boîte élargie — `verifier_geometrie`
+#      accepte 912 × 1 472, 100,00 % des mailles renseignées. Si le
+#      domaine natif s'était arrêté avant, CHAQUE passe aurait échoué
+#      toutes les 10 min, et le refus n'aurait été découvert qu'en
+#      production ;
+#    · le VPS tient — OVH VPS-1 2027 : **500 Mbit/s, trafic illimité**,
+#      aucun seuil de bridage publié (fiche produit lue le 20/08). Le
+#      tirage passe de 71,07 à ~105 Mo par passe, soit ~15 Go/jour
+#      entrants (~1,4 Mbit/s en moyenne, ~50 Mbit/s en pointe pendant
+#      les 40 s de tirage).
+#  ⚠️ Ce qui bougera en premier n'est PAS le réseau mais la MÉMOIRE :
+#  `MemoryPeak` du service valait 678 Mo à 802 × 1 136 (mesuré le 20/08),
+#  donc ~1,0 Go à la nouvelle taille, sur 3,4 Go disponibles. Il reste de
+#  la marge, mais elle n'est plus d'un ordre de grandeur : agrandir
+#  encore (Corse du sud, ×1,60) demanderait de la remesurer.
 # ══════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
@@ -117,8 +144,13 @@ PAS_DEG = 0.01                                 # la maille servie
 FACTEUR_CALQUE = 2                             # 0,01° → 0,02°
 PAS_CALQUE_DEG = PAS_DEG * FACTEUR_CALQUE
 
-#: L'emprise ingérée (A19, corrigée — cf. l'en-tête).
-BOITE = dict(latmin=42.00, latmax=50.01, lonmin=-1.85, lonmax=9.50)
+#: L'emprise ingérée (A19, corrigée, puis élargie par A24 — cf.
+#: l'en-tête). ⛔ Toute modification de ces quatre nombres change la
+#: géométrie SERVIE : elle doit passer par `verifier_parite`, être
+#: confrontée au domaine natif du producteur par une requête réelle
+#: (`verifier_geometrie` refuse tout écart), et son coût réseau/mémoire
+#: doit être MESURÉ avant, pas après.
+BOITE = dict(latmin=42.00, latmax=51.11, lonmin=-5.21, lonmax=9.50)
 
 #: ⛔ Les domaines où la COUPE existe, et rien d'autre. Vérifié dans le
 #: client le 20/08 : `chargerProfilAgrume` lit UNE colonne d'un
