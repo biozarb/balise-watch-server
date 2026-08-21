@@ -458,6 +458,46 @@ def obs_key(day: datetime) -> str:
     return f"obs/{day:%Y/%m}/obs_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def obswindsmobi_key(day: datetime) -> str:
+    """Le flux windsmobi (S0.2, 21/08) — clé à part, jamais dans `obs/`.
+
+    Décision 1 du cadrage : `obs/` reste Pioupiou seul, lu depuis treize
+    nuits par `score.py` (ce fichier). windsmobi a sa cadence, ses
+    variables (pas de pression, jamais) et sa géographie propres — les
+    mélanger dans un fichier déjà relu, c'était risquer de casser une
+    notation qui marche pour une donnée que personne ne note encore.
+    """
+    return f"obswindsmobi/{day:%Y/%m}/obswindsmobi_{day:%Y-%m-%d}.ndjson.gz"
+
+
+#: Toutes les clés d'observations de VENT à fusionner pour noter une
+#: journée. `obs_key` (Pioupiou) est la seule d'origine ; chaque session
+#: du S0.2 y ajoute la sienne au fil de l'eau (infoclimat, mf, aemet).
+#: ⚠️ `score.py` NE CONNAÎT AUCUN RÉSEAU PAR SON NOM au-delà de cette
+#: liste : `daily_rows`, `climatology_by_station` et le reste de la
+#: notation lisent des lignes génériques (`source`, `station_id`, `t`,
+#: `speed`…) sans jamais tester `row["source"] == "windsmobi"`. Ajouter
+#: un réseau, c'est ajouter sa fonction de clé ici — rien d'autre à
+#: toucher dans ce fichier pour qu'il entre dans le score.
+OBS_KEY_FUNCS = [obs_key, obswindsmobi_key]
+
+
+def all_obs_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
+    """Les observations de vent de TOUTES les sources, pour une journée.
+
+    Même principe que `snapshot_rows` pour les prévisions (fcst + fcst
+    AGRUME) : une fonction qui fusionne, jamais un `if` par réseau semé
+    dans le reste du fichier. Un objet absent rend `[]` (`read_ndjson`),
+    donc une source qui n'existe pas encore pour cette journée ne casse
+    rien — c'est le cas normal des quinze premières nuits de chaque
+    nouveau réseau.
+    """
+    rows: list[dict] = []
+    for key_fn in OBS_KEY_FUNCS:
+        rows += read_ndjson(root, key_fn(day), storage)
+    return rows
+
+
 def fcst_agrume_key(day: datetime) -> str:
     """Le flux AGRUME — un préfixe à part, et c'est délibéré (lot I).
 
@@ -760,11 +800,15 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
         return cached
     snapshots = {off: snapshot_rows(root, day - timedelta(days=off), storage)
                  for off in LEAD_BY_OFFSET}
-    obs_day = read_ndjson(root, obs_key(day), storage)
+    # ⚠️ TOUTES LES SOURCES DE VENT, PAS SEULEMENT PIOUPIOU — S0.2, 21/08.
+    # `all_obs_rows` fusionne `obs_key` (Pioupiou) et chaque flux ajouté
+    # depuis (windsmobi, puis infoclimat/mf/aemet) ; le reste de cette
+    # fonction ne change pas, il reçoit juste plus de lignes.
+    obs_day = all_obs_rows(root, day, storage)
     if not obs_day:
         replay_write(root, day, [])
         return []
-    obs_prev = read_ndjson(root, obs_key(day - timedelta(days=1)), storage)
+    obs_prev = all_obs_rows(root, day - timedelta(days=1), storage)
     rows, _ = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s)
     replay_write(root, day, rows)
     return rows
@@ -857,7 +901,7 @@ def climatology_by_station(root: pathlib.Path, day: datetime, storage,
     obs_by_unit_day: dict[str, dict[str, list]] = defaultdict(dict)
     for k in range(n_days):
         d = day - timedelta(days=k)
-        for row in read_ndjson(root, obs_key(d), storage):
+        for row in all_obs_rows(root, d, storage):
             unit = f"{row['source']}:{row['station_id']}"
             obs_by_unit_day[unit][d.strftime("%Y-%m-%d")] = to_obs_samples(row)
 
@@ -2166,8 +2210,9 @@ def main() -> int:
               + (f", qui ne donneront AUCUNE ligne : horizon 24 h, moins de "
                  f"{MIN_HOURS_DAILY} heures appariables à cet offset"
                  if n_ag and offset else ""))
-    obs_day = read_ndjson(root, obs_key(day), st)
-    obs_prev = read_ndjson(root, obs_key(day - timedelta(days=1)), st)
+    # ⚠️ TOUTES LES SOURCES DE VENT — cf. `all_obs_rows`, S0.2 (21/08).
+    obs_day = all_obs_rows(root, day, st)
+    obs_prev = all_obs_rows(root, day - timedelta(days=1), st)
     print(f"  observations du jour : {len(obs_day)} balises, "
           f"veille : {len(obs_prev)}")
     if not obs_day:

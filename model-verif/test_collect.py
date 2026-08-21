@@ -443,6 +443,156 @@ verifie("p01i" not in C.METAR_CHAMPS,
         "la vérité terrain d'E4 passe par Météo-France, pas par le METAR")
 
 
+# ── 10. WINDSMOBI : référentiel, historique, cadence nocturne ────────
+# ⚠️ CES DEUX FIXTURES SONT DES RÉPONSES RÉELLES ENREGISTRÉES, pas
+# fabriquées — capturées le 21/08/2026 avec le user-agent obligatoire
+# (`WINDSMOBI_UA`), UN appel par endpoint, aucune rafale :
+#   GET /stations/?provider=yvbeach&limit=0            (le référentiel)
+#   GET /stations/yvbeach-yvbeach/historic/?duration=3600  (l'historique)
+# yvbeach est un réseau à une seule balise : la réponse tient entière
+# ici, sans troncature ni paraphrase.
+import json                                             # noqa: E402
+
+_WM_REFERENTIEL_YVBEACH = json.loads(
+    '[{"_id":"yvbeach-yvbeach","alt":430,"loc":{"type":"Point",'
+    '"coordinates":[6.714839,46.80541]},"name":"Yvonand plage",'
+    '"peak":false,"pv-name":"yvbeach.com","short":"yvbeach",'
+    '"status":"green","tz":"Europe/Zurich","last":{"_id":1787312400,'
+    '"w-dir":253,"w-avg":7.6,"w-max":11.3,"temp":17.4}}]'
+)
+_WM_HISTORIC_YVBEACH = json.loads(
+    '[{"_id":1787312400,"w-dir":253,"w-avg":7.6,"w-max":11.3,"temp":17.4},'
+    '{"_id":1787311800,"w-dir":242,"w-avg":4.1,"w-max":9.7,"temp":17.1},'
+    '{"_id":1787311500,"w-dir":228,"w-avg":4.8,"w-max":9.7,"temp":16.9},'
+    '{"_id":1787310900,"w-dir":249,"w-avg":6.1,"w-max":9.7,"temp":16.4},'
+    '{"_id":1787310600,"w-dir":245,"w-avg":6.1,"w-max":9.7,"temp":16.6},'
+    '{"_id":1787310000,"w-dir":247,"w-avg":6.7,"w-max":9.7,"temp":16.6},'
+    '{"_id":1787309700,"w-dir":247,"w-avg":6.8,"w-max":9.7,"temp":16.6},'
+    '{"_id":1787309100,"w-dir":247,"w-avg":5.9,"w-max":8.0,"temp":16.4},'
+    '{"_id":1787308800,"w-dir":247,"w-avg":5.7,"w-max":8.0,"temp":16.6}]'
+)
+# Tous les `_id` de l'historique tombent le 2026-08-21 UTC (11:40 → 10:40).
+
+_wm_get_avant = C._get_json_windsmobi
+
+
+def _wm_route(referentiel_par_provider, historic_par_id, echecs_historic=()):
+    """Un faux `_get_json_windsmobi` qui distingue les deux formes
+    d'URL EXACTEMENT comme collect.py les construit — un banc qui
+    inventerait ses propres routes testerait le mock, pas l'appelant.
+    """
+    def _fake(path, timeout=60):
+        if path.startswith("/stations/?provider="):
+            provider = path.split("provider=", 1)[1].split("&", 1)[0]
+            return referentiel_par_provider.get(provider, [])
+        if "/historic/?duration=" in path:
+            sid = path.split("/stations/", 1)[1].split("/historic/", 1)[0]
+            if sid in echecs_historic:
+                raise RuntimeError("HTTP 500 (simulé)")
+            return historic_par_id.get(sid)
+        raise AssertionError(f"route windsmobi inattendue dans le test : {path}")
+    return _fake
+
+
+# ── 10.1 le référentiel : un vrai réseau, plus deux cas fabriqués pour
+#         couvrir les filtres (status, sans vent, hors BBOX) que la
+#         réponse réelle, à elle seule, ne traverse pas.
+_wm_extra = {
+    "holfuy": [
+        # station masquée : ne doit jamais entrer dans l'archive
+        {"_id": "holfuy-1", "loc": {"coordinates": [6.0, 45.5]}, "alt": 1200,
+         "status": "hidden", "last": {"_id": 1787312400, "w-avg": 3.0}},
+        # station connue mais qui n'a jamais mesuré de vent
+        {"_id": "holfuy-2", "loc": {"coordinates": [6.1, 45.6]}, "alt": 900,
+         "status": "green", "last": {"_id": 1787312400, "w-avg": None}},
+        # station hors BBOX de collect.py (BBOX lonMax = 11.0)
+        {"_id": "holfuy-3", "loc": {"coordinates": [15.0, 45.6]}, "alt": 500,
+         "status": "green", "last": {"_id": 1787312400, "w-avg": 5.0}},
+    ],
+}
+try:
+    C._get_json_windsmobi = _wm_route(
+        {"yvbeach": _WM_REFERENTIEL_YVBEACH, **_wm_extra}, {})
+    with tempfile.TemporaryDirectory() as d:
+        _cache = pathlib.Path(d) / "windsmobi_stations.json"
+        with redirect_stdout(io.StringIO()):
+            _wm_stations = C.windsmobi_stations(_cache)
+finally:
+    C._get_json_windsmobi = _wm_get_avant
+
+verifie({s["id"] for s in _wm_stations} == {"yvbeach-yvbeach"},
+        f"masquée, sans vent et hors BBOX écartées, seule la vraie balise reste — {_wm_stations}")
+_wm_st = _wm_stations[0]
+verifie(_wm_st["network"] == "yvbeach" and _wm_st["source"] == "windsmobi",
+        "réseau d'origine et source archivés sur la ligne du référentiel")
+verifie(_wm_st["lat"] == 46.8054 and _wm_st["lon"] == 6.7148,
+        f"coordonnées reprises de `loc.coordinates` (lon, lat), arrondies — {_wm_st}")
+verifie(_wm_st["elev"] == 430, "altitude reprise du champ `alt`")
+
+# ── 10.2 l'historique : tri croissant, aucune pression, cadence nocturne
+try:
+    C._get_json_windsmobi = _wm_route({}, {"yvbeach-yvbeach": _WM_HISTORIC_YVBEACH})
+    with redirect_stdout(io.StringIO()):
+        _wm_rows = list(C.windsmobi_rows(_wm_stations, "2026-08-21"))
+finally:
+    C._get_json_windsmobi = _wm_get_avant
+
+verifie(len(_wm_rows) == 1, f"une balise, une ligne — {_wm_rows}")
+_wr = _wm_rows[0]
+verifie(_wr["t"] == sorted(_wr["t"]),
+        f"winds.mobi rend le plus récent en premier — l'archive doit être croissante — {_wr['t']}")
+verifie(_wr["t"][0] == 1787308800 and _wr["t"][-1] == 1787312400,
+        f"les neuf points de la réponse réelle sont tous conservés — {_wr['t']}")
+verifie(_wr["speed"] == [5.7, 5.9, 6.8, 6.7, 6.1, 6.1, 4.8, 4.1, 7.6],
+        f"`w-avg` devient `speed`, réordonné avec `t` — {_wr['speed']}")
+verifie(_wr["gust"] == [8.0, 8.0, 9.7, 9.7, 9.7, 9.7, 9.7, 9.7, 11.3],
+        f"`w-max` devient `gust` — {_wr['gust']}")
+verifie(_wr["dir"][0] == 247 and _wr["dir"][-1] == 253,
+        f"`w-dir` devient `dir`, dans le même ordre que `t` — {_wr['dir']}")
+verifie("pres_hpa" not in _wr and "pres_kind" not in _wr,
+        "AUCUNE pression, jamais — le champ est OMIS, pas mis à None en boucle "
+        "(mesuré au cadrage : les 16 réseaux windsmobi ne disent pas leur "
+        "convention de réduction)")
+verifie(_wr.get("elev") == 430 and _wr.get("network") == "yvbeach",
+        "altitude et réseau d'origine reportés sur la ligne d'observation")
+
+# ⚠️ La fenêtre nocturne filtre par JOURNÉE CIVILE, pas seulement par
+# `WINDSMOBI_HISTORY_DURATION_S` : demander la même réponse réelle pour
+# la VEILLE (2026-08-20) doit la vider entièrement, puisque les neuf
+# points tombent tous le 21.
+try:
+    C._get_json_windsmobi = _wm_route({}, {"yvbeach-yvbeach": _WM_HISTORIC_YVBEACH})
+    with redirect_stdout(io.StringIO()):
+        _wm_rows_veille = list(C.windsmobi_rows(_wm_stations, "2026-08-20"))
+finally:
+    C._get_json_windsmobi = _wm_get_avant
+verifie(_wm_rows_veille == [],
+        "les points du 21 n'entrent pas dans l'archive du 20 — fenêtre glissante, "
+        "pas un simple 'garder ce qu'on reçoit'")
+
+# ⚠️ Un échec réseau sur UNE balise ne doit ni lever, ni polluer les
+# autres — même filet que pour `fetch_forecast`/`fetch_archive`.
+try:
+    C._get_json_windsmobi = _wm_route(
+        {}, {"yvbeach-yvbeach": _WM_HISTORIC_YVBEACH}, echecs_historic={"yvbeach-yvbeach"})
+    with redirect_stdout(io.StringIO()):
+        _wm_rows_echec = list(C.windsmobi_rows(_wm_stations, "2026-08-21"))
+finally:
+    C._get_json_windsmobi = _wm_get_avant
+verifie(_wm_rows_echec == [],
+        "une balise dont l'appel historique échoue est simplement absente de "
+        "l'archive du jour — jamais une exception qui ferait tomber le run")
+
+verifie(list(C.windsmobi_rows([], "2026-08-21")) == [],
+        "référentiel windsmobi vide → aucune requête, aucune ligne")
+
+verifie(C.WINDSMOBI_HISTORY_DURATION_S < 604800,
+        "la durée par appel n'est plus les 7 jours pleins de la version "
+        "hebdomadaire d'origine — cf. le commentaire de la constante")
+verifie("windsmobi" not in {"pioupiou"},  # garde-fou trivial, documente l'intention
+        "score.py ne doit JAMAIS tester `source == 'windsmobi'` — cf. all_obs_rows")
+
+
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")
 for m in ko:
     print(f"  ❌ {m}")

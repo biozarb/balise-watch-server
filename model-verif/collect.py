@@ -935,6 +935,226 @@ def metar_rows(stations: list[dict], day: str):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  OBSERVATIONS WINDSMOBI (vent, seize réseaux agrégés) — S0.2, 21/08
+# ══════════════════════════════════════════════════════════════════
+#
+#  Ce flux vient du cadrage `claude/lot-s0-cadrage-reseaux-21-08.md` :
+#  848 balises neuves, dont 572 dans les Alpes et 337 au-dessus de
+#  1 500 m — la seule population qui puisse dire si « aucun modèle ne
+#  bat la climatologie » (0/27 lignes massif Alpes du Nord) parle des
+#  modèles ou des balises.
+#
+#  ⛔ CADENCE : NOCTURNE, ET C'EST UN ARBITRAGE ROUVERT LE 21/08.
+#  La note de cadrage recommandait UNE PASSE PAR SEMAINE (848
+#  appels/semaine, −86 % contre un rythme nocturne) précisément pour
+#  ménager winds.mobi : CGU « Do not overload… », blacklistage SANS
+#  PRÉAVIS, monétisation interdite. Yann a rouvert cet arbitrage le
+#  21/08 et choisi la cadence nocturne — ~5 936 appels/semaine (×7) —
+#  en connaissance du risque. Ce choix est ASSUMÉ, pas un oubli.
+#
+#  ⛔ CONTRAINTES NON NÉGOCIABLES (CGU sondées le 07/08, RESEAU_WINDSMOBI.md) :
+#    - user-agent identifiant OBLIGATOIRE sur CHAQUE appel (WINDSMOBI_UA) ;
+#    - AUCUNE RAFALE : les appels par balise sont séquentiels, avec
+#      une pause (BATCH_PAUSE_S) — jamais de parallélisme ;
+#    - IL N'EXISTE PAS D'APPEL GROUPÉ POUR L'HISTORIQUE — mesuré au
+#      cadrage. Un appel par balise est la seule voie.
+#
+#  ⚠️ AUCUNE PRESSION, JAMAIS. Mesuré au cadrage : les 16 réseaux
+#  sources ne disent pas leur convention de réduction. Les champs
+#  `pres_hpa`/`pres_kind` du schéma de décision 1 sont donc OMIS des
+#  lignes windsmobi plutôt que remplis de `None` en boucle — un champ
+#  absent dit « sans objet », une colonne de `None` se relirait un jour
+#  comme une collecte manquée.
+#
+#  ⚠️ AUCUN DÉDOUBLONNAGE À L'ARCHIVAGE (décision 2 du cadrage). Les
+#  ~305 doublons FFVL/Pioupiou à moins de 180 m sont écartés côté ÉCRAN
+#  (`windsmobiIsDuplicate` dans index.js) parce qu'un marqueur en double
+#  y est une régression. Côté archive, deux capteurs à 50 m qui mesurent
+#  différemment sont une information : c'est la matière du S3.
+
+WINDSMOBI_API = "https://winds.mobi/api/2"
+WINDSMOBI_UA = "balise-watch.app (biozarb@gmail.com)"
+#: Mêmes seize réseaux que `refreshWindsmobiProviders` (index.js) —
+#: copie assumée, comme `tools/sonde_windsmobi.mjs` le fait déjà : si
+#: quelqu'un change cette liste côté serveur sans toucher collect.py,
+#: l'archive divergera silencieusement de ce que l'app affiche. À
+#: vérifier à l'œil si les deux s'écartent d'un coup.
+WINDSMOBI_PROVIDERS_FAST = ["holfuy", "ffvl"]
+WINDSMOBI_PROVIDERS_SLOW = [
+    "slf", "meteoswiss", "windspots", "aletsch", "windball", "windline",
+    "iweathar", "pgsonda", "gxaircom", "pdcs", "yvbeach", "thunerwetter",
+    "kachelmannwetter", "wunderground",
+]
+WINDSMOBI_PROVIDERS = WINDSMOBI_PROVIDERS_FAST + WINDSMOBI_PROVIDERS_SLOW
+
+#: Durée d'historique redemandée à CHAQUE appel nocturne, en secondes.
+#: ⚠️ CHOIX D'IMPLÉMENTATION, PAS UN ARBITRAGE DE YANN — lui a tranché
+#: nocturne vs hebdomadaire (cadence), pas la durée par appel (payload).
+#: 48 h et pas les 604 800 s (7 j) de la version hebdomadaire d'origine :
+#: la cadence nocturne n'a plus qu'à couvrir la nuit ratée d'avant, pas
+#: une semaine entière — demander 7 j chaque nuit multiplierait le
+#: payload par ~28 sans changer le nombre d'appels, ce que rien dans
+#: l'arbitrage du 21/08 ne demandait. 48 h reprend l'ordre de grandeur
+#: déjà choisi pour la marge MF/AEMET (§1.4 du cadrage). À raccourcir si
+#: la charge s'avère un problème mesuré, à rallonger si des nuits
+#: manquées se révèlent fréquentes — mais alors le dire à Yann, ce n'est
+#: plus un détail d'implémentation.
+WINDSMOBI_HISTORY_DURATION_S = 48 * 3600
+
+
+def _get_json_windsmobi(path: str, timeout: int = 60):
+    """GET sur l'API windsmobi, AVEC le user-agent obligatoire.
+
+    ⚠️ Pas `_get_json` : ce garde-fou-là est pour Open-Meteo (piège du
+    `{"error": true}` en HTTP 200). windsmobi a son propre risque — le
+    blacklistage sans préavis d'une IP qui ne s'identifie pas — d'où un
+    header dédié plutôt qu'un paramètre optionnel sur la fonction
+    générique, pour qu'un appel windsmobi sans user-agent soit
+    impossible à écrire par erreur.
+    """
+    req = urllib.request.Request(f"{WINDSMOBI_API}{path}",
+                                 headers={"user-agent": WINDSMOBI_UA})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def windsmobi_stations(cache: pathlib.Path) -> list[dict]:
+    """Le référentiel des balises windsmobi, avec cache sur disque.
+
+    SEIZE appels (`/stations/?provider=<p>&limit=0`), un par réseau —
+    pas 848 : celui-ci ne demande que position et dernier relevé, pas
+    l'historique. Même filet que `metar_stations` : un réseau injoignable
+    ne fait pas tomber le run, et le cache d'hier prend le relais si
+    aucun des seize ne répond.
+
+    Filtré sur la MÊME `BBOX` que le reste de collect.py — PAS
+    `WINDSMOBI_BOX` d'index.js, plus large, qui sert l'écran et pas
+    l'archive. C'est la `BBOX` de collect.py que le cadrage du 21/08 a
+    mesurée (901 balises en boîte, 848 neuves).
+
+    Les stations `red`/`hidden` ou n'ayant jamais mesuré de vent
+    (`last['w-avg']` absent) sont écartées : pas un dédoublonnage, un
+    filtre de vivacité — leur historique ne rendrait que des lignes
+    vides, comme `refreshWindsmobiProviders` le fait déjà côté serveur.
+    """
+    stations, echecs = {}, []
+    for provider in WINDSMOBI_PROVIDERS:
+        try:
+            rows = _get_json_windsmobi(f"/stations/?provider={provider}&limit=0")
+        except Exception as exc:                       # noqa: BLE001
+            echecs.append(f"{provider} ({exc})")
+            continue
+        if not isinstance(rows, list):
+            echecs.append(f"{provider} (réponse inattendue)")
+            continue
+        for s in rows:
+            coords = ((s.get("loc") or {}).get("coordinates")) or []
+            if len(coords) < 2:
+                continue
+            lon, lat = float(coords[0]), float(coords[1])
+            if not (BBOX[0] <= lat <= BBOX[2] and BBOX[1] <= lon <= BBOX[3]):
+                continue
+            if s.get("status") in ("red", "hidden"):
+                continue
+            last = s.get("last") or {}
+            if last.get("w-avg") is None:
+                continue
+            sid = s.get("_id")
+            if sid is None:
+                continue
+            stations[sid] = {
+                "id": str(sid), "source": "windsmobi", "network": provider,
+                "lat": round(lat, 4), "lon": round(lon, 4),
+                "elev": s.get("alt"),
+                "name": (s.get("name") or s.get("short") or str(sid))[:60],
+            }
+    if echecs:
+        print(f"  ⚠️  référentiel windsmobi incomplet — {', '.join(echecs)}",
+              file=sys.stderr)
+    if stations:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sorted(stations.values(), key=lambda s: s["id"]),
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
+        return list(stations.values())
+    if cache.exists():
+        anciennes = json.loads(cache.read_text(encoding="utf-8"))
+        print(f"  ⚠️  aucun réseau windsmobi joignable — on repart du cache "
+              f"({len(anciennes)} balises)", file=sys.stderr)
+        return anciennes
+    return []
+
+
+def windsmobi_historic(station_id: str) -> list | None:
+    """Un appel : l'historique d'UNE balise, `WINDSMOBI_HISTORY_DURATION_S`
+    de recul depuis maintenant. Pas d'appel groupé possible — mesuré au
+    cadrage du 21/08.
+    """
+    path = f"/stations/{urllib.parse.quote(station_id, safe='')}/historic/?duration={WINDSMOBI_HISTORY_DURATION_S}"
+    try:
+        rows = _get_json_windsmobi(path, timeout=30)
+    except Exception as exc:                           # noqa: BLE001
+        print(f"  ⚠️ windsmobi historic {station_id} : {exc}", file=sys.stderr)
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def windsmobi_rows(stations: list[dict], day: str):
+    """Une journée de windsmobi, un appel PAR BALISE, séquentiel.
+
+    ⚠️ AUCUNE RAFALE : `BATCH_PAUSE_S` entre deux appels, la même pause
+    que pour Pioupiou — winds.mobi n'a pas de quota chiffré au-delà de
+    « ne pas surcharger », donc on reprend la prudence déjà choisie pour
+    un autre tiers gratuit plutôt que d'inventer un chiffre.
+
+    winds.mobi rend l'historique le plus RÉCENT en premier et horodate
+    en SECONDES (`_id`) — on retrie par `t` croissant, et on ne garde
+    que les points tombant dans la journée civile UTC demandée : l'appel
+    ramène `WINDSMOBI_HISTORY_DURATION_S` de recul depuis MAINTENANT,
+    pas une fenêtre calée sur `day`.
+
+    Vitesse et rafale sont DÉJÀ en km/h — vérifié par
+    `tools/sonde_windsmobi.mjs` (comparaison à 39 balises Pioupiou vues
+    des deux côtés, à l'horodatage identique) : aucune conversion.
+
+    ⛔ Aucun champ `pres_hpa`/`pres_kind` — cf. l'en-tête de section.
+    """
+    if not stations:
+        return
+    debut = int(datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    fin = debut + 86400
+    for i, st in enumerate(stations, 1):
+        rows = windsmobi_historic(st["id"])
+        time.sleep(BATCH_PAUSE_S)
+        if not rows:
+            continue
+        t, speed, gust, direction = [], [], [], []
+        for p in rows:
+            ts = p.get("_id") if isinstance(p, dict) else None
+            if not isinstance(ts, (int, float)):
+                continue
+            ts = int(ts)
+            if ts < debut or ts >= fin:
+                continue
+            t.append(ts)
+            speed.append(p.get("w-avg"))
+            gust.append(p.get("w-max"))
+            direction.append(p.get("w-dir"))
+        if not t or all(v is None for v in speed):
+            continue
+        order = sorted(range(len(t)), key=lambda k: t[k])
+        yield {
+            "station_id": st["id"], "source": "windsmobi", "network": st["network"],
+            "lat": st["lat"], "lon": st["lon"], "elev": st["elev"],
+            "t": [t[k] for k in order],
+            "speed": [speed[k] for k in order],
+            "gust": [gust[k] for k in order],
+            "dir": [direction[k] for k in order],
+        }
+        if i % 50 == 0:
+            print(f"  … {i}/{len(stations)}")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ÉCRITURE
 # ══════════════════════════════════════════════════════════════════
 
@@ -1073,6 +1293,8 @@ def main() -> int:
     ap.add_argument("--skip-obs", action="store_true")
     ap.add_argument("--skip-metar", action="store_true",
                     help="saute les observations d'aérodrome (flux rattrapable)")
+    ap.add_argument("--skip-windsmobi", action="store_true",
+                    help="saute les observations windsmobi (rétroactif 48h chez la source)")
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
@@ -1243,6 +1465,28 @@ def main() -> int:
         except Exception as exc:                       # noqa: BLE001
             print(f"⚠️ passe METAR abandonnée ({exc!r}) — flux rattrapable, "
                   f"le reste du run n'est pas affecté", file=sys.stderr)
+
+    # ── 2 ter. OBSERVATIONS WINDSMOBI ─────────────────────────────
+    # ⚠️ NOCTURNE depuis le 21/08 (arbitrage rouvert par Yann) — voir
+    # l'en-tête de section pour ce que ça coûte et pourquoi c'est assumé.
+    # Comme METAR : un échec ici ne doit jamais faire tomber le run,
+    # c'est un ajout et non une brique dont dépend le score actuel.
+    if not args.skip_windsmobi:
+        try:
+            d = datetime.strptime(obs_day, "%Y-%m-%d")
+            key = f"obswindsmobi/{d:%Y/%m}/obswindsmobi_{obs_day}.ndjson.gz"
+            path = out / key
+            balises = windsmobi_stations(out / "windsmobi_stations.json")
+            if args.limit:
+                balises = balises[: args.limit]
+            print(f"▶ windsmobi du {obs_day} : {len(balises)} balises → {path}")
+            n = write_ndjson_gz(path, windsmobi_rows(balises, obs_day))
+            print(f"✅ {n} balises servies sur {len(balises)}, "
+                  f"{path.stat().st_size / 1024:.0f} Ko")
+            upload_r2(path, key)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"⚠️ passe windsmobi abandonnée ({exc!r}) — flux rattrapable "
+                  f"48h, le reste du run n'est pas affecté", file=sys.stderr)
 
     # ── 3. L'ARCHIVE EST-ELLE VRAIMENT À L'ABRI ? ─────────────────
     # Une seule règle, en fin de run, plutôt qu'un test à chaque envoi :
