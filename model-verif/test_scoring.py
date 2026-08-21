@@ -263,6 +263,118 @@ def unit_tests():
     med, lo, hi = S.bootstrap_ci(vals)
     check("… et l'intervalle encadre bien la médiane", lo <= med <= hi, True)
 
+    _unit_pression()
+
+
+def _unit_pression():
+    """Le bloc PRESSION (lot S1, 21/08) — dans la langue de son appelant.
+
+    L'appelant, c'est `score.py::pressure_rows`, qui lit une ARCHIVE :
+    des séries horaires, des `pres_kind` qui peuvent manquer, des
+    températures qui peuvent manquer. Le banc parle cette langue-là.
+    """
+    print("\n── 1 bis. la pression (S1) ──")
+
+    # ── la physique, aux deux bouts ──
+    check("QNH = QFF au niveau de la mer à 15 °C (atmosphère standard)",
+          round(S.qnh_to_qff(1013.25, 0, 15.0), 6), 1013.25)
+    chaud = S.qnh_to_qff(1018.0, 500, 20.0)
+    froid = S.qnh_to_qff(1018.0, 500, -10.0)
+    check("le QFF d'une même station dépend de la température",
+          round(froid - chaud, 2) > 0, True)
+    # C'est le chiffre que `pressure.ts` annonce (2,4 hPa entre deux
+    # stations de même altitude séparées par 15 K) : on vérifie l'ORDRE
+    # DE GRANDEUR, pas une décimale, parce que c'est lui qui justifie
+    # que le S1 convertisse au lieu de comparer des QNH bruts.
+    check("… et l'écart est de quelques hPa pour 30 K",
+          4.0 <= froid - chaud <= 9.0, True)
+
+    # ── les refus, un par un ──
+    check("QNH sans température : refusé, PAS rabattu sur le brut",
+          S.to_qff(1018.0, "qnh", 500, None), (None, "no-temp"))
+    check("au-dessus du plafond : refusé (cas Samedan)",
+          S.to_qff(1025.0, "qnh", 1708, 0.0), (None, "too-high"))
+    check("pile au plafond : accepté", S.to_qff(1015.0, "qff", 1000, None),
+          (1015.0, None))
+    check("`pres_kind` inconnu : refusé et comptable",
+          S.to_qff(1015.0, "unknown", 137, 5.0), (None, "unknown-kind"))
+    check("`pres_kind` absent : idem", S.to_qff(1015.0, "", 137, 5.0),
+          (None, "unknown-kind"))
+    check("sans altitude : refusé", S.to_qff(1015.0, "qnh", None, 5.0),
+          (None, "no-elev"))
+    check("valeur absente : refusée, et surtout pas 0",
+          S.to_qff(None, "qff", 137, 5.0), (None, "no-value"))
+    check("QFF natif : rendu tel quel, sans conversion",
+          S.to_qff(1015.3, "qff", 137, None), (1015.3, None))
+
+    # ── l'appariement horaire ──
+    t0 = 0
+    heures = [t0 + h * 3_600_000 for h in range(24)]
+    obs = [S.PresSample(t=t0 + h * 3_600_000 + 5 * 60_000, qff=1010.0 + 0.5 * h)
+           for h in range(24)]
+    modele = [1010.0 + 0.5 * h for h in range(24)]
+    pr = S.pair_pressure(heures, modele, obs)
+    check("24 heures appariées", len(pr), 24)
+    check("modèle parfait → erreur nulle", S.pressure_error(pr), 0.0)
+    check("… et tendance parfaite aussi", S.tendency_error(pr), 0.0)
+
+    # ⛔ CE QUE LA SPEC DU S1 ANNONÇAIT EST ARITHMÉTIQUEMENT FAUX, et ce
+    # banc le montre plutôt que de le contourner. Elle demandait « une
+    # journée fabriquée où le modèle suit l'observation à 0,3 hPa près
+    # mais avec 3 h de retard → `pres_err_med` petit, `ptend_err_med`
+    # grand ». Mesuré ici (et dans `/tmp/s1_verif_spec.py`, 21/08) :
+    #
+    #   · front de 6 h sur une journée sinon plate, retard 3 h :
+    #     pres_err_med = 0,300 et ptend_err_med = **0,000** — l'INVERSE.
+    #     Les deux sont des MÉDIANES journalières, et dix-huit heures de
+    #     plateau les écrasent toutes les deux ;
+    #   · passage synoptique continu, retard 3 h : pres_err_med = 2,68
+    #     et ptend_err_med = 2,07 — la tendance est plus PETITE en hPa.
+    #
+    # Ce qui est vrai, et que ce banc vérifie, c'est la comparaison de
+    # chaque erreur À SON PROPRE SIGNAL : un retard coûte 55 % de
+    # l'amplitude de la tendance contre 27 % de l'amplitude de la
+    # pression. Les deux métriques ne se départagent pas en hPa, elles
+    # se départagent sur CE QU'ELLES VOIENT (cas suivant).
+    obs_sin = [S.PresSample(t=t0 + h * 3_600_000,
+                            qff=1015.0 + 5.0 * math.sin(2 * math.pi * h / 24.0))
+               for h in range(24)]
+    mod_retard = [1015.0 + 5.0 * math.sin(2 * math.pi * (h - 3) / 24.0) + 0.3
+                  for h in range(24)]
+    pr2 = S.pair_pressure(heures, mod_retard, obs_sin)
+    err = S.pressure_error(pr2)
+    ten = S.tendency_error(pr2)
+    amp_p = 10.0                       # crête à crête de la sinusoïde
+    amp_t = max(abs(obs_sin[h].qff - obs_sin[h - 3].qff) for h in range(3, 24))
+    check("retard de 3 h : la tendance en paie une part BIEN plus grande",
+          (ten / amp_t) > 1.7 * (err / amp_p), True)
+    check("… et en hPa bruts, c'est l'absolu qui est le plus grand "
+          "(contrairement à ce qu'annonçait la spec)", err > ten, True)
+
+    # LE CAS QUI DÉPARTAGE VRAIMENT LES DEUX MÉTRIQUES — un décalage
+    # CONSTANT de station (le cas Infoclimat, σ de calage 2,60 hPa
+    # mesuré le 21/08) : l'absolu le voit en entier, la tendance
+    # l'annule exactement. C'est ce qui autorise Infoclimat sur l'une et
+    # le lui interdit sur l'autre.
+    obs_decale = [S.PresSample(t=o.t, qff=o.qff + 2.6) for o in obs]
+    pr3 = S.pair_pressure(heures, modele, obs_decale)
+    check("offset de calage : l'erreur absolue le voit en entier",
+          round(S.pressure_error(pr3), 6), 2.6)
+    check("… et la tendance l'annule complètement",
+          S.tendency_error(pr3), 0.0)
+
+    # ── ce que l'appariement refuse ──
+    check("aucun relevé dans la fenêtre → heure ABSENTE, pas comblée",
+          len(S.pair_pressure(heures, modele,
+                              [S.PresSample(t=t0 + 45 * 60_000, qff=1010.0)])), 1)
+    check("série modèle vide → aucune paire",
+          S.pair_pressure(heures, [None] * 24, obs), [])
+    check("aucune paire → None, jamais 0",
+          (S.pressure_error([]), S.tendency_error([])), (None, None))
+    # Une seule heure : pas de t−3h, donc pas de tendance CALCULABLE.
+    check("moins de 3 h d'archive → tendance None, pas 0",
+          S.tendency_error(pr[:2]), None)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  2. FIXTURES DE PARITÉ
@@ -400,6 +512,31 @@ def build_fixtures():
             {"steps": [[1.2, 5 * DAY_MS], [1.2, 5 * DAY_MS], [1.3, 4 * DAY_MS]],
              "halfLifeDays": 30, "reference": 1.0},
         ],
+        # ── PRESSION (lot S1, 21/08) ──────────────────────────────
+        # ⚠️ Ces quatre sections tiennent le portage de `pressure.ts`.
+        # Les altitudes vont de 0 à 1 700 m EXPRÈS : 1 708 m est
+        # l'altitude de Samedan, le cas qui a fixé `PRESSURE_MAX_ALT`.
+        "qnhToStation": [[1013.25, 0], [1013.25, 500], [1025, 1708],
+                         [990.5, 137], [1030, 999]],
+        "stationToQff": [[1013.25, 0, 15], [954.6, 500, 20],
+                         [954.6, 500, -10], [997.0, 137, 5.5]],
+        "qnhToQff": [[1013.25, 0, 15], [1013.25, 500, 20],
+                     [1013.25, 500, -10], [1018, 137, 5.5], [1025, 999, 0]],
+        "normalizePressure": [
+            # QFF natif : rendu tel quel.
+            {"raw": 1015.3, "kind": "qff", "elev": 137, "tempC": 5.5},
+            # QNH converti — les deux températures qui encadrent l'écart
+            # de 2,4 hPa chiffré côté serveur.
+            {"raw": 1018.0, "kind": "qnh", "elev": 500, "tempC": 20.0},
+            {"raw": 1018.0, "kind": "qnh", "elev": 500, "tempC": -10.0},
+            # QNH sans température : refus `no-temp`, JAMAIS le brut.
+            {"raw": 1018.0, "kind": "qnh", "elev": 500, "tempC": None},
+            # Au-dessus du plafond : refus `too-high` (le cas Samedan).
+            {"raw": 1025.0, "kind": "qnh", "elev": 1708, "tempC": 0.0},
+            {"raw": 1015.0, "kind": "qff", "elev": 1001, "tempC": 0.0},
+            # Pile au plafond : accepté (borne inclusive des deux côtés).
+            {"raw": 1015.0, "kind": "qff", "elev": 1000, "tempC": 0.0},
+        ],
     }
 
 
@@ -462,6 +599,21 @@ def python_results(fx):
               "occurrences": s["occurrences"]} for s in c["scores"]],
             c["minRelativeGap"])
         out["rankByRegime"].append([key, reason])
+    out["qnhToStation"] = [r(S.qnh_to_station(q, e)) for q, e in fx["qnhToStation"]]
+    out["stationToQff"] = [r(S.station_to_qff(p, e, t))
+                           for p, e, t in fx["stationToQff"]]
+    out["qnhToQff"] = [r(S.qnh_to_qff(q, e, t)) for q, e, t in fx["qnhToQff"]]
+    # ⚠️ On ne compare QUE le vocabulaire commun aux deux portages.
+    # Le Python en dit plus (`no-value`, `unknown-kind`, `no-elev`) parce
+    # qu'il lit une ARCHIVE, où ces trois cas existent ; le TS lit une
+    # route déjà typée. Comparer un vocabulaire plus riche à un plus
+    # pauvre ferait échouer la parité sur une différence qui n'est pas
+    # une divergence — et les fixtures ci-dessus n'exercent aucun des
+    # trois (c'est `unit_tests` qui s'en charge).
+    out["normalizePressure"] = []
+    for c in fx["normalizePressure"]:
+        qff, motif = S.to_qff(c["raw"], c["kind"], c["elev"], c["tempC"])
+        out["normalizePressure"].append([r(qff), motif])
     out["classifyRegime"] = [S.classify_regime(c, d, s)
                              for c, d, s in fx["classifyRegime"]]
     out["dominantRegime"] = [

@@ -692,3 +692,235 @@ def is_regular(acc: Accumulator, reference: float,
 def is_announceable(acc: Accumulator, reference: float) -> bool:
     """Les deux conditions réunies — bien déterminé ET reproductible."""
     return is_significant(acc, reference) and is_regular(acc, reference)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PRESSION (E6) — lot S1, 21/08/2026
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⚠️ CE BLOC EST UN PORTAGE, PAS UNE TROISIÈME ÉCRITURE.
+#
+#  La physique QNH → QFF existe déjà, en TypeScript, dans
+#  `web/src/lib/pressure.ts` (vérifiée par `scripts/verify-pressure.mjs`)
+#  et générée en `balise-watch-server/lib/pressure.cjs` pour le serveur
+#  (contrôle de dérive : `node tools/verify-pressure-sync.mjs`). Ce qui
+#  suit en est le JUMEAU PYTHON, et il est tenu par le banc de parité
+#  (`test_scoring.py` + `web/scripts/parity-scoring.ts`), exactement
+#  comme `verifScore.ts` l'est déjà. Toute correction ici doit partir
+#  du TS, pas y arriver.
+#
+#  ⛔ POURQUOI ICI ET PAS DANS `score.py`. La spec du S1 laissait le
+#  choix « portage avec banc de parité » ou « conversion locale dans
+#  score.py, rien côté TS ». Le portage l'emporte parce que la
+#  conversion ne sert pas qu'à la notation : le S2 en aura besoin pour
+#  l'offset de station, et une conversion écrite dans `score.py` serait
+#  la QUATRIÈME copie le jour où quelqu'un d'autre en a besoin.
+#
+#  ⚠️ ET LA CONSTANTE D'ALTITUDE N'EST PAS UN GARDE-FOU DE CONFORT.
+#  `PRESSURE_MAX_ALT = 1000` vient de `pressure.ts` (03/08) : Samedan
+#  (LSZS, 1 708 m) annonçait Q1025 quand toute la Suisse était entre
+#  Q1013 et Q1018, et restait 2 à 3 hPa au-dessus de ses voisins MÊME
+#  APRÈS conversion en QFF. Une réduction au niveau de la mer depuis
+#  1 700 m est une fiction, pas une mesure imprécise.
+
+#: Atmosphère standard ISA — valeurs reprises À L'IDENTIQUE de
+#: `pressure.ts`. Les changer d'un côté sans l'autre casse la parité,
+#: ce qui est exactement le but du banc.
+ISA_T0 = 288.15          # K
+ISA_LAPSE = 0.0065       # K/m
+ISA_EXP = 5.25588        # = g / (R_d · lapse)
+G_ACC = 9.80665          # m/s²
+R_D = 287.05             # J/(kg·K)
+
+#: cf. `pressure.ts` — mêmes noms, mêmes valeurs, même raison.
+PRESSURE_MAX_ALT = 1000.0
+QFF_CONVERSION_UNCERTAINTY_HPA = 0.3
+QFF_NATIVE_UNCERTAINTY_HPA = 0.05
+
+#: Les conventions de réduction qu'on sait traiter. `unknown` n'en est
+#: PAS une : une pression dont on ignore la convention ne s'apparie pas,
+#: elle se COMPTE (cf. `to_qff`, qui rend un motif).
+PRES_KINDS = ("qff", "qnh", "station")
+
+#: L'écart de tendance se mesure sur 3 h — c'est l'échelle à laquelle un
+#: front se voit passer, et celle que le S0.1 a mesurée (|Δ3h| médian
+#: observé : 0,668 hPa chez MF, 0,867 chez Infoclimat, le 21/08).
+PTEND_HOURS = 3
+
+
+def qnh_to_station(qnh: float, elev: float) -> float:
+    """QNH → pression station, en remontant l'atmosphère standard.
+
+    C'est l'inverse exact de la définition du QNH : le calage
+    altimétrique qui, en atmosphère standard, ferait afficher l'altitude
+    du terrain.
+    """
+    return qnh * (1.0 - (ISA_LAPSE * elev) / ISA_T0) ** ISA_EXP
+
+
+def station_to_qff(p_sta: float, elev: float, temp_c: float) -> float:
+    """Pression station → QFF, colonne d'air à la température RÉELLE.
+
+    Toute la différence avec le QNH est là : la colonne fictive sous une
+    station est plus légère quand il fait chaud, donc la réduction est
+    plus faible. `T_moy` approxime la température moyenne de la colonne
+    par celle de la station corrigée d'un demi-gradient standard.
+    """
+    t_mean = temp_c + 273.15 + (ISA_LAPSE * elev) / 2.0
+    return p_sta * math.exp((G_ACC * elev) / (R_D * t_mean))
+
+
+def qnh_to_qff(qnh: float, elev: float, temp_c: float) -> float:
+    """QNH → QFF en une passe."""
+    return station_to_qff(qnh_to_station(qnh, elev), elev, temp_c)
+
+
+def to_qff(raw: float | None, kind: str, elev: float | None,
+           temp_c: float | None = None,
+           max_alt: float = PRESSURE_MAX_ALT) -> tuple[float | None, str | None]:
+    """Ramène n'importe quel relevé en QFF. Rend `(qff, motif_de_refus)`.
+
+    ⛔ TROIS REFUS EXPLICITES, tous volontaires — mieux vaut pas de
+    chiffre qu'un chiffre faux, et le motif remonte pour être COMPTÉ :
+
+      · `too-high`  — station au-dessus de `max_alt` (le cas Samedan) ;
+      · `no-temp`   — un QNH sans température. On ne se rabat SURTOUT
+        PAS sur le QNH brut « faute de mieux » : ce serait exactement le
+        mélange de conventions que tout ce bloc existe pour empêcher
+        (2,4 hPa d'écart entre deux stations de même altitude séparées
+        par 15 K, chiffré côté serveur) ;
+      · `unknown-kind` — `pres_kind` absent ou inconnu. La spec du S1 le
+        dit : « si `pres_kind` est inconnu, on n'apparie pas, on
+        compte ».
+
+    ⚠️ `elev` EST L'ALTITUDE DÉCLARÉE PAR LA SOURCE, pas `dem_alt_m`.
+    Se tromper de 28 m décalait Lugano de 3,3 hPa (03/08). `dem_alt_m`
+    sert aux SEUILS d'appariement (`geopair`), jamais à la conversion.
+    """
+    if raw is None or not _finite(raw):
+        return None, "no-value"
+    if kind not in PRES_KINDS:
+        return None, "unknown-kind"
+    if elev is None or not _finite(elev):
+        return None, "no-elev"
+    if elev > max_alt:
+        return None, "too-high"
+    if kind == "qff":
+        return float(raw), None
+    if temp_c is None or not _finite(temp_c):
+        return None, "no-temp"
+    if kind == "qnh":
+        return qnh_to_qff(float(raw), float(elev), float(temp_c)), None
+    return station_to_qff(float(raw), float(elev), float(temp_c)), None
+
+
+@dataclass(frozen=True)
+class PresSample:
+    """Un relevé de pression DÉJÀ ramené en QFF (hPa)."""
+    t: int              # ms
+    qff: float
+
+
+@dataclass(frozen=True)
+class PresPair:
+    """Une heure appariée : le modèle et l'observation, tous deux en QFF."""
+    t: int
+    fcst_hpa: float
+    obs_hpa: float
+    n_obs: int
+
+
+def mean_pressure(samples: Sequence[PresSample]) -> tuple[float | None, int]:
+    """Moyenne arithmétique — et là, contrairement au vent, c'est juste.
+
+    Une pression n'est pas une grandeur circulaire ; le piège du
+    `mean_wind` (350° + 10° = 180°) n'existe pas ici. On garde quand
+    même une fonction nommée pour que l'appariement se lise pareil des
+    deux côtés.
+    """
+    vals = [s.qff for s in samples if _finite(s.qff)]
+    if not vals:
+        return None, 0
+    return sum(vals) / len(vals), len(vals)
+
+
+def pair_pressure(times: Sequence[int],
+                  fcst_hpa: Sequence[float | None],
+                  obs: Sequence[PresSample],
+                  half_window_ms: int = OBS_HALF_WINDOW_MS) -> list[PresPair]:
+    """Même fenêtre que le vent (±20 min), et c'est délibéré.
+
+    Non pas parce que la pression aurait besoin de la même tolérance —
+    elle varie bien plus lentement — mais parce que deux fenêtres
+    différentes rendraient `n_hours` incomparable d'une variable à
+    l'autre sur la même balise-jour, et personne ne le verrait.
+
+    Les heures sans relevé sont ABSENTES, jamais interpolées.
+    """
+    if not times or not obs:
+        return []
+    ordered = sorted(obs, key=lambda o: o.t)
+    out: list[PresPair] = []
+    lo = 0
+    for i, t in enumerate(times):
+        f = fcst_hpa[i] if i < len(fcst_hpa) else None
+        if not _finite(f):
+            continue
+        while lo < len(ordered) and ordered[lo].t < t - half_window_ms:
+            lo += 1
+        win = []
+        j = lo
+        while j < len(ordered) and ordered[j].t <= t + half_window_ms:
+            win.append(ordered[j])
+            j += 1
+        if not win:
+            continue
+        m, n = mean_pressure(win)
+        if m is None:
+            continue
+        out.append(PresPair(t=t, fcst_hpa=float(f), obs_hpa=m, n_obs=n))
+    return out
+
+
+def pressure_error(pairs: Sequence[PresPair]) -> float | None:
+    """`pres_err_med` — erreur absolue médiane en hPa.
+
+    ⛔ NE SE CALCULE QUE SUR DES BAROMÈTRES CALIBRÉS (METAR, MF, AEMET,
+    SMN). Mesuré le 21/08 sur 764 stations Infoclimat : l'écart médian
+    entre deux baromètres amateurs distants de MOINS DE 5 KM est de
+    **1,18 hPa**, et il n'atteint 1,82 qu'à 200 km. La dispersion de
+    calage écrase complètement le signal spatial ; une erreur absolue
+    calculée là-dessus mesurerait nos capteurs, pas les modèles.
+    C'est `score.py` qui applique cette règle (il connaît les sources),
+    pas cette fonction (qui n'en connaît aucune).
+    """
+    errs = [abs(p.fcst_hpa - p.obs_hpa) for p in pairs]
+    return median(errs)
+
+
+def tendency_error(pairs: Sequence[PresPair],
+                   hours: int = PTEND_HOURS) -> float | None:
+    """`ptend_err_med` — erreur médiane sur la VARIATION à 3 h.
+
+    Différence des variations : |(F(t) − F(t−3h)) − (O(t) − O(t−3h))|.
+    Un décalage CONSTANT par station s'y annule, ce qui la rend valable
+    même sur des baromètres mal calés — mesuré le 21/08 : la fonction de
+    structure de la tendance d'Infoclimat (amateur) colle à celle de
+    Météo-France (calibrée) à moins de 0,04 hPa sur toute la gamme
+    0-200 km. C'est ce qui autorise Infoclimat sur CETTE métrique et le
+    lui interdit sur l'autre.
+
+    ⚠️ La paire à t−3h doit EXISTER : on ne va pas chercher la plus
+    proche, on exige l'heure exacte. Une tendance calculée sur 2 h 40
+    en croyant qu'elle en fait 3 est une erreur silencieuse.
+    """
+    par_t = {p.t: p for p in pairs}
+    dt = hours * 3_600_000
+    errs = []
+    for p in pairs:
+        avant = par_t.get(p.t - dt)
+        if avant is None:
+            continue
+        errs.append(abs((p.fcst_hpa - avant.fcst_hpa)
+                        - (p.obs_hpa - avant.obs_hpa)))
+    return median(errs)

@@ -362,6 +362,39 @@ Aucun réseau, aucune base : `score.py` sépare la lecture d'archive du
 calcul pour que ce soit possible. Les entrées sont des lignes NDJSON de
 la forme **exacte** que `collect.py` écrit.
 
+### `geopair.py` — l'appariement géographique (lot S1, 21/08)
+
+```bash
+python3 test_geopair.py
+```
+
+⚠️ **Un banc à part, et pas un chapitre de `test_score.py`.** Une erreur
+dans `pres_err_med` se voit (le chiffre est absurde) ; une erreur dans
+l'APPARIEMENT produit des chiffres parfaitement plausibles sur les
+mauvaises paires, et rien ne la signale. Ce banc teste la mécanique
+seule : plafond horizontal, plafond vertical, plafond d'altitude
+absolue, départage des candidats, déterminisme.
+
+⚠️ **`geopair` ne connaît aucune variable, et le vent n'a PAS le droit
+de s'en servir.** L'autorisation se déclare dans `score.py`
+(`GEOPAIR_VARIABLES`), avec sa raison écrite. Cf.
+`claude/lot-s1-conception-appariement-21-08.md`.
+
+### ⛔ Purger le cache d'octets : `__pycache__` NE SUFFIT PAS sur le Mac
+
+Le `python3` du système macOS (3.9.6) est configuré avec
+`sys.pycache_prefix = ~/Library/Caches/com.apple.python` : **il n'écrit
+RIEN dans `__pycache__`**, et un `rm -rf __pycache__` — la consigne du
+chantier — ne purge donc absolument rien. Un banc peut alors rester vert
+(ou rouge) sur du code qui n'est plus celui du disque. Payé le 21/08
+pendant le lot S1. La commande juste, sur le Mac :
+
+```bash
+rm -rf __pycache__ "$HOME/Library/Caches/com.apple.python"
+```
+
+Le VPS (Python 3.13, `pycache_prefix` non défini) n'est pas concerné.
+
 ---
 
 ## Chiffres mesurés le 08/08

@@ -757,6 +757,275 @@ def _r(x, nd: int = 4):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  PRESSION (E6) — lot S1, 21/08/2026
+# ══════════════════════════════════════════════════════════════════
+#
+#  Conception complète : `claude/lot-s1-conception-appariement-21-08.md`.
+#
+#  ⛔ POURQUOI UNE FONCTION SŒUR DE `daily_rows` ET PAS UNE BRANCHE DEDANS
+#
+#  `daily_rows` boucle sur les PRÉVISIONS et rend une ligne par (point de
+#  prévision × modèle × échéance), avec `source:station_id` = le point de
+#  prévision, parce que pour le vent les deux bouts SONT le même point.
+#
+#  Ici, non. `pmsl` n'est archivé qu'aux ~648 coordonnées Pioupiou, qui
+#  ne mesurent jamais de pression ; les réseaux qui en mesurent sont
+#  ailleurs. Les lignes de pression sont donc clé par la station
+#  D'OBSERVATION, sur une autre population, avec d'autres colonnes et
+#  d'autres refus. Les faire cohabiter dans une seule boucle demanderait
+#  un `if` à chaque étape — c'est-à-dire le pansement que le lot S1
+#  refusait explicitement.
+#
+#  ⇒ `daily_rows` N'EST PAS MODIFIÉE. Les 168 assertions de
+#  `test_score.py` ne peuvent pas bouger : le code qu'elles couvrent
+#  n'est pas touché. La preuve n'est pas « le banc est vert », c'est
+#  « le diff ne contient pas `daily_rows` ».
+
+#: ⛔ QUELLES VARIABLES ONT LE DROIT D'ÊTRE APPARIÉES GÉOGRAPHIQUEMENT.
+#: `geopair` ne connaît aucune variable — c'est ICI, et seulement ici,
+#: que l'autorisation se donne, avec sa raison écrite.
+#:
+#: ⛔ `wind` N'Y EST PAS, ET CE N'EST PAS UN OUBLI. Le vent à 10 m d'une
+#: balise de décollage n'est pas un champ synoptique décalé de quelques
+#: kilomètres : c'est le vent DE CE SITE-LÀ, et le lot S2 existe tout
+#: entier parce que ce biais de site est énorme. Apparier un METAR
+#: d'aérodrome au Pioupiou d'une crête à 30 km produirait des lignes, un
+#: `n` et un classement — tous faux, et indistinguables d'un vrai une
+#: fois publiés.
+GEOPAIR_VARIABLES = {
+    "pres": {
+        # Budget de bruit : le déplacement ne doit pas ajouter plus de
+        # ~0,25 hPa d'erreur MÉDIANE, soit moins que les 0,3 hPa que le
+        # projet accepte déjà sur toute conversion QNH → QFF
+        # (`QFF_CONVERSION_UNCERTAINTY_HPA`, pressure.ts).
+        # Conséquence MESURÉE le 21/08 sur 168 stations Météo-France
+        # calibrées (48 h) : 50 km rend 0,243 hPa, 100 km en rendrait
+        # 0,386. Ce n'est PAS `PRESSURE_MAX_KM` (25 km), qui répond à
+        # une autre question — cf. §2 de la note de conception.
+        "max_km": 50.0,
+        # 300 m est le coude mesuré : à moins de 30 km, 300-600 m de
+        # dénivelé coûtent 0,286 hPa, soit autant que 60-100 km à
+        # altitude égale. Sans cette borne, un Pioupiou de crête se
+        # ferait apparier à une station de plaine et le désaccord des
+        # deux réductions serait compté comme une erreur de modèle.
+        "max_dz_m": 300.0,
+        # = `PRESSURE_MAX_ALT` de pressure.ts (03/08, Samedan LSZS :
+        # Q1025 quand toute la Suisse était à Q1013-1018, et 2 à 3 hPa
+        # de trop MÊME après conversion en QFF). S'applique aux DEUX
+        # bouts : le `pressure_msl` d'un point à 2 000 m est la même
+        # fiction, réduite depuis l'orographie du modèle.
+        "max_alt_m": S.PRESSURE_MAX_ALT,
+    },
+}
+
+#: Le champ où vit la pression, par source, et la convention à lui
+#: appliquer. Le défaut (`pres_hpa` + `pres_kind` de la ligne) est celui
+#: du schéma du S0.2 ; METAR est archivé depuis le 08/08 avec un schéma
+#: antérieur, d'où l'entrée explicite. Deux entrées, pas quatre `if`.
+PRES_FIELDS = {
+    "metar": {"value": "qnh", "kind": "qnh", "temp": "t2m"},
+}
+
+#: ⛔ LES SEULS RÉSEAUX SUR LESQUELS `pres_err_med` A UN SENS.
+#: Mesuré le 21/08 sur 764 stations Infoclimat : l'écart médian entre
+#: deux baromètres amateurs distants de MOINS DE 5 KM est de 1,18 hPa,
+#: et il n'atteint 1,82 qu'à 200 km — la dispersion de calage écrase
+#: complètement le signal spatial. Sur les mêmes stations, la fonction
+#: de structure de la TENDANCE colle à celle de Météo-France à moins de
+#: 0,04 hPa : les décalages constants s'y annulent. D'où la règle, qui
+#: n'est plus une intuition : `pres_err_med` sur les calibrés,
+#: `ptend_err_med` sur tout le monde.
+PRES_CALIBRATED = frozenset({"metar", "mf", "aemet", "smn"})
+
+
+def obsmetar_key(day: datetime) -> str:
+    """L'archive METAR (225 aérodromes Iowa State, depuis le 08/08).
+
+    ⛔ ELLE N'EST PAS DANS `OBS_KEY_FUNCS`, ET ELLE N'Y ENTRE PAS ICI.
+    `OBS_KEY_FUNCS` alimente la notation du VENT, et le vent d'un
+    aérodrome n'a aucun point de prévision à sa propre coordonnée :
+    l'y ajouter produirait zéro ligne aujourd'hui, et la première
+    personne à voir ce zéro serait tentée de « le réparer » avec
+    `geopair`. Le S1 lit `obsmetar/` pour la PRESSION seulement.
+    """
+    return f"obsmetar/{day:%Y/%m}/obsmetar_{day:%Y-%m-%d}.ndjson.gz"
+
+
+#: Toutes les clés d'archive susceptibles de porter une PRESSION.
+#: METAR d'abord (le seul rempli à 100 %), puis les trois flux du S0.2.
+PRES_OBS_KEY_FUNCS = [obsmetar_key, obsinfoclimat_key, obsmf_key, obsaemet_key]
+
+
+def pres_obs_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
+    """Les observations de PRESSION de toutes les sources, une journée.
+
+    Même principe que `all_obs_rows` : une fonction qui fusionne, jamais
+    un `if` par réseau semé ailleurs. Un objet absent rend `[]`, donc une
+    source qui n'existe pas encore ne casse rien — c'est le cas normal
+    des premières nuits de chaque flux (les collecteurs du S0.2 ont été
+    déployés le 21/08 : la première journée archivée est le 22/08).
+    """
+    rows: list[dict] = []
+    for key_fn in PRES_OBS_KEY_FUNCS:
+        rows += read_ndjson(root, key_fn(day), storage)
+    return rows
+
+
+def pres_samples(row: dict, refus: dict | None = None) -> list[S.PresSample]:
+    """Une ligne d'archive → des relevés RAMENÉS EN QFF, ou rien.
+
+    ⚠️ La réduction se fait ICI, une seule fois, avec l'altitude
+    DÉCLARÉE PAR LA SOURCE (`elev`) — jamais `dem_alt_m`, qui ne sert
+    qu'aux seuils d'appariement : 28 m d'erreur décalaient Lugano de
+    3,3 hPa (mesuré le 03/08).
+
+    Chaque refus est COMPTÉ dans `refus` plutôt que silencieux : une
+    population qui rétrécit sans dire pourquoi se relit six mois plus
+    tard comme « le modèle s'est amélioré ».
+    """
+    src = row.get("source") or ""
+    spec = PRES_FIELDS.get(src)
+    if spec:
+        vals = row.get(spec["value"]) or []
+        kind = spec["kind"]
+        temps = row.get(spec["temp"]) or [] if spec.get("temp") else []
+    else:
+        vals = row.get("pres_hpa") or []
+        # `pres_kind` est CONSTANT par ligne dans le schéma du S0.2.
+        # Absent → `to_qff` refusera avec `unknown-kind`, et le comptera.
+        kind = row.get("pres_kind") or ""
+        temps = []
+    if not vals:
+        return []
+    ts = row.get("t") or []
+    elev = row.get("elev")
+    out: list[S.PresSample] = []
+    for i, t in enumerate(ts):
+        if i >= len(vals):
+            break
+        temp = temps[i] if i < len(temps) else None
+        qff, motif = S.to_qff(vals[i], kind, elev, temp)
+        if qff is None:
+            if refus is not None and motif:
+                refus[motif] = refus.get(motif, 0) + 1
+            continue
+        out.append(S.PresSample(t=int(t) * 1000, qff=qff))
+    return out
+
+
+def pressure_rows(day: datetime, snapshots: dict[int, list[dict]],
+                  pres_obs: list[dict], zone_of: dict | None = None):
+    """Les agrégats quotidiens de PRESSION. Rend (lignes, bilan lisible).
+
+    Une ligne par (station d'observation × modèle × échéance), clé par la
+    station QUI MESURE — jamais par le point Pioupiou dont vient la
+    prévision. Publier `pioupiou:123` sur une erreur mesurée à Ambérieu
+    serait un mensonge dans la clé primaire, et plus personne ne pourrait
+    s'en apercevoir. Le point utilisé voyage dans `pair_source` /
+    `pair_station_id`, avec `pair_km` et `pair_dz_m`.
+
+    ⚠️ L'APPARIEMENT EST CALCULÉ UNE SEULE FOIS, PAS UNE PAR ÉCHÉANCE.
+    Sinon une même station pourrait être notée contre un point à +6 h et
+    contre un AUTRE point à +48 h, et la comparaison entre échéances —
+    qui est exactement ce que l'écran affiche — mélangerait deux
+    géométries. L'appariement est une propriété des positions, pas de
+    l'échéance.
+    """
+    import geopair as GP                      # noqa: PLC0415
+
+    conf = GEOPAIR_VARIABLES["pres"]
+    day_start_ms = int(day.replace(tzinfo=timezone.utc).timestamp()) * 1000
+    zone_of = zone_of or {}
+
+    def dem(cle: str):
+        z = zone_of.get(cle)
+        return z.get("dem_alt_m") if z else None
+
+    # ── les candidats : les points de prévision qui portent `pmsl` ──
+    # Un champ ABSENT veut dire « ce modèle ne sert pas cette variable
+    # ici » (cf. `collect.py`, extension du format du 08/08) — ce n'est
+    # pas une absence de valeur, c'est une absence de série.
+    points: dict[str, dict] = {}
+    par_point: dict[str, list[tuple[int, dict]]] = defaultdict(list)
+    for offset in LEAD_BY_OFFSET:
+        for row in snapshots.get(offset, []):
+            if not row.get("pmsl"):
+                continue
+            cle = f"{row['source']}:{row['station_id']}"
+            points.setdefault(cle, {"cle": cle, "lat": row["lat"],
+                                    "lon": row["lon"], "dem_alt_m": dem(cle)})
+            par_point[cle].append((offset, row))
+
+    # ── les cibles : les stations qui mesurent une pression ce jour-là ──
+    refus: dict[str, int] = {}
+    cibles, obs_par_cle = [], {}
+    for row in pres_obs:
+        cle = f"{row['source']}:{row['station_id']}"
+        ech = pres_samples(row, refus)
+        if not ech:
+            continue
+        cibles.append({"cle": cle, "lat": row["lat"], "lon": row["lon"],
+                       "dem_alt_m": dem(cle), "elev": row.get("elev")})
+        obs_par_cle[cle] = (row, ech)
+
+    appariement, bilan = GP.apparier(
+        cibles, list(points.values()),
+        max_km=conf["max_km"], max_dz_m=conf["max_dz_m"],
+        max_alt_m=conf["max_alt_m"])
+
+    rows: list[dict] = []
+    for cle, (obs_row, ech) in obs_par_cle.items():
+        ap = appariement.get(cle)
+        if ap is None:
+            continue                # « pas de modèle assez proche », jamais un 0
+        calibre = obs_row["source"] in PRES_CALIBRATED
+        for offset, frow in par_point.get(ap.cle, []):
+            times = fcst_times_ms(frow)
+            pmsl = frow.get("pmsl") or []
+            idx = [i for i, t in enumerate(times)
+                   if day_start_ms <= t < day_start_ms + DAY_MS]
+            if not idx:
+                continue
+            pairs = S.pair_pressure([times[i] for i in idx],
+                                    [pmsl[i] if i < len(pmsl) else None
+                                     for i in idx], ech)
+            if len(pairs) < MIN_HOURS_DAILY:
+                continue
+            emitted_dt = datetime.fromisoformat(frow["fetched_at"])
+            if emitted_dt.tzinfo is None:
+                emitted_dt = emitted_dt.replace(tzinfo=timezone.utc)
+            emitted = int(emitted_dt.timestamp()) * 1000
+            lead_exact = sum(p.t - emitted for p in pairs) / len(pairs) / 3_600_000
+            rows.append({
+                "day": day.strftime("%Y-%m-%d"),
+                "source": obs_row["source"], "station_id": obs_row["station_id"],
+                "model": frow["model"], "lead_h": LEAD_BY_OFFSET[offset],
+                "fcst_src": "own_archive",
+                "lead_exact_h": round(lead_exact, 2),
+                "n_hours": len(pairs),
+                # ⛔ `None`, pas 0, sur les baromètres non calibrés — la
+                # ligne existe (sa tendance est valable), mais son erreur
+                # absolue n'a pas de sens et un 0 se lirait comme un
+                # modèle parfait.
+                "pres_err_med": _r(S.pressure_error(pairs), 3) if calibre else None,
+                "ptend_err_med": _r(S.tendency_error(pairs), 3),
+                "pres_kind": (PRES_FIELDS.get(obs_row["source"], {}).get("kind")
+                              or obs_row.get("pres_kind")),
+                "calibrated": calibre,
+                "pair_source": ap.cle.split(":", 1)[0],
+                "pair_station_id": ap.cle.split(":", 1)[1],
+                "pair_km": _r(ap.km, 2),
+                "pair_dz_m": _r(ap.dz_m, 1),
+            })
+
+    detail = ", ".join(f"{k} {v}" for k, v in sorted(refus.items()))
+    resume = (f"{len(rows)} lignes ; {len(points)} points de prévision portent "
+              f"`pmsl` ; {bilan.resume()}"
+              + (f" ; relevés refusés : {detail}" if detail else ""))
+    return rows, resume
+
+
+# ══════════════════════════════════════════════════════════════════
 #  REJEU DE L'ARCHIVE (lot G1)
 # ══════════════════════════════════════════════════════════════════
 #
@@ -2282,6 +2551,38 @@ def main() -> int:
     # et un plafond qu'on ne franchit pas encore reste un plafond.
     zones_raw = sb.select("station_zone", order="source,station_id")
     zone_of = {f"{z['source']}:{z['station_id']}": z for z in zones_raw}
+
+    # ── 3 bis. la pression (E6, lot S1) ───────────────────────────
+    #
+    # ⚠️ TOUT CE BLOC EST SOUS `try`, ET C'EST DÉLIBÉRÉ. La notation du
+    # vent tourne depuis quatorze nuits ; la pression est neuve, sa
+    # table peut ne pas encore exister (le SQL est exécuté par Yann,
+    # pas par ce script), et ses archives commencent le 22/08. Une
+    # exception ici ne doit JAMAIS emporter le run de vent avec elle —
+    # ce serait échanger un chantier qui marche contre un chantier qui
+    # démarre. Elle est journalisée en toutes lettres, pas avalée.
+    #
+    # ⓘ Placé APRÈS `station_zone` parce que l'appariement a besoin de
+    # `dem_alt_m` — la seule altitude que les points Pioupiou possèdent,
+    # et la seule qui soit sur la même échelle que celle des stations.
+    try:
+        pres_obs = pres_obs_rows(root, day, st)
+        if not pres_obs:
+            print("  ⓘ pression : aucune archive d'observation pour cette "
+                  "journée — normal avant le 22/08 (flux S0.2 déployés le "
+                  "21/08). Rien noté, rien écrit.")
+        else:
+            p_rows, p_bilan = pressure_rows(day, snapshots, pres_obs, zone_of)
+            print(f"  pression : {p_bilan}")
+            if p_rows:
+                n = sb.upsert("model_verif_daily_pres",
+                              _pour_la_base(sb, "model_verif_daily_pres", p_rows),
+                              "day,source,station_id,model,lead_h,fcst_src")
+                print(f"  → model_verif_daily_pres : {n} lignes")
+    except Exception as exc:                       # noqa: BLE001
+        print(f"  ⚠️ pression (S1) : {type(exc).__name__} — {exc}. "
+              f"La notation du VENT n'est pas affectée.", file=sys.stderr)
+
     if not zone_of:
         print("  ⓘ `station_zone` est vide : aucune balise n'est encore")
         print("     rattachée à son bassin-versant. Les accumulateurs et les")
@@ -2401,6 +2702,16 @@ def main() -> int:
             print(f"  → model_score_zone : {n} lignes")
             # Le JSON publié, lui, porte TOUT : il n'a pas de schéma à
             # respecter, et c'est lui que lira l'écran des bêta-testeurs.
+            # ⚠️ `variable` EST ÉCRIT EXPLICITEMENT SUR CHAQUE LIGNE,
+            # jamais déduit d'une absence (lot S1). L'écran ne doit
+            # jamais additionner des hPa et des km/h ; « pas de champ »
+            # se lit un jour comme « pas de valeur », et c'est la
+            # deuxième moitié de ce garde-fou qui vit côté web (une
+            # ligne sans `variable` y est traitée comme `wind`, pour
+            # qu'un JSON servi par le CDN pendant l'heure de cache ne
+            # fasse pas disparaître le tableau).
+            for _s in scores:
+                _s.setdefault("variable", "wind")
             _publish(st, scores, as_of, args.dry_run,
                      meta={"stability": stabilite,
                            "replay": bilan_replay,
@@ -2413,6 +2724,14 @@ def main() -> int:
     if not args.no_purge:
         today = datetime.now(timezone.utc)
         sb.delete("model_verif_daily",
+                  f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
+        # Même rétention que sa sœur : la pression se rejoue depuis
+        # l'archive R2 comme le vent, donc garder 30 jours en base
+        # n'apporte rien de plus qu'à `model_verif_daily`.
+        # ⓘ `Supabase.delete` journalise et continue sur un HTTP d'erreur
+        # (cf. sa définition) : tant que le SQL du S1 n'est pas passé,
+        # cette ligne écrit un ⚠️ dans le journal et ne casse rien.
+        sb.delete("model_verif_daily_pres",
                   f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
         sb.delete("model_verif_event",
                   f"?day=lt.{(today - timedelta(days=RETENTION_EVENT_D)):%Y-%m-%d}")

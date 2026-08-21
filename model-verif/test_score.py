@@ -1126,6 +1126,195 @@ def test_plancher_de_skill():
           hors, [])
 
 
+# ══════════════════════════════════════════════════════════════════
+#  PRESSION (E6) — lot S1, 21/08/2026
+# ══════════════════════════════════════════════════════════════════
+#
+# ⚠️ CE BLOC NE TOUCHE PAS `daily_rows`, ET C'EST LE POINT. La pression
+# passe par `pressure_rows`, une fonction SŒUR ; les 168 assertions qui
+# précèdent couvrent du code qui n'a pas bougé d'une ligne. La preuve de
+# non-régression n'est pas « le banc est vert », c'est « le diff ne
+# contient pas `daily_rows` » — mais le banc vert le confirme.
+
+def _fcst_pres(station_id, model, emitted: datetime, lat, lon,
+               pmsl_at, hours=72):
+    """Une ligne de prévision QUI PORTE `pmsl`."""
+    t0 = int(emitted.replace(hour=0, minute=0, second=0,
+                             tzinfo=timezone.utc).timestamp())
+    return {
+        "station_id": station_id, "source": "pioupiou",
+        "lat": lat, "lon": lon, "model": model,
+        "fetched_at": emitted.replace(tzinfo=timezone.utc).isoformat(),
+        "t0": t0, "step_s": 3600,
+        "speed": [10.0] * hours, "dir": [200.0] * hours,
+        "gust": [None] * hours,
+        "pmsl": [pmsl_at(i) for i in range(hours)],
+    }
+
+
+def _obs_pres(station_id, source, day: datetime, lat, lon, elev,
+              hpa_at, kind="qff", t2m=None):
+    """Une ligne d'archive d'observation qui porte une pression."""
+    t0 = int(day.replace(tzinfo=timezone.utc).timestamp())
+    t = [t0 + h * 3600 for h in range(24)]
+    row = {"station_id": station_id, "source": source,
+           "lat": lat, "lon": lon, "elev": elev, "t": t,
+           "speed": [8.0] * 24, "gust": [None] * 24, "dir": [200.0] * 24}
+    if source == "metar":
+        row["qnh"] = [hpa_at(h) for h in range(24)]
+        row["t2m"] = [t2m if t2m is not None else 12.0] * 24
+    else:
+        row["pres_hpa"] = [hpa_at(h) for h in range(24)]
+        row["pres_kind"] = kind
+    return row
+
+
+def test_pression_appariement():
+    day = datetime(2026, 8, 20)
+    emitted = day                      # offset 0 → +6 h
+    # Le point de prévision, à 45,00 N / 6,00 E, 400 m (DEM).
+    snaps = {0: [_fcst_pres("1", "ecmwf_ifs025", emitted, 45.0, 6.0,
+                            lambda i: 1013.0 + 0.1 * (i % 24)),
+                 _fcst_pres("1", "gfs_seamless_x", emitted, 45.0, 6.0,
+                            lambda i: 1016.0 + 0.1 * (i % 24))],
+             1: [], 2: []}
+    zone_of = {"pioupiou:1": {"dem_alt_m": 400},
+               "mf:AAA": {"dem_alt_m": 380},
+               "mf:LOIN": {"dem_alt_m": 380},
+               "mf:HAUT": {"dem_alt_m": 1900},
+               "infoclimat:IC1": {"dem_alt_m": 390},
+               "metar:LFXX": {"dem_alt_m": 380}}
+
+    # AAA est à ~15 km à l'est ; LOIN à ~160 km ; HAUT est proche mais
+    # 1 500 m plus haut ET au-dessus du plafond absolu.
+    obs = [
+        _obs_pres("AAA", "mf", day, 45.0, 6.19, 380,
+                  lambda h: 1013.0 + 0.1 * h),
+        _obs_pres("LOIN", "mf", day, 45.0, 8.03, 380,
+                  lambda h: 1013.0 + 0.1 * h),
+        _obs_pres("HAUT", "mf", day, 45.01, 6.01, 1900,
+                  lambda h: 1013.0 + 0.1 * h),
+        _obs_pres("IC1", "infoclimat", day, 45.02, 6.02, 390,
+                  lambda h: 1015.6 + 0.1 * h),     # offset de calage +2,6
+        _obs_pres("LFXX", "metar", day, 45.03, 6.03, 380,
+                  lambda h: 1013.0 + 0.1 * h, kind="qnh", t2m=12.0),
+    ]
+    rows, bilan = J.pressure_rows(day, snaps, obs, zone_of)
+    par = {(r["source"], r["station_id"], r["model"]): r for r in rows}
+
+    check("la station proche est notée (2 modèles)",
+          sorted(k[2] for k in par if k[1] == "AAA"),
+          ["ecmwf_ifs025", "gfs_seamless_x"])
+    check("… et la ligne est clé par la STATION, pas par le point Pioupiou",
+          (par[("mf", "AAA", "ecmwf_ifs025")]["source"],
+           par[("mf", "AAA", "ecmwf_ifs025")]["station_id"]), ("mf", "AAA"))
+    check("… avec le point de prévision publié",
+          (par[("mf", "AAA", "ecmwf_ifs025")]["pair_source"],
+           par[("mf", "AAA", "ecmwf_ifs025")]["pair_station_id"]),
+          ("pioupiou", "1"))
+    check("… et la distance, arrondie mais pas cachée",
+          14 < par[("mf", "AAA", "ecmwf_ifs025")]["pair_km"] < 16, True)
+    check("… et le dénivelé", par[("mf", "AAA", "ecmwf_ifs025")]["pair_dz_m"],
+          20.0)
+
+    check("la station à 160 km n'est PAS notée — et pas notée à zéro",
+          [k for k in par if k[1] == "LOIN"], [])
+    check("la station à 1 900 m non plus (plafond absolu)",
+          [k for k in par if k[1] == "HAUT"], [])
+
+    # ECMWF colle à l'observation de AAA : erreur nulle des deux côtés.
+    r_ok = par[("mf", "AAA", "ecmwf_ifs025")]
+    check("modèle qui colle → erreur absolue nulle", r_ok["pres_err_med"], 0.0)
+    check("… et tendance nulle", r_ok["ptend_err_med"], 0.0)
+    r_bad = par[("mf", "AAA", "gfs_seamless_x")]
+    check("modèle décalé de 3 hPa → l'erreur absolue le voit",
+          r_bad["pres_err_med"], 3.0)
+    check("… mais pas la tendance (le décalage est constant)",
+          r_bad["ptend_err_med"], 0.0)
+
+    # ⛔ Infoclimat : la ligne EXISTE (sa tendance vaut), mais son erreur
+    # absolue est `None` — jamais 0, qui se lirait comme un sans-faute.
+    r_ic = par[("infoclimat", "IC1", "ecmwf_ifs025")]
+    check("Infoclimat : pas d'erreur absolue", r_ic["pres_err_med"], None)
+    check("… mais une tendance, elle", r_ic["ptend_err_med"], 0.0)
+    check("… et le drapeau qui le dit", r_ic["calibrated"], False)
+    check("METAR est calibré, lui",
+          par[("metar", "LFXX", "ecmwf_ifs025")]["calibrated"], True)
+    check("… et sa convention est retenue comme QNH",
+          par[("metar", "LFXX", "ecmwf_ifs025")]["pres_kind"], "qnh")
+
+    check("le bilan dit combien de points portaient `pmsl`",
+          "1 points de prévision portent `pmsl`" in bilan, True)
+    check("… et compte les refusées", "hors rayon" in bilan, True)
+
+
+def test_pression_refus():
+    day = datetime(2026, 8, 20)
+    snaps = {0: [_fcst_pres("1", "ecmwf_ifs025", day, 45.0, 6.0,
+                            lambda i: 1013.0)], 1: [], 2: []}
+    zone_of = {"pioupiou:1": {"dem_alt_m": 400}, "mf:X": {"dem_alt_m": 380}}
+
+    # Un QNH sans température ne se rabat PAS sur le brut : la station
+    # disparaît, elle ne produit pas une ligne fausse.
+    sans_t = _obs_pres("X", "metar", day, 45.0, 6.05, 380, lambda h: 1013.0,
+                       kind="qnh")
+    sans_t["t2m"] = [None] * 24
+    zone_of["metar:X"] = {"dem_alt_m": 380}
+    rows, bilan = J.pressure_rows(day, snaps, [sans_t], zone_of)
+    check("QNH sans température → aucune ligne", rows, [])
+    check("… et le motif est compté", "no-temp" in bilan, True)
+
+    # `pres_kind` absent : « on n'apparie pas, on compte » (spec S1).
+    sans_kind = _obs_pres("X", "mf", day, 45.0, 6.05, 380, lambda h: 1013.0)
+    del sans_kind["pres_kind"]
+    rows, bilan = J.pressure_rows(day, snaps, [sans_kind], zone_of)
+    check("`pres_kind` absent → aucune ligne", rows, [])
+    check("… et le motif est compté", "unknown-kind" in bilan, True)
+
+    # Aucun modèle ne porte `pmsl` : aucune ligne, et pas une erreur.
+    sans_pmsl = {0: [fcst_line("1", "ecmwf_ifs025", day, lambda i: 10.0)],
+                 1: [], 2: []}
+    bonne = _obs_pres("X", "mf", day, 45.0, 6.05, 380, lambda h: 1013.0)
+    rows, bilan = J.pressure_rows(day, sans_pmsl, [bonne], zone_of)
+    check("aucune prévision de `pmsl` → aucune ligne", rows, [])
+    check("… et le bilan le dit", "0 points de prévision" in bilan, True)
+
+    # Moins de MIN_HOURS_DAILY heures appariables : rien.
+    court = _obs_pres("X", "mf", day, 45.0, 6.05, 380, lambda h: 1013.0)
+    for champ in ("t", "pres_hpa", "speed", "gust", "dir"):
+        court[champ] = court[champ][:3]
+    rows, _ = J.pressure_rows(day, snaps, [court], zone_of)
+    check("moins de 6 heures appariées → aucune ligne", rows, [])
+
+
+def test_pression_appariement_stable_entre_echeances():
+    """⚠️ La même station doit être notée contre LE MÊME point à toutes
+    les échéances — sinon +6 h et +48 h compareraient deux géométries."""
+    day = datetime(2026, 8, 20)
+    snaps = {}
+    for offset in (0, 1, 2):
+        emitted = day - timedelta(days=offset)
+        # Deux points de prévision : le proche n'apparaît qu'à J-0, le
+        # lointain aux trois. Un appariement calculé par échéance
+        # basculerait de l'un à l'autre.
+        lignes = [_fcst_pres("LOINTAIN", "ecmwf_ifs025", emitted, 45.0, 6.40,
+                             lambda i: 1013.0, hours=72)]
+        if offset == 0:
+            lignes.append(_fcst_pres("PROCHE", "ecmwf_ifs025", emitted,
+                                     45.0, 6.05, lambda i: 1013.0, hours=72))
+        snaps[offset] = lignes
+    zone_of = {"pioupiou:PROCHE": {"dem_alt_m": 400},
+               "pioupiou:LOINTAIN": {"dem_alt_m": 400},
+               "mf:X": {"dem_alt_m": 380}}
+    obs = [_obs_pres("X", "mf", day, 45.0, 6.0, 380, lambda h: 1013.0)]
+    rows, _ = J.pressure_rows(day, snaps, obs, zone_of)
+    points = {r["pair_station_id"] for r in rows}
+    check("un seul point de prévision pour toutes les échéances",
+          points, {"PROCHE"})
+    check("… et donc une seule échéance notée (le proche n'existe qu'à J-0)",
+          sorted(r["lead_h"] for r in rows), [6])
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -1135,7 +1324,9 @@ def main() -> int:
                test_fenetre_de_maintien_adaptative,
                test_stabilite_des_rangs,
                test_familles_publiees, test_lecture_paginee,
-               test_plancher_de_skill):
+               test_plancher_de_skill,
+               test_pression_appariement, test_pression_refus,
+               test_pression_appariement_stable_entre_echeances):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0
