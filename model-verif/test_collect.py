@@ -593,6 +593,159 @@ verifie("windsmobi" not in {"pioupiou"},  # garde-fou trivial, documente l'inten
         "score.py ne doit JAMAIS tester `source == 'windsmobi'` — cf. all_obs_rows")
 
 
+# ── 11. INFOCLIMAT : référentiel geojson, history.json, journée civile
+# ⚠️ FIXTURES RÉELLES, capturées en direct le 21/08/2026 (deux stations
+# du GeoJSON public data.gouv.fr + leurs quatre derniers points de
+# `infoclimat/history.json`, notre propre objet R2 public) — même
+# discipline que le §10 windsmobi. Les entrées synthétiques (hors BBOX,
+# METEO-FRANCE, station hors référentiel, vent tout-None) couvrent les
+# filtres que l'échantillon réel, à lui seul, ne traverse pas.
+_IC_GEOJSON = {
+    "features": [
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-0.96, 46.15]},
+         "properties": {"id": "00001", "name": "Saint-Médard-d'Aunis", "elevation": 20,
+                        "license": {"code": 1, "license": "CC BY",
+                                    "url": "https://creativecommons.org/licenses/by/2.0/fr/",
+                                    "source": "infoclimat.fr"}}},
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [6.17, 43.34]},
+         "properties": {"id": "00003", "name": "Besse sur Issole", "elevation": 275,
+                        "license": {"code": 2, "license": "NON-COMMERCIAL ONLY: CC BY NC",
+                                    "url": "https://creativecommons.org/licenses/by-nc/2.0/fr/",
+                                    "source": "infoclimat.fr"}}},
+        # dans le référentiel, mais son vent du 21/08 sera tout-None.
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [3.0, 47.0]},
+         "properties": {"id": "00005", "name": "Silencieuse", "elevation": 150,
+                        "license": {"code": 1, "license": "CC BY", "url": "https://x",
+                                    "source": "infoclimat.fr"}}},
+        # hors BBOX de collect.py (BBOX lonMax = 11.0) — doit être écarté.
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [20.0, 45.0]},
+         "properties": {"id": "99999", "name": "Hors BBOX", "elevation": 100,
+                        "license": {"code": 1, "license": "CC BY", "url": "https://x",
+                                    "source": "infoclimat.fr"}}},
+        # une entrée MÉTÉO-FRANCE du même GeoJSON : jamais notre `mf`.
+        {"type": "Feature", "geometry": {"type": "Point", "coordinates": [2.0, 46.0]},
+         "properties": {"id": "07510", "name": "MF quelque part", "elevation": 50,
+                        "license": {"source": "meteofrance"}}},
+    ]
+}
+_IC_HISTORY = {
+    "genere_le": "2026-08-21T16:05:35+00:00", "heures": 30,
+    "historique": {
+        "00001": {"t": [1787320200, 1787320800, 1787321400, 1787322000],
+                  "moy": [25.8, 27.1, 26.1, 26.5],
+                  "raf": [44.1, 44.1, 44.1, 44.1],
+                  "dir": [251, 253, 251, 251],
+                  "pres": [1014.9, 1014.9, 1014.7, 1014.7],
+                  "temp": [24.6, 24.3, 24.2, 24.2]},
+        "00003": {"t": [1787322000, 1787322600, 1787323200, 1787323800],
+                  "moy": [20.9, 19.3, 20.9, 17.7],
+                  "dir": [287, 307, 306, 263],
+                  "pres": [1009.1, 1009.2, 1009.2, 1009.2],
+                  "temp": [28.3, 28.2, 28.4, 28.5]},
+        # dans le référentiel, mais aucune mesure de vent ce jour-là.
+        "00005": {"t": [1787320200, 1787320800], "moy": [None, None],
+                  "dir": [10, 12]},
+        # dans l'historique, mais HORS référentiel (BBOX/GeoJSON) —
+        # jamais dans l'archive, sans lever.
+        "88888": {"t": [1787320200], "moy": [10.0]},
+    },
+}
+
+_ic_get_avant = C._get_json_infoclimat
+
+
+def _ic_route(par_url):
+    def _fake(url, timeout=60):
+        if url not in par_url:
+            raise AssertionError(f"URL infoclimat inattendue dans le test : {url}")
+        return par_url[url]
+    return _fake
+
+
+# ── 11.1 le référentiel : BBOX, licence par station, METEO-FRANCE écarté
+try:
+    C._get_json_infoclimat = _ic_route({C.INFOCLIMAT_STATIONS_GEOJSON: _IC_GEOJSON})
+    with tempfile.TemporaryDirectory() as d:
+        _ic_cache = pathlib.Path(d) / "infoclimat_stations.json"
+        with redirect_stdout(io.StringIO()):
+            _ic_stations = C.infoclimat_stations(_ic_cache)
+finally:
+    C._get_json_infoclimat = _ic_get_avant
+
+verifie({s["id"] for s in _ic_stations} == {"00001", "00003", "00005"},
+        f"hors BBOX et MÉTÉO-FRANCE écartés, les trois stations StatIC restent — {_ic_stations}")
+_ic_st1 = next(s for s in _ic_stations if s["id"] == "00001")
+verifie(_ic_st1["lat"] == 46.15 and _ic_st1["lon"] == -0.96,
+        f"coordonnées reprises de `geometry.coordinates` (lon, lat) — {_ic_st1}")
+verifie(_ic_st1["elev"] == 20 and _ic_st1["licence_code"] == 1,
+        f"altitude et licence reprises du GeoJSON — {_ic_st1}")
+verifie(next(s for s in _ic_stations if s["id"] == "00003")["licence_code"] == 2,
+        "la licence varie par station (CC BY-NC ici, CC BY pour 00001)")
+
+# ── 11.2 le référentiel injoignable : repli sur le cache disque ──────
+_ic_cache_json = json.dumps([{"id": "x", "source": "infoclimat", "lat": 1.0,
+                              "lon": 1.0, "elev": 1, "licence_code": 1}])
+try:
+    def _ic_boom(url, timeout=60):
+        raise RuntimeError("HTTP 500 (simulé)")
+    C._get_json_infoclimat = _ic_boom
+    with tempfile.TemporaryDirectory() as d:
+        _ic_cache2 = pathlib.Path(d) / "infoclimat_stations.json"
+        _ic_cache2.write_text(_ic_cache_json, encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            _ic_fallback = C.infoclimat_stations(_ic_cache2)
+finally:
+    C._get_json_infoclimat = _ic_get_avant
+verifie(_ic_fallback and _ic_fallback[0]["id"] == "x",
+        "data.gouv.fr injoignable → repli sur le cache disque, comme metar/windsmobi")
+
+# ── 11.3 les lignes : gust TOUJOURS présent, pres_kind constant, licence
+try:
+    C._get_json_infoclimat = _ic_route({C.INFOCLIMAT_HISTORY_URL: _IC_HISTORY})
+    with redirect_stdout(io.StringIO()):
+        _ic_rows = list(C.infoclimat_rows(_ic_stations, "2026-08-21"))
+finally:
+    C._get_json_infoclimat = _ic_get_avant
+
+verifie({r["station_id"] for r in _ic_rows} == {"00001", "00003"},
+        f"00005 (vent tout-None) et 88888 (hors référentiel) n'entrent pas — {_ic_rows}")
+_ic_r1 = next(r for r in _ic_rows if r["station_id"] == "00001")
+verifie(_ic_r1["gust"] == [44.1, 44.1, 44.1, 44.1],
+        f"`raf` devient `gust`, présent sur cette station — {_ic_r1['gust']}")
+verifie(_ic_r1["pres_hpa"] == [1014.9, 1014.9, 1014.7, 1014.7],
+        f"`pres` devient `pres_hpa`, la mesure BRUTE, jamais convertie — {_ic_r1['pres_hpa']}")
+verifie(_ic_r1["pres_kind"] == "qff", "pres_kind constant — mesuré au cadrage (§1.5)")
+verifie(_ic_r1["licence_code"] == 1, "licence reportée depuis le référentiel")
+verifie(_ic_r1["elev"] == 20 and _ic_r1["lat"] == 46.15,
+        "position/altitude viennent du référentiel — history.json ne les porte pas")
+verifie("temp" not in _ic_r1,
+        "`temp` n'est pas dans le schéma d'archive (décision 1 du cadrage) — jamais recopié")
+
+_ic_r3 = next(r for r in _ic_rows if r["station_id"] == "00003")
+verifie(_ic_r3["gust"] == [None, None, None, None],
+        f"pas de `raf` chez cette station — `gust` reste TOUJOURS présent, rempli de None, "
+        f"jamais omis (mesuré : ~4 % du parc seulement publie une rafale) — {_ic_r3['gust']}")
+
+# ── 11.4 journée civile UTC : les points du 21 n'entrent pas dans le 20
+try:
+    C._get_json_infoclimat = _ic_route({C.INFOCLIMAT_HISTORY_URL: _IC_HISTORY})
+    with redirect_stdout(io.StringIO()):
+        _ic_rows_veille = list(C.infoclimat_rows(_ic_stations, "2026-08-20"))
+finally:
+    C._get_json_infoclimat = _ic_get_avant
+verifie(_ic_rows_veille == [],
+        "les points du 21 n'entrent pas dans l'archive du 20 — filtre par journée civile UTC, "
+        "pas un simple 'garder ce qu'on reçoit'")
+
+verifie(list(C.infoclimat_rows([], "2026-08-21")) == [],
+        "référentiel infoclimat vide → aucune requête, aucune ligne")
+
+verifie(C.INFOCLIMAT_HISTORY_URL.endswith("/infoclimat/history.json")
+        and "r2.dev" in C.INFOCLIMAT_HISTORY_URL,
+        "lecture par l'URL PUBLIQUE r2.dev, la même qu'index.js — pas par tools/storage.py "
+        "(qui subirait le R2_BUCKET=model-verif forcé par run.sh)")
+
+
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")
 for m in ko:
     print(f"  ❌ {m}")

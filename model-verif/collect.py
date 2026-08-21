@@ -1185,6 +1185,202 @@ def windsmobi_rows(stations: list[dict], day: str):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  OBSERVATIONS INFOCLIMAT (vent + pression) — S0.2, 21/08, session 2
+# ══════════════════════════════════════════════════════════════════
+#
+#  Ce flux vient du cadrage `claude/lot-s0-cadrage-reseaux-21-08.md` :
+#  539 pressions à 10 min — le seul réseau non archivé qui en serve —
+#  et 550 balises de plaine (la population « sans relief » du S3).
+#
+#  ⛔ ZÉRO APPEL CHEZ L'ASSOCIATION. Ce flux lit DEUX choses, ni l'une
+#  ni l'autre n'est un appel à `infoclimat.fr` :
+#    1. Le référentiel des stations — le MÊME GeoJSON public que lit
+#       déjà `traces/infoclimat/poller_infoclimat.py::charger_stations`
+#       (data.gouv.fr, aucune clé requise) ;
+#    2. `infoclimat/history.json` — NOTRE PROPRE objet R2, écrit par le
+#       poller toutes les `HISTORY_INTERVAL_MIN` (30 min). Le poller a
+#       déjà fait le travail chez l'association ; on ne fait que relire
+#       ce qu'il a écrit.
+#
+#  ⚠️ URL PUBLIQUE, PAS `tools/storage.py`. Les deux objets Infoclimat
+#  sont servis en lecture publique par le domaine r2.dev — EXACTEMENT
+#  l'URL qu'`index.js` lit déjà côté serveur (`INFOCLIMAT_HISTORY_URL`).
+#  Passer par `Storage`/boto3 aurait fallu contourner `run.sh`, qui
+#  FORCE `R2_BUCKET=model-verif` pour ce job — et l'objet Infoclimat vit
+#  dans le bucket `balise-watch-packs` (cf. le piège déjà documenté et
+#  déjoué dans `agrume_fcst.bucket_r2`). La route publique n'a pas ce
+#  problème, et ne consomme aucun identifiant.
+#
+#  ⚠️ FENÊTRE DE 30 H, PAS 48 H COMME windsmobi — MESURÉ, PAS SUPPOSÉ.
+#  `poller_infoclimat.py` accumule un historique GLISSANT de
+#  `HISTORY_HEURES = 30` dans son propre état, réécrit sur R2 toutes
+#  les 30 min. Un run de collecte qui tombe dans les six premières
+#  heures UTC du jour suivant (03 h 15, notre cas) couvre la totalité
+#  de la veille avec ~3 h de marge ; au-delà, une partie de la journée
+#  manquerait EN SILENCE. C'est le sens du §1.4 du cadrage : « chaque
+#  nuit ou pas du tout ».
+#
+#  ⚠️ `raf` (rafale) N'EXISTE QUE SUR ~4 % DES STATIONS — mesuré en
+#  direct le 21/08 sur l'objet réel : 31 stations sur 872. Le champ est
+#  quand même TOUJOURS écrit (comme pour METAR), avec `None` là où il
+#  n'y a pas de mesure — jamais reconstruit depuis la moyenne.
+#
+#  ⚠️ `pres_kind = "qff"`, CONSTANT — mesuré au cadrage (§1.5) : la
+#  pression Infoclimat est déjà réduite au niveau de la mer et colle en
+#  médiane au QFF Météo-France (−0,10 hPa sous 500 m, +0,20 entre 500 et
+#  1 500 m), mais avec un écart-type de 2,60 hPa — la dispersion de
+#  calage des baromètres amateurs. C'est ce qui, au S1, écartera
+#  Infoclimat de `pres_err_med` et ne gardera que `ptend_err_med`. Ici
+#  on archive la MESURE BRUTE, jamais une décision de notation.
+#
+#  ⚠️ `licence_code` VOYAGE PAR STATION (décision 1 du cadrage) : 1
+#  (`CC BY`) ou 2 (`NON-COMMERCIAL ONLY: CC BY NC`), à peu près
+#  moitié-moitié sur le parc. On archive tout ; le tri par licence, s'il
+#  doit exister, se fera à la lecture — jamais à l'archivage.
+
+INFOCLIMAT_STATIONS_GEOJSON = ("https://www.data.gouv.fr/api/1/datasets/r/"
+                               "8a9e6a12-03f8-4056-861f-70b84136313e")
+#: ⚠️ MÊME URL PUBLIQUE QU'`index.js` (`INFOCLIMAT_R2_BASE`, l. ~2644) —
+#: recopiée à dessein plutôt que lue depuis un fichier partagé : les
+#: deux runtimes (Render en JS, ce script en Python sur le VPS) n'ont
+#: aucun module commun. Si Yann change le domaine personnalisé un jour,
+#: les deux constantes divergeront en silence — à vérifier à l'œil si
+#: le flux s'arrête sans raison apparente.
+INFOCLIMAT_R2_BASE = (os.environ.get("INFOCLIMAT_R2_BASE")
+                      or "https://pub-14b7b6ffdba34729b51280359c8f2c01.r2.dev")
+INFOCLIMAT_HISTORY_URL = f"{INFOCLIMAT_R2_BASE}/infoclimat/history.json"
+#: Mesuré au cadrage (§1.5) — cf. l'en-tête de section.
+INFOCLIMAT_PRES_KIND = "qff"
+
+
+def _get_json_infoclimat(url: str, timeout: int = 60):
+    req = urllib.request.Request(url, headers={"User-Agent": "balise-watch/model-verif"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def infoclimat_stations(cache: pathlib.Path) -> list[dict]:
+    """Le référentiel des stations Infoclimat StatIC, avec cache disque.
+
+    UN appel — le GeoJSON public de data.gouv.fr, PAS l'API Infoclimat.
+    Même filet que `metar_stations`/`windsmobi_stations` : une panne de
+    data.gouv.fr cette nuit-là ne fait pas sauter la nuit, le cache
+    d'hier prend le relais (une station Infoclimat n'ouvre pas tous les
+    mois).
+
+    Filtré sur la MÊME `BBOX` que le reste de collect.py — mesuré le
+    21/08 : 1 145 stations Infoclimat dans la `BBOX` sur les 1 212 que
+    sert le GeoJSON complet (StatIC seul — les entrées `METEO-FRANCE`
+    du même fichier sont déjà couvertes par `mf`, jamais dédoublées ici
+    non plus qu'ailleurs dans ce script).
+    """
+    try:
+        geo = _get_json_infoclimat(INFOCLIMAT_STATIONS_GEOJSON, timeout=60)
+    except Exception as exc:                           # noqa: BLE001
+        geo = None
+        print(f"  ⚠️  référentiel infoclimat (data.gouv.fr) injoignable : {exc}",
+              file=sys.stderr)
+
+    stations = {}
+    if isinstance(geo, dict):
+        for feat in geo.get("features") or []:
+            props = feat.get("properties") or {}
+            coords = (feat.get("geometry") or {}).get("coordinates") or []
+            if len(coords) < 2 or not props.get("id"):
+                continue
+            lic = props.get("license") or {}
+            # Ne garder que le réseau Infoclimat (StatIC) : les entrées
+            # `METEO-FRANCE` du même GeoJSON sont déjà notre `mf`.
+            if lic.get("source") != "infoclimat.fr":
+                continue
+            lon, lat = float(coords[0]), float(coords[1])
+            if not (BBOX[0] <= lat <= BBOX[2] and BBOX[1] <= lon <= BBOX[3]):
+                continue
+            sid = str(props["id"])
+            stations[sid] = {
+                "id": sid, "source": "infoclimat",
+                "lat": round(lat, 4), "lon": round(lon, 4),
+                "elev": props.get("elevation"),
+                "licence_code": lic.get("code"),
+            }
+    if stations:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sorted(stations.values(), key=lambda s: s["id"]),
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
+        return list(stations.values())
+    if cache.exists():
+        anciennes = json.loads(cache.read_text(encoding="utf-8"))
+        print(f"  ⚠️  référentiel infoclimat injoignable — on repart du cache "
+              f"({len(anciennes)} stations)", file=sys.stderr)
+        return anciennes
+    return []
+
+
+def infoclimat_rows(stations: list[dict], day: str):
+    """Une journée d'Infoclimat, LUE UNE SEULE FOIS depuis NOTRE objet R2
+    `infoclimat/history.json` — cf. l'en-tête de section pour pourquoi
+    ce n'est ni un appel chez l'association ni un passage par `Storage`.
+
+    Format colonnaire de la source (`corps_history` dans
+    `poller_infoclimat.py`) : chaque station porte des tableaux ALIGNÉS
+    sur `t`, une série entièrement nulle est absente du dict plutôt que
+    remplie de `null`. On reproduit la même discipline à l'écriture :
+    `gust`/`pres_hpa` sont TOUJOURS présents sur la ligne archivée
+    (comme pour METAR), avec `None` aux positions où la série source
+    est absente — jamais un champ qui disparaît selon la station.
+    """
+    if not stations:
+        return
+    par_id = {s["id"]: s for s in stations}
+    try:
+        doc = _get_json_infoclimat(INFOCLIMAT_HISTORY_URL, timeout=60)
+    except Exception as exc:                           # noqa: BLE001
+        print(f"  ⚠️ infoclimat history.json injoignable : {exc}", file=sys.stderr)
+        return
+    if not isinstance(doc, dict):
+        return
+    hist = doc.get("historique")
+    if not isinstance(hist, dict):
+        return
+
+    debut = int(datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    fin = debut + 86400
+
+    for sid, serie in hist.items():
+        st = par_id.get(sid)
+        if st is None:
+            continue                      # hors BBOX, ou hors référentiel
+        t_all = serie.get("t") if isinstance(serie, dict) else None
+        if not isinstance(t_all, list):
+            continue
+        idx = [i for i, ts in enumerate(t_all)
+              if isinstance(ts, (int, float)) and debut <= ts < fin]
+        if not idx:
+            continue
+
+        def colonne(champ, _serie=serie, _idx=idx):
+            vals = _serie.get(champ)
+            if not isinstance(vals, list):
+                return [None] * len(_idx)
+            return [vals[i] if i < len(vals) else None for i in _idx]
+
+        speed = colonne("moy")
+        if all(v is None for v in speed):
+            continue
+        yield {
+            "station_id": sid, "source": "infoclimat",
+            "lat": st["lat"], "lon": st["lon"], "elev": st["elev"],
+            "t": [t_all[i] for i in idx],
+            "speed": speed,
+            "gust": colonne("raf"),
+            "dir": colonne("dir"),
+            "pres_hpa": colonne("pres"),
+            "pres_kind": INFOCLIMAT_PRES_KIND,
+            "licence_code": st["licence_code"],
+        }
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ÉCRITURE
 # ══════════════════════════════════════════════════════════════════
 
@@ -1325,6 +1521,8 @@ def main() -> int:
                     help="saute les observations d'aérodrome (flux rattrapable)")
     ap.add_argument("--skip-windsmobi", action="store_true",
                     help="saute les observations windsmobi (rétroactif 48h chez la source)")
+    ap.add_argument("--skip-infoclimat", action="store_true",
+                    help="saute les observations infoclimat (rétroactif 30h chez NOUS, pas la source)")
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
@@ -1517,6 +1715,30 @@ def main() -> int:
         except Exception as exc:                       # noqa: BLE001
             print(f"⚠️ passe windsmobi abandonnée ({exc!r}) — flux rattrapable "
                   f"48h, le reste du run n'est pas affecté", file=sys.stderr)
+
+    # ── 2 quater. OBSERVATIONS INFOCLIMAT (vent + pression) ───────
+    # ⚠️ Comme METAR et windsmobi : un échec ici ne fait jamais tomber
+    # le run. Contrairement à windsmobi (48h chez la SOURCE), la fenêtre
+    # infoclimat n'est que de 30h et chez NOUS (notre propre historique
+    # R2) — cf. l'en-tête de section : une nuit manquée n'est
+    # rattrapable que de justesse, jamais au-delà.
+    if not args.skip_infoclimat:
+        try:
+            d = datetime.strptime(obs_day, "%Y-%m-%d")
+            key = f"obsinfoclimat/{d:%Y/%m}/obsinfoclimat_{obs_day}.ndjson.gz"
+            path = out / key
+            stations_ic = infoclimat_stations(out / "infoclimat_stations.json")
+            if args.limit:
+                stations_ic = stations_ic[: args.limit]
+            print(f"▶ infoclimat du {obs_day} : {len(stations_ic)} stations → {path}")
+            n = write_ndjson_gz(path, infoclimat_rows(stations_ic, obs_day))
+            print(f"✅ {n} stations servies sur {len(stations_ic)}, "
+                  f"{path.stat().st_size / 1024:.0f} Ko")
+            upload_r2(path, key)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"⚠️ passe infoclimat abandonnée ({exc!r}) — flux rattrapable "
+                  f"30h (chez nous), le reste du run n'est pas affecté",
+                  file=sys.stderr)
 
     # ── 3. L'ARCHIVE EST-ELLE VRAIMENT À L'ABRI ? ─────────────────
     # Une seule règle, en fin de run, plutôt qu'un test à chaque envoi :
