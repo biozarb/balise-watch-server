@@ -894,6 +894,171 @@ verifie(C.MF_STATIONS_URL.endswith("/meteofrance-stations")
         "lecture par NOTRE propre route publique — jamais public-api.meteofrance.fr")
 
 
+# ── 13. AEMET (S0.2, session 4 — le dernier du sous-lot) ──────────────
+# ⚠️ FIXTURES RÉELLES, capturées en direct le 21/08/2026 depuis NOTRE
+# PROPRE infrastructure publique (aucun identifiant nécessaire, ni pour
+# `/aemet-stations` ni pour `aemet_station_history`, RLS publique en
+# lecture comme MF) :
+#   - `0016A` (REUS AEROPUERTO) — vraie station AVEC vent ET pression,
+#     6 points réels du 21/08 (12h-17h UTC) ;
+#   - `0009X` (ALFORJA) — vraie station AVEC vent, SANS pression (`pmer`
+#     toujours `None`), 6 points réels du 21/08 ;
+#   - `0002I` (VANDELLÓS) — réelle, et **hors BBOX de justesse** :
+#     lat 40.95806 < BBOX latMin 41.0 (un near-miss réel, pas un cas
+#     lointain comme la Guadeloupe côté MF) ;
+#   - `4362X` (RETAMAL DE LLERENA) — réelle, présente dans l'historique,
+#     jamais ajoutée au référentiel ci-dessous : couvre « en historique
+#     mais hors référentiel », même rôle que `01034004` côté MF.
+# Contrairement à MF, AUCUNE station pression-seule n'a été mesurée en
+# direct cette session (0/756 sur 24h glissantes, cf. l'en-tête de
+# section de `collect.py`) : `9999P` est donc SYNTHÉTIQUE, seule entrée
+# de ce fichier à ne pas venir d'une réponse réelle — elle couvre le
+# même filet de sécurité que CAP BEAR côté MF, jamais traversé en
+# pratique ici.
+_AEMET_STATIONS_DOC = {
+    "stations": [
+        {"id": "0016A", "nom": "REUS  AEROPUERTO", "lat": 41.145, "lon": 1.163611, "alt": 71,
+         "dd": 100, "ff": 22.32, "raf10": 35.28, "ddraf10": 100,
+         "pres": None, "pmer": 1012.4, "validityTime": "2026-08-21T17:00:00.000Z"},
+        {"id": "0009X", "nom": "ALFORJA", "lat": 41.213892, "lon": 0.963335, "alt": 406,
+         "dd": 282, "ff": 15.120000000000001, "raf10": 39.96, "ddraf10": 275,
+         "pres": None, "pmer": None, "validityTime": "2026-08-21T16:00:00.000Z"},
+        # réelle, mais hors BBOX de collect.py (BBOX latMin = 41.0) — un
+        # near-miss réel à 40.958, pas un cas lointain.
+        {"id": "0002I", "nom": "VANDELLÓS", "lat": 40.95806, "lon": 0.871385, "alt": 32,
+         "dd": 327, "ff": 7.5600000000000005, "raf10": 19.44, "ddraf10": 306,
+         "pres": None, "pmer": 1011.9, "validityTime": "2026-08-21T17:00:00.000Z"},
+        # synthétique : station pression-seule — cf. en-tête de §13,
+        # aucune ne traverse ce filtre en réalité cette session.
+        {"id": "9999P", "nom": "Pression seule (synthétique)", "lat": 42.0, "lon": 1.5, "alt": 1200,
+         "dd": None, "ff": None, "raf10": None, "ddraf10": None,
+         "pres": None, "pmer": 1015.0, "validityTime": "2026-08-21T17:00:00.000Z"},
+        # synthétique : coordonnées absentes (forme dégradée jamais
+        # observée en direct — 0/756 stations sans lat/lon cette
+        # session — mais qu'aemetStationsPayload ne garantit pas
+        # d'exclure elle-même). Même discipline que le §12 MF.
+        {"id": "0000S", "nom": "Sans coordonnées", "lat": None, "lon": None, "alt": None,
+         "dd": None, "ff": None, "raf10": None, "ddraf10": None,
+         "pres": None, "pmer": None, "validityTime": None},
+    ],
+    "fetchedAt": 1787333765015,
+}
+
+# `t` en epoch MILLISECONDES — vérifié en direct le 21/08 (Supabase réel,
+# pas une hypothèse, cf. en-tête de section de `collect.py`) — journée
+# civile UTC du 2026-08-21 : [1787270400000, 1787356800000), les mêmes
+# bornes que la fixture MF puisque c'est le même jour calendaire.
+_AEMET_JOUR = "2026-08-21"
+_AEMET_DEBUT_MS, _AEMET_FIN_MS = 1787270400000, 1787356800000
+_AEMET_HISTORY_ROWS = [
+    {"station_id": "0016A", "t": 1787313600000, "moy": 10.44, "raf": 42.480000000000004, "dir": 150, "pressure": 1012},
+    {"station_id": "0016A", "t": 1787317200000, "moy": 11.879999999999999, "raf": 27.720000000000002, "dir": 100, "pressure": 1011.9},
+    {"station_id": "0016A", "t": 1787320800000, "moy": 15.48, "raf": 57.6, "dir": 250, "pressure": 1011.3},
+    {"station_id": "0016A", "t": 1787324400000, "moy": 20.88, "raf": 38.88, "dir": 270, "pressure": 1011.3},
+    {"station_id": "0016A", "t": 1787328000000, "moy": 24.12, "raf": 33.480000000000004, "dir": 100, "pressure": 1011.7},
+    {"station_id": "0016A", "t": 1787331600000, "moy": 22.32, "raf": 35.28, "dir": 100, "pressure": 1012.4},
+    {"station_id": "0009X", "t": 1787310000000, "moy": 16.2, "raf": 36, "dir": 269, "pressure": None},
+    {"station_id": "0009X", "t": 1787313600000, "moy": 20.88, "raf": 37.440000000000005, "dir": 278, "pressure": None},
+    {"station_id": "0009X", "t": 1787317200000, "moy": 14.4, "raf": 40.32, "dir": 260, "pressure": None},
+    {"station_id": "0009X", "t": 1787320800000, "moy": 16.56, "raf": 33.12, "dir": 267, "pressure": None},
+    {"station_id": "0009X", "t": 1787324400000, "moy": 17.28, "raf": 42.84, "dir": 261, "pressure": None},
+    {"station_id": "0009X", "t": 1787328000000, "moy": 15.120000000000001, "raf": 39.96, "dir": 282, "pressure": None},
+    # synthétique — cf. en-tête de §13 : `moy` toujours None, comme la
+    # définition de "9999P" ci-dessus le promet.
+    {"station_id": "9999P", "t": 1787328000000, "moy": None, "raf": None, "dir": None, "pressure": 1015.0},
+    {"station_id": "9999P", "t": 1787331600000, "moy": None, "raf": None, "dir": None, "pressure": 1015.1},
+    # hors référentiel (pas dans _AEMET_STATIONS_DOC) — doit être ignorée sans lever.
+    {"station_id": "4362X", "t": 1787328000000, "moy": 11.16, "raf": 21.96, "dir": 227, "pressure": None},
+]
+
+_aemet_get_avant = C._get_json_aemet
+_aemet_select_avant = C._aemet_history_select
+_aemet_select_appels: list[tuple[int, int]] = []
+
+
+def _aemet_select_fake(debut_ms, fin_ms):
+    _aemet_select_appels.append((debut_ms, fin_ms))
+    return _AEMET_HISTORY_ROWS
+
+
+# ── 13.1 le référentiel : BBOX, coordonnées absentes, source="aemet" ──
+try:
+    def _aemet_route(url, timeout=45):
+        if url != C.AEMET_STATIONS_URL:
+            raise AssertionError(f"URL AEMET inattendue dans le test : {url}")
+        return _AEMET_STATIONS_DOC
+    C._get_json_aemet = _aemet_route
+    with tempfile.TemporaryDirectory() as d:
+        _aemet_cache = pathlib.Path(d) / "aemet_stations.json"
+        with redirect_stdout(io.StringIO()):
+            _aemet_stations = C.aemet_stations(_aemet_cache)
+finally:
+    C._get_json_aemet = _aemet_get_avant
+
+verifie({s["id"] for s in _aemet_stations} == {"0016A", "0009X", "9999P"},
+        f"hors BBOX (VANDELLÓS, near-miss réel) et coordonnées absentes écartés — {_aemet_stations}")
+_aemet_reus = next(s for s in _aemet_stations if s["id"] == "0016A")
+verifie(_aemet_reus["source"] == "aemet" and _aemet_reus["lat"] == 41.145 and _aemet_reus["elev"] == 71,
+        f"source='aemet', coordonnées et altitude reprises de notre route — {_aemet_reus}")
+
+# ── 13.2 le référentiel injoignable : repli sur le cache disque ──────
+_aemet_cache_json = json.dumps([{"id": "x", "source": "aemet", "lat": 1.0, "lon": 1.0, "elev": 1}])
+try:
+    def _aemet_boom(url, timeout=45):
+        raise RuntimeError("HTTP 500 (simulé)")
+    C._get_json_aemet = _aemet_boom
+    with tempfile.TemporaryDirectory() as d:
+        _aemet_cache2 = pathlib.Path(d) / "aemet_stations.json"
+        _aemet_cache2.write_text(_aemet_cache_json, encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            _aemet_fallback = C.aemet_stations(_aemet_cache2)
+finally:
+    C._get_json_aemet = _aemet_get_avant
+verifie(_aemet_fallback and _aemet_fallback[0]["id"] == "x",
+        "notre serveur injoignable → repli sur le cache disque, comme metar/windsmobi/infoclimat/mf")
+
+# ── 13.3 les lignes : ms → s, pression-seule ÉCARTÉE, hors référentiel ignoré
+try:
+    C._aemet_history_select = _aemet_select_fake
+    _aemet_stats: dict = {}
+    with redirect_stdout(io.StringIO()):
+        _aemet_rows = list(C.aemet_rows(_aemet_stations, _AEMET_JOUR, _aemet_stats))
+finally:
+    C._aemet_history_select = _aemet_select_avant
+
+verifie(_aemet_select_appels == [(_AEMET_DEBUT_MS, _AEMET_FIN_MS)],
+        f"bornes ms passées à `_aemet_history_select` pour le {_AEMET_JOUR} — {_aemet_select_appels}")
+verifie({r["station_id"] for r in _aemet_rows} == {"0016A", "0009X"},
+        f"9999P (pression-seule, moy toujours None) écartée, 4362X (hors "
+        f"référentiel) ignorée — {[r['station_id'] for r in _aemet_rows]}")
+_aemet_r1 = next(r for r in _aemet_rows if r["station_id"] == "0016A")
+verifie(_aemet_r1["t"][0] == 1787313600000 // 1000,
+        f"`t` converti de MILLISECONDES en SECONDES — {_aemet_r1['t'][0]}")
+verifie(_aemet_r1["speed"] == [10.44, 11.879999999999999, 15.48, 20.88, 24.12, 22.32],
+        f"`moy` devient `speed`, dans l'ordre — {_aemet_r1['speed']}")
+verifie(_aemet_r1["gust"][0] == 42.480000000000004 and _aemet_r1["dir"][0] == 150,
+        f"`raf` devient `gust`, `dir` inchangé — {_aemet_r1}")
+verifie(_aemet_r1["pres_hpa"] == [1012, 1011.9, 1011.3, 1011.3, 1011.7, 1012.4],
+        f"pression présente pour cette station — {_aemet_r1['pres_hpa']}")
+_aemet_r2 = next(r for r in _aemet_rows if r["station_id"] == "0009X")
+verifie(_aemet_r2["pres_hpa"] == [None] * 6,
+        f"pas de pression chez ALFORJA — colonne présente, remplie de None — {_aemet_r2['pres_hpa']}")
+verifie(_aemet_r1["pres_kind"] == "qff", "pres_kind constant — mesuré au cadrage (§1.5), pres_nmar")
+verifie(_aemet_r1["lat"] == 41.145 and _aemet_r1["elev"] == 71,
+        "position/altitude viennent du référentiel — aemet_station_history ne les porte pas")
+verifie(_aemet_stats.get("pression_seule_ecartees") == 1,
+        f"UNE station écartée (9999P, synthétique) — {_aemet_stats}")
+verifie(_aemet_stats.get("stations_avec_donnees") == 3,
+        f"trois stations avaient des lignes ce jour-là (0016A + 0009X + 9999P) — {_aemet_stats}")
+
+verifie(list(C.aemet_rows([], _AEMET_JOUR)) == [],
+        "référentiel aemet vide → aucune requête, aucune ligne")
+
+verifie(C.AEMET_STATIONS_URL.endswith("/aemet-stations")
+        and "balise-watch-server" in C.AEMET_STATIONS_URL,
+        "lecture par NOTRE propre route publique — jamais opendata.aemet.es")
+
+
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")
 for m in ko:
     print(f"  ❌ {m}")

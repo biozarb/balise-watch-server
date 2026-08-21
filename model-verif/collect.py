@@ -1576,6 +1576,200 @@ def mf_rows(stations: list[dict], day: str, stats: dict | None = None):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  OBSERVATIONS AEMET (vent + pression) — S0.2, session 4/4
+# ══════════════════════════════════════════════════════════════════
+#
+#  Quatrième et dernier réseau du cadrage (`claude/lot-s0-cadrage-
+#  reseaux-21-08.md` §3, décision 5) : Espagne, Pyrénées côté sud —
+#  **0 balise dans les Alpes**, réseau OFFICIEL (synoptique/automatique
+#  AEMET), pas un parc amateur.
+#
+#  ⚠️ DÉCOUVERTE ARCHITECTURALE DE LA SESSION, avant le premier commit —
+#  et elle DIFFÈRE de MF : contrairement à `mfStationsList` (liste
+#  statique, rafraîchie une fois par jour depuis
+#  `MF_LISTE_STATIONS_URL`), il n'existe AUCUNE liste statique des
+#  stations AEMET dans `index.js` — pas d'équivalent d'un endpoint
+#  « inventario de estaciones ». `/aemet-stations` (`aemetStationsPayload`)
+#  ne sert QUE `aemetObsCache`, le cache LIVE du dernier poll (20 min),
+#  reconstruit à chaque `refreshAemetObs`. Le référentiel qu'on lit ici
+#  est donc, structurellement, une PHOTO du dernier poll — pas un
+#  catalogue de stations « connues mais actuellement muettes » comme
+#  pour MF. Mesuré en direct le 21/08 (session aemet) : ça reste
+#  cohérent avec le cadrage — **756 stations servies, 259 dans la
+#  BBOX** (cadrage §1.2 : 257) — parce qu'AEMET est un réseau officiel
+#  où l'écrasante majorité des stations répond à chaque poll (pas la
+#  respiration d'un parc amateur comme Infoclimat/windsmobi).
+#
+#  ⛔ CORRECTION D'UNE HYPOTHÈSE DE LA SESSION MF (21/08, note
+#  `lot-s02-mf-21-08.md`, en-tête de section) : celle-ci affirmait que
+#  `mf_station_history` était « la SEULE des quatre archives à ne pas
+#  déjà être en epoch secondes ». **C'est faux pour `aemet_station_
+#  history` aussi** — vérifié en direct le 21/08 en interrogeant
+#  Supabase (`t=1787328000000` pour une ligne du 21/08 16h UTC, soit
+#  13 chiffres, cohérent avec `Date.parse(row.fint)` côté `index.js`,
+#  jamais divisé par 1000 avant l'upsert). On CONVERTIT donc ici aussi,
+#  comme pour MF, une seule fois, dans `aemet_rows`.
+#
+#  ⚠️ `moy`/`raf`/`dir`/`pressure` PEUVENT ÊTRE `None` INDÉPENDAMMENT,
+#  même règle que MF : mesuré en direct sur 24h glissantes (16 872
+#  lignes, 756 stations) — `pressure` est `None` sur une bonne partie
+#  du parc (ex. `0009X` ALFORJA, vent sans pression), mais **AUCUNE**
+#  station n'a `moy` toujours `None` sur la fenêtre (0 pression-seule
+#  mesurée, contre 2 chez MF). Le filtre d'exclusion des stations
+#  pression-seule est conservé quand même — même filet de sécurité que
+#  MF, jamais traversé par une donnée réelle dans cette session, testé
+#  par une fixture synthétique (cf. `test_collect.py` §13).
+#
+#  ⚠️ `pres_kind = "qff"`, CONSTANT — mesuré au cadrage (§1.5) :
+#  `pres_nmar` EST la pression déjà ramenée au niveau de la mer (même
+#  raisonnement que `pmer` côté MF). `pres` (pression station brute)
+#  n'est ni lu par `aemetObsCache`, ni exposé par `/aemet-stations`, ni
+#  archivé ici.
+
+AEMET_STATIONS_URL = (os.environ.get("AEMET_STATIONS_URL")
+                      or "https://balise-watch-server.onrender.com/aemet-stations")
+#: Mesuré au cadrage (§1.5) — cf. l'en-tête de section.
+AEMET_PRES_KIND = "qff"
+#: cf. `supabase_step24_aemet_station_history.sql`.
+AEMET_HISTORY_TABLE = "aemet_station_history"
+
+
+def _get_json_aemet(url: str, timeout: int = 60):
+    req = urllib.request.Request(url, headers={"User-Agent": "balise-watch/model-verif"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _aemet_history_select(debut_ms: int, fin_ms: int) -> list[dict]:
+    """Lecture PostgREST paginée de `aemet_station_history` sur `[debut_ms, fin_ms)`.
+
+    ⚠️ VOLONTAIREMENT PAS UN IMPORT DE `score.py` — même raison que
+    `_mf_history_select` (cf. son docstring) : la séparation collecte/
+    notation interdit à la collecte de dépendre du module de score.
+    Duplique donc le strict nécessaire, identique à MF : pagination par
+    `Range` de 1000, `order` explicite sur la clé primaire composite.
+    """
+    url = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or ""
+    if not (url and key):
+        raise Abort("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (aemet_station_history)")
+    page = 1000
+    out: list[dict] = []
+    offset = 0
+    q = f"t=gte.{debut_ms}&t=lt.{fin_ms}&select=station_id,t,moy,raf,dir,pressure"
+    while True:
+        req = urllib.request.Request(
+            f"{url}/rest/v1/{AEMET_HISTORY_TABLE}?{q}&order=station_id,t",
+            headers={"apikey": key, "Authorization": f"Bearer {key}",
+                    "Range-Unit": "items", "Range": f"{offset}-{offset + page - 1}"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            chunk = json.loads(r.read().decode("utf-8"))
+        out.extend(chunk)
+        if len(chunk) < page:
+            return out
+        offset += page
+
+
+def aemet_stations(cache: pathlib.Path) -> list[dict]:
+    """Le référentiel des stations AEMET, via NOTRE ROUTE, avec cache disque.
+
+    ⚠️ Contrairement à `mf_stations`, il n'y a PAS de liste statique
+    derrière cette route (cf. l'en-tête de section) : `/aemet-stations`
+    ne rend que les stations vues au DERNIER poll (≤ 20 min). C'est
+    quand même le référentiel le plus complet disponible sans appel
+    AEMET supplémentaire, et il colle au cadrage (259 mesurées ici
+    contre 257 au cadrage, même réseau officiel qui « respire » très
+    peu — pas la nature d'un parc amateur).
+    """
+    try:
+        doc = _get_json_aemet(AEMET_STATIONS_URL, timeout=45)
+    except Exception as exc:                            # noqa: BLE001
+        doc = None
+        print(f"  ⚠️  référentiel AEMET (notre serveur) injoignable : {exc}",
+              file=sys.stderr)
+
+    stations = {}
+    if isinstance(doc, dict):
+        for s in doc.get("stations") or []:
+            sid = s.get("id")
+            lat, lon = s.get("lat"), s.get("lon")
+            if not sid or lat is None or lon is None:
+                continue
+            lat, lon = float(lat), float(lon)
+            if not (BBOX[0] <= lat <= BBOX[2] and BBOX[1] <= lon <= BBOX[3]):
+                continue
+            stations[sid] = {
+                "id": sid, "source": "aemet",
+                "lat": round(lat, 4), "lon": round(lon, 4),
+                "elev": s.get("alt"),
+            }
+    if stations:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sorted(stations.values(), key=lambda s: s["id"]),
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
+        return list(stations.values())
+    if cache.exists():
+        anciennes = json.loads(cache.read_text(encoding="utf-8"))
+        print(f"  ⚠️  référentiel AEMET injoignable — on repart du cache "
+              f"({len(anciennes)} stations)", file=sys.stderr)
+        return anciennes
+    return []
+
+
+def aemet_rows(stations: list[dict], day: str, stats: dict | None = None):
+    """Une journée d'AEMET, lue dans NOTRE table `aemet_station_history`.
+
+    ⚠️ `t` DE LA TABLE EST EN MILLISECONDES — converti en secondes ICI,
+    une seule fois, cf. l'en-tête de section (correction de l'hypothèse
+    de la session mf).
+
+    Les stations dont TOUTES les lignes du jour sont pression-seule
+    (`moy` toujours `None`) sont ÉCARTÉES de l'archive — même règle que
+    MF (décision cadrage §8), par cohérence, même si aucune station
+    réelle ne l'a traversée cette session (0 mesurée, cf. en-tête).
+    `stats`, si fourni, reçoit le compte de ce qui est écarté.
+    """
+    if not stations:
+        return
+    par_id = {s["id"]: s for s in stations}
+    debut = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    fin = debut + timedelta(days=1)
+    debut_ms = int(debut.timestamp() * 1000)
+    fin_ms = int(fin.timestamp() * 1000)
+
+    par_station: dict[str, dict] = {}
+    for r in _aemet_history_select(debut_ms, fin_ms):
+        sid = r.get("station_id")
+        st = par_id.get(sid)
+        if st is None:
+            continue                      # hors BBOX, ou hors référentiel
+        t_ms = r.get("t")
+        if t_ms is None:
+            continue
+        row = par_station.setdefault(sid, {
+            "station_id": sid, "source": "aemet",
+            "lat": st["lat"], "lon": st["lon"], "elev": st["elev"],
+            "t": [], "speed": [], "gust": [], "dir": [],
+            "pres_hpa": [], "pres_kind": AEMET_PRES_KIND,
+        })
+        row["t"].append(int(t_ms // 1000))            # ms → s, cf. en-tête
+        row["speed"].append(r.get("moy"))
+        row["gust"].append(r.get("raf"))
+        row["dir"].append(r.get("dir"))
+        row["pres_hpa"].append(r.get("pressure"))
+
+    ecartees = 0
+    for row in par_station.values():
+        if all(v is None for v in row["speed"]):
+            ecartees += 1                  # pression-seule — cf. décision cadrage §8
+            continue
+        yield row
+    if stats is not None:
+        stats["pression_seule_ecartees"] = ecartees
+        stats["stations_avec_donnees"] = len(par_station)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ÉCRITURE
 # ══════════════════════════════════════════════════════════════════
 
@@ -1720,6 +1914,8 @@ def main() -> int:
                     help="saute les observations infoclimat (rétroactif 30h chez NOUS, pas la source)")
     ap.add_argument("--skip-mf", action="store_true",
                     help="saute les observations mf (rétroactif 48h chez NOUS, pas la source)")
+    ap.add_argument("--skip-aemet", action="store_true",
+                    help="saute les observations aemet (rétroactif 48h chez NOUS, pas la source)")
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
@@ -1961,6 +2157,32 @@ def main() -> int:
             upload_r2(path, key)
         except Exception as exc:                       # noqa: BLE001
             print(f"⚠️ passe mf abandonnée ({exc!r}) — flux rattrapable "
+                  f"48h (chez nous), le reste du run n'est pas affecté",
+                  file=sys.stderr)
+
+    # ── 2 sextes. OBSERVATIONS AEMET (vent + pression) ─────────────
+    # ⚠️ Comme METAR/windsmobi/infoclimat/mf : un échec ici ne fait
+    # jamais tomber le run. Rétention 48h chez NOUS (Supabase, pas la
+    # source) pour les stations avec vent — cf. l'en-tête de section.
+    # Le référentiel est une photo du dernier poll (≤ 20 min), pas un
+    # catalogue statique comme MF — cf. l'en-tête de section.
+    if not args.skip_aemet:
+        try:
+            d = datetime.strptime(obs_day, "%Y-%m-%d")
+            key = f"obsaemet/{d:%Y/%m}/obsaemet_{obs_day}.ndjson.gz"
+            path = out / key
+            stations_aemet = aemet_stations(out / "aemet_stations.json")
+            if args.limit:
+                stations_aemet = stations_aemet[: args.limit]
+            print(f"▶ aemet du {obs_day} : {len(stations_aemet)} stations → {path}")
+            stats_aemet: dict = {}
+            n = write_ndjson_gz(path, aemet_rows(stations_aemet, obs_day, stats_aemet))
+            print(f"✅ {n} stations servies sur {len(stations_aemet)}, "
+                  f"{stats_aemet.get('pression_seule_ecartees', 0)} écartée(s) "
+                  f"(pression seule), {path.stat().st_size / 1024:.0f} Ko")
+            upload_r2(path, key)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"⚠️ passe aemet abandonnée ({exc!r}) — flux rattrapable "
                   f"48h (chez nous), le reste du run n'est pas affecté",
                   file=sys.stderr)
 

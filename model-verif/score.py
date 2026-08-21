@@ -488,17 +488,27 @@ def obsmf_key(day: datetime) -> str:
     return f"obsmf/{day:%Y/%m}/obsmf_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def obsaemet_key(day: datetime) -> str:
+    """Le flux aemet (S0.2, 21/08, session 4 — le dernier du sous-lot) —
+    clé à part, comme windsmobi/infoclimat/mf. Porte aussi
+    `pres_hpa`/`pres_kind` que le S1 lira plus tard ; `score.py` ne les
+    regarde pas encore (cf. `to_obs_samples`, qui ne lit que
+    `t`/`speed`/`dir`).
+    """
+    return f"obsaemet/{day:%Y/%m}/obsaemet_{day:%Y-%m-%d}.ndjson.gz"
+
+
 #: Toutes les clés d'observations de VENT à fusionner pour noter une
 #: journée. `obs_key` (Pioupiou) est la seule d'origine ; chaque session
-#: du S0.2 y ajoute la sienne au fil de l'eau (windsmobi et infoclimat
-#: faits, mf fait, aemet reste). ⚠️ `score.py` NE CONNAÎT AUCUN RÉSEAU
-#: PAR SON NOM au-delà de cette liste : `daily_rows`,
+#: du S0.2 y ajoute la sienne au fil de l'eau — windsmobi, infoclimat,
+#: mf et aemet faits : S0.2 est clos. ⚠️ `score.py` NE CONNAÎT AUCUN
+#: RÉSEAU PAR SON NOM au-delà de cette liste : `daily_rows`,
 #: `climatology_by_station` et le reste de la notation lisent des lignes
 #: génériques (`source`, `station_id`, `t`, `speed`…) sans jamais tester
 #: `row["source"] == "windsmobi"`. Ajouter un réseau, c'est ajouter sa
 #: fonction de clé ici — rien d'autre à toucher dans ce fichier pour
 #: qu'il entre dans le score.
-OBS_KEY_FUNCS = [obs_key, obswindsmobi_key, obsinfoclimat_key, obsmf_key]
+OBS_KEY_FUNCS = [obs_key, obswindsmobi_key, obsinfoclimat_key, obsmf_key, obsaemet_key]
 
 
 def all_obs_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
