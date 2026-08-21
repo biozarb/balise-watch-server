@@ -1001,6 +1001,14 @@ WINDSMOBI_PROVIDERS = WINDSMOBI_PROVIDERS_FAST + WINDSMOBI_PROVIDERS_SLOW
 #: plus un détail d'implémentation.
 WINDSMOBI_HISTORY_DURATION_S = 48 * 3600
 
+#: Profondeur maximale que winds.mobi accepte de rendre par balise
+#: (`?duration=…`), mesurée le 07/08 sur `ffvl-2820` : 937 points sur
+#: 168,0 h pile. Même constante que `WINDSMOBI_HISTORY_MAX_H` d'index.js
+#: — sert ICI de garde-fraîcheur du référentiel (§ ci-dessous dans
+#: `windsmobi_stations`) : au-delà, l'historique d'une station ne
+#: rentrerait de toute façon dans aucune fenêtre de 48 h demandée.
+WINDSMOBI_HISTORY_MAX_H = 168
+
 
 def _get_json_windsmobi(path: str, timeout: int = 60):
     """GET sur l'API windsmobi, AVEC le user-agent obligatoire.
@@ -1036,8 +1044,27 @@ def windsmobi_stations(cache: pathlib.Path) -> list[dict]:
     (`last['w-avg']` absent) sont écartées : pas un dédoublonnage, un
     filtre de vivacité — leur historique ne rendrait que des lignes
     vides, comme `refreshWindsmobiProviders` le fait déjà côté serveur.
+
+    ⛔ **Garde-fraîcheur ajoutée le 21/08 (suite session, cf. §9 du
+    cadrage) — écarte les stations mortes DEPUIS LONGTEMPS.** Mesuré ce
+    jour-là : le référentiel brut (identique au filtre ci-dessus, SANS
+    cette garde) rend 1283 stations contre 901 au cadrage S0.1, quelques
+    heures plus tôt. Investigué et **pour l'essentiel PAS expliqué par
+    la fraîcheur** : seules 50 stations sur 1283 ont un dernier relevé
+    de plus de 60 min (le seuil `WINDSMOBI_OBS_MAX_AGE_MS` de l'app), et
+    37 de plus de 24 h — l'écart réel (~382) tient surtout à la
+    RESPIRATION du réseau au fil de la journée (mesure 12h40 vs
+    fin d'après-midi), la même que celle déjà documentée pour Infoclimat
+    (§1.2 du cadrage : 548 puis 572 en dix minutes). Ce n'est donc PAS
+    une correction du chiffre, juste l'écartement des entrées VRAIMENT
+    abandonnées : au-delà de `WINDSMOBI_HISTORY_MAX_H` (168 h, 7 jours —
+    la même constante qu'index.js pour la profondeur d'historique
+    winds.mobi), leur historique ne rentrerait de toute façon dans
+    aucune fenêtre de 48 h qu'on leur redemande. Mesuré : 15 stations
+    sur 1283 dans ce cas le 21/08.
     """
     stations, echecs = {}, []
+    now = time.time()
     for provider in WINDSMOBI_PROVIDERS:
         try:
             rows = _get_json_windsmobi(f"/stations/?provider={provider}&limit=0")
@@ -1058,6 +1085,9 @@ def windsmobi_stations(cache: pathlib.Path) -> list[dict]:
                 continue
             last = s.get("last") or {}
             if last.get("w-avg") is None:
+                continue
+            derniere_ts = last.get("_id")
+            if isinstance(derniere_ts, (int, float)) and (now - derniere_ts) > WINDSMOBI_HISTORY_MAX_H * 3600:
                 continue
             sid = s.get("_id")
             if sid is None:
