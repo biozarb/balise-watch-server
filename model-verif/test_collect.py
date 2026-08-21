@@ -746,6 +746,154 @@ verifie(C.INFOCLIMAT_HISTORY_URL.endswith("/infoclimat/history.json")
         "(qui subirait le R2_BUCKET=model-verif forcé par run.sh)")
 
 
+# ── 12. MF (S0.2, session 3) ──────────────────────────────────────────
+# ⚠️ FIXTURES RÉELLES, capturées en direct le 21/08/2026 depuis NOTRE
+# PROPRE infrastructure publique (aucun identifiant nécessaire, ni pour
+# `/meteofrance-stations` ni pour `mf_station_history` — sa policy RLS
+# est `for select using (true)`, cf. supabase_step13) :
+#   - `01014002` (ARBENT) — une vraie station AVEC vent, 6 points réels
+#     du 21/08 (00h07-00h29 UTC) ;
+#   - `66148001` (CAP BEAR) — LA station que le cadrage nommait déjà
+#     comme l'exemple mesuré de pression-seule (§8 de la note de
+#     cadrage) : 6 points réels du 21/08, `moy` strictement `None` sur
+#     TOUTE la fenêtre de rétention (121 lignes vérifiées en direct,
+#     0 avec du vent) — la confirmation en base de ce que le cadrage
+#     avait mesuré côté serveur.
+# Les entrées synthétiques (coordonnées absentes) couvrent un filtre
+# que l'échantillon réel, à lui seul, ne traverse pas — même discipline
+# que les §10/§11 windsmobi/infoclimat.
+_MF_STATIONS_DOC = {
+    "stations": [
+        {"id": "01014002", "nom": "ARBENT", "lat": 46.278167, "lon": 5.669, "alt": 534,
+         "dd": 300, "ff": 10.44, "raf10": 25.56, "ddraf10": 300,
+         "pres": None, "pmer": None, "validityTime": "2026-08-21T16:42:00Z"},
+        {"id": "66148001", "nom": "CAP BEAR", "lat": 42.516167, "lon": 3.133667, "alt": 72,
+         "dd": None, "ff": None, "raf10": None, "ddraf10": None,
+         "pres": 1004.5, "pmer": 1014.4, "validityTime": "2026-08-21T16:42:00Z"},
+        # réelle, mais hors BBOX de collect.py (BBOX lonMin = -6.0) — Guadeloupe.
+        {"id": "97101015", "nom": "LE RAIZET AERO", "lat": 16.264, "lon": -61.516333, "alt": 11,
+         "dd": 100, "ff": 20.16, "raf10": 29.16, "ddraf10": 100,
+         "pres": 1015.3, "pmer": 1016.2, "validityTime": "2026-08-21T16:42:00Z"},
+        # synthétique : coordonnées absentes (forme dégradée jamais observée en
+        # direct, mais que mfStationsPayload ne garantit pas d'exclure elle-même).
+        {"id": "00000000", "nom": "Sans coordonnées", "lat": None, "lon": None, "alt": None,
+         "dd": None, "ff": None, "raf10": None, "ddraf10": None,
+         "pres": None, "pmer": None, "validityTime": None},
+    ],
+    "fetchedAt": 1787331507332,
+}
+
+# `t` en epoch MILLISECONDES (convention `mf_station_history`, PAS celle
+# de l'archive) — journée civile UTC du 2026-08-21 : [1787270400000,
+# 1787356800000). Les 6 points d'ARBENT capturés tombent tous dans la
+# première demi-heure de cette fenêtre (00h07-00h29 UTC) ; ceux de CAP
+# BEAR vers 05h05-05h35 UTC. `01034004` : une troisième station réelle,
+# présente dans la même réponse Supabase, jamais ajoutée au référentiel
+# ci-dessus — sert à couvrir « en historique mais hors référentiel ».
+_MF_JOUR = "2026-08-21"
+_MF_DEBUT_MS, _MF_FIN_MS = 1787270400000, 1787356800000
+_MF_HISTORY_ROWS = [
+    {"station_id": "01014002", "t": 1787270850904, "moy": 2.88, "raf": 7.2, "dir": 150, "pressure": None},
+    {"station_id": "01014002", "t": 1787271109099, "moy": 3.6, "raf": 7.2, "dir": 100, "pressure": None},
+    {"station_id": "01014002", "t": 1787271706960, "moy": 2.16, "raf": 6.12, "dir": 70, "pressure": None},
+    {"station_id": "01014002", "t": 1787272007003, "moy": 1.8, "raf": 3.96, "dir": 350, "pressure": None},
+    {"station_id": "01014002", "t": 1787272307097, "moy": 2.16, "raf": 4.68, "dir": 340, "pressure": None},
+    {"station_id": "01014002", "t": 1787273368680, "moy": 1.8, "raf": 5.04, "dir": 70, "pressure": None},
+    {"station_id": "66148001", "t": 1787288756035, "moy": None, "raf": None, "dir": None, "pressure": 1009.5},
+    {"station_id": "66148001", "t": 1787289116150, "moy": None, "raf": None, "dir": None, "pressure": 1009.6},
+    {"station_id": "66148001", "t": 1787289476936, "moy": None, "raf": None, "dir": None, "pressure": 1009.7},
+    {"station_id": "66148001", "t": 1787289838143, "moy": None, "raf": None, "dir": None, "pressure": 1009.8},
+    {"station_id": "66148001", "t": 1787290197641, "moy": None, "raf": None, "dir": None, "pressure": 1009.9},
+    {"station_id": "66148001", "t": 1787290557244, "moy": None, "raf": None, "dir": None, "pressure": 1009.9},
+    # hors référentiel (pas dans _MF_STATIONS_DOC) — doit être ignorée sans lever.
+    {"station_id": "01034004", "t": 1787270850904, "moy": 5.04, "raf": 10.44, "dir": 310, "pressure": None},
+]
+
+_mf_get_avant = C._get_json_mf
+_mf_select_avant = C._mf_history_select
+_mf_select_appels: list[tuple[int, int]] = []
+
+
+def _mf_select_fake(debut_ms, fin_ms):
+    _mf_select_appels.append((debut_ms, fin_ms))
+    return _MF_HISTORY_ROWS
+
+
+# ── 12.1 le référentiel : BBOX, coordonnées absentes, source="mf" ────
+try:
+    def _mf_route(url, timeout=45):
+        if url != C.MF_STATIONS_URL:
+            raise AssertionError(f"URL MF inattendue dans le test : {url}")
+        return _MF_STATIONS_DOC
+    C._get_json_mf = _mf_route
+    with tempfile.TemporaryDirectory() as d:
+        _mf_cache = pathlib.Path(d) / "mf_stations.json"
+        with redirect_stdout(io.StringIO()):
+            _mf_stations = C.mf_stations(_mf_cache)
+finally:
+    C._get_json_mf = _mf_get_avant
+
+verifie({s["id"] for s in _mf_stations} == {"01014002", "66148001"},
+        f"hors BBOX (Guadeloupe) et coordonnées absentes écartés — {_mf_stations}")
+_mf_arbent = next(s for s in _mf_stations if s["id"] == "01014002")
+verifie(_mf_arbent["source"] == "mf" and _mf_arbent["lat"] == 46.2782 and _mf_arbent["elev"] == 534,
+        f"source='mf', coordonnées et altitude reprises de notre route — {_mf_arbent}")
+
+# ── 12.2 le référentiel injoignable : repli sur le cache disque ──────
+_mf_cache_json = json.dumps([{"id": "x", "source": "mf", "lat": 1.0, "lon": 1.0, "elev": 1}])
+try:
+    def _mf_boom(url, timeout=45):
+        raise RuntimeError("HTTP 500 (simulé)")
+    C._get_json_mf = _mf_boom
+    with tempfile.TemporaryDirectory() as d:
+        _mf_cache2 = pathlib.Path(d) / "mf_stations.json"
+        _mf_cache2.write_text(_mf_cache_json, encoding="utf-8")
+        with redirect_stdout(io.StringIO()):
+            _mf_fallback = C.mf_stations(_mf_cache2)
+finally:
+    C._get_json_mf = _mf_get_avant
+verifie(_mf_fallback and _mf_fallback[0]["id"] == "x",
+        "notre serveur injoignable → repli sur le cache disque, comme metar/windsmobi/infoclimat")
+
+# ── 12.3 les lignes : ms → s, pression-seule ÉCARTÉE, hors référentiel ignoré
+try:
+    C._mf_history_select = _mf_select_fake
+    _mf_stats: dict = {}
+    with redirect_stdout(io.StringIO()):
+        _mf_rows = list(C.mf_rows(_mf_stations, _MF_JOUR, _mf_stats))
+finally:
+    C._mf_history_select = _mf_select_avant
+
+verifie(_mf_select_appels == [(_MF_DEBUT_MS, _MF_FIN_MS)],
+        f"bornes ms passées à `_mf_history_select` pour le {_MF_JOUR} — {_mf_select_appels}")
+verifie({r["station_id"] for r in _mf_rows} == {"01014002"},
+        f"CAP BEAR (pression-seule, moy toujours None) écartée, 01034004 (hors "
+        f"référentiel) ignorée — {[r['station_id'] for r in _mf_rows]}")
+_mf_r1 = next(r for r in _mf_rows if r["station_id"] == "01014002")
+verifie(_mf_r1["t"][0] == 1787270850904 // 1000,
+        f"`t` converti de MILLISECONDES en SECONDES — {_mf_r1['t'][0]}")
+verifie(_mf_r1["speed"] == [2.88, 3.6, 2.16, 1.8, 2.16, 1.8],
+        f"`moy` devient `speed`, dans l'ordre — {_mf_r1['speed']}")
+verifie(_mf_r1["gust"][0] == 7.2 and _mf_r1["dir"][0] == 150,
+        f"`raf` devient `gust`, `dir` inchangé — {_mf_r1}")
+verifie(_mf_r1["pres_hpa"] == [None] * 6,
+        f"pas de pression chez cette station — colonne présente, remplie de None — {_mf_r1['pres_hpa']}")
+verifie(_mf_r1["pres_kind"] == "qff", "pres_kind constant — mesuré au cadrage (§1.5)")
+verifie(_mf_r1["lat"] == 46.2782 and _mf_r1["elev"] == 534,
+        "position/altitude viennent du référentiel — mf_station_history ne les porte pas")
+verifie(_mf_stats.get("pression_seule_ecartees") == 1,
+        f"UNE station écartée (CAP BEAR) — {_mf_stats}")
+verifie(_mf_stats.get("stations_avec_donnees") == 2,
+        f"deux stations avaient des lignes ce jour-là (ARBENT + CAP BEAR) — {_mf_stats}")
+
+verifie(list(C.mf_rows([], _MF_JOUR)) == [],
+        "référentiel mf vide → aucune requête, aucune ligne")
+
+verifie(C.MF_STATIONS_URL.endswith("/meteofrance-stations")
+        and "balise-watch-server" in C.MF_STATIONS_URL,
+        "lecture par NOTRE propre route publique — jamais public-api.meteofrance.fr")
+
+
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")
 for m in ko:
     print(f"  ❌ {m}")

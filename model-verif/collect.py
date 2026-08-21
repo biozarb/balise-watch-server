@@ -1381,6 +1381,201 @@ def infoclimat_rows(stations: list[dict], day: str):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  OBSERVATIONS MÉTÉO-FRANCE (vent + pression) — S0.2, 21/08, session 3
+# ══════════════════════════════════════════════════════════════════
+#
+#  Ce flux vient du cadrage `claude/lot-s0-cadrage-reseaux-21-08.md` :
+#  685 balises neuves (88 dans les Alpes), cadence 5 min, la meilleure
+#  qualité instrumentale du lot, et 168 pressions QFF.
+#
+#  ⛔ ZÉRO APPEL À MÉTÉO-FRANCE. Ce flux lit DEUX choses, ni l'une ni
+#  l'autre n'appelle `public-api.meteofrance.fr` :
+#    1. Le référentiel des stations (id/nom/lat/lon/alt) — la route
+#       PUBLIQUE de NOTRE PROPRE serveur, `/meteofrance-stations`
+#       (index.js, `mfStationsPayload`), qui sert déjà le mélange
+#       référentiel × dernier relevé sans exposer la clé API MF ni
+#       déclencher d'appel MF supplémentaire (cache RAM rafraîchi en
+#       tâche de fond, cf. `refreshMeteoFranceData`) ;
+#    2. `mf_station_history` — NOTRE PROPRE table Supabase (step13 +
+#       step17), alimentée par le poll 5 min du serveur (`pollAndNotify`)
+#       et sa persistance différenciée (Lot 8, 12/07). On la relit
+#       directement en PostgREST, avec la clé service_role déjà
+#       utilisée par `score.py` pour `station_zone`/`model_verif_daily`
+#       (même `.env` sur le VPS).
+#
+#  ⚠️ `t` EST EN MILLISECONDES DANS `mf_station_history` (`Date.now()`
+#  côté serveur, cf. le commentaire du SQL step13) — PAS EN SECONDES
+#  comme le reste de l'archive (`obs/`, `obsmetar/`, `obswindsmobi/`,
+#  `obsinfoclimat/`). On CONVERTIT à la lecture, une seule fois, dans
+#  `mf_rows` : un piège qui ne se voit qu'au premier chiffre faux du
+#  S1, jamais avant.
+#
+#  ⚠️ `moy`/`raf`/`dir`/`pressure` PEUVENT ÊTRE `None` INDÉPENDAMMENT :
+#  une station AVEC vent écrit moy/raf/dir non-null et `pressure`
+#  (souvent) non-null ; une station SANS anémomètre (pression seule)
+#  écrit UNIQUEMENT `pressure`, moy/dir/raf toujours `None` — jamais 0
+#  (`mfPersistHistory`, index.js l. 1801).
+#
+#  ⛔ LES STATIONS PRESSION-SEULE SONT ÉCARTÉES DE L'ARCHIVE — décision
+#  du cadrage §8, option 1 retenue. Mesuré : DEUX stations (dont « CAP
+#  BEAR ») servent `pmer` sans jamais servir `ff`, purgées à 12h côté
+#  Supabase (`MF_PRESSURE_ONLY_RETENTION_H`) — une fenêtre trop courte
+#  pour un run nocturne qui redemande la veille entière (cf. cadrage
+#  §8, l'arithmétique du run à 03h15 UTC : il ne resterait que 8h45 de
+#  la veille). Les 166 autres stations à pression ont aussi du vent :
+#  rétention 48h, couverture complète d'un run nocturne. `mf_rows`
+#  compte ce qu'il écarte ; `main` le nomme dans le journal.
+#
+#  ⚠️ `pres_kind = "qff"`, CONSTANT — mesuré au cadrage (§1.5) : `pmer`
+#  EST la pression déjà réduite au niveau de la mer (à température
+#  réelle, la convention QFF). Ne pas confondre avec `pres` (pression
+#  station) : ce champ n'est ni lu par `mfObsCache`, ni exposé par
+#  `/meteofrance-stations`, ni archivé ici.
+
+MF_STATIONS_URL = (os.environ.get("MF_STATIONS_URL")
+                   or "https://balise-watch-server.onrender.com/meteofrance-stations")
+#: Mesuré au cadrage (§1.5) — cf. l'en-tête de section.
+MF_PRES_KIND = "qff"
+#: cf. `supabase_step13_mf_station_history.sql` et son additif step17.
+MF_HISTORY_TABLE = "mf_station_history"
+
+
+def _get_json_mf(url: str, timeout: int = 60):
+    req = urllib.request.Request(url, headers={"User-Agent": "balise-watch/model-verif"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _mf_history_select(debut_ms: int, fin_ms: int) -> list[dict]:
+    """Lecture PostgREST paginée de `mf_station_history` sur `[debut_ms, fin_ms)`.
+
+    ⚠️ VOLONTAIREMENT PAS UN IMPORT DE `score.py`. La séparation
+    collecte/notation (cf. l'en-tête de ce fichier) interdit à la
+    collecte de dépendre du module qui calcule le score — même si les
+    deux parlent au même PostgREST. Duplique donc le strict nécessaire
+    de `Supabase.select` : pagination par `Range` de 1000 (plafond
+    PostgREST, pas du client), `order` explicite sur la clé primaire
+    composite pour que deux pages ne se chevauchent ni ne se percent
+    (`score.py` l. 222-270 documente le même piège pour `station_zone`).
+    """
+    url = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or ""
+    if not (url and key):
+        raise Abort("SUPABASE_URL / SUPABASE_SERVICE_KEY manquants (mf_station_history)")
+    page = 1000
+    out: list[dict] = []
+    offset = 0
+    q = f"t=gte.{debut_ms}&t=lt.{fin_ms}&select=station_id,t,moy,raf,dir,pressure"
+    while True:
+        req = urllib.request.Request(
+            f"{url}/rest/v1/{MF_HISTORY_TABLE}?{q}&order=station_id,t",
+            headers={"apikey": key, "Authorization": f"Bearer {key}",
+                    "Range-Unit": "items", "Range": f"{offset}-{offset + page - 1}"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            chunk = json.loads(r.read().decode("utf-8"))
+        out.extend(chunk)
+        if len(chunk) < page:
+            return out
+        offset += page
+
+
+def mf_stations(cache: pathlib.Path) -> list[dict]:
+    """Le référentiel des stations MF, via NOTRE ROUTE, avec cache disque.
+
+    ⚠️ `/meteofrance-stations` ne rend QUE les stations qui ont un
+    relevé exploitable au moment de l'appel (vent OU pression seule) —
+    la même nature de filtre que le référentiel Infoclimat (`referential
+    ⊇ history`, jamais l'inverse) : suffisant pour rattacher les zones,
+    et une station qui ne publie plus n'a de toute façon rien à
+    archiver ce jour-là.
+    """
+    try:
+        doc = _get_json_mf(MF_STATIONS_URL, timeout=45)
+    except Exception as exc:                            # noqa: BLE001
+        doc = None
+        print(f"  ⚠️  référentiel MF (notre serveur) injoignable : {exc}",
+              file=sys.stderr)
+
+    stations = {}
+    if isinstance(doc, dict):
+        for s in doc.get("stations") or []:
+            sid = s.get("id")
+            lat, lon = s.get("lat"), s.get("lon")
+            if not sid or lat is None or lon is None:
+                continue
+            lat, lon = float(lat), float(lon)
+            if not (BBOX[0] <= lat <= BBOX[2] and BBOX[1] <= lon <= BBOX[3]):
+                continue
+            stations[sid] = {
+                "id": sid, "source": "mf",
+                "lat": round(lat, 4), "lon": round(lon, 4),
+                "elev": s.get("alt"),
+            }
+    if stations:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(sorted(stations.values(), key=lambda s: s["id"]),
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
+        return list(stations.values())
+    if cache.exists():
+        anciennes = json.loads(cache.read_text(encoding="utf-8"))
+        print(f"  ⚠️  référentiel MF injoignable — on repart du cache "
+              f"({len(anciennes)} stations)", file=sys.stderr)
+        return anciennes
+    return []
+
+
+def mf_rows(stations: list[dict], day: str, stats: dict | None = None):
+    """Une journée de MF, lue dans NOTRE table `mf_station_history`.
+
+    ⚠️ `t` DE LA TABLE EST EN MILLISECONDES — converti en secondes ICI,
+    une seule fois, cf. l'en-tête de section.
+
+    Les stations dont TOUTES les lignes du jour sont pression-seule
+    (`moy` toujours `None`) sont ÉCARTÉES de l'archive — décision du
+    cadrage §8. `stats`, si fourni, reçoit le compte de ce qui est
+    écarté : ce générateur ne journalise rien lui-même, `main` le fait.
+    """
+    if not stations:
+        return
+    par_id = {s["id"]: s for s in stations}
+    debut = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    fin = debut + timedelta(days=1)
+    debut_ms = int(debut.timestamp() * 1000)
+    fin_ms = int(fin.timestamp() * 1000)
+
+    par_station: dict[str, dict] = {}
+    for r in _mf_history_select(debut_ms, fin_ms):
+        sid = r.get("station_id")
+        st = par_id.get(sid)
+        if st is None:
+            continue                      # hors BBOX, ou hors référentiel
+        t_ms = r.get("t")
+        if t_ms is None:
+            continue
+        row = par_station.setdefault(sid, {
+            "station_id": sid, "source": "mf",
+            "lat": st["lat"], "lon": st["lon"], "elev": st["elev"],
+            "t": [], "speed": [], "gust": [], "dir": [],
+            "pres_hpa": [], "pres_kind": MF_PRES_KIND,
+        })
+        row["t"].append(int(t_ms // 1000))            # ms → s, cf. en-tête
+        row["speed"].append(r.get("moy"))
+        row["gust"].append(r.get("raf"))
+        row["dir"].append(r.get("dir"))
+        row["pres_hpa"].append(r.get("pressure"))
+
+    ecartees = 0
+    for row in par_station.values():
+        if all(v is None for v in row["speed"]):
+            ecartees += 1                  # pression-seule — cf. décision cadrage §8
+            continue
+        yield row
+    if stats is not None:
+        stats["pression_seule_ecartees"] = ecartees
+        stats["stations_avec_donnees"] = len(par_station)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ÉCRITURE
 # ══════════════════════════════════════════════════════════════════
 
@@ -1523,6 +1718,8 @@ def main() -> int:
                     help="saute les observations windsmobi (rétroactif 48h chez la source)")
     ap.add_argument("--skip-infoclimat", action="store_true",
                     help="saute les observations infoclimat (rétroactif 30h chez NOUS, pas la source)")
+    ap.add_argument("--skip-mf", action="store_true",
+                    help="saute les observations mf (rétroactif 48h chez NOUS, pas la source)")
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
@@ -1738,6 +1935,33 @@ def main() -> int:
         except Exception as exc:                       # noqa: BLE001
             print(f"⚠️ passe infoclimat abandonnée ({exc!r}) — flux rattrapable "
                   f"30h (chez nous), le reste du run n'est pas affecté",
+                  file=sys.stderr)
+
+    # ── 2 quinquies. OBSERVATIONS MF (vent + pression) ─────────────
+    # ⚠️ Comme METAR/windsmobi/infoclimat : un échec ici ne fait jamais
+    # tomber le run. Rétention 48h chez NOUS (Supabase, pas la source)
+    # pour les stations avec vent — cf. l'en-tête de section. Les
+    # stations pression-seule (12h chez nous, 2 mesurées au cadrage)
+    # n'entrent de toute façon jamais dans l'archive (décision §8).
+    if not args.skip_mf:
+        try:
+            d = datetime.strptime(obs_day, "%Y-%m-%d")
+            key = f"obsmf/{d:%Y/%m}/obsmf_{obs_day}.ndjson.gz"
+            path = out / key
+            stations_mf = mf_stations(out / "mf_stations.json")
+            if args.limit:
+                stations_mf = stations_mf[: args.limit]
+            print(f"▶ mf du {obs_day} : {len(stations_mf)} stations → {path}")
+            stats_mf: dict = {}
+            n = write_ndjson_gz(path, mf_rows(stations_mf, obs_day, stats_mf))
+            print(f"✅ {n} stations servies sur {len(stations_mf)}, "
+                  f"{stats_mf.get('pression_seule_ecartees', 0)} écartée(s) "
+                  f"(pression seule, purgée à 12h — décision cadrage §8), "
+                  f"{path.stat().st_size / 1024:.0f} Ko")
+            upload_r2(path, key)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"⚠️ passe mf abandonnée ({exc!r}) — flux rattrapable "
+                  f"48h (chez nous), le reste du run n'est pas affecté",
                   file=sys.stderr)
 
     # ── 3. L'ARCHIVE EST-ELLE VRAIMENT À L'ABRI ? ─────────────────
