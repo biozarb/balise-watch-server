@@ -81,7 +81,6 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import io
 import json
 import os
@@ -156,23 +155,18 @@ BUCKET_SUPABASE_DEFAUT = "wind-grid"
 PREFIXE_COLONNES = "agrume/colonnes/"
 
 #: ⛔ LE JETON R2 ORDINAIRE DU VPS ÉCRIT SUR `balise-watch-grids` MAIS NE
-#: LE LIT PAS. Mesuré le 13/08 : `HeadObject` sur une clé PI écrite six
-#: minutes plus tôt rend **403**, et `ListObjectsV2` aussi. C'est le même
-#: jeton qui a fait écrire à `~/.balise-watch-r2.env` que « le jeton de
-#: ce VPS n'a pas ListBuckets ». Le producteur lit donc avec le jeton
-#: LECTURE SEULE de l'audit, qui, lui, liste et lit (22 runs du produit A
-#: retrouvés avec lui le 13/08). L'écriture de l'archive, elle, repart
-#: sur le jeton ordinaire et sur `model-verif`.
+#: LE LIT PAS, et c'est `prefixe_lecture()` qui choisit le bon jeu
+#: d'identifiants. ⚠️ CES DEUX FONCTIONS ONT DÉMÉNAGÉ LE 22/08 (lot
+#: S0.5) dans `tools/r2_lecture.py`, À L'IDENTIQUE, corps et
+#: commentaires : `model-verif/arome_fcst.py` lit le MÊME bucket avec le
+#: MÊME jeton contre le MÊME piège, et le chantier a déjà payé cinq
+#: copies de `sb_upload`. La raison de chaque ligne est là-bas.
 #:
-#: Ordre d'essai, du plus spécifique au plus général. ⚠️ Le dernier
-#: échelon (`R2_*`) est un repli qui ÉCHOUERA sur le VPS d'aujourd'hui,
-#: et c'est voulu : il fait marcher le job partout où le jeton principal
-#: a le droit de lire (les Actions, une machine de dev), sans faire
-#: croire qu'un jeton dédié n'est pas souhaitable.
-#: ⓘ Reliquat assumé : un jeton `AGRUME_R2_READ_*` propre, scopé au seul
-#: bucket des grilles, vaudrait mieux que d'emprunter celui de l'audit —
-#: le jour où Yann le crée, il suffit de le poser dans le .env.
-PREFIXES_LECTURE = ("AGRUME_R2_READ_", "BW_R2_AUDIT_", "R2_")
+#: Elles restent des attributs de CE module — `A.bucket_r2(...)` et
+#: `A.prefixe_lecture()` du banc continuent de fonctionner sans une
+#: ligne de changement.
+from r2_lecture import (PREFIXES_LECTURE, bucket_r2,      # noqa: E402,F401
+                        prefixe_lecture)
 
 
 class Abort(Exception):
@@ -182,63 +176,6 @@ class Abort(Exception):
 # ══════════════════════════════════════════════════════════════════
 #  LIRE LE PRODUIT A — et le piège des deux buckets
 # ══════════════════════════════════════════════════════════════════
-
-def prefixe_lecture() -> str:
-    """Le premier jeu d'identifiants R2 disponible pour la LECTURE.
-
-    Rend le préfixe de variables retenu (`"BW_R2_AUDIT_"`, …). Le
-    dernier échelon (`"R2_"`) est toujours rendu par défaut, même
-    incomplet : c'est `lire_run` qui dira ce qui a été refusé, avec le
-    nom de la variable à poser.
-    """
-    for p in PREFIXES_LECTURE:
-        if os.environ.get(p + "ACCESS_KEY_ID") and \
-                os.environ.get(p + "SECRET_ACCESS_KEY"):
-            return p
-    return PREFIXES_LECTURE[-1]
-
-
-@contextlib.contextmanager
-def bucket_r2(nom: str, prefixe: str | None = None):
-    """Force `R2_BUCKET` (et les identifiants) le temps d'un `Storage`.
-
-    ⛔ LE PIÈGE QUE CE BLOC EXISTE POUR ÉVITER, ET IL EST SILENCIEUX.
-    `tools/storage.py` résout le bucket R2 par
-    `os.environ.get("R2_BUCKET") or defaut` — `R2_BUCKET` PRIME sur le
-    `bucket_env` passé en argument. Or `run.sh` exporte
-    `R2_BUCKET=model-verif` pour les trois modes du module. Sans ce
-    bloc, la lecture du produit A irait chercher
-    `model-verif/agrume/colonnes/…` : une clé qui n'existe pas, donc un
-    `None`, donc « run absent », donc zéro ligne AGRUME toutes les
-    nuits — et rien ne s'allumerait, parce qu'un run absent est un cas
-    NORMAL au démarrage.
-
-    ⛔ ET LES IDENTIFIANTS AVEC, pour la même raison en pire : le jeton
-    ordinaire du VPS ÉCRIT sur `balise-watch-grids` sans pouvoir le LIRE
-    (403 mesuré le 13/08 sur une clé existante). `prefixe` désigne le jeu
-    de variables à utiliser ; `None` laisse celles en place.
-
-    On restaure tout en sortant : l'envoi de l'archive, lui, doit
-    repartir sur `model-verif` avec le jeton ordinaire.
-    """
-    cles = ["R2_BUCKET"]
-    if prefixe and prefixe != "R2_":
-        cles += ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
-    avant = {k: os.environ.get(k) for k in cles}
-    os.environ["R2_BUCKET"] = nom
-    if prefixe and prefixe != "R2_":
-        for suffixe in ("ACCESS_KEY_ID", "SECRET_ACCESS_KEY"):
-            v = os.environ.get(prefixe + suffixe)
-            if v:
-                os.environ["R2_" + suffixe] = v
-    try:
-        yield nom
-    finally:
-        for k, v in avant.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def lire_run(run: str, crier=print):

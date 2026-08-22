@@ -179,7 +179,18 @@ REPLAY_SUBDIR = "replay"
 #:     borné : `--replay-budget` (3 par défaut) rattrape trois journées
 #:     par nuit et `replay_window` COMPTE celles qu'il reporte. Pour
 #:     rattraper d'un coup : `--replay-budget 30`.
-REPLAY_FORMULA = 3
+#: 4 — lot S2 (22/08) : `daily_rows` porte la COLONNE CORRIGÉE du biais
+#:     de site (`err_vec_med_corr`, `mse_model_corr`, `bias_n_days`) et
+#:     la pente du jour (`bias_slope`) dont l'antécédent des journées
+#:     suivantes est fait. Un cache de la formule 3 ne porte NI l'une NI
+#:     l'autre : réutilisé, il donnerait une fenêtre où le corrigé
+#:     existe pour les journées récentes et manque pour les anciennes —
+#:     exactement le mélange que la formule 3 refusait déjà pour AGRUME.
+#:     ⚠️ Prix connu : au premier run, les 30 caches sont invalides et
+#:     l'antécédent repart à zéro. `--replay-budget 30` une fois (mesuré
+#:     ~35 s par journée sur le VPS, soit ~18 min) plutôt que dix nuits
+#:     à en rattraper trois.
+REPLAY_FORMULA = 4
 
 
 class Abort(Exception):
@@ -450,8 +461,69 @@ def read_ndjson(root: pathlib.Path, key: str, storage=None):
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-def fcst_key(day: datetime) -> str:
-    return f"fcst/{day:%Y/%m}/fcst_{day:%Y-%m-%d}.ndjson.gz"
+def read_json(root: pathlib.Path, key: str, storage=None):
+    """Lit UN objet JSON d'archive, localement d'abord, sur R2 ensuite.
+
+    Même contrat que `read_ndjson` : un objet absent rend `None`, et
+    l'appelant doit en faire un fait, pas une erreur.
+
+    ⓘ LE LOCAL D'ABORD, ET ÇA COMPTE POUR LE MANIFESTE. `score.py`
+    tourne sur la même machine que `collect.py` : si l'envoi R2 du
+    manifeste a échoué, le fichier est quand même là, et la notation de
+    la nuit le trouve. R2 n'est le recours que pour un rejeu fait
+    ailleurs.
+    """
+    path = root / key
+    raw = None
+    if path.exists():
+        raw = path.read_bytes()
+    elif storage is not None:
+        raw = storage.get(key)
+    if not raw:
+        return None
+    try:
+        return json.loads(gzip.decompress(raw).decode("utf-8"))
+    except OSError:
+        pass
+    except ValueError:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+
+
+def fcst_key(day: datetime, partie: int = 1) -> str:
+    """La clé d'UNE partie du flux `fcst/` — la 1 est la clé historique.
+
+    ⛔ AUCUNE DATE DE BASCULE, ET C'EST LA PROPRIÉTÉ QUI COMPTE.
+    `fcst_key(day)` rend exactement ce qu'elle rendait avant le lot S0.6,
+    donc les 15 nuits déjà écrites (au 22/08/2026) restent lisibles sans
+    condition. Une journée d'avant la partition n'a pas de manifeste,
+    n'a qu'une clé, et son union est complète.
+
+    ⓘ Le miroir de `collect.fcst_cle`. Les deux fichiers ne s'importent
+    pas l'un l'autre (`score.py` ne doit dépendre ni de numpy ni du
+    paquet `agrume/`), donc la forme est écrite deux fois — et le banc
+    `test_score.py::test_les_deux_cles_fcst_sont_la_meme_chaine` la
+    compare caractère pour caractère plutôt que de faire confiance.
+    """
+    if partie < 1:
+        raise ValueError(f"partie {partie} : elles se comptent à partir de 1")
+    suffixe = "" if partie == 1 else f"_p{partie}"
+    return f"fcst/{day:%Y/%m}/fcst_{day:%Y-%m-%d}{suffixe}.ndjson.gz"
+
+
+def fcst_manifeste_key(day: datetime) -> str:
+    """Le manifeste de partition du flux `fcst/` — objet LATÉRAL.
+
+    ⚠️ `tools/storage.py` N'A PAS DE `list`, et c'est pour ça que cette
+    clé est calculable : on la lit par `get_json`, jamais par listing.
+    C'est aussi ce qui condamnait la variante « le nom de la clé porte
+    le total » (`_p2sur2`) — il aurait fallu sonder n × n clés pour
+    trouver celle qui parle.
+    """
+    return f"fcst/{day:%Y/%m}/fcst_{day:%Y-%m-%d}.manifeste.json"
 
 
 def obs_key(day: datetime) -> str:
@@ -546,23 +618,197 @@ def fcst_agrume_key(day: datetime) -> str:
     return f"fcstagrume/{day:%Y/%m}/fcstagrume_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def fcst_arome_key(day: datetime) -> str:
+    """Le flux AROME lu sur R2 (lot S0.5, 22/08) — un préfixe à part,
+    exactement pour les mêmes raisons que `fcstagrume`.
+
+    ⚠️ POURQUOI PAS DANS `fcst/`. Les deux flux n'ont ni le même
+    producteur, ni la même heure, ni la même façon d'échouer :
+    `collect.py` interroge Open-Meteo sous quota à 03:19 et son archive
+    est IRREMPLAÇABLE ; `arome_fcst.py` relit à 06:00 des tuiles que
+    l'Action `arome-wind` réécrit toutes les 3 h. Les mélanger dans une
+    clé écrite par deux jobs, c'est se donner un moyen de perdre
+    l'irremplaçable en réécrivant l'autre.
+
+    ⚠️ ET L'ARCHIVE PORTE LE JOUR DE SON PROPRE RUN, pas la veille.
+    `agrume_fcst.py` archive HIER (le produit A est encore sur R2) ;
+    ici les tuiles n'ont AUCUN historique, donc le job lit le jour même
+    et `fcstarome_{J}` contient bien « les prévisions émises le jour J »
+    — la même chose que `fcst_{J}`, écrit le matin de J lui aussi.
+
+    ⓘ Ce préfixe est le seul endroit du dépôt où il est écrit. C'est
+    `arome_fcst.py` qui l'importe d'ici, pas l'inverse.
+    """
+    return f"fcstarome/{day:%Y/%m}/fcstarome_{day:%Y-%m-%d}.ndjson.gz"
+
+
 def snapshot_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
     """Toutes les prévisions émises un jour donné, tous flux confondus.
 
-    ⛔ LE FLUX AGRUME EST LU AUX TROIS OFFSETS, EXACTEMENT COMME LES
-    AUTRES, et ce n'est pas une négligence. Son horizon de 24 h fait
-    qu'aux offsets 1 et 2 il ne reste que 1 à 4 heures appariables dans
-    la journée notée — sous `MIN_HOURS_DAILY`, donc `daily_rows` et
-    `event_rows` les écartent tous les deux d'eux-mêmes. Écrire ici un
-    `if offset == 0` produirait le même résultat en le faisant
-    dépendre d'une constante lue à un autre endroit : le jour où
-    l'horizon d'AGRUME passerait à 48 h (ARPEGE), il faudrait penser à
-    retirer la garde. Ici, il n'y a rien à penser : la donnée décide.
-    Le banc `test_agrume_fcst.py::test_lead_24_ne_sort_aucune_ligne`
-    tient cette propriété.
+    ⛔ LES FLUX R2 SONT LUS AUX TROIS OFFSETS, EXACTEMENT COMME LES
+    AUTRES, et ce n'est pas une négligence. L'horizon d'AGRUME (24 h)
+    fait qu'aux offsets 1 et 2 il ne reste que 1 à 4 heures appariables
+    dans la journée notée ; celui d'AROME/R2 (51 h) ne laisse que
+    2 heures à l'offset 2 — le run 00 Z de J−2 ne touche la journée J
+    que par 00:00 et 03:00, `arome-wind/ingest.py::keep_step()` ayant
+    déjà retiré 01 h et 02 h de la nuit. Dans les deux cas c'est sous
+    `MIN_HOURS_DAILY`, donc `daily_rows` et `event_rows` les écartent
+    tous les deux d'eux-mêmes. Écrire ici un `if offset == 0`
+    produirait le même résultat en le faisant dépendre d'une constante
+    lue à un autre endroit : le jour où l'horizon d'AGRUME passerait à
+    48 h (ARPEGE), ou celui où `MAX_HOURS` d'`arome-wind` remonterait,
+    il faudrait penser à retirer la garde. Ici, il n'y a rien à
+    penser : la donnée décide. Les bancs
+    `test_agrume_fcst.py::test_lead_24_ne_sort_aucune_ligne` et
+    `test_arome_fcst.py::test_lead_48_ne_sort_aucune_ligne` tiennent
+    la propriété.
     """
-    return (read_ndjson(root, fcst_key(day), storage)
-            + read_ndjson(root, fcst_agrume_key(day), storage))
+    return snapshot_rows_et_bilan(root, day, storage)[0]
+
+
+#: Version de manifeste que ce fichier sait lire. Un numéro inconnu doit
+#: ARRÊTER la lecture, pas être ignoré : un manifeste v2 pourrait très
+#: bien déclarer ses parties autrement, et les compter comme des v1
+#: donnerait un chiffre faux avec l'air d'être juste.
+MANIFESTE_VERSION_LUE = 1
+
+
+def fcst_parties(root: pathlib.Path, day: datetime,
+                 storage=None) -> tuple[list[dict], dict]:
+    """Les lignes du flux `fcst/` ET le bilan de ses parties.
+
+    ⛔⛔ ON NE DEVINE JAMAIS COMBIEN DE PARTIES LA NUIT ATTENDAIT. C'est
+    le piège central du lot S0.6, et il n'a qu'une forme : si la
+    partie 2 échoue et que la notation lit « les clés qui existent », la
+    journée est notée sur sept modèles en moins SANS QUE RIEN NE LE
+    DISE. Le compte vient du MANIFESTE, écrit avant la première ligne de
+    données ; il ne vient de nulle part ailleurs.
+
+    Rend `(lignes, bilan)`, où le bilan est :
+
+        {"flux": "fcst", "parties_attendues": 2, "parties_lues": 1,
+         "manquantes": [{"i": 2, "cle": …, "modeles": [...]}],
+         "modeles_manquants": [...], "etat": "…"}
+
+    ⚠️ `flux` N'EST PAS DÉCORATIF. `snapshot_rows` lit TROIS flux depuis
+    le lot S0.5 (`fcst`, `fcstagrume`, `fcstarome`) et UN SEUL est
+    partitionné. Sans le nommer, « 1 partie sur 2 » se lit « il manque
+    un flux sur deux », qui est une tout autre nuit.
+
+    ⚠️ LES QUATRE ÉTATS, ET AUCUN N'A BESOIN D'UNE DATE DE BASCULE :
+
+    | manifeste | clé historique | `_p2` | lecture                       |
+    |-----------|----------------|-------|-------------------------------|
+    | présent   | —              | —     | il fait autorité, point       |
+    | absent    | présente       | vide  | journée d'AVANT la partition  |
+    | absent    | présente       | pleine| ⛔ INCIDENT : manifeste perdu  |
+    | absent    | absente        | vide  | ⛔ INCIDENT : nuit sans rien   |
+
+    ⓘ LE SONDAGE DE `_p2` NE SERT PAS À COMPTER. Il ne sert qu'à savoir
+    si l'ABSENCE du manifeste est excusable. Une nuit à trois parties qui
+    aurait perdu son manifeste tombe donc aussi en incident — ce qui est
+    la bonne réponse, puisqu'on ne saura de toute façon plus ce qu'elle
+    attendait. Un `get` R2 de plus par journée d'émission, soit trois par
+    nuit : Class B, 0,0001 % du palier.
+    """
+    manifeste = read_json(root, fcst_manifeste_key(day), storage)
+    bilan = {"flux": "fcst", "parties_attendues": None, "parties_lues": 0,
+             "manquantes": [], "modeles_manquants": [], "etat": "ok"}
+
+    if isinstance(manifeste, dict) and \
+            manifeste.get("version") == MANIFESTE_VERSION_LUE:
+        detail = manifeste.get("detail") or []
+        bilan["parties_attendues"] = int(manifeste.get("parties") or len(detail))
+        rows: list[dict] = []
+        for d in detail:
+            cle = d.get("cle") or fcst_key(day, int(d.get("i", 1)))
+            part = read_ndjson(root, cle, storage)
+            if part:
+                bilan["parties_lues"] += 1
+                rows += part
+            else:
+                bilan["manquantes"].append(
+                    {"i": d.get("i"), "cle": cle,
+                     "modeles": list(d.get("modeles") or [])})
+                bilan["modeles_manquants"] += list(d.get("modeles") or [])
+        if bilan["manquantes"]:
+            bilan["etat"] = "partie_manquante"
+        return rows, bilan
+
+    if isinstance(manifeste, dict):
+        # Un manifeste illisible ou d'une version inconnue. ⛔ On ne
+        # l'interprète PAS : on lit la clé historique, et on le dit.
+        bilan["etat"] = "manifeste_version_inconnue"
+        p1 = read_ndjson(root, fcst_key(day), storage)
+        bilan["parties_lues"] = 1 if p1 else 0
+        return p1, bilan
+
+    # ── Pas de manifeste ────────────────────────────────────────────
+    p1 = read_ndjson(root, fcst_key(day), storage)
+    p2 = read_ndjson(root, fcst_key(day, 2), storage)
+    if p2:
+        # ⛔ Une partie 2 sans manifeste : la déclaration a été perdue.
+        # On garde les lignes — la donnée est la donnée — mais on
+        # REFUSE de dire combien de parties étaient attendues.
+        bilan["etat"] = "manifeste_absent_mais_partie_2_presente"
+        bilan["parties_lues"] = (1 if p1 else 0) + 1
+        return p1 + p2, bilan
+    if p1:
+        bilan["parties_attendues"] = 1
+        bilan["parties_lues"] = 1
+        bilan["etat"] = "avant_partition"
+        return p1, bilan
+    bilan["etat"] = "rien_produit"
+    return [], bilan
+
+
+def snapshot_rows_et_bilan(root: pathlib.Path, day: datetime,
+                           storage=None) -> tuple[list[dict], dict]:
+    """`snapshot_rows`, plus le bilan des parties du flux `fcst/`.
+
+    ⓘ POURQUOI DEUX FONCTIONS. `snapshot_rows` est appelée par les bancs
+    d'`agrume_fcst` et d'`arome_fcst`, qui n'ont que faire du bilan ;
+    lui faire rendre un couple aurait cassé trois appelants pour une
+    information dont ils ne se servent pas. Et lire le bilan
+    séparément aurait relu les archives une seconde fois — 6 Mo par
+    offset, trois fois par nuit, pour rien.
+    """
+    rows, bilan = fcst_parties(root, day, storage)
+    return (rows
+            + read_ndjson(root, fcst_agrume_key(day), storage)
+            + read_ndjson(root, fcst_arome_key(day), storage)), bilan
+
+
+def dire_bilan_parties(bilan: dict, offset: int) -> str:
+    """Une ligne de journal qui COMPTE et qui NOMME.
+
+    ⛔ « prévisions émises J-0 : 5 595 lignes » ne suffit plus. Un compte
+    de lignes ne distingue pas une nuit complète d'une nuit à laquelle
+    il manque sept modèles — les deux sont « beaucoup de lignes ». Il
+    faut dire combien de parties, sur combien, et LESQUELS des modèles
+    manquent.
+    """
+    f = bilan.get("flux", "?")
+    att, lues = bilan.get("parties_attendues"), bilan.get("parties_lues", 0)
+    etat = bilan.get("etat")
+    if etat == "avant_partition":
+        return f"`{f}/` : 1 partie (journée d'avant la partition)"
+    if etat == "rien_produit":
+        return (f"⛔ `{f}/` : AUCUNE donnée et AUCUN manifeste pour J-{offset} "
+                f"— la nuit d'émission n'a rien produit du tout")
+    if etat == "manifeste_absent_mais_partie_2_presente":
+        return (f"⛔ `{f}/` : {lues} partie(s) lue(s) mais AUCUN MANIFESTE, "
+                f"alors qu'une partie 2 existe — la déclaration a été perdue "
+                f"et plus rien ne dit combien de parties cette nuit attendait")
+    if etat == "manifeste_version_inconnue":
+        return (f"⛔ `{f}/` : manifeste d'une version que ce code ne sait pas "
+                f"lire — seule la clé historique a été lue")
+    if etat == "partie_manquante":
+        noms = ", ".join(bilan.get("modeles_manquants") or []) or "?"
+        quelles = ", ".join(str(m.get("i")) for m in bilan.get("manquantes", []))
+        return (f"⛔ `{f}/` : {lues}/{att} parties — partie(s) {quelles} "
+                f"MANQUANTE(S) : {noms}")
+    return f"`{f}/` : {lues}/{att} parties"
 
 
 def to_obs_samples(row: dict) -> list[S.ObsSample]:
@@ -630,7 +876,8 @@ def day_regime(fcst_ref: dict | None, obs: list[S.ObsSample],
 
 def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                obs_day: list[dict], obs_prev: list[dict],
-               utc_offset_s: int, clim: dict | None = None):
+               utc_offset_s: int, clim: dict | None = None,
+               bias_prior: dict | None = None, temoin: list | None = None):
     """Rend (lignes model_verif_daily, détail par tranche de vent).
 
     Le détail par tranche ne va PAS en base : il alimente les
@@ -640,6 +887,19 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
     Une seule colonne `bias_ratio` par journée ne peut pas porter ça ;
     la stocker par tranche triplerait la table pour une donnée qui ne
     sert qu'une fois.
+
+    `bias_prior` (lot S2) : `{(unit, model, lead): (pente, cap, n_jours)}`
+    bâti par `prior_biais` sur les jours STRICTEMENT antérieurs. Absent
+    ou vide, les colonnes `*_corr` sortent à `None` et le reste de la
+    fonction est bit à bit ce qu'il était — c'est ce qui permet aux
+    168 assertions de `test_score.py` de rester vraies sans changer.
+
+    `temoin` : liste que la fonction remplit de couples
+    `(err_brut, err_placebo)` pour une balise-jour sur `BIAIS_TEMOIN_PAS`,
+    la correction d'une AUTRE balise étant appliquée à celle-ci. ⛔ Ce
+    n'est pas une coquetterie : mesuré le 22/08, un antécédent tiré au
+    sort rend DÉJÀ 13 % des 29 % de gain. Publier « corrigé −29 % » sans
+    ce chiffre laisserait croire que 29 points viennent du site.
     """
     day_start_ms = int(day.replace(tzinfo=timezone.utc).timestamp()) * 1000
     obs_by_st = {f"{r['source']}:{r['station_id']}": to_obs_samples(r) for r in obs_day}
@@ -658,6 +918,9 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
 
     rows: list[dict] = []
     banded: list[dict] = []
+    #: (modèle, échéance) → (pente, cap, balise) du dernier échantillon,
+    #: la matière du témoin ci-dessous.
+    dernier_prior: dict[tuple, tuple] = {}
     for offset, lead_h in LEAD_BY_OFFSET.items():
         for row in snapshots.get(offset, []):
             key = f"{row['source']}:{row['station_id']}"
@@ -709,6 +972,39 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 if c:
                     _, _, _, mse_c = INF.skill_vs_climatology(pairs, c, utc_offset_s)
 
+            # ── la colonne corrigée du biais de site (lot S2) ─────────
+            # ⛔ L'ANTÉCÉDENT NE CONTIENT JAMAIS LE JOUR J. Il est bâti
+            # par `prior_biais` sur [J−30, J−1] et passé tout fait : il
+            # n'y a, dans cette fonction, aucun chemin par lequel la
+            # journée qu'on note pourrait entrer dans sa propre
+            # correction. C'est le seul garde-fou qui compte ici, et
+            # `test_score.py` le vérifie en lui donnant un antécédent
+            # que J contredit.
+            err_corr = mse_corr = n_bias = None
+            pente_j = pente_du_jour(pairs)
+            if bias_prior:
+                prior = bias_prior.get((key, row["model"], lead_h))
+                if prior:
+                    pente, cap, n_bias = prior
+                    cp = S.apply_bias(pairs, S.SiteBias(pente, cap, len(pairs)))
+                    err_corr = S.series_error(cp).med
+                    _, _, mse_corr, _ = S.skill_vs_persistence(cp, obs_for_skill)
+                    # ── le témoin ────────────────────────────────────
+                    # On applique à CETTE balise l'antécédent d'une
+                    # AUTRE : la précédente balise échantillonnée du
+                    # même modèle et de la même échéance. Si l'erreur
+                    # tombe quand même, ce qui tombe n'est pas du site.
+                    # Une balise-jour sur `BIAIS_TEMOIN_PAS`, pour que
+                    # le coût reste une fraction du run.
+                    if temoin is not None and len(rows) % BIAIS_TEMOIN_PAS == 0:
+                        autre = dernier_prior.get((row["model"], lead_h))
+                        if autre is not None and autre[2] != key:
+                            pp = S.apply_bias(
+                                pairs, S.SiteBias(autre[0], autre[1], len(pairs)))
+                            temoin.append((err.med, err_corr,
+                                           S.series_error(pp).med))
+                        dernier_prior[(row["model"], lead_h)] = (pente, cap, key)
+
             rows.append({
                 "day": day.strftime("%Y-%m-%d"),
                 "source": row["source"], "station_id": row["station_id"],
@@ -724,6 +1020,15 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 "bias_ratio": _r(bias.speed_ratio),
                 "bias_dir_deg": _r(bias.dir_offset),
                 "vector_ratio": _r(err.vector_ratio),
+                # ── lot S2 ────────────────────────────────────────────
+                # `bias_slope` est la pente du jour J : elle ne sert PAS
+                # à corriger J (ce serait la fuite), elle nourrit
+                # l'antécédent de J+1. C'est pour elle que le cache de
+                # rejeu change de formule.
+                "bias_slope": _r(pente_j),
+                "err_vec_med_corr": _r(err_corr),
+                "mse_model_corr": _r(mse_corr),
+                "bias_n_days": n_bias,
             })
 
             # ── détail par tranche de vent OBSERVÉE ──
@@ -754,6 +1059,263 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
 
 def _r(x, nd: int = 4):
     return None if x is None or not S._finite(x) else round(float(x), nd)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LE BIAIS DE SITE APPLIQUÉ — la colonne corrigée (lot S2, 22/08/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+#  Conception et mesures : `claude/lot-s2-erreur-corrigee-22-08.md`.
+#  ⛔ LA DÉCISION D N'EST PAS ROUVERTE. Le score de référence reste le
+#  BRUT — c'est lui que le pilote voit. Ce qui suit publie une SECONDE
+#  colonne, nommée comme telle, qui dit ce qu'un MOS donnerait.
+#
+#  ═══ POURQUOI UN ESTIMATEUR NEUF ET PAS `S.site_bias` ═══
+#
+#  `S.site_bias` rend la MÉDIANE de `obs/prev` sur les seules heures où
+#  `fcst_speed >= BIAS_MIN_WIND_KMH` (8 km/h). Conditionner sur la
+#  PRÉVISION sélectionne les heures où le modèle est haut : si l'erreur
+#  est bruitée, `obs/prev` y est mécaniquement inférieur à 1 même quand
+#  le modèle ne surestime rien. C'est un retour vers la moyenne, pas un
+#  biais de site.
+#
+#  ⛔ MESURÉ, PAS SUPPOSÉ — 40 539 heures appariées, 19→21/08/2026,
+#  ECMWF IFS 0,25° :
+#
+#      med(obs/prev | prev ≥ 8)  = 0,761      ← ce que `site_bias` rend
+#      med(obs/prev | prev ≥ 1)  = 1,003
+#      Σobs / Σprev              = 1,112
+#      Σ(obs·prev) / Σ(prev²)    = 0,894      ← la pente ci-dessous
+#      med(obs/prev | obs ≥ 8)   = 1,514      ← le miroir, qui prouve
+#                                               que c'est la sélection
+#
+#  Un estimateur qui rend 0,76 et 1,51 selon le côté sur lequel on
+#  conditionne ne mesure pas le vent, il mesure son propre seuil.
+#
+#  ⇒ On prend la PENTE DES MOINDRES CARRÉS `Σ(obs·prev) / Σ(prev²)`,
+#  sur TOUTES les heures appariées, sans seuil. C'est l'estimateur qui
+#  minimise l'erreur quadratique — c'est-à-dire exactement la quantité
+#  que `mse_model_corr` publie — et il est insensible à la sélection
+#  parce qu'il ne trie aucune heure.
+#
+#  ⚠️ IL VIT ICI ET PAS DANS `scoring.py`, DÉLIBÉRÉMENT. `scoring.py`
+#  est tenu au flottant près par son jumeau `verifScore.ts` et par
+#  `parity-scoring.ts` ; y poser une fonction neuve obligerait à écrire
+#  le jumeau TS le même jour pour une arithmétique que le navigateur
+#  n'appelle jamais. `S.apply_bias`, lui, est bien réutilisé tel quel :
+#  la CORRECTION est commune, seule son ESTIMATION est locale.
+#
+#  ═══ ET POURQUOI L'ANTÉCÉDENT VIENT DES JOURS < J ═══
+#
+#  Corriger le jour J avec le biais mesuré le jour J, c'est noter une
+#  prévision qui a vu sa propre réponse : l'erreur tomberait de moitié
+#  sans qu'aucun modèle n'ait rien appris. L'antécédent est donc une
+#  EWMA (demi-vie 30 j, même arithmétique en sommes que
+#  `S.accumulate` — cf. son avertissement sur le biais d'initialisation)
+#  arrêtée la VEILLE, reconstruite depuis le cache de rejeu.
+#
+#  ⚠️ PAR BALISE, PAS PAR `model_character`. L'accumulateur de
+#  `model_character` ne garde AUCUN état historique : il n'a que sa
+#  valeur d'aujourd'hui, laquelle a déjà intégré le jour J. L'utiliser
+#  pour corriger une journée rejouée serait précisément la fuite
+#  ci-dessus. La mesure dit en plus que le niveau ne change presque
+#  rien : 29,4 % de gain par balise contre 28,9 % par case fine.
+
+#: Demi-vie de l'antécédent, en jours. Identique à `S.HALF_LIFE_DAYS` —
+#: écrite ici parce qu'elle décrit CETTE mémoire-ci, et qu'aligner les
+#: deux par hasard n'est pas les aligner.
+BIAIS_DEMI_VIE_J = 30
+
+#: Profondeur de cache lue pour bâtir l'antécédent d'une journée.
+BIAIS_PRIOR_JOURS = 30
+
+#: Sous ce nombre de journées intégrées, la correction ne sort pas :
+#: `err_vec_med_corr` et consorts restent à `None`. Une pente tirée de
+#: deux journées est une pente de deux journées, pas un caractère.
+BIAIS_MIN_JOURS = 3
+
+#: Heures appariées minimales pour que la pente d'UNE journée soit
+#: calculée. Même seuil que `MIN_HOURS_DAILY` : une journée qui mérite
+#: une ligne mérite une pente.
+BIAIS_MIN_HEURES = MIN_HOURS_DAILY
+
+#: Garde-fous de sanité sur la pente appliquée. ⛔ Hors de ces bornes on
+#: ne corrige PAS — on ne rabote pas la valeur. Une pente de 0,2 ou de 4
+#: ne dit pas « ce site est très abrité », elle dit « quelque chose ne
+#: va pas » (mât cassé, coordonnées fausses, unité mélangée), et publier
+#: une correction dessus donnerait un chiffre lisse et faux.
+BIAIS_PENTE_MIN = 0.4
+BIAIS_PENTE_MAX = 2.5
+
+#: Écart de cap maximal appliqué, en degrés. Au-delà, la girouette est
+#: probablement mal orientée sur son mât — c'est une réparation de
+#: terrain, pas une correction de modèle.
+BIAIS_CAP_MAX_DEG = 90.0
+
+#: Une balise-jour sur N reçoit AUSSI la correction d'une AUTRE balise,
+#: pour mesurer la part du gain qui n'est pas du site (§ témoin).
+BIAIS_TEMOIN_PAS = 7
+
+
+def pente_du_jour(pairs) -> float | None:
+    """Pente des moindres carrés `Σ(obs·prev) / Σ(prev²)` d'une journée.
+
+    ⚠️ SANS ORDONNÉE À L'ORIGINE, et c'est voulu : une correction
+    multiplicative se compose (deux jours à ×0,8 font ×0,64) et
+    s'accumule donc en log, ce qu'une affine ne sait pas faire. C'est
+    aussi la forme que `S.apply_bias` sait appliquer, et le lot S2 ne
+    change pas la correction, seulement son estimation.
+
+    ⚠️ Sur la FORCE seule. Le cap a son propre estimateur (l'écart
+    circulaire médian de `S.site_bias`), qui, lui, conditionne des DEUX
+    côtés (`fcst_speed >= 8` ET `obs_speed >= 8`) — une condition
+    symétrique ne fabrique pas le biais qu'elle mesure, et une girouette
+    sous 8 km/h raconte vraiment n'importe quoi.
+
+    ⚠️ L'ARITHMÉTIQUE VIT DANS `scoring.py`, PAS ICI — et c'est le second
+    commit du lot S2 qui l'y a mise, en réparant `S.site_bias` du même
+    coup. Cette fonction n'est plus qu'un GARDE : le seuil d'heures
+    propre au rejeu quotidien. Deux copies de `Σof/Σff` dans le projet
+    auraient été exactement la duplication non vérifiée contre laquelle
+    l'en-tête de `scoring.py` met en garde.
+    """
+    if len(pairs) < BIAIS_MIN_HEURES:
+        return None
+    return S.pente_moindres_carres(pairs)
+
+
+class AccBiais:
+    """EWMA à poids temporel, en SOMMES — le patron de `S.Accumulator`.
+
+    On refait ici les trois lignes plutôt que d'importer l'accumulateur
+    de `scoring.py` parce que celui-ci porte `sum_wx2` (la variance) et
+    une identité de ligne `model_character` dont on n'a que faire, et
+    parce qu'il est tenu par la parité TS. Deux sommes suffisent.
+    """
+    __slots__ = ("sum_w", "sum_wx", "days", "last_day")
+
+    def __init__(self):
+        self.sum_w = 0.0
+        self.sum_wx = 0.0
+        self.days = 0
+        self.last_day = None
+
+    def push(self, day_i: int, x: float) -> None:
+        if x is None or not S._finite(x):
+            return
+        # Une journée déjà intégrée ne se réintègre pas : le rejeu doit
+        # pouvoir repasser deux fois sans épaissir la mémoire.
+        if self.last_day is not None and day_i <= self.last_day:
+            return
+        decay = (1.0 if self.last_day is None
+                 else 2 ** (-(day_i - self.last_day) / BIAIS_DEMI_VIE_J))
+        self.sum_w = self.sum_w * decay + 1
+        self.sum_wx = self.sum_wx * decay + x
+        self.days += 1
+        self.last_day = day_i
+
+    @property
+    def mean(self) -> float | None:
+        return self.sum_wx / self.sum_w if self.sum_w > 0 else None
+
+
+def _jour_index(day: datetime) -> int:
+    return (day.replace(tzinfo=timezone.utc) - datetime(2026, 1, 1,
+                                                        tzinfo=timezone.utc)).days
+
+
+def prior_biais(root: pathlib.Path, day: datetime,
+                n_jours: int = BIAIS_PRIOR_JOURS) -> dict:
+    """L'antécédent du jour `day`, bâti sur les jours STRICTEMENT avant.
+
+    Rend `{(unit, model, lead): (pente, ecart_cap_deg, n_jours)}`.
+
+    ⚠️ NE LIT QUE LE CACHE DE REJEU, jamais l'archive. Recalculer trente
+    journées pour corriger une journée coûterait trente fois le run, et
+    le cache EST la projection rejouable de l'archive — c'est même son
+    unique raison d'être. Conséquence assumée et publiée : tant que le
+    cache est creux, `bias_n_days` est petit et la correction se tait
+    d'elle-même sous `BIAIS_MIN_JOURS`. Elle s'approfondit à mesure que
+    `--replay-budget` comble le passé, et `bias_n_days` voyage à côté de
+    chaque chiffre pour que personne n'ait à le deviner.
+
+    ⛔ Et le cache d'une AUTRE formule est déjà refusé par
+    `replay_read` : un antécédent ne peut donc pas mélanger deux
+    définitions de la pente.
+    """
+    acc_pente: dict[tuple, AccBiais] = {}
+    acc_cap: dict[tuple, AccBiais] = {}
+    for k in range(n_jours, 0, -1):          # du plus ancien au plus récent
+        d = day - timedelta(days=k)
+        rows = replay_read(root, d)
+        if not rows:
+            continue
+        di = _jour_index(d)
+        for r in rows:
+            pente = r.get("bias_slope")
+            cap = r.get("bias_dir_deg")
+            if pente is None and cap is None:
+                continue
+            key = (f"{r['source']}:{r['station_id']}", r["model"], r["lead_h"])
+            if pente is not None and pente > 0:
+                acc_pente.setdefault(key, AccBiais()).push(di, math.log(pente))
+            if cap is not None:
+                acc_cap.setdefault(key, AccBiais()).push(di, cap)
+    out: dict[tuple, tuple] = {}
+    for key in set(acc_pente) | set(acc_cap):
+        ap = acc_pente.get(key)
+        ac = acc_cap.get(key)
+        n = ap.days if ap else 0
+        if n < BIAIS_MIN_JOURS:
+            continue
+        pente = math.exp(ap.mean) if ap and ap.mean is not None else None
+        if pente is not None and not (BIAIS_PENTE_MIN <= pente <= BIAIS_PENTE_MAX):
+            pente = None
+        cap = ac.mean if ac and ac.mean is not None else None
+        if cap is not None and abs(cap) > BIAIS_CAP_MAX_DEG:
+            cap = None
+        if pente is None and cap is None:
+            continue
+        out[key] = (pente, cap, n)
+    return out
+
+
+def bilan_temoin(temoin: list) -> dict | None:
+    """Ce que la correction gagne, et ce qu'un HASARD gagnerait.
+
+    ⛔ CE CHIFFRE EST LA MOITIÉ DU LIVRABLE DU LOT S2. Mesuré le 22/08
+    sur 30 268 balise-jours : le vrai antécédent fait tomber l'erreur
+    médiane de 29,4 %, et celui d'une balise tirée au sort la fait
+    tomber de 13,0 %. Autrement dit, **44 % du gain affiché n'est pas du
+    biais de site** — c'est un rétrécissement de la prévision, qui
+    réduit une erreur quadratique dès lors que la prévision est bruitée,
+    quelle que soit la balise dont vient le facteur.
+
+    Publier « corrigé −29 % » sans ce témoin serait exact et trompeur à
+    la fois. Il sort donc dans le journal du run ET dans le `meta` du
+    JSON publié, à côté du chiffre qu'il tempère.
+    """
+    if len(temoin) < 30:
+        return None
+    brut = S.median([t[0] for t in temoin])
+    corr = S.median([t[1] for t in temoin])
+    plac = S.median([t[2] for t in temoin])
+    if not brut:
+        return None
+    g_corr = 100 * (brut - corr) / brut
+    g_plac = 100 * (brut - plac) / brut
+    return {
+        "n": len(temoin),
+        "err_brut": _r(brut, 3), "err_corr": _r(corr, 3),
+        "err_placebo": _r(plac, 3),
+        "gain_pct": _r(g_corr, 1), "gain_placebo_pct": _r(g_plac, 1),
+        "part_site_pct": _r(g_corr - g_plac, 1),
+        "texte": (f"sur {len(temoin)} balise-jours échantillonnés, le vrai "
+                  f"antécédent gagne {g_corr:.1f} % et celui d'une AUTRE "
+                  f"balise {g_plac:.1f} % — la part imputable au site est "
+                  f"{g_corr - g_plac:.1f} point(s), le reste est un "
+                  f"rétrécissement de la prévision"),
+    }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1107,7 +1669,14 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
         replay_write(root, day, [])
         return []
     obs_prev = all_obs_rows(root, day - timedelta(days=1), storage)
-    rows, _ = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s)
+    # ⚠️ L'ANTÉCÉDENT DE CETTE JOURNÉE-CI, pas celui d'aujourd'hui. Une
+    # journée rejouée doit être corrigée par ce qu'on savait AVANT elle,
+    # sinon un rejeu de juillet appliquerait le biais d'août et le
+    # « corrigé » serait meilleur que la réalité sur toute la
+    # profondeur de l'archive — le genre d'erreur qui ne se voit jamais
+    # parce qu'elle va dans le sens qu'on espère.
+    rows, _ = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s,
+                         bias_prior=prior_biais(root, day))
     replay_write(root, day, rows)
     return rows
 
@@ -2035,7 +2604,9 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
     """
     acc: dict[tuple, dict] = defaultdict(
         lambda: {"by_day": defaultdict(list), "st": set(), "rows": [],
-                 "mse_m": [], "mse_r": [], "mse_c": [], "n_hours": 0})
+                 "mse_m": [], "mse_r": [], "mse_c": [], "n_hours": 0,
+                 # ── lot S2 : la colonne corrigée, À CÔTÉ ─────────────
+                 "err_corr": [], "mse_cc": [], "nd": []})
     for d in units:
         z = zone_of.get(d["unit"])
         if z is None or z.get("basin_uncertain"):
@@ -2055,6 +2626,22 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
                 b["mse_r"].append(d["mse_persist"])
             if d.get("mse_model") is not None and d.get("mse_clim") is not None:
                 b["mse_c"].append((d["mse_model"], d["mse_clim"]))
+            # ── lot S2 ────────────────────────────────────────────────
+            # ⚠️ LA CLIMATOLOGIE N'EST PAS CORRIGÉE, ET C'EST LA QUESTION.
+            # Elle est bâtie sur des OBSERVATIONS : elle porte déjà le
+            # site en elle, c'est même pour ça qu'elle gagne dans les
+            # Alpes. `skill_clim_corr` demande donc « une fois le site
+            # retiré du MODÈLE, bat-il une référence qui, elle, l'a
+            # gardé ». C'est l'exploit qui compte, et le corriger des
+            # deux côtés reviendrait à comparer deux fois la même
+            # soustraction.
+            if d.get("err_vec_med_corr") is not None:
+                b["err_corr"].append(d["err_vec_med_corr"])
+                if d.get("bias_n_days") is not None:
+                    b["nd"].append(d["bias_n_days"])
+            if (d.get("mse_model_corr") is not None
+                    and d.get("mse_clim") is not None):
+                b["mse_cc"].append((d["mse_model_corr"], d["mse_clim"]))
             b["st"].add(d["unit"])
             b["n_hours"] += d.get("n_hours") or 0
 
@@ -2104,6 +2691,16 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         mse_cc = S.median([c for _, c in b["mse_c"]])
         skill, bat_persist = skill_contre(mse_m, mse_r)
         skill_clim, bat_clim = skill_contre(mse_cm, mse_cc)
+        # ── lot S2 : la même arithmétique, sur le modèle corrigé ──────
+        # ⚠️ Le quorum est CELUI DE LA CASE, pas un second : une case
+        # publie son corrigé si et seulement si elle publie son brut.
+        # Deux populations différentes sous deux colonnes voisines
+        # inviteraient à les soustraire, et la différence ne voudrait
+        # rien dire.
+        corr_med = S.median(b["err_corr"]) if b["err_corr"] else None
+        mse_ccm = S.median([m for m, _ in b["mse_cc"]])
+        mse_ccc = S.median([c for _, c in b["mse_cc"]])
+        skill_clim_corr, bat_clim_corr = skill_contre(mse_ccm, mse_ccc)
         # Le dénombrement se fait ICI, sur la référence, pas sur le
         # résultat : un skill nul parce que la référence manque et un
         # skill nul parce qu'elle est trop bonne sont deux choses, et
@@ -2126,6 +2723,18 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             "skill": skill,
             "beats_clim": bat_clim,
             "skill_clim": skill_clim,
+            # ── lot S2 : le corrigé, À CÔTÉ du brut, jamais à sa place ─
+            # ⛔ Décision D intacte : `typical_err_kmh` reste LE score.
+            # `n_corr` voyage avec, parce qu'une case peut publier son
+            # brut sur 40 balise-jours et son corrigé sur 12 (les
+            # balises dont l'antécédent n'a pas encore
+            # `BIAIS_MIN_JOURS` journées), et comparer les deux
+            # médianes sans le savoir serait comparer deux populations.
+            "typical_err_kmh_corr": _r(corr_med),
+            "beats_clim_corr": bat_clim_corr,
+            "skill_clim_corr": skill_clim_corr,
+            "n_corr": len(b["err_corr"]),
+            "bias_n_days": _r(S.median(b["nd"]), 1) if b["nd"] else None,
             "ci_low": _r(ci.ci_low), "ci_high": _r(ci.ci_high),
             "rank": None, "rank_reason": None,
             # ── colonnes du lot G ──
@@ -2264,6 +2873,82 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
         for r in rows:
             r["rank_reason"] = reason
             r["rank"] = ranks.get(r["model"])
+
+
+#: La valeur que porte un rang publié sur une journée à laquelle il
+#: manque une partie de collecte.
+RANK_REASON_PARTIE_MANQUANTE = "partie_manquante"
+
+
+def marquer_parties_manquantes(rows: list[dict], bilans: dict) -> int:
+    """Qualifie les rangs PUBLIÉS quand une partie de collecte manque.
+
+    ⛔ LA QUESTION QUE LE LOT S0.4 LAISSAIT OUVERTE, TRANCHÉE ICI.
+    `_apply_rank` classe les modèles PRÉSENTS. Si la passe de surface a
+    échoué, il en reste deux sur neuf, et il publie « 1ᵉʳ sur 2 » sans
+    que rien ne dise que sept manquaient. Les deux issues instruites
+    étaient : refuser de classer la journée, ou publier en le disant.
+
+    ⇒ **On publie en le disant**, et la raison est celle du S0.4 : *un
+    classement absent et un classement partiel se lisent pareil dans un
+    écran, et le second au moins se dit.* Refuser de classer ferait
+    disparaître la ligne — donc rendrait la nuit incomplète
+    INDISTINGUABLE d'une nuit sous quorum, qui est le cas le plus
+    fréquent et parfaitement normal.
+
+    ⚠️ MAIS ON N'ÉCRASE QUE LES `ok`, ET C'EST LA MOITIÉ QUI COMPTE.
+    `rank_reason` porte un verdict STATISTIQUE par case
+    (`insufficient`, `window_too_short`, `not_separable`, `tied`,
+    `too_few_pairs`, `single_model`). Le remplacer partout détruirait
+    une information par case pour y mettre un fait par JOURNÉE — et sur
+    ces cases-là il n'y a de toute façon aucun rang trompeur à
+    qualifier, puisqu'il n'y a pas de rang du tout. On ne qualifie donc
+    que ce qui, sans ça, mentirait : les rangs effectivement publiés.
+
+    ⓘ LE FAIT PAR JOURNÉE, LUI, VA EN BASE, dans
+    `model_verif_collect_part` — une table par (jour, flux), lisible
+    telle quelle, qui porte le compte des parties et les modèles
+    nommés. Les deux écritures sont complémentaires : celle-ci empêche
+    un rang de mentir, celle-là permet au tableau de bord de dire
+    pourquoi.
+
+    Rend le nombre de lignes qualifiées.
+    """
+    incomplets = sorted(
+        off for off, b in bilans.items()
+        if b.get("etat") not in ("ok", "avant_partition"))
+    if not incomplets:
+        return 0
+    n = 0
+    for r in rows:
+        if r.get("rank") is not None and r.get("rank_reason") == "ok":
+            r["rank_reason"] = RANK_REASON_PARTIE_MANQUANTE
+            n += 1
+    return n
+
+
+def collect_part_rows(day: datetime, bilans: dict) -> list[dict]:
+    """Les lignes de `model_verif_collect_part` pour une journée notée.
+
+    ⚠️ UNE LIGNE PAR (JOUR D'ÉMISSION, FLUX), pas par journée notée. Une
+    nuit de notation lit TROIS journées d'émission (les trois offsets de
+    `LEAD_BY_OFFSET`) : c'est chacune d'elles qui a pu perdre une
+    partie, et les confondre ferait disparaître deux incidents sur
+    trois. La clé primaire est donc `(day, flux)` où `day` est le jour
+    D'ÉMISSION — le même que celui de la clé R2.
+    """
+    out = []
+    for off, b in sorted(bilans.items()):
+        emis = day - timedelta(days=off)
+        out.append({
+            "day": f"{emis:%Y-%m-%d}",
+            "flux": b.get("flux", "fcst"),
+            "parties_attendues": b.get("parties_attendues"),
+            "parties_lues": b.get("parties_lues", 0),
+            "modeles_manquants": list(b.get("modeles_manquants") or []),
+            "etat": b.get("etat", "ok"),
+        })
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2417,9 +3102,17 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
     absentes = sorted(set(rows[0]) - cols)
     if not absentes:
         return rows
+    # ⚠️ Le nom du SQL est DÉDUIT des colonnes qui manquent, pas écrit en
+    # dur. La version précédente nommait toujours `step40_lot_g` : au lot
+    # S2, elle aurait envoyé Yann rejouer un fichier déjà passé pendant
+    # que les vraies colonnes manquantes attendaient ailleurs.
+    _S2 = {"bias_slope", "err_vec_med_corr", "mse_model_corr", "bias_n_days",
+           "typical_err_kmh_corr", "beats_clim_corr", "skill_clim_corr",
+           "n_corr"}
+    fichier = ("supabase_step49_lot_s2_biais_corrige.sql"
+               if set(absentes) & _S2 else "supabase_step40_lot_g.sql")
     print(f"  ⓘ {table} : colonnes pas encore en base, non envoyées — "
-          f"{', '.join(absentes)}. Lancer supabase_step40_lot_g.sql "
-          f"pour les activer.")
+          f"{', '.join(absentes)}. Lancer {fichier} pour les activer.")
     out = [{k: v for k, v in r.items() if k in cols} for r in rows]
 
     # ⚠️ ET LE CAS QUI NE SE VOIT PAS. `model_score_zone.rank_reason`
@@ -2444,6 +3137,54 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
                 if r.get("rank_reason") not in historiques:
                     r["rank_reason"] = None
     return out
+
+
+#: Les `rank_reason` que le CHECK de `supabase_step40_lot_g.sql` admet.
+#: `single_model` (lot S0.5) n'y est PAS : il vient avec
+#: `supabase_step42_lot_s05.sql`.
+RANK_REASONS_STEP40 = {"ok", "insufficient", "tied", "not_separable",
+                       "window_too_short", "too_few_pairs", None}
+
+
+def _upsert_scores(sb, rows: list[dict]) -> int:
+    """`model_score_zone`, avec un repli sur le CHECK de `rank_reason`.
+
+    ⛔ POURQUOI CE REPLI EXISTE, ET IL A UN PRÉCÉDENT EXACT. Le lot G a
+    ajouté trois valeurs à `rank_reason` ; le CHECK de step35 les
+    refusait, et un HTTP 400 sur `model_score_zone` fait perdre LA NUIT
+    ENTIÈRE — pas la colonne, la nuit. Le contournement d'alors
+    (`_pour_la_base`, ci-dessus) devinait l'état du schéma par une
+    colonne absente : un proxy, qui ne marche que pour ce lot-là.
+
+    Le lot S0.5 ajoute `single_model` et n'ajoute AUCUNE colonne : il
+    n'y a plus de proxy à lire. On fait donc la seule chose qui ne
+    suppose rien — on envoie, et si la base refuse EN NOMMANT sa
+    contrainte, on renvoie une fois avec la raison neuve mise à `null`.
+    Le JSON publié, lui, garde la vraie raison, et c'est lui que lit
+    l'écran (même règle qu'au lot G).
+
+    ⇒ La nuit passe même si `supabase_step42_lot_s05.sql` n'a pas
+    encore été joué, et ce repli devient inerte le jour où il l'est —
+    sans qu'il faille penser à retirer quoi que ce soit.
+    """
+    cle = "as_of,zone_id,model,lead_h,window_kind,regime"
+    try:
+        return sb.upsert("model_score_zone", rows, cle)
+    except Abort as exc:
+        if "model_score_zone_rank_reason_check" not in str(exc):
+            raise
+        neuves = sorted({r.get("rank_reason") for r in rows}
+                        - RANK_REASONS_STEP40)
+        print(f"  ⚠️ rank_reason : {', '.join(neuves)} refusé(s) par le "
+              f"CHECK en base → écrit `null` cette nuit. Jouer "
+              f"`supabase_step42_lot_s05.sql` (`single_model`) et/ou "
+              f"`supabase_step48_lot_s06_collect_part.sql` "
+              f"(`partie_manquante`). Le JSON publié garde la raison "
+              f"exacte.", file=sys.stderr)
+        for r in rows:
+            if r.get("rank_reason") not in RANK_REASONS_STEP40:
+                r["rank_reason"] = None
+        return sb.upsert("model_score_zone", rows, cle)
 
 
 def main() -> int:
@@ -2493,10 +3234,16 @@ def main() -> int:
 
     # ── 1. relire l'archive ───────────────────────────────────────
     snapshots = {}
+    # ⛔ LE BILAN DES PARTIES, PAR JOURNÉE D'ÉMISSION (lot S0.6). Il se
+    # rend et se journalise TROIS FOIS par nuit — une par offset — parce
+    # que ce sont trois nuits de collecte différentes, dont chacune a pu
+    # perdre une partie. Un bilan unique en aurait caché deux sur trois.
+    bilans_parties = {}
     for offset in LEAD_BY_OFFSET:
         emis = day - timedelta(days=offset)
-        rows = snapshot_rows(root, emis, st)
+        rows, bilan = snapshot_rows_et_bilan(root, emis, st)
         snapshots[offset] = rows
+        bilans_parties[offset] = bilan
         n_ag = sum(1 for r in rows if r.get("model") == AGRUME_MODEL)
         # ⚠️ Le compte AGRUME se dit à chaque offset, y compris quand il
         # est destiné à ne rien produire. Une ligne « 0 » qui n'apparaît
@@ -2508,6 +3255,42 @@ def main() -> int:
               + (f", qui ne donneront AUCUNE ligne : horizon 24 h, moins de "
                  f"{MIN_HOURS_DAILY} heures appariables à cet offset"
                  if n_ag and offset else ""))
+        # ⚠️ ET LA LIGNE QUI NOMME LE FLUX. « 1 partie sur 2 » sans son
+        # flux se lit « il manque un flux sur trois » : `snapshot_rows`
+        # en lit trois (`fcst`, `fcstagrume`, `fcstarome`) et seul
+        # `fcst/` est partitionné.
+        ligne = dire_bilan_parties(bilan, offset)
+        print(f"     {ligne}",
+              file=sys.stderr if ligne.startswith("⛔") else sys.stdout)
+
+    # ── 1 bis. le bilan des parties EN BASE (lot S0.6) ────────────
+    #
+    # ⚠️ TOUT CE BLOC EST SOUS `try`, POUR LA MÊME RAISON QUE CELUI DE LA
+    # PRESSION (S1) : la table est neuve, son SQL est exécuté par Yann et
+    # pas par ce script, et une notation qui tomberait ENTIÈRE parce
+    # qu'une ligne de DIAGNOSTIC n'a pas pu s'écrire serait le remède
+    # pire que le mal. Le journal, lui, a déjà dit la même chose
+    # ci-dessus : la base ajoute la lisibilité pour le tableau de bord,
+    # elle n'est pas le seul endroit où le fait existe.
+    #
+    # ⓘ ORDRE DE DÉPLOIEMENT RECOMMANDÉ : la table AVANT le code. Mais
+    # grâce à ce `try`, ce n'est plus une CONDITION — c'est un confort.
+    # Un ordre de déploiement qu'il faut se rappeler est un ordre qu'on
+    # oubliera un soir de fatigue.
+    try:
+        cp_rows = collect_part_rows(day, bilans_parties)
+        n = sb.upsert("model_verif_collect_part", cp_rows, "day,flux")
+        incidents = [r for r in cp_rows
+                     if r["etat"] not in ("ok", "avant_partition")]
+        print(f"  → model_verif_collect_part : {n} ligne(s)"
+              + (f", dont {len(incidents)} INCIDENT(S)" if incidents else ""))
+    except Exception as exc:                           # noqa: BLE001
+        print(f"  ⚠️ model_verif_collect_part : {type(exc).__name__} — {exc}. "
+              f"Le bilan des parties reste dans le journal ci-dessus ; la "
+              f"notation n'est pas affectée. (Jouer "
+              f"`supabase_step48_lot_s06_collect_part.sql`.)",
+              file=sys.stderr)
+
     # ⚠️ TOUTES LES SOURCES DE VENT — cf. `all_obs_rows`, S0.2 (21/08).
     obs_day = all_obs_rows(root, day, st)
     obs_prev = all_obs_rows(root, day - timedelta(days=1), st)
@@ -2530,8 +3313,22 @@ def main() -> int:
           f"({time.monotonic() - t_clim:.1f} s)"
           + ("" if clim else " — archive trop courte, seconde référence "
                              "indisponible, `beats_clim` restera nul"))
-    rows, banded = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s, clim)
+    # ── l'antécédent du biais de site (lot S2) ───────────────────
+    t_prior = time.monotonic()
+    prior = prior_biais(root, day)
+    print(f"  antécédent du biais : {len(prior)} couples balise×modèle×échéance "
+          f"sur {BIAIS_PRIOR_JOURS} j de cache ({time.monotonic() - t_prior:.1f} s)"
+          + ("" if prior else
+             f" — ⓘ vide : le cache de rejeu est creux ou vient de changer de "
+             f"formule ({REPLAY_FORMULA}). Les colonnes corrigées resteront "
+             f"nulles cette nuit ; `--replay-budget 30` comble d'un coup."))
+    temoin: list = []
+    rows, banded = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s,
+                              clim, bias_prior=prior, temoin=temoin)
     print(f"  {len(rows)} agrégats quotidiens, {len(banded)} détails par tranche")
+    part_temoin = bilan_temoin(temoin)
+    if part_temoin:
+        print(f"  ⛔ témoin du corrigé : {part_temoin['texte']}")
     if rows:
         n = sb.upsert("model_verif_daily", _pour_la_base(sb, "model_verif_daily", rows),
                       "day,source,station_id,model,lead_h,fcst_src")
@@ -2681,6 +3478,17 @@ def main() -> int:
         print(f"  score par régime : {len(reg_rows)} lignes "
               f"({time.monotonic() - t_reg:.1f} s)")
 
+        # ⛔ UN RANG PUBLIÉ SUR UNE JOURNÉE INCOMPLÈTE DOIT LE DIRE
+        # (lot S0.6). `_apply_rank` classe les modèles PRÉSENTS : si la
+        # passe de surface a échoué, il publie « 1ᵉʳ sur 2 » sans que
+        # rien ne dise que sept manquaient. On garde le classement — un
+        # classement absent et un classement partiel se lisent pareil à
+        # l'écran, et le second au moins se dit — mais on le QUALIFIE.
+        n_marques = marquer_parties_manquantes(scores, bilans_parties)
+        if n_marques:
+            print(f"  ⛔ {n_marques} rang(s) publié(s) sur une journée "
+                  f"d'émission INCOMPLÈTE → `rank_reason = "
+                  f"{RANK_REASON_PARTIE_MANQUANTE}`", file=sys.stderr)
         n_pool = apply_pooling(scores, list(zone_of.values()))
         print(f"  rétrécissement vers le parent : {n_pool} cases fines "
               f"rapprochées de leur échelon supérieur (poids emprunté publié)")
@@ -2696,9 +3504,8 @@ def main() -> int:
         print(f"     ⓘ {stabilite['covers']}")
 
         if scores:
-            n = sb.upsert("model_score_zone",
-                          _pour_la_base(sb, "model_score_zone", scores),
-                          "as_of,zone_id,model,lead_h,window_kind,regime")
+            n = _upsert_scores(sb, _pour_la_base(sb, "model_score_zone",
+                                                 scores))
             print(f"  → model_score_zone : {n} lignes")
             # Le JSON publié, lui, porte TOUT : il n'a pas de schéma à
             # respecter, et c'est lui que lira l'écran des bêta-testeurs.
@@ -2716,6 +3523,17 @@ def main() -> int:
                      meta={"stability": stabilite,
                            "replay": bilan_replay,
                            "regime_days": args.regime_days,
+                           # ⛔ Le témoin voyage AVEC le corrigé, dans le
+                           # même objet, pour qu'on ne puisse pas lire
+                           # l'un sans l'autre (lot S2).
+                           "bias_correction": {
+                               "prior_days": BIAIS_PRIOR_JOURS,
+                               "half_life_days": BIAIS_DEMI_VIE_J,
+                               "min_days": BIAIS_MIN_JOURS,
+                               "estimator": "ls_slope_sum_of_over_sum_ff",
+                               "pairs_with_prior": len(prior),
+                               "witness": part_temoin,
+                           },
                            "climatology_stations": len(clim),
                            "events_calibrated": EVENTS_CALIBRATED,
                            "audience": "beta"})

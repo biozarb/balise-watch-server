@@ -224,8 +224,12 @@ with redirect_stdout(io.StringIO()) as tampon:
     total = C.quota_projete(648, 3)
 sortie = tampon.getvalue()
 
-n_vars = len(C._hourly_vars()) * len(C.MODELS)
-verifie(abs(total - 648 * n_vars / 10) < 1e-6,
+# ⚠️ MIS À JOUR LE 22/08 (S0.4) : le poids d'un point ne vaut plus
+# `len(_hourly_vars()) × len(MODELS)`, parce que la requête d'un point
+# est découpée en groupes qui ne demandent pas les mêmes variables.
+# `poids_par_point()` est la seule source — et le banc du bloc S0.4
+# vérifie qu'elle est d'accord avec `quota_openmeteo.poids_url()`.
+verifie(abs(total - 648 * C.poids_par_point()) < 1e-6,
         f"le total suit la pondération sans remise de jours — {total}")
 verifie(total > 3000, f"648 points pèsent plus de 3000 pondérés, pas 694 — {total:.0f}")
 verifie("fenêtre HORAIRE" in sortie,
@@ -243,14 +247,43 @@ verifie(f"{C.QUOTA_HEURE}" in sortie, "et le plafond de l'heure, en clair")
 verifie(total <= C.QUOTA_HEURE * 0.95,
         f"le run tient dans la fenêtre horaire — {total:.0f} / {C.QUOTA_HEURE}")
 
-# ⚠️ ET LA CONFIGURATION DU 09/08 DOIT ÊTRE REFUSÉE. 10 modèles × 8
-# variables pesaient 8,0 par point, soit 5 184 pondérés : au-dessus des
-# 5 000 de l'heure. Le run s'était arrêté à 625 points collectés — 5 000
-# à l'unité près — puis n'avait plus rien obtenu pendant 26 minutes.
-# C'est l'assertion qui empêche de rajouter un dixième modèle sans
-# recompter, et de rejouer cette nuit-là.
+# ⚠️ LA CONFIGURATION DU 09/08 — ET CE BANC A CHANGÉ DE RÉPONSE LE
+# 22/08. IL FAUT LE LIRE, PAS LE CROIRE.
+#
+# Le 09/08, la requête était UNIQUE : 8 variables × 10 modèles = 8,0
+# pondérés par point, soit 5 184 pour 648 points — au-dessus des 5 000
+# de l'heure. Le run s'était arrêté à 625 points collectés (5 000 à
+# l'unité près) puis n'avait plus rien obtenu pendant 26 minutes, et
+# ICON-CH1 avait été retiré pour faire tenir le reste.
+#
+# Depuis le S0.4, la requête est découpée : à 10 modèles elle pèse
+# (2 × 8 + 8 × 6) / 10 = 6,4, soit 4 147 pour 648 points. ⭐ **La
+# configuration du 09/08 TIENDRAIT aujourd'hui.** C'est un fait, pas
+# une invitation : réintroduire ICON-CH1 est une décision de contenu
+# (elle ramène la marge horaire de 818 à 742 points), et le pavé de
+# `MODELS` dit ce qu'il faut remesurer avant d'y toucher.
+#
+# Ce banc tient donc deux choses distinctes :
+#   1. la FORME du 09/08 (une requête, 8 vars × 10 modèles) dépasse
+#      toujours l'heure — calculé par `poids_url`, l'autorité ;
+#   2. le garde-fou refuse toujours quand le volume déborde vraiment —
+#      vérifié par MUTATION, en ajoutant assez de modèles pour franchir
+#      la ligne même avec le découpage.
+import urllib.parse as _up_09                           # noqa: E402
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
+import quota_openmeteo as _QM09                         # noqa: E402
+
+_url_09 = f"{C.FORECAST_API}?" + _up_09.urlencode({
+    "latitude": "45.3193", "longitude": "6.5800",
+    "hourly": ",".join(C._hourly_vars()),
+    "models": ",".join(list(C.MODELS) + ["meteoswiss_icon_ch1"]),
+    "forecast_days": "3", "wind_speed_unit": "kmh", "timeformat": "unixtime"})
+verifie(648 * _QM09.poids_url(_url_09) > C.QUOTA_HEURE * 0.95,
+        f"la FORME du 09/08 — une seule requête, 8 vars × 10 modèles — pèse "
+        f"{648 * _QM09.poids_url(_url_09):.0f} et dépasse toujours l'heure")
+
 modeles_avant = C.MODELS
-C.MODELS = list(modeles_avant) + ["meteoswiss_icon_ch1"]
+C.MODELS = list(modeles_avant) + [f"modele_de_banc_{i}" for i in range(3)]
 try:
     refuse = False
     try:
@@ -259,7 +292,9 @@ try:
     except C.Abort as exc:
         refuse = True
         motif = str(exc)
-    verifie(refuse, "10 modèles × 8 variables — la nuit du 09/08 — est REFUSÉE")
+    verifie(refuse,
+            "MUTATION — douze modèles débordent l'heure MÊME découpés, et le "
+            "garde-fou refuse encore : il n'a pas été rendu tolérant")
     verifie(refuse and "heure" in motif,
             "et le refus dit que c'est l'HEURE qui bloque, pas la cadence")
 finally:
@@ -273,17 +308,42 @@ verifie(not hasattr(C, "LATENCE_S"),
 verifie(not hasattr(C, "FCST_PAUSE_S"),
         "plus de pause fixe pour la passe prévisions — le seau la remplace")
 
-# ⚠️ Et le plafond JOURNALIER doit rester un plafond. Il a été relevé de
-# 50 % à 60 % le 08/08 pour laisser passer 51,8 % ; il doit toujours
-# refuser ce qu'il est censé attraper — « quelqu'un a doublé le nombre
-# de points sans recompter ».
-refuse = False
+# ⛔⛔ LE SEUIL JOURNALIER DE 60 % NE PEUT RIEN REFUSER QUE L'HORAIRE NE
+# REFUSE DÉJÀ — trouvé en mutant ce banc le 22/08 (S0.4) : on a remplacé
+# le `raise` journalier par un `if False`, et RIEN n'est devenu rouge.
+# La raison est arithmétique et ne dépend d'aucune mesure :
+#
+#     QUOTA_HEURE × 0,95 = 4 750   <   QUOTA_JOUR × 0,60 = 6 000
+#
+# Tout run d'UNE passe qui franchit 6 000 franchit forcément 4 750. Le
+# seuil journalier ne décidait donc pas SI le run est refusé, seulement
+# QUEL MESSAGE sort — et il sortait le moins utile des deux, celui qui
+# désigne la journée là où c'est l'heure qui ferme la porte.
+#
+# ⇒ Les deux gardes ont été INVERSÉES le 22/08 : l'heure parle d'abord.
+# Le seuil journalier reste écrit, inerte, et redeviendra le seul
+# garde-fou utile le jour où la collecte sera PARTITIONNÉE en plusieurs
+# passes horaires — chaque passe tiendra alors sous 4 750 et c'est LEUR
+# SOMME qui devra tenir sous le plafond du jour. Il devra alors comparer
+# au budget MESURÉ (`Budget.etat()`), pas à 60 % d'un plafond brut.
+# Entrée `BUGS.md` du 22/08.
+verifie(C.QUOTA_HEURE * 0.95 < C.QUOTA_JOUR * 0.6,
+        f"le seuil HORAIRE ({C.QUOTA_HEURE * 0.95:.0f}) est plus strict que le "
+        f"seuil JOURNALIER ({C.QUOTA_JOUR * 0.6:.0f}) — c'est ce recouvrement "
+        f"qui rend le second inerte à une passe. Si cette assertion tombe, "
+        f"quelqu'un a touché une des deux constantes et le raisonnement du "
+        f"pavé de `quota_projete` est à refaire.")
+motif_1300 = ""
 try:
     with redirect_stdout(io.StringIO()):
         C.quota_projete(1300, 3)
-except C.Abort:
-    refuse = True
-verifie(refuse, "1300 points (10 400 pondérés) restent REFUSÉS par le plafond journalier")
+except C.Abort as exc:
+    motif_1300 = str(exc)
+verifie(motif_1300 and "l'heure n'en autorise" in motif_1300,
+        f"⭐ 1300 points restent REFUSÉS, et le message nomme la fenêtre qui "
+        f"ferme vraiment la porte : l'HEURE. Avant le 22/08 il annonçait "
+        f"« 60 % du plafond journalier », ce qui envoyait chercher au mauvais "
+        f"endroit — {motif_1300[:70]}")
 
 # ── 7 bis. les variables d'E4/E6 sont bien demandées ─────────────────
 # ⚠️ Ce n'est pas une assertion décorative : ces trois variables sont la
@@ -1057,6 +1117,624 @@ verifie(list(C.aemet_rows([], _AEMET_JOUR)) == [],
 verifie(C.AEMET_STATIONS_URL.endswith("/aemet-stations")
         and "balise-watch-server" in C.AEMET_STATIONS_URL,
         "lecture par NOTRE propre route publique — jamais opendata.aemet.es")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  S0.4 (22/08/2026) — LA REQUÊTE D'UN POINT SE DÉCOUPE EN GROUPES
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⚠️ CE QUE CE BLOC DÉFEND, ET CONTRE QUOI.
+#
+#  Mesuré le 22/08 : la collecte payait 1 051,2 pondérés par nuit — 146
+#  points de budget, 22 % du run — pour DEUX variables de 850 hPa
+#  demandées aux NEUF modèles alors qu'un seul les archive
+#  (`forecast_rows`, `if model == REGIME_REF_MODEL` ; vérifié sur
+#  `fcst_2026-08-22.ndjson.gz` : 657 lignes portent `aloft_speed`,
+#  toutes en `ecmwf_ifs025`, sur 5 595).
+#
+#  Le découpage en deux requêtes par point fait tomber le poids de 7,2 à
+#  5,8. Ce n'est pas une optimisation de confort : à 7,2, le garde-fou
+#  horaire de `quota_projete` refuse de démarrer au 660ᵉ point et le
+#  référentiel en comptait 657 ce matin-là, avec un rafraîchissement
+#  tous les 7 jours en AJOUT SEUL. À 5,8, il refuse au 819ᵉ.
+#
+#  Les trois propriétés qu'un banc doit tenir, et qu'une relecture
+#  distraite casserait :
+#    1. le CONTENU de l'archive ne bouge pas — deux groupes concaténés
+#       doivent rendre exactement les lignes d'une requête unique ;
+#    2. le garde-fou du suffixe compte les modèles DU GROUPE, pas ceux
+#       de `MODELS` — sinon il se tait quand il devrait crier ;
+#    3. `aloft_*` n'est jamais écrit à `null` : un champ absent dit la
+#       vérité, un champ à `null` ment.
+
+import json as _json                                    # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
+import quota_openmeteo as _QM                           # noqa: E402
+
+_G = C.groupes_requete()
+
+verifie(len(_G) == 2, f"deux groupes de requête, pas plus — {len(_G)}")
+
+# ⚠️ Dépliage DÉFENSIF : muter `groupes_requete` pour qu'il rende un
+# seul groupe (l'état d'avant le S0.4) doit rendre ce banc ROUGE, pas le
+# faire planter sur un `IndexError` — un banc qui explose au lieu
+# d'échouer ne dit pas ce qui est cassé.
+_g_alt, _v_alt = _G[0]
+_g_surf, _v_surf = _G[1] if len(_G) > 1 else ([], [])
+
+verifie(_g_alt == [C.REGIME_REF_MODEL, C.COMPAGNON_ALTITUDE],
+        f"le groupe d'altitude porte le modèle de régime ET son compagnon "
+        f"mondial, dans cet ordre — {_g_alt}")
+verifie(len(_g_alt) == 2,
+        "DEUX modèles dans le groupe d'altitude : un seul ferait rendre à "
+        "Open-Meteo une réponse sans suffixe, et `forecast_rows` "
+        "abandonnerait tous les points (piège du 08/08)")
+verifie(sorted(_g_alt + _g_surf) == sorted(C.MODELS),
+        "les groupes partitionnent MODELS : aucun modèle perdu, aucun en double")
+verifie(not (set(_g_alt) & set(_g_surf)),
+        "aucun modèle dans les deux groupes — il serait collecté et facturé deux fois")
+
+verifie(all(v in _v_alt for v in C.ALOFT_VARS),
+        f"le groupe d'altitude demande bien le 850 hPa — {_v_alt}")
+verifie(not any(v in _v_surf for v in C.ALOFT_VARS),
+        f"⭐ le groupe de surface NE demande PAS le 850 hPa — c'est là qu'est "
+        f"toute l'économie du lot — {_v_surf}")
+verifie(C.REGIME_REF_MODEL in _g_alt,
+        "le modèle de régime est dans le groupe qui demande le 850 hPa — "
+        "sinon `aloft_*` serait absent de toute l'archive")
+verifie(set(_v_alt) == set(C._hourly_vars()),
+        "`_hourly_vars()` reste l'union — un lecteur doit pouvoir lire "
+        "d'un coup d'œil ce que l'archive peut contenir")
+
+# ── Le poids, mesuré par le seau lui-même et pas recalculé à la main ──
+#
+# ⚠️ ON NE RECOPIE PAS 5,8. On construit les URL RÉELLES (jamais
+# envoyées) et on demande son avis à `quota_openmeteo.poids_url()`, qui
+# est l'autorité du projet sur cette arithmétique. Un banc qui recopie
+# le chiffre qu'il vérifie ne vérifie rien — c'est la panne du 09/08
+# transposée au banc.
+
+
+def _url_de(groupe, variables):
+    import urllib.parse as _up
+    return f"{C.FORECAST_API}?" + _up.urlencode({
+        "latitude": "45.3193", "longitude": "6.5800",
+        "hourly": ",".join(variables), "models": ",".join(groupe),
+        "forecast_days": "3", "wind_speed_unit": "kmh",
+        "timeformat": "unixtime"})
+
+
+_p_mesure = sum(_QM.poids_url(_url_de(m, v)) for m, v in _G)
+verifie(abs(C.poids_par_point() - _p_mesure) < 1e-9,
+        f"`poids_par_point()` est d'accord avec `poids_url` sur les URL "
+        f"réellement construites — {C.poids_par_point()} vs {_p_mesure}")
+
+_p_avant = _QM.poids_url(_url_de(C.MODELS, C._hourly_vars()))
+verifie(C.poids_par_point() < _p_avant,
+        f"le découpage COÛTE MOINS que la requête unique — "
+        f"{C.poids_par_point()} < {_p_avant}")
+verifie(abs(_p_avant - C.poids_par_point()
+            - len(C.ALOFT_VARS) * (len(C.MODELS) - len(_g_alt)) / 10) < 1e-9,
+        "l'économie vaut EXACTEMENT les variables d'altitude qu'on ne demande "
+        "plus aux modèles qui ne les archivent pas — rien d'autre n'a changé")
+
+# ── Ce que ça déplace sur le garde-fou horaire ────────────────────
+_plafond_h = C.QUOTA_HEURE * 0.95
+_max_avant = int(_plafond_h // _p_avant)
+_max_apres = int(_plafond_h // C.poids_par_point())
+verifie(_max_avant == 659,
+        f"AVANT : l'heure autorisait {_max_avant} points (mesuré 657 le 22/08, "
+        f"soit 2 de marge)")
+verifie(_max_apres == 818,
+        f"APRÈS : l'heure en autorise {_max_apres} — la marge passe de 2 à 161 points")
+
+# ── Le garde-fou sait encore refuser ──────────────────────────────
+#
+# ⚠️ UN BANC DOIT SAVOIR ÉCHOUER. Celui-ci vérifie que le seuil n'a pas
+# été « rendu tolérant » en passant à deux groupes : il refuse toujours,
+# simplement plus loin. Sans cette assertion, quelqu'un pourrait
+# supprimer le `raise` et tout le reste du fichier resterait vert.
+try:
+    C.quota_projete(_max_apres + 1, 3)
+    verifie(False, "quota_projete DOIT lever Abort au-delà du plafond horaire")
+except C.Abort as _exc:
+    verifie("09/08" in str(_exc) and "PARTITIONNER" in str(_exc),
+            f"le refus explique la panne qu'il évite ET les issues chiffrées — "
+            f"{str(_exc)[:80]}")
+try:
+    C.quota_projete(_max_apres, 3)
+    verifie(True, "quota_projete accepte pile au plafond")
+except C.Abort:
+    verifie(False, f"quota_projete refuse {_max_apres} points alors qu'ils tiennent")
+
+# ⚠️ Et il refuse toujours pour la RAISON du 09/08 : un modèle ajouté
+# sans regarder. On mute `MODELS` plutôt que de raisonner dessus.
+_models_avant = C.MODELS
+try:
+    C.MODELS = C.MODELS + [f"modele_invente_{i}" for i in range(6)]
+    try:
+        C.quota_projete(657, 3)
+        verifie(False, "six modèles ajoutés sans regarder DOIVENT faire refuser "
+                       "le run — c'est ce que le seuil de 60 % attrape")
+    except C.Abort:
+        verifie(True, "six modèles ajoutés sans regarder font refuser le run")
+finally:
+    C.MODELS = _models_avant
+
+# ⚠️ Et le groupe d'altitude refuse de se construire si son compagnon
+# disparaît de MODELS — sans quoi la requête partirait à un seul modèle
+# et l'API rendrait une réponse sans suffixe, pour toutes les balises.
+_models_avant = C.MODELS
+try:
+    C.MODELS = [m for m in C.MODELS if m != C.COMPAGNON_ALTITUDE]
+    try:
+        C.groupes_requete()
+        verifie(False, "`groupes_requete` DOIT lever Abort si le compagnon "
+                       "mondial sort de MODELS")
+    except C.Abort as _exc:
+        verifie("suffixe" in str(_exc),
+                f"le refus dit POURQUOI (la règle du suffixe) — {str(_exc)[:70]}")
+finally:
+    C.MODELS = _models_avant
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Le CONTENU de l'archive ne bouge pas — deux groupes = une requête
+# ══════════════════════════════════════════════════════════════════
+
+_T0 = 1787270400
+_ST = {"id": "42", "source": "pioupiou", "lat": 45.3193, "lon": 6.5800}
+
+
+def _payload(modeles, variables, sert=None):
+    """Une réponse Open-Meteo plausible, suffixée par modèle.
+
+    `sert` limite les modèles qui répondent vraiment (les autres rendent
+    une clé présente et pleine de `None` — le piège ERA5 du 06/08).
+
+    ⚠️ Les valeurs sont dérivées du NOM du modèle, jamais de sa position
+    dans la liste : sinon les deux formes comparées plus bas (une
+    requête de neuf modèles / deux requêtes de deux et sept) ne
+    porteraient pas les mêmes chiffres, et le banc « ligne pour ligne »
+    testerait son propre échafaudage au lieu du code.
+    """
+    sert = sert if sert is not None else modeles
+    h = {"time": [_T0, _T0 + 3600, _T0 + 7200]}
+    for m in modeles:
+        vide = m not in sert
+        base = float(len(m))
+        for v in variables:
+            h[f"{v}_{m}"] = ([None] * 3 if vide
+                             else [base, base + 1, base + 2])
+    return {"hourly": h}
+
+
+_lignes_1 = list(C.forecast_rows(_ST, _payload(C.MODELS, C._hourly_vars()),
+                                 "2026-08-22T03:15:00Z", C.MODELS))
+_lignes_2 = []
+for _m, _v in _G:
+    _lignes_2 += list(C.forecast_rows(_ST, _payload(_m, _v),
+                                      "2026-08-22T03:15:00Z", _m))
+
+verifie(len(_lignes_1) == len(C.MODELS) and len(_lignes_2) == len(C.MODELS),
+        f"une ligne par modèle servi, dans les deux formes — "
+        f"{len(_lignes_1)} et {len(_lignes_2)}")
+verifie({r["model"] for r in _lignes_1} == {r["model"] for r in _lignes_2},
+        "⭐ les deux groupes réunis couvrent exactement les mêmes modèles "
+        "qu'une requête unique")
+
+_par_modele_1 = {r["model"]: r for r in _lignes_1}
+_par_modele_2 = {r["model"]: r for r in _lignes_2}
+verifie(all(_json.dumps(_par_modele_1[m], sort_keys=True)
+            == _json.dumps(_par_modele_2[m], sort_keys=True)
+            for m in _par_modele_1),
+        "⭐⭐ LIGNE POUR LIGNE, CHAMP POUR CHAMP, l'archive est identique — "
+        "le découpage change le nombre de requêtes, jamais le contenu")
+
+verifie(sum(1 for r in _lignes_2 if "aloft_speed" in r) == 1,
+        f"UNE seule ligne porte le vent d'altitude — "
+        f"{[r['model'] for r in _lignes_2 if 'aloft_speed' in r]}")
+verifie(next(r for r in _lignes_2 if "aloft_speed" in r)["model"]
+        == C.REGIME_REF_MODEL,
+        "et c'est celle du modèle de régime")
+
+# ⚠️ Le champ ne doit JAMAIS sortir à `null`. On simule le cas où le
+# modèle de régime serait servi sans son 850 hPa — ce qui arriverait si
+# quelqu'un le sortait du groupe d'altitude.
+_sans_alt = _payload([C.REGIME_REF_MODEL, C.COMPAGNON_ALTITUDE],
+                     C._surface_vars())
+_l_sans = list(C.forecast_rows(_ST, _sans_alt, "2026-08-22T03:15:00Z",
+                               [C.REGIME_REF_MODEL, C.COMPAGNON_ALTITUDE]))
+verifie(len(_l_sans) == 2, f"les deux modèles sortent quand même — {len(_l_sans)}")
+verifie(all("aloft_speed" not in r for r in _l_sans),
+        "⭐ pas de 850 hPa dans la réponse ⇒ le champ est ABSENT, jamais "
+        "`null` : un champ absent dit la vérité, un `null` mentirait")
+
+# ── Le garde-fou du suffixe compte les modèles DU GROUPE ──────────
+#
+# Réponse sans suffixe = un seul des modèles demandés sert le point.
+# Avant le S0.4 le test portait sur `len(MODELS) > 1`, ce qui restait
+# vrai par accident ; il porte maintenant sur le groupe.
+_nu = {"hourly": {"time": [_T0, _T0 + 3600, _T0 + 7200],
+                  "wind_speed_10m": [10.0, 11.0, 12.0],
+                  "wind_direction_10m": [180, 190, 200],
+                  "wind_gusts_10m": [20.0, 21.0, 22.0]}}
+import contextlib as _ctx                               # noqa: E402
+_bruit = io.StringIO()
+with _ctx.redirect_stderr(_bruit):
+    _l_nu = list(C.forecast_rows(_ST, _nu, "x", _g_alt))
+verifie(_l_nu == [],
+        "⭐ réponse SANS suffixe sur un groupe de 2 modèles ⇒ zéro ligne — "
+        "jamais une série attribuée au hasard (piège du 06/08)")
+verifie("sans suffixe" in _bruit.getvalue()
+        and f"{len(_g_alt)} modèles demandés" in _bruit.getvalue(),
+        f"⭐ et ZÉRO LIGNE SE DIT : le garde-fou écrit sur stderr, en nommant "
+        f"la balise et la taille du GROUPE. Sans cette assertion, remplacer "
+        f"`len(models)` par `len(MODELS)` ne casserait rien de visible — "
+        f"{_bruit.getvalue().strip()[:90]}")
+verifie(list(C.forecast_rows(_ST, _nu, "x", ["un_seul"])) == [],
+        "⛔ ET UN GROUPE À UN SEUL MODÈLE NE PRODUIT RIEN NON PLUS — le "
+        "garde-fou ne se déclenche pas (il faut `len(models) > 1`), mais la "
+        "boucle cherche `wind_speed_10m_un_seul`, que l'API ne peut pas "
+        "écrire quand un seul modèle sert. Zéro ligne, EN SILENCE : c'est "
+        "précisément pour ça que `COMPAGNON_ALTITUDE` existe et que le "
+        "groupe d'altitude porte deux modèles.")
+
+# ── Un modèle du groupe hors domaine : clé présente, pleine de None ──
+_hors = _payload(_g_surf, _v_surf, sert=_g_surf[:2])
+_l_hors = list(C.forecast_rows(_ST, _hors, "x", _g_surf))
+verifie(len(_l_hors) == 2,
+        f"les modèles servant `null` partout sont écartés, pas archivés — "
+        f"{len(_l_hors)} lignes sur {len(_g_surf)} modèles demandés")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ⛔⛔ UN REFUS DE QUOTA NE DOIT PLUS EMPORTER LES OBSERVATIONS
+# ══════════════════════════════════════════════════════════════════
+#
+#  Entrée `BUGS.md` du 22/08 (S0.3 §11.1). `quota_projete` levait
+#  `Abort`, `main()` faisait `return 1` AVANT la passe observations : la
+#  nuit du dépassement perdait aussi l'archive de vent des cinq réseaux,
+#  dont trois n'ont que 30 à 48 h de rétention amont — c'est-à-dire pour
+#  toujours. Or AUCUNE de ces passes ne consomme de quota Open-Meteo :
+#  `fetch_archive` interroge Pioupiou (`PIOUPIOU_ARCHIVE`), les autres
+#  interrogent Iowa State, winds.mobi, Infoclimat, MF et l'AEMET.
+#
+#  ⚠️ CE BANC SAIT ÉCHOUER : rejoué contre le `return 1`, il tombe sur
+#  l'assertion « le fichier d'observations existe ».
+
+_racine = pathlib.Path(tempfile.mkdtemp(prefix="s04-obs-"))
+_avant = {n: getattr(C, n) for n in
+          ("quota_projete", "load_stations", "fetch_archive", "upload_r2",
+           "metar_stations", "windsmobi_stations", "infoclimat_stations",
+           "mf_stations", "aemet_stations")}
+_argv_avant = sys.argv
+
+
+def _upload_bidon(path, key):
+    C.temoin(path).write_text("ok", encoding="utf-8")
+    return True
+
+
+try:
+    # ⚠️ `**kw` DEPUIS LE LOT S0.6 : `quota_projete` prend désormais
+    # `groupes=` et `passe=`. Un faux à signature figée se serait mis à
+    # lever `TypeError` au lieu d'`Abort`, et le banc aurait cru tester
+    # le refus de quota alors qu'il testait sa propre doublure.
+    C.quota_projete = lambda n, d, **kw: (_ for _ in ()).throw(
+        C.Abort("4900 appels pondérés pour 680 points — banc S0.4"))
+    C.load_stations = lambda p, max_age_days=7: [dict(_ST)]
+    C.fetch_archive = lambda st, day: {
+        "station_id": st["id"], "source": st["source"],
+        "lat": st["lat"], "lon": st["lon"],
+        "t": [_T0], "speed": [12.0], "gust": [20.0], "dir": [180]}
+    C.upload_r2 = _upload_bidon
+    for _n in ("metar_stations", "windsmobi_stations", "infoclimat_stations",
+               "mf_stations", "aemet_stations"):
+        setattr(C, _n, lambda cache: [])
+    sys.argv = ["collect.py", "--out", str(_racine), "--obs-day", "2026-08-21"]
+    _rc = C.main()
+finally:
+    for _n, _f in _avant.items():
+        setattr(C, _n, _f)
+    sys.argv = _argv_avant
+
+_obs = _racine / "obs/2026/08/obs_2026-08-21.ndjson.gz"
+_fcst = _racine / "fcst" / f"{C.datetime.now(C.timezone.utc):%Y/%m}"
+verifie(_obs.exists(),
+        "⭐⭐ le refus de quota N'EMPORTE PLUS les observations : le fichier "
+        f"obs du 21/08 existe — {_obs}")
+verifie(_obs.exists() and len(gzip.open(_obs, "rt").read().splitlines()) == 1,
+        "et il porte bien la ligne de la balise, pas un fichier vide")
+verifie(not _fcst.exists() or not any(_fcst.glob("fcst_*.ndjson.gz")),
+        "la passe PRÉVISIONS, elle, n'a rien écrit — c'est elle qui débordait")
+verifie(_rc == 1,
+        f"⭐ et le run sort quand même en ERREUR pour que l'alerte parte "
+        f"(run.sh, SEUIL_ALERTE=1) — code {_rc}")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LOT S0.6 — LA PARTITION EN PASSES HORAIRES
+# ══════════════════════════════════════════════════════════════════
+
+# ── 1. Les clés : la partie 1 garde la clé historique ───────────────
+#
+# ⛔ C'est la propriété qui permet de N'AVOIR AUCUNE DATE DE BASCULE
+# dans le code. Si elle tombe, les 15 nuits déjà écrites deviennent
+# illisibles sans un `if jour < X` — et un `if` daté est une ligne que
+# personne ne relit.
+_J = C.datetime(2026, 8, 23, 3, 15, 4, tzinfo=C.timezone.utc)
+verifie(C.fcst_cle(_J, 1) == "fcst/2026/08/fcst_2026-08-23.ndjson.gz",
+        f"⭐ la partie 1 rend EXACTEMENT la clé d'avant le lot — "
+        f"{C.fcst_cle(_J, 1)}")
+verifie(C.fcst_cle(_J) == C.fcst_cle(_J, 1),
+        "et le défaut est la partie 1")
+verifie(C.fcst_cle(_J, 2) == "fcst/2026/08/fcst_2026-08-23_p2.ndjson.gz",
+        f"la partie 2 prend `_p2` — {C.fcst_cle(_J, 2)}")
+verifie(C.manifeste_cle(_J) == "fcst/2026/08/fcst_2026-08-23.manifeste.json",
+        "le manifeste est LATÉRAL — un objet à part, jamais une ligne")
+try:
+    C.fcst_cle(_J, 0)
+    verifie(False, "une partie 0 doit lever, pas rendre une clé muette")
+except C.Abort:
+    verifie(True, "une partie 0 lève `Abort` plutôt que d'inventer une clé")
+
+# ── 2. Le manifeste est DÉRIVÉ, jamais recopié ─────────────────────
+_m = C.construire_manifeste(_J, 657)
+_g = C.groupes_requete()
+verifie(_m["parties"] == len(_g),
+        f"le manifeste déclare autant de parties que `groupes_requete()` "
+        f"en rend — {_m['parties']} / {len(_g)}")
+verifie(_m["flux"] == "fcst",
+        "⭐ il NOMME son flux : `snapshot_rows` en lit trois, un seul est "
+        "partitionné")
+verifie(abs(_m["poids_point_total"] - C.poids_par_point()) < 1e-9,
+        f"son poids par point est celui de `poids_par_point()` — "
+        f"{_m['poids_point_total']} / {C.poids_par_point()}")
+verifie([d["cle"] for d in _m["detail"]]
+        == [C.fcst_cle(_J, i) for i in range(1, len(_g) + 1)],
+        "et chaque partie déclare la clé que la passe écrira vraiment")
+verifie(_m["detail"][0]["modeles"] == [C.REGIME_REF_MODEL,
+                                       C.COMPAGNON_ALTITUDE],
+        f"⛔ la PARTIE 1 porte le modèle de régime — c'est elle qui garde "
+        f"l'heure de 03:15, donc `{C.REGIME_REF_MODEL}` ne subit aucune "
+        f"discontinuité de fraîcheur de run")
+
+# ── 3. ⭐ L'ATTENTE BORNÉE — la passe DEMANDE, elle ne suppose pas ──
+#
+# ⛔ C'est le point que le S0.4 signale et ne résout pas : une passe 2
+# lancée pendant que la passe 1 déborde encore se ferait refuser POINT
+# PAR POINT (657 refus) là où UNE attente de douze minutes ramène toute
+# la donnée.
+
+class _BudgetFactice:
+    def __init__(self, attente):
+        self.attente = attente
+        self.demande = []
+
+    def attente_fenetre(self, poids, fenetre="heure"):
+        self.demande.append((poids, fenetre))
+        return self.attente
+
+
+_dodos = []
+_b = _BudgetFactice(0.0)
+verifie(C.attendre_la_place(_b, 2759.4, 2, _dodos.append) == 0.0
+        and not _dodos,
+        "place libre : on ne dort pas, et on ne le dit pas non plus")
+verifie(_b.demande == [(2759.4, "heure")],
+        "⭐ et c'est bien la fenêtre HORAIRE qu'on interroge, pas la minute "
+        "— la minute ne peut JAMAIS contenir le poids d'une passe entière, "
+        "elle rendrait `inf` pour une question qui a une réponse")
+
+_dodos = []
+_att = C.attendre_la_place(_BudgetFactice(720.0), 2759.4, 2, _dodos.append)
+verifie(_att == 720.0 and _dodos == [720.0],
+        f"⭐⭐ UNE SEULE attente, de la durée EXACTE que le budget calcule "
+        f"— {_dodos} (et non 657 refus)")
+
+try:
+    C.attendre_la_place(_BudgetFactice(C.ATTENTE_PASSE_MAX_S + 1), 2759.4, 2,
+                        _dodos.append)
+    verifie(False, "au-delà de la borne, la passe doit être SAUTÉE, pas dormir")
+except C.Abort as _e:
+    verifie("borne" in str(_e) and "passe 2" in str(_e),
+            "au-delà de la borne : refus ARGUMENTÉ, qui nomme la passe et "
+            "la borne — un trou déclaré, pas un run tué par le chien de garde")
+
+try:
+    C.attendre_la_place(_BudgetFactice(float("inf")), 99999.0, 2, _dodos.append)
+    verifie(False, "un poids qui ne tient jamais doit lever")
+except C.Abort as _e:
+    verifie("volume" in str(_e),
+            "⛔ et un poids qui ne tient JAMAIS dans une heure dit que c'est "
+            "un VOLUME : il faut une passe de plus, pas une minute de plus")
+
+verifie(C.attendre_la_place(None, 2759.4, 2, _dodos.append) == 0.0,
+        "sans module de budget (mode dégradé), on part — un garde-fou qui "
+        "empêche de tourner est pire que le risque qu'il couvre")
+
+# ── 4. ⭐ LE SEUIL JOURNALIER JUGE LA SOMME DES PASSES ──────────────
+#
+# ⛔ Le mutant M7 du S0.4 (« le seuil journalier ne refuse rien ») était
+# ÉQUIVALENT parce qu'une seule passe franchissait toujours l'heure
+# avant la journée. Avec deux passes, ce n'est plus vrai — et c'est ici
+# que ça se vérifie.
+_alt, _surf = C.groupes_requete()
+_pp_surf = len(_surf[0]) * len(_surf[1]) / 10          # 4,2 au 22/08
+_pp_jour = C.poids_par_point()                        # 5,8 au 22/08
+# Un nombre de points où la passe de SURFACE passe l'heure (< 4 750)
+# mais où les DEUX passes réunies franchissent 60 % du jour (> 6 000).
+_n = int(C.QUOTA_JOUR * 0.6 / _pp_jour) + 20
+verifie(_n * _pp_surf < C.QUOTA_HEURE * 0.95,
+        f"⚠️ le banc est bien dans le cas visé : {_n} points × {_pp_surf} = "
+        f"{_n * _pp_surf:.0f} pondérés, sous les 4 750 de l'heure")
+try:
+    C.quota_projete(_n, 3, groupes=[_surf], passe=2)
+    verifie(False, "⛔ le seuil JOURNALIER doit refuser la somme des passes")
+except C.Abort as _e:
+    verifie("JOURNÉE" in str(_e) and "SOMME" in str(_e),
+            f"⭐⭐ le seuil journalier juge la SOMME des passes, pas celle "
+            f"qui part — sans quoi deux passes de 4 700 passeraient l'heure "
+            f"chacune et feraient 9 400 dans la journée")
+_n_ok = int(C.QUOTA_JOUR * 0.6 / _pp_jour) - 20
+_v = C.quota_projete(_n_ok, 3, groupes=[_surf], passe=2)
+verifie(abs(_v - _n_ok * _pp_surf) < 1e-6,
+        f"et il rend le poids de LA PASSE ({_v:.0f}), pas celui du jour — "
+        f"c'est ce chiffre-là que le seau doit réserver")
+
+# ── 4 bis. ⭐⭐ LA MARGE ANNONCE LE GARDE-FOU QUI MORD LE PREMIER ───
+#
+# ⛔ Dès qu'il y a deux passes, ce n'est plus l'heure qui ferme la porte,
+# c'est le JOUR : à 5,80 pondéré/point, le seuil journalier refuse au
+# 1 035ᵉ point quand la passe de surface tient l'heure jusqu'au 1 130ᵉ.
+# Une ligne « MARGE AVANT REFUS » calculée sur la seule fenêtre horaire
+# annoncerait donc 96 points de trop — et on découvrirait la vraie
+# limite le matin où elle est franchie. C'est exactement la panne du
+# 09/08 : un garde-fou qui annonce l'échéance d'un AUTRE garde-fou.
+import io as _io                                          # noqa: E402
+import contextlib as _cx                                  # noqa: E402
+
+
+def _capte(*a, **k):
+    _b = _io.StringIO()
+    with _cx.redirect_stdout(_b):
+        try:
+            C.quota_projete(*a, **k)
+        except C.Abort:
+            pass
+    return _b.getvalue()
+
+
+_pmax_jour = int(C.QUOTA_JOUR * 0.6 // _pp_jour)
+_pmax_heure_surf = int(C.QUOTA_HEURE * 0.95 // _pp_surf)
+verifie(_pmax_jour < _pmax_heure_surf,
+        f"⚠️ le banc est bien dans le cas visé : le jour plafonne à "
+        f"{_pmax_jour} points, l'heure de la passe de surface à "
+        f"{_pmax_heure_surf}")
+_sortie = _capte(600, 3, groupes=[_surf], passe=2)
+verifie("seuil JOURNALIER (60 %)" in _sortie,
+        "⭐⭐ partitionné, la marge annonce le seuil JOURNALIER — c'est lui "
+        "qui mord le premier, et la ligne le NOMME")
+verifie(f"MARGE AVANT REFUS      : {_pmax_jour - 600} points" in _sortie,
+        f"⭐ et elle compte jusqu'au bon plafond ({_pmax_jour}), pas "
+        f"jusqu'à celui de l'heure ({_pmax_heure_surf})")
+_sortie0 = _capte(657, 3)
+verifie("fenêtre HORAIRE)" in _sortie0 and "MARGE AVANT REFUS      : 161" in _sortie0,
+        "⛔ et SANS partition rien ne change : c'est toujours l'heure qui "
+        "mord, et la marge vaut toujours 161 points à 657 points de "
+        "référentiel")
+
+# ── 5. ⭐⭐ LE MANIFESTE SURVIT À LA PERTE DES DONNÉES ──────────────
+#
+# ⛔ C'EST TOUTE LA RAISON D'ÊTRE DE LA FORME « MANIFESTE LATÉRAL ».
+# On simule la nuit où la collecte ne ramène RIEN : pas une ligne. La
+# déclaration, elle, a été écrite AVANT — donc la notation du lendemain
+# saura qu'il manquait quelque chose. Un en-tête de ligne, lui, aurait
+# disparu avec le fichier vide.
+#
+# ⚠️ CE BANC SAIT ÉCHOUER : déplacer l'écriture du manifeste APRÈS
+# `write_ndjson_gz` le laisse vert ; la déplacer après le `if n:` ou la
+# supprimer fait tomber les deux assertions ci-dessous.
+_r2 = pathlib.Path(tempfile.mkdtemp(prefix="s06-manif-"))
+_avant2 = {n: getattr(C, n) for n in
+           ("load_stations", "fetch_forecast", "upload_r2", "charger_quota",
+            "metar_stations", "windsmobi_stations", "infoclimat_stations",
+            "mf_stations", "aemet_stations", "fetch_archive")}
+_argv2 = sys.argv
+try:
+    C.load_stations = lambda p, max_age_days=7: [dict(_ST)]
+    C.fetch_forecast = lambda *a, **k: None      # la nuit ne ramène RIEN
+    C.upload_r2 = _upload_bidon
+    C.charger_quota = lambda: None               # pas de seau : pas d'attente
+    C.fetch_archive = lambda st, day: None
+    for _n2 in ("metar_stations", "windsmobi_stations", "infoclimat_stations",
+                "mf_stations", "aemet_stations"):
+        setattr(C, _n2, lambda cache: [])
+    sys.argv = ["collect.py", "--out", str(_r2), "--passe", "1",
+                "--obs-day", "2026-08-21"]
+    C.main()
+finally:
+    for _n2, _f2 in _avant2.items():
+        setattr(C, _n2, _f2)
+    sys.argv = _argv2
+
+_aujd = C.datetime.now(C.timezone.utc)
+_mp = _r2 / C.manifeste_cle(_aujd)
+verifie(_mp.exists(),
+        f"⭐⭐ le manifeste EXISTE alors que la collecte n'a rien ramené — "
+        f"c'est ce qu'aucune des deux autres formes ne sait faire ({_mp})")
+if _mp.exists():
+    _mj = json.loads(_mp.read_text(encoding="utf-8"))
+    verifie(_mj["parties"] == len(C.groupes_requete()),
+            f"⭐ et il DÉCLARE {_mj['parties']} parties : la notation du "
+            f"lendemain saura qu'il en manque, au lieu de noter la nuit sur "
+            f"les modèles qu'elle trouve")
+    verifie(_mj["flux"] == "fcst" and "modeles" in _mj["detail"][0],
+            "il nomme son flux ET les modèles de chaque partie")
+
+# ── 6. La passe 2 : sa propre clé, pas de manifeste, pas d'obs ──────
+_r3 = pathlib.Path(tempfile.mkdtemp(prefix="s06-p2-"))
+_argv3 = sys.argv
+_vus = []
+try:
+    C.load_stations = lambda p, max_age_days=7: [dict(_ST)]
+    C.fetch_forecast = lambda *a, **k: None
+    C.upload_r2 = _upload_bidon
+    C.charger_quota = lambda: None
+    C.fetch_archive = lambda st, day: _vus.append(day)
+    for _n3 in ("metar_stations", "windsmobi_stations", "infoclimat_stations",
+                "mf_stations", "aemet_stations"):
+        setattr(C, _n3, lambda cache: [])
+    sys.argv = ["collect.py", "--out", str(_r3), "--passe", "2",
+                "--obs-day", "2026-08-21"]
+    C.main()
+finally:
+    for _n3, _f3 in _avant2.items():
+        setattr(C, _n3, _f3)
+    sys.argv = _argv3
+
+verifie((_r3 / C.fcst_cle(_aujd, 2)).exists(),
+        f"la passe 2 écrit SA clé `_p2` — {C.fcst_cle(_aujd, 2)}")
+verifie(not (_r3 / C.fcst_cle(_aujd, 1)).exists(),
+        "⛔ et elle ne touche PAS la clé historique — sinon elle écraserait "
+        "la partie 1, qui est déjà partie une heure plus tôt")
+verifie(not (_r3 / C.manifeste_cle(_aujd)).exists(),
+        "⛔⛔ elle N'ÉCRIT PAS le manifeste : une clé R2 s'écrit UNE FOIS, "
+        "et un manifeste que la passe 2 compléterait ne dirait plus rien le "
+        "jour où c'est la passe 2 qui manque")
+verifie(not _vus and not (_r3 / "obs").exists(),
+        "⛔ et elle ne collecte AUCUNE observation — couper la passe "
+        "observations en deux couperait l'archive Pioupiou en deux fichiers, "
+        "pour une passe qui ne consomme aucun quota Open-Meteo")
+# ── 7. ⛔ `en_retard()` CONNAÎT LES MANIFESTES ──────────────────────
+#
+# Un manifeste dont l'envoi R2 échoue et que `rattraper()` ne reprend
+# jamais est PIRE qu'un manifeste absent : côté `score.py`, son absence
+# sur R2 se lit « journée d'avant la partition », et la nuit est notée
+# sur une partie sur deux, en silence. 300 octets qui manquent.
+#
+# ⚠️ On construit le cas à la main plutôt que de le déduire du run
+# ci-dessus : là-bas `_upload_bidon` pose le témoin, donc il n'y a
+# JAMAIS de retard et l'assertion serait vraie sans rien prouver.
+_r4 = pathlib.Path(tempfile.mkdtemp(prefix="s06-retard-"))
+_mk = C.manifeste_cle(_J)
+(_r4 / _mk).parent.mkdir(parents=True, exist_ok=True)
+(_r4 / _mk).write_text('{"version":1}', encoding="utf-8")
+(_r4 / C.fcst_cle(_J, 1)).write_bytes(b"")
+_retard = [p.relative_to(_r4).as_posix() for p in C.en_retard(_r4)]
+verifie(_mk in _retard,
+        f"⛔ un manifeste sans témoin est EN RETARD, donc rattrapable — "
+        f"sinon son absence sur R2 se lira « journée d'avant la partition » "
+        f"et la nuit sera notée sur une partie sur deux, en silence "
+        f"(vu : {_retard})")
+verifie(C.fcst_cle(_J, 1) in _retard,
+        "et les archives restent rattrapables comme avant")
+C.temoin(_r4 / _mk).write_text("ok", encoding="utf-8")
+verifie(_mk not in [p.relative_to(_r4).as_posix() for p in C.en_retard(_r4)],
+        "un manifeste avec témoin ne repart pas — le témoin marche à "
+        "l'identique quel que soit le suffixe")
 
 
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")

@@ -72,10 +72,99 @@
 #     variables, moins de modèles, une passe étalée sur deux heures, ou
 #     une clé payante. `quota_projete()` doit refuser de démarrer et
 #     poser l'arithmétique, plutôt que de partir en espérant.
+#
+#  ═══ S0.7 (22/08/2026) — LE QUATRIÈME PLAFOND, 300 000/MOIS ═══
+#
+#  Le palier gratuit Open-Meteo compte une QUATRIÈME fenêtre, mensuelle,
+#  confirmée verbatim sur sa page de tarification le 22/08 : « 600 calls
+#  / min, 5.000 calls / hour, 10.000 calls / day, 300.000 calls / month ».
+#
+#  ⛔ « L'AJOUTER À FENETRES EST UNE LIGNE » EST FAUX, ET L'ÉCRIRE DEUX
+#  FOIS (S0.3) NE L'A PAS REND VRAI. Deux raisons, toutes deux mesurées :
+#
+#  1. `_reserver` élague à 86 400 s EN DUR (plus bas — CETTE LIGNE NE
+#     BOUGE PAS dans ce lot). Ajouter ("mois", 2_592_000, 300_000) à
+#     FENETRES SANS y toucher donnerait une fenêtre mensuelle qui ne
+#     verrait JAMAIS plus de 24 h d'événements : elle compterait ~4 000
+#     pondérés au lieu de ~122 000, et ne se déclencherait donc JAMAIS.
+#     `TestVersionNaiveEstRouge` (banc) reproduit ce calcul et le prouve :
+#     c'est la forme EXACTE du défaut du 09/08 — un garde-fou présent
+#     qui ne garde rien, pire que son absence puisqu'on croirait le
+#     plafond couvert.
+#
+#  2. Élargir l'élagage à 30 jours pour de vrai NE PASSE PAS À L'ÉCHELLE.
+#     Mesuré sur le VPS le 22/08 à 12 h UTC : le fichier d'état pèse
+#     40 367 octets pour 1 077 événements (37,5 octets/événement), relu
+#     ET réécrit à CHAQUE `demander()` — 1 524 fois par nuit depuis le
+#     S0.4 (2 requêtes × 657 points, plus `backfill_packs`). Élargir
+#     l'élagage à 30 jours ferait grossir ce fichier à ~45 700
+#     événements (~1,7 Mo), soit ~1,7 Mo lus + 1,7 Mo écrits × 1 524 —
+#     environ 5 Go d'E/S par nuit, et un tri de 45 000 éléments × 4
+#     fenêtres × 1 524 fois. Personne n'a demandé ce coût.
+#
+#  ═══ LA FORME RETENUE : UN COMPTEUR AGRÉGÉ EN SEAUX JOURNALIERS ═══
+#
+#  PAS un quatrième élément de FENETRES — une structure À PART, "jours",
+#  dans le même fichier JSON, à côté de "evenements" :
+#
+#      {"version": 2,
+#       "evenements": [[t, poids, "collect"], …],   ← inchangé, 24 h
+#       "jours": {"2026-08-21": 4982.4, "2026-08-22": 3810.6, …}}
+#
+#  · SEAUX JOURNALIERS, pas un agrégat par MOIS CALENDAIRE (la forme
+#    esquissée dans le prompt, "2026-08": 121878.0) — cf. question 1
+#    du prompt : le mois d'Open-Meteo n'est PAS mesuré, et un agrégat
+#    par mois calendaire suppose implicitement qu'il l'est. Les seaux
+#    journaliers répondent aux DEUX hypothèses (calendaire OU glissant)
+#    sans trancher ce qu'on ne peut pas trancher : sommés sur les 30
+#    derniers jours (`_poids_mois`), ils incluent le jour calendaire
+#    ENTIER qui contient la borne basse de la fenêtre, donc surestiment
+#    légèrement plutôt que l'inverse — même arbitrage que le périmètre
+#    global/par-API en tête de fichier : un garde-fou qui se trompe doit
+#    se tromper du côté qui protège.
+#
+#  · INCRÉMENTÉS AU MÊME ENDROIT que l'événement (`_reserver`, sous le
+#    même `flock`, dans la même réécriture atomique `_ecrire`) — sinon
+#    les deux compteurs peuvent diverger après un crash entre les deux.
+#
+#  · ÉLAGUÉS À 31 JOURS (`JOURS_CONSERVES`) : 30 jours de fenêtre + 1 de
+#    marge pour que le jour EN COURS, toujours partiel, ne fasse jamais
+#    manquer un jour complet côté bas de la fenêtre.
+#
+#  · MARGE 5 % (`MARGE_LONGUE`), la même que l'heure et le jour : c'est
+#    une ACCUMULATION, pas une fenêtre où la dispersion réseau mord.
+#
+#  · UN MOIS PLEIN REFUSE IMMÉDIATEMENT, SANS ATTENDRE (question 2) :
+#    attendre n'a aucun sens, la fenêtre met des JOURS à se vider — très
+#    au-delà d'`ATTENTE_MAX_S` (300 s). `_reserver` court-circuite donc
+#    `_quand_possible` pour le mensuel et rend directement `float("inf")`
+#    avec le motif `"mois"`, que `demander()` traduit en `BudgetRefuse`
+#    dont le message contient explicitement le mot « mois » — vérifié
+#    par le banc, pas supposé.
+#
+#  · L'ANNONCE AVANT LA MORSURE (question 3) vit dans `etat()` et
+#    `resume()` — PAS dans `model-verif/collect.py::quota_projete()`,
+#    qui reste INTOUCHÉ : les cinq appelants impriment déjà
+#    `budget.resume()` et itèrent déjà `budget.etat()["fenetres"]` en
+#    fin de run. Étendre ces deux méthodes suffit à faire apparaître la
+#    ligne mensuelle — « mois 121878/300000 (40,6 %), au rythme actuel
+#    plein le AAAA-MM-JJ » — SANS toucher un seul appelant.
+#
+#  · COÛT EN E/S MESURÉ (question 4), pas estimé : `TestCoutEntreesSorties`
+#    du banc sérialise un état réaliste (1 077 événements + 31 jours) et
+#    mesure la taille en octets. Les 31 seaux journaliers ajoutent moins
+#    de 1 000 octets — sans commune mesure avec le ~1,7 Mo qu'aurait
+#    coûté l'option naïve.
+#
+#  ⚠️ CE QUE CE CHOIX NE TRANCHE PAS : si Open-Meteo compte réellement en
+#  mois CALENDAIRE (non mesuré), ce seau se déclenchera parfois un peu
+#  AVANT que le fournisseur ne coupe vraiment — jamais après. C'est le
+#  sens dans lequel un garde-fou a le droit de se tromper.
 # ══════════════════════════════════════════════════════════════════════
 
 from __future__ import annotations
 
+import datetime
 import fcntl
 import json
 import os
@@ -109,6 +198,23 @@ FENETRES = (
     ("heure", 3600.0, PLAFOND_HEURE),
     ("jour", 86400.0, PLAFOND_JOUR),
 )
+
+#: ⭐ LOT S0.7 (22/08) — le QUATRIÈME plafond, mensuel. ⛔ VOLONTAIREMENT
+#: PAS dans FENETRES : cf. le pavé « S0.7 » en tête de fichier — y
+#: ajouter une ligne ("mois", 2_592_000, PLAFOND_MOIS) réutiliserait
+#: l'élagage à 86 400 s de `_reserver` et ne se déclencherait JAMAIS.
+#: Le mensuel est compté à part, en seaux journaliers (`_poids_mois`,
+#: `_jours_elagues`), sur une fenêtre glissante de 30 jours.
+PLAFOND_MOIS = 300_000
+
+#: Fenêtre glissante, PAS calendaire — cf. le pavé S0.7 : le mois
+#: d'Open-Meteo n'est pas mesuré, et les seaux journaliers répondent aux
+#: deux hypothèses sans avoir à trancher entre elles.
+DUREE_MOIS_S = 30 * 86400.0
+
+#: 30 jours de fenêtre + 1 de marge pour le jour en cours, toujours
+#: partiel (cf. `_jours_elagues`).
+JOURS_CONSERVES = 31
 
 #: Marges. Elles ne sont PAS uniformes, et la différence est raisonnée.
 #:
@@ -211,6 +317,82 @@ def plafond_effectif(fenetre: str) -> float:
     raise KeyError(fenetre)
 
 
+def plafond_mois_effectif() -> float:
+    """Plafond MENSUEL réduit de MARGE_LONGUE.
+
+    ⚠️ Une ACCUMULATION, comme l'heure et le jour, cf. le pavé de marges
+    plus haut — 30 jours glissants n'ont pas la dispersion réseau que la
+    minute doit absorber.
+    """
+    return PLAFOND_MOIS * MARGE_LONGUE
+
+
+def _cle_jour(instant: float) -> str:
+    """Date UTC d'un instant — la clé d'un seau journalier ('AAAA-MM-JJ').
+
+    ⚠️ UTC, jamais l'heure locale du VPS : `time.time()` (et l'horloge
+    injectée dans les bancs) est déjà en secondes UTC depuis l'epoch.
+    Mélanger un fuseau ici rendrait la frontière du jour incohérente
+    avec les fenêtres minute/heure/jour, qui elles ignorent totalement
+    les fuseaux — et ferait un compteur mensuel qui compte parfois 23 h,
+    parfois 25 h de « jour ».
+    """
+    return datetime.datetime.fromtimestamp(
+        instant, tz=datetime.timezone.utc).strftime("%Y-%m-%d")
+
+
+def _poids_mois(jours: dict, maintenant: float) -> float:
+    """Pondéré cumulé sur les 30 jours glissants, lu sur les seaux.
+
+    ⚠️ SURESTIME LÉGÈREMENT, JAMAIS NE SOUS-ESTIME : la fenêtre inclut
+    le jour calendaire ENTIER qui contient sa borne basse, même si une
+    partie de ce jour-là tombe en réalité hors fenêtre — la seule
+    imprécision qu'un seau à granularité JOURNALIÈRE peut faire, et on
+    la fait du côté qui protège (même arbitrage que le périmètre
+    global/par-API en tête de fichier).
+    """
+    depuis = _cle_jour(maintenant - DUREE_MOIS_S)
+    return sum(w for jour, w in jours.items() if jour >= depuis)
+
+
+def _jours_elagues(jours: dict, maintenant: float) -> dict:
+    """Seaux journaliers élagués à `JOURS_CONSERVES` jours.
+
+    ⚠️ Sans cet élagage le fichier grossirait sans fin, comme le pavé
+    S0.7 le note pour la forme naïve — sauf qu'ici il grossit d'UNE
+    entrée par jour, jamais d'une par événement.
+    """
+    limite = _cle_jour(maintenant - JOURS_CONSERVES * 86400.0)
+    return {jour: p for jour, p in jours.items() if jour >= limite}
+
+
+def _projection_mois(jours: dict, maintenant: float) -> str | None:
+    """AAAA-MM-JJ où le seau mensuel serait plein « au rythme actuel ».
+
+    Rend `None` si la donnée est insuffisante (aucun jour mesuré dans la
+    fenêtre) ou si le rythme est nul — pas de projection à faire.
+
+    ⚠️ LE RYTHME EST LA MOYENNE DES JOURS RÉELLEMENT MESURÉS dans la
+    fenêtre, pas `consomme / 30`. Au lendemain d'une migration ou d'un
+    redémarrage il n'y a que quelques jours de mesure ; diviser par 30
+    sous-estimerait le rythme — donc la projection — du côté qui NE
+    protège PAS.
+    """
+    depuis = _cle_jour(maintenant - DUREE_MOIS_S)
+    pertinents = {jour: p for jour, p in jours.items() if jour >= depuis}
+    if not pertinents:
+        return None
+    consomme = sum(pertinents.values())
+    rythme = consomme / len(pertinents)
+    if rythme <= 0:
+        return None
+    plafond = plafond_mois_effectif()
+    if consomme >= plafond:
+        return _cle_jour(maintenant)
+    jours_restants = (plafond - consomme) / rythme
+    return _cle_jour(maintenant + jours_restants * 86400.0)
+
+
 class Budget:
     """Le droit de parler à Open-Meteo, compté hors processus.
 
@@ -247,6 +429,7 @@ class Budget:
         self._journal = journal
         self.degrade = False
         self._degrade_dit = False
+        self._migration_dite = False
         self.attendu_s = 0.0
         self.consomme = 0.0
         self.refuses = 0
@@ -263,35 +446,74 @@ class Budget:
     def _chemin_verrou(self) -> Path:
         return self.chemin.with_name(self.chemin.name + ".lock")
 
-    def _lire(self) -> list:
-        """Événements du fichier, ou [] si l'état est neuf.
+    def _lire(self) -> tuple[list, dict]:
+        """(événements, seaux journaliers) du fichier, ou ([], {}) si neuf.
 
         ⚠️ Toute lecture qui échoue bascule en mode DÉGRADÉ plutôt que
         de lever : un garde-fou qui empêche de tourner est pire que le
         risque qu'il couvre. Fichier absent, JSON tronqué, version
         inconnue, droits refusés — même traitement.
+
+        ⚠️ MIGRATION DEPUIS LA VERSION 1 (avant le S0.7, sans compteur
+        mensuel) : l'ABSENCE de la clé "jours" — pas le numéro de
+        version, plus robuste à un fichier écrit à la main — déclenche
+        `_signaler_migration()`. Il n'y a rien à récupérer (la version 1
+        ne conservait aucun agrégat journalier), donc les seaux
+        démarrent à {} ; ce qui compte est que ce ne soit jamais fait EN
+        SILENCE.
         """
         try:
             brut = json.loads(self.chemin.read_text(encoding="utf-8"))
             evenements = brut["evenements"]
             if not isinstance(evenements, list):
                 raise ValueError("evenements n'est pas une liste")
-            return [(float(t), float(p), str(q)) for t, p, q in evenements]
+            evenements = [(float(t), float(p), str(q)) for t, p, q in evenements]
+            if "jours" in brut:
+                jours = brut["jours"]
+                if not isinstance(jours, dict):
+                    raise ValueError("jours n'est pas un objet")
+                jours = {str(j): float(w) for j, w in jours.items()}
+            else:
+                jours = {}
+                self._signaler_migration()
+            return evenements, jours
         except FileNotFoundError:
-            return []
+            return [], {}
         except Exception as exc:                      # noqa: BLE001
             self._passer_en_degrade(f"état illisible ({exc})")
-            return []
+            return [], {}
 
-    def _ecrire(self, evenements: list) -> None:
+    def _signaler_migration(self) -> None:
+        """Dit UNE FOIS qu'un fichier sans compteur mensuel a été lu.
+
+        ⚠️ NE REPART JAMAIS « DE ZÉRO EN SILENCE » (Livrable attendu du
+        S0.7) : il n'y a rien à récupérer — la version 1 ne conservait
+        pas d'agrégat journalier — donc démarrer à 0 est la seule
+        option honnête. Cette méthode garantit qu'on le SAIT, pas qu'on
+        invente un historique.
+        """
+        if not self._migration_dite:
+            self._migration_dite = True
+            print(f"  ⓘ budget Open-Meteo : {self.chemin} sans compteur "
+                  f"mensuel (version 1) — migration vers la version 2, "
+                  f"compteur MENSUEL démarré à 0 (rien à récupérer : la "
+                  f"version 1 ne conservait pas d'agrégat journalier)",
+                  file=self._journal)
+
+    def _ecrire(self, evenements: list, jours: dict) -> None:
         """Réécriture atomique : fichier temporaire puis `rename`.
 
         ⚠️ Un `open(..., "w")` suivi d'un crash laisserait un JSON
         tronqué — et le lecteur suivant basculerait en dégradé pour
         rien. `rename` est atomique sur le même système de fichiers :
         l'état est soit l'ancien, soit le nouveau, jamais entre les deux.
+
+        ⭐ VERSION 2 (S0.7) : `evenements` ET `jours` sont réécrits
+        ENSEMBLE, dans le MÊME `rename` atomique — c'est ce qui garantit
+        qu'ils ne peuvent pas diverger après un crash entre les deux.
         """
-        contenu = json.dumps({"version": 1, "evenements": evenements},
+        contenu = json.dumps({"version": 2, "evenements": evenements,
+                              "jours": jours},
                              separators=(",", ":"))
         fd, tmp = tempfile.mkstemp(dir=str(self.chemin.parent),
                                    prefix=".quota-", suffix=".tmp")
@@ -353,31 +575,119 @@ class Budget:
             attente = max(attente, liberation - maintenant)
         return attente
 
-    def _reserver(self, p: float) -> float:
+    def attente_fenetre(self, poids_total: float,
+                        fenetre: str = "heure") -> float:
+        """Quand UNE fenêtre nommée aura la place pour `poids_total`.
+
+        Rend 0.0 si la place est déjà là, sinon l'attente en secondes,
+        sinon `inf` si `poids_total` dépasse à lui seul le plafond
+        effectif de cette fenêtre — auquel cas aucune attente ne sert et
+        c'est `quota_projete` qui doit refuser, pas ce compteur.
+
+        ⚠️ CE N'EST PAS `_quand_possible`, ET LA DIFFÉRENCE EST LE SUJET
+        DU LOT S0.6. `_quand_possible` répond pour UNE requête et sur
+        TOUTES les fenêtres — la minute comprise, qui ne peut jamais
+        contenir le poids d'une passe entière et rendrait donc `inf`
+        pour une question qui a une réponse. Ici on demande à UNE seule
+        fenêtre, celle qui ferme la porte pour une heure entière.
+
+        ⛔ POURQUOI CETTE MÉTHODE EXISTE. Une passe de collecte lancée
+        à l'heure où la précédente déborde encore se ferait refuser
+        POINT PAR POINT jusqu'à `ATTENTE_MAX_S`, en fabriquant des
+        centaines de trous DÉCLARÉS là où attendre douze minutes une
+        seule fois aurait tout sauvé. Un trou déclaré vaut mieux qu'un
+        run tué (arbitrage 2 de l'en-tête) — mais il ne vaut rien du
+        tout face à une attente qui, elle, ramène la donnée. La passe
+        doit donc pouvoir DEMANDER l'instant où la place se libère au
+        lieu de le supposer.
+
+        ⚠️ LECTURE SANS VERROU ET SANS RÉSERVATION, et c'est voulu :
+        c'est un CONSEIL, pas un droit. La réservation reste celle de
+        `demander()`, point par point, sous `flock`. Deux passes qui
+        liraient ce conseil en même temps se réserveraient quand même
+        correctement — au pire elles se marcheraient dessus au niveau
+        des points, ce que le seau sait déjà arbitrer.
+
+        ⓘ Le mode dégradé rend 0.0 : sans état lisible, on ne sait rien,
+        et faire attendre sur une ignorance serait pire que partir à la
+        cadence de repli.
+        """
+        for nom, duree, _brut in FENETRES:
+            if nom != fenetre:
+                continue
+            limite = plafond_effectif(nom)
+            if poids_total > limite:
+                return float("inf")
+            evenements, _jours = self._lire()
+            if self.degrade:
+                return 0.0
+            maintenant = self._horloge()
+            dedans = sorted((t, w) for t, w, _q in evenements
+                            if t > maintenant - duree)
+            somme = sum(w for _t, w in dedans)
+            if somme + poids_total <= limite:
+                return 0.0
+            besoin = somme + poids_total - limite
+            cumul = 0.0
+            for t, w in dedans:
+                cumul += w
+                if cumul >= besoin:
+                    return max(0.0, t + duree - maintenant)
+            # Inatteignable : `besoin` ne peut pas dépasser `somme`.
+            return float("inf")
+        raise KeyError(fenetre)
+
+    def _reserver(self, p: float) -> tuple[float, str]:
         """Sous verrou : réserve `p` si possible, sinon dit quand.
 
-        Renvoie 0.0 si le jeton est pris (et l'état déjà réécrit), sinon
-        l'attente en secondes, ou `inf` si c'est sans espoir.
+        Renvoie `(0.0, "")` si le jeton est pris (état déjà réécrit),
+        sinon `(attente_s, motif)` — `motif` vaut `"mois"` quand c'est
+        le plafond MENSUEL qui refuse (`demander()` en a besoin pour
+        nommer la bonne fenêtre dans le message de `BudgetRefuse`), et
+        `""` pour les trois fenêtres glissantes classiques, dont le
+        message ne nomme aucune fenêtre depuis le 09/08 (inchangé ici).
         """
         verrou = self._chemin_verrou()
         verrou.parent.mkdir(parents=True, exist_ok=True)
         with open(verrou, "a+") as vf:
             fcntl.flock(vf.fileno(), fcntl.LOCK_EX)
             try:
-                evenements = self._lire()
+                evenements, jours = self._lire()
                 if self.degrade:
-                    return 0.0            # traité par l'appelant
+                    return 0.0, ""        # traité par l'appelant
                 maintenant = self._horloge()
                 # Élagage : au-delà de 24 h, un événement ne pèse dans
                 # aucune fenêtre. Sans lui le fichier grossirait sans fin.
+                # ⛔ CETTE LIGNE NE BOUGE PAS (cf. le pavé S0.7 en tête de
+                # fichier) : le mensuel est compté à part, sur `jours`,
+                # justement pour ne PAS en dépendre.
                 evenements = [e for e in evenements
                               if e[0] > maintenant - 86400.0]
+                jours = _jours_elagues(jours, maintenant)
+
+                # ⛔ LE MENSUEL D'ABORD, ET SANS PASSER PAR
+                # `_quand_possible` : question 2 du prompt S0.7 —
+                # attendre n'a aucun sens, la fenêtre met des JOURS à se
+                # vider, très au-delà d'`ATTENTE_MAX_S`. Un refus
+                # immédiat dit la vérité ; un temps d'attente calculé sur
+                # un seau à granularité JOURNALIÈRE ne saurait de toute
+                # façon pas dire l'instant exact.
+                consomme_mois = _poids_mois(jours, maintenant)
+                if consomme_mois + p > plafond_mois_effectif():
+                    return float("inf"), "mois"
+
                 attente = self._quand_possible(evenements, p, maintenant)
                 if attente > 0.0:
-                    return attente
+                    return attente, ""
                 evenements.append((maintenant, p, self.consommateur))
-                self._ecrire(evenements)
-                return 0.0
+                # ⭐ Incrémenté ICI, sous le MÊME verrou, réécrit dans la
+                # MÊME `rename` atomique que `evenements` — sinon les
+                # deux compteurs peuvent diverger après un crash entre
+                # deux écritures séparées.
+                cle = _cle_jour(maintenant)
+                jours[cle] = jours.get(cle, 0.0) + p
+                self._ecrire(evenements, jours)
+                return 0.0, ""
             finally:
                 fcntl.flock(vf.fileno(), fcntl.LOCK_UN)
 
@@ -403,7 +713,7 @@ class Budget:
         attendu = 0.0
         while True:
             try:
-                attente = self._reserver(p)
+                attente, motif = self._reserver(p)
             except OSError as exc:
                 # Disque plein, droits refusés, /var/lib absent : on
                 # dégrade, on ne s'arrête pas.
@@ -424,6 +734,19 @@ class Budget:
 
             if attente == float("inf"):
                 self.refuses += 1
+                if motif == "mois":
+                    # ⭐ Question 2 du prompt S0.7, vérifiée : le mois
+                    # plein refuse IMMÉDIATEMENT, jamais après une
+                    # attente — et le message dit « mois », pas autre
+                    # chose (Livrable attendu du lot).
+                    raise BudgetRefuse(
+                        f"{self.consommateur}: le plafond MENSUEL Open-Meteo "
+                        f"est atteint ({plafond_mois_effectif():.0f} "
+                        f"pondérés effectifs sur {PLAFOND_MOIS} bruts, 30 "
+                        f"jours glissants) pour {p:.1f} pondérés — attendre "
+                        f"n'a aucun sens, la fenêtre met des jours à se "
+                        f"vider. Point non collecté — trou déclaré pour le "
+                        f"mois.")
                 raise BudgetRefuse(
                     f"{self.consommateur}: une requête de {p:.1f} pondérés "
                     f"dépasse à elle seule un plafond — revoir le nombre de "
@@ -453,8 +776,16 @@ class Budget:
         ⚠️ Sert à la ligne de journal de fin de run. Un budget partagé
         qui ne nomme pas ses consommateurs déplace le problème au lieu
         de le résoudre.
+
+        ⭐ `vue["mois"]` (S0.7) — À PART de `vue["fenetres"]`, PAS un
+        quatrième élément dedans : sa forme diffère (pas de
+        `par_consommateur` — les seaux journaliers ne gardent pas cette
+        granularité, c'est tout le point de l'agrégat) et le mêler à
+        `fenetres` risquerait de le faire un jour finir DANS FENETRES
+        par un « nettoyage » bien intentionné — exactement l'erreur que
+        ce lot existe pour empêcher.
         """
-        evenements = self._lire()
+        evenements, jours = self._lire()
         maintenant = self._horloge()
         vue: dict = {"degrade": self.degrade, "fenetres": {}}
         for nom, duree, brut in FENETRES:
@@ -470,15 +801,37 @@ class Budget:
                                      sorted(par_qui.items(),
                                             key=lambda kv: -kv[1])},
             }
+        consomme_mois = _poids_mois(jours, maintenant)
+        vue["mois"] = {
+            "consomme": round(consomme_mois, 1),
+            "plafond": PLAFOND_MOIS,
+            "plafond_effectif": round(plafond_mois_effectif(), 1),
+            "projection": _projection_mois(jours, maintenant),
+        }
         return vue
 
     def resume(self) -> str:
-        """Une ligne lisible, pour la fin d'un run."""
+        """Une ligne lisible, pour la fin d'un run.
+
+        ⭐ QUESTION 3 DU PROMPT S0.7 : « faut-il l'annoncer avant de
+        mordre ? » — le S0.4 l'a fait pour l'heure dans
+        `quota_projete()` (`model-verif/collect.py`) ; ici, ajouter la
+        ligne DANS `resume()` fait apparaître l'annonce mensuelle chez
+        les CINQ appelants qui impriment déjà cette ligne en fin de run,
+        SANS toucher un seul d'entre eux — cf. le pavé S0.7 en tête de
+        fichier.
+        """
         vue = self.etat()
         morceaux = []
         for nom, _duree, _brut in FENETRES:
             f = vue["fenetres"][nom]
             morceaux.append(f"{nom} {f['consomme']:.0f}/{f['plafond']}")
+        m = vue["mois"]
+        pct_mois = (m["consomme"] / m["plafond"] * 100) if m["plafond"] else 0.0
+        ligne_mois = f"mois {m['consomme']:.0f}/{m['plafond']} ({pct_mois:.1f} %)"
+        if m["projection"]:
+            ligne_mois += f", au rythme actuel plein le {m['projection']}"
+        morceaux.append(ligne_mois)
         suffixe = " (DÉGRADÉ)" if self.degrade else ""
         return (f"quota Open-Meteo — {', '.join(morceaux)} ; "
                 f"{self.consommateur} a consommé {self.consomme:.0f}, "
@@ -500,5 +853,10 @@ if __name__ == "__main__":
               f"(seuil interne {info['plafond_effectif']:.0f})")
         for qui, combien in info["par_consommateur"].items():
             print(f"│   {qui:<24} {combien:>8.1f}")
+    m = etat["mois"]
+    print(f"┌─ mois : {m['consomme']:.0f} / {m['plafond']} "
+          f"(seuil interne {m['plafond_effectif']:.0f})"
+          + (f" — au rythme actuel plein le {m['projection']}"
+             if m["projection"] else ""))
     if etat["degrade"]:
         print("⚠️  état illisible — les chiffres ci-dessus sont incomplets")

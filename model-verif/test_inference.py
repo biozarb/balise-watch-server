@@ -264,8 +264,14 @@ check("sous le quorum → 'insufficient', aucun rang",
 
 rk4, reason4, _ = I.rank_models(
     [{"model": "A", "typical_err_kmh": 4.0, "occurrences": 20}], {"A": a})
-check("un seul modèle au-dessus du quorum est classé 1 sans test",
-      rk4 == {"A": 1} and reason4 == "ok")
+# ⛔ CHANGÉ LE 22/08/2026 (lot S0.5). Cette assertion demandait
+# `rk4 == {"A": 1}` et `reason4 == "ok"` : un « 1ᵉʳ sur 1 » publié avec
+# la mention « un vainqueur, prouvé et utile ». Tant que chaque case
+# portait neuf modèles, le cas était marginal (2 lignes sur 276 035,
+# mesuré le 22/08). Le flux AROME/R2 le rend STRUCTUREL — 2 938 balises
+# n'ont qu'un seul modèle. Un modèle seul n'a battu personne.
+check("un seul modèle au-dessus du quorum n'est PAS classé",
+      rk4 == {} and reason4 == "single_model", f"{rk4} / {reason4}")
 
 # ══════════════════════════════════════════════════════════════════
 print("── 7. rétrécissement vers le parent, et poids emprunté ──")

@@ -275,20 +275,79 @@ class SiteBias:
     n: int
 
 
+def pente_moindres_carres(pairs: Sequence[VerifPair]) -> float | None:
+    """Le facteur `a` qui minimise Σ(a·prévu − observé)² : Σ(o·f) / Σ(f²).
+
+    ⛔ POURQUOI CETTE FONCTION EXISTE — LE DÉFAUT QU'ELLE RÉPARE (S2, 22/08).
+
+    Jusqu'au 22/08, `site_bias` rendait la MÉDIANE de `obs/prev` sur les
+    seules heures où `fcst_speed >= BIAS_MIN_WIND_KMH`. Conditionner sur
+    la PRÉVISION sélectionne les heures où le modèle est haut — donc,
+    quand il se trompe, les heures où son erreur est POSITIVE. Le
+    rapport y est mécaniquement inférieur à 1 même sur un modèle qui ne
+    surestime rien.
+
+    ⛔ MESURÉ, PAS SUPPOSÉ — 40 539 heures appariées, 19→21/08/2026,
+    ECMWF IFS 0,25° :
+
+        med(obs/prev | prev ≥ 8)  = 0,761      ← l'ancienne réponse
+        med(obs/prev | prev ≥ 1)  = 1,003
+        Σobs / Σprev              = 1,112
+        Σ(obs·prev) / Σ(prev²)    = 0,894      ← celle-ci
+        med(obs/prev | obs ≥ 8)   = 1,514      ← le miroir, qui prouve
+                                                 que c'est la sélection
+
+    Un estimateur qui rend 0,76 ou 1,51 selon le côté sur lequel on
+    conditionne ne mesure pas le vent : il mesure son propre seuil.
+
+    ⚠️ ET IL NE REND PAS 1 SUR UN MODÈLE SANS BIAIS — c'est normal et
+    voulu. Il vaut Var(vérité)/(Var(vérité)+Var(erreur)) : l'atténuation
+    classique. Ce n'est pas « le biais du site », c'est LE FACTEUR QUI
+    MINIMISE L'ERREUR, ce qui est précisément ce qu'on lui demande. Le
+    nom `speed_ratio` est donc devenu un peu étroit ; il est conservé
+    parce que le renommer casserait `model_character.metric` et le TS
+    sans rien apprendre à personne.
+
+    ⚠️ SANS SEUIL, ET C'EST LE POINT. Les heures faibles pèsent déjà
+    presque rien (la somme est pondérée par `prev²`) : mesuré le 22/08,
+    retirer les heures sous 8 km/h ne déplace la pente que de 0,002.
+    Mais sur une JOURNÉE CALME, où aucune heure n'atteint 8 km/h,
+    l'ancien estimateur se taisait — donc les sites abrités, ceux qui en
+    ont le plus besoin, n'avaient jamais de correction.
+    """
+    sof = sff = 0.0
+    for p in pairs:
+        if not (_finite(p.fcst_speed) and _finite(p.obs_speed)):
+            continue
+        sof += p.obs_speed * p.fcst_speed
+        sff += p.fcst_speed * p.fcst_speed
+    return sof / sff if sff > 0 else None
+
+
 def site_bias(pairs: Sequence[VerifPair],
               min_pairs: int = BIAS_MIN_PAIRS) -> SiteBias:
-    ratios: list[float] = []
+    """Le biais d'un site : un facteur sur la force, un écart sur le cap.
+
+    ⚠️ LES DEUX MOITIÉS N'ONT PAS LE MÊME ESTIMATEUR, ET C'EST DÉLIBÉRÉ.
+    La force passe par `pente_moindres_carres`, sans seuil (voir
+    ci-dessus). Le CAP garde sa médiane d'écarts circulaires conditionnée
+    à `BIAS_MIN_WIND_KMH` **des deux côtés** — une condition SYMÉTRIQUE
+    ne fabrique pas le biais qu'elle mesure, et une girouette sous
+    8 km/h raconte vraiment n'importe quoi.
+    """
     offsets: list[float] = []
+    n_force = 0
     for p in pairs:
-        if p.fcst_speed >= BIAS_MIN_WIND_KMH and p.obs_speed >= 0:
-            ratios.append(p.obs_speed / p.fcst_speed)
+        if _finite(p.fcst_speed) and _finite(p.obs_speed):
+            n_force += 1
         if (p.fcst_dir is not None and p.obs_dir is not None
                 and p.fcst_speed >= BIAS_MIN_WIND_KMH
                 and p.obs_speed >= BIAS_MIN_WIND_KMH):
             offsets.append(angular_diff(p.fcst_dir, p.obs_dir))
     enough = len(pairs) >= min_pairs
     return SiteBias(
-        speed_ratio=median(ratios) if enough and len(ratios) >= min_pairs / 2 else None,
+        speed_ratio=(pente_moindres_carres(pairs)
+                     if enough and n_force >= min_pairs / 2 else None),
         dir_offset=median(offsets) if enough and len(offsets) >= min_pairs / 2 else None,
         n=len(pairs),
     )

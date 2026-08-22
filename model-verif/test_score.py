@@ -1315,6 +1315,635 @@ def test_pression_appariement_stable_entre_echeances():
           sorted(r["lead_h"] for r in rows), [6])
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LOT S0.6 — UNE PARTIE MANQUANTE EST VUE, COMPTÉE ET NOMMÉE
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ C'EST LE PIÈGE CENTRAL DU LOT, ET CE BANC EST TOUT CE QUI SÉPARE
+#  « la nuit a été notée sur deux modèles » de « la nuit a été notée sur
+#  deux modèles ET PERSONNE NE L'A SU ».
+#
+#  ⚠️ CE BANC SAIT ÉCHOUER, et on peut le vérifier en une ligne :
+#  remplacer dans `score.py::fcst_parties` le compte tiré du manifeste
+#  par « les clés qui existent » — c'est-à-dire écrire le défaut — fait
+#  tomber `parties_attendues == 2` et les deux assertions qui NOMMENT
+#  les modèles. C'est la mutation M1 du §8 de la note.
+
+def _ecrire_gz(racine, cle, lignes):
+    import gzip as _gz
+    import json as _js
+    p = racine / cle
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with _gz.open(p, "wt", encoding="utf-8") as fh:
+        for r in lignes:
+            fh.write(_js.dumps(r) + "\n")
+    return p
+
+
+def _ligne(model):
+    return {"source": "pioupiou", "station_id": "1", "model": model,
+            "t0": DAY_MS // 1000, "step_s": 3600, "speed": [10.0, 11.0]}
+
+
+def _manifeste(jour, parties, version=1):
+    detail = []
+    for i, (cle, modeles) in enumerate(parties, 1):
+        detail.append({"i": i, "cle": cle, "modeles": modeles,
+                       "n_vars": 6, "poids_point": 0.6 * len(modeles)})
+    return {"version": version, "flux": "fcst", "jour": f"{jour:%Y-%m-%d}",
+            "parties": len(parties), "n_points": 3,
+            "poids_point_total": 5.8, "detail": detail,
+            "ecrit_par": "banc", "ecrit_a": "2026-08-23T03:15:04Z"}
+
+
+def test_partition_parties_manquantes():
+    import json as _js
+    import pathlib
+    import tempfile
+
+    ALT = ["ecmwf_ifs025", "gfs_global"]
+    SURF = ["meteofrance_arome_france_hd", "meteofrance_arpege_europe",
+            "icon_eu", "dmi_harmonie", "chmi_aladin", "icon_d2",
+            "meteoswiss_icon_ch2"]
+    k1 = J.fcst_key(DAY)
+    k2 = J.fcst_key(DAY, 2)
+
+    check("la partie 1 garde la clé HISTORIQUE, au caractère près",
+          k1, f"fcst/2026/08/fcst_2026-08-05.ndjson.gz")
+    check("la partie 2 prend `_p2`",
+          k2, "fcst/2026/08/fcst_2026-08-05_p2.ndjson.gz")
+    check("le manifeste est LATÉRAL, jamais une ligne de l'archive",
+          J.fcst_manifeste_key(DAY),
+          "fcst/2026/08/fcst_2026-08-05.manifeste.json")
+
+    # ── 1. Journée d'AVANT la partition : pas de manifeste, une clé ──
+    #     ⚠️ Sans date de bascule dans le code : les 15 nuits déjà
+    #     écrites doivent rester lisibles telles quelles.
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-avant-"))
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT + SURF])
+    rows, b = J.fcst_parties(d, DAY)
+    check("avant la partition : les 9 modèles sont lus", len(rows), 9)
+    check("avant la partition : l'état le DIT", b["etat"], "avant_partition")
+    check("avant la partition : 1 partie attendue", b["parties_attendues"], 1)
+
+    # ── 2. Deux parties déclarées, deux présentes ────────────────────
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-ok-"))
+    (d / "fcst/2026/08").mkdir(parents=True)
+    (d / J.fcst_manifeste_key(DAY)).write_text(
+        _js.dumps(_manifeste(DAY, [(k1, ALT), (k2, SURF)])), encoding="utf-8")
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT])
+    _ecrire_gz(d, k2, [_ligne(m) for m in SURF])
+    rows, b = J.fcst_parties(d, DAY)
+    check("2 parties présentes : toutes les lignes sont là", len(rows), 9)
+    check("2/2 parties lues", (b["parties_lues"], b["parties_attendues"]),
+          (2, 2))
+    check("rien à signaler", b["etat"], "ok")
+
+    # ── 3. ⭐⭐ LA PARTIE 2 MANQUE — VUE, COMPTÉE, NOMMÉE ────────────
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-trou-"))
+    (d / "fcst/2026/08").mkdir(parents=True)
+    (d / J.fcst_manifeste_key(DAY)).write_text(
+        _js.dumps(_manifeste(DAY, [(k1, ALT), (k2, SURF)])), encoding="utf-8")
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT])
+    # …et RIEN pour la partie 2. C'est la nuit où la passe de 04:35 a
+    # échoué.
+    rows, b = J.fcst_parties(d, DAY)
+    check("⭐ VUE : l'état nomme le défaut", b["etat"], "partie_manquante")
+    check("⭐ COMPTÉE : 1 partie lue sur 2 ATTENDUES — le 2 vient du "
+          "manifeste, jamais des clés qui existent",
+          (b["parties_lues"], b["parties_attendues"]), (1, 2))
+    check("⭐ NOMMÉE : les sept modèles perdus sont listés",
+          sorted(b["modeles_manquants"]), sorted(SURF))
+    check("et la partie manquante porte son numéro et sa clé",
+          (b["manquantes"][0]["i"], b["manquantes"][0]["cle"]), (2, k2))
+    check("les lignes de la partie 1 ne sont PAS perdues au passage",
+          len(rows), 2)
+    ligne = J.dire_bilan_parties(b, 0)
+    check("⭐ le journal COMPTE : « 1/2 parties »", "1/2 parties" in ligne, True)
+    check("⭐ le journal NOMME : `icon_eu` est écrit en toutes lettres",
+          "icon_eu" in ligne, True)
+    check("⭐ et le journal nomme SON FLUX — sinon « 1 partie sur 2 » se "
+          "lit « il manque un flux sur trois »", "`fcst/`" in ligne, True)
+
+    # ── 4. ⛔ Manifeste perdu alors qu'une partie 2 existe ───────────
+    #     Le cas que le S0.4 laissait ouvert. On garde les lignes, mais
+    #     on REFUSE de dire combien de parties étaient attendues.
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-sansmanif-"))
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT])
+    _ecrire_gz(d, k2, [_ligne(m) for m in SURF])
+    rows, b = J.fcst_parties(d, DAY)
+    check("manifeste perdu + partie 2 présente = INCIDENT, pas "
+          "« avant la partition »",
+          b["etat"], "manifeste_absent_mais_partie_2_presente")
+    check("⛔ et surtout : on REFUSE de deviner combien de parties",
+          b["parties_attendues"], None)
+    check("la donnée, elle, n'est pas jetée", len(rows), 9)
+
+    # ── 5. ⛔ Ni manifeste ni donnée ─────────────────────────────────
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-rien-"))
+    rows, b = J.fcst_parties(d, DAY)
+    check("rien du tout = incident, pas « journée normale »",
+          b["etat"], "rien_produit")
+    check("et zéro ligne", len(rows), 0)
+
+    # ── 6. Manifeste d'une version inconnue ─────────────────────────
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-v99-"))
+    (d / "fcst/2026/08").mkdir(parents=True)
+    (d / J.fcst_manifeste_key(DAY)).write_text(
+        _js.dumps(_manifeste(DAY, [(k1, ALT), (k2, SURF)], version=99)),
+        encoding="utf-8")
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT])
+    rows, b = J.fcst_parties(d, DAY)
+    check("une version inconnue ARRÊTE la lecture au lieu de la deviner",
+          b["etat"], "manifeste_version_inconnue")
+
+    # ── 7. ⚠️ LES DEUX AUTRES FLUX NE SONT PAS DES PARTIES ──────────
+    #     `snapshot_rows` en lit TROIS ; le manifeste ne parle que de
+    #     `fcst/`. Un `fcstarome` présent ne doit pas faire croire à une
+    #     partie de plus, ni son absence à une partie manquante.
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s06-flux-"))
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT])
+    _ecrire_gz(d, J.fcst_arome_key(DAY), [_ligne("arome_r2")])
+    _ecrire_gz(d, J.fcst_agrume_key(DAY), [_ligne("agrume")])
+    rows, b = J.snapshot_rows_et_bilan(d, DAY)
+    check("les trois flux sont lus", len(rows), 4)
+    check("mais le bilan ne compte que les parties de `fcst/`",
+          (b["flux"], b["parties_lues"], b["parties_attendues"]),
+          ("fcst", 1, 1))
+    check("`snapshot_rows` rend toujours une simple liste (3 appelants)",
+          len(J.snapshot_rows(d, DAY)), 4)
+
+
+def test_rang_sur_journee_incomplete():
+    """⛔ Un rang publié sur une journée incomplète doit le DIRE."""
+    trou = {0: {"flux": "fcst", "etat": "partie_manquante",
+                "parties_attendues": 2, "parties_lues": 1,
+                "modeles_manquants": ["icon_eu"]},
+            1: {"flux": "fcst", "etat": "ok"},
+            2: {"flux": "fcst", "etat": "avant_partition"}}
+    complet = {0: {"flux": "fcst", "etat": "ok"},
+               1: {"flux": "fcst", "etat": "avant_partition"}}
+
+    rows = [
+        {"model": "a", "rank": 1, "rank_reason": "ok"},
+        {"model": "b", "rank": 2, "rank_reason": "ok"},
+        # ⚠️ Déjà non classée pour une raison STATISTIQUE : on n'y
+        # touche pas. Il n'y a aucun rang trompeur à qualifier, et
+        # écraser la raison détruirait un fait par case au profit d'un
+        # fait par journée.
+        {"model": "c", "rank": None, "rank_reason": "window_too_short"},
+        {"model": "d", "rank": None, "rank_reason": "single_model"},
+    ]
+    n = J.marquer_parties_manquantes(rows, trou)
+    check("seuls les rangs PUBLIÉS sont qualifiés", n, 2)
+    check("le rang reste — un classement absent et un classement partiel "
+          "se lisent pareil, et le second au moins se dit",
+          [r["rank"] for r in rows], [1, 2, None, None])
+    check("⭐ et il porte `partie_manquante`",
+          [r["rank_reason"] for r in rows[:2]],
+          ["partie_manquante", "partie_manquante"])
+    check("⚠️ les raisons STATISTIQUES ne sont pas écrasées",
+          [r["rank_reason"] for r in rows[2:]],
+          ["window_too_short", "single_model"])
+
+    rows2 = [{"model": "a", "rank": 1, "rank_reason": "ok"}]
+    check("une journée complète ne qualifie rien",
+          J.marquer_parties_manquantes(rows2, complet), 0)
+    check("et `avant_partition` n'est PAS un incident",
+          rows2[0]["rank_reason"], "ok")
+
+    lignes = J.collect_part_rows(DAY, trou)
+    check("une ligne de base par journée d'ÉMISSION, pas une par nuit "
+          "notée — sinon deux incidents sur trois disparaissent",
+          [r["day"] for r in lignes],
+          ["2026-08-05", "2026-08-04", "2026-08-03"])
+    check("et elle nomme son flux", {r["flux"] for r in lignes}, {"fcst"})
+    check("⛔ `parties_attendues` est NUL quand on ne sait pas, jamais 0",
+          J.collect_part_rows(
+              DAY, {0: {"flux": "fcst", "parties_lues": 2,
+                        "etat": "manifeste_absent_mais_partie_2_presente"}}
+          )[0]["parties_attendues"], None)
+
+
+def test_les_deux_cles_fcst_sont_la_meme_chaine():
+    """`collect.py` et `score.py` écrivent la forme de clé DEUX FOIS.
+
+    ⚠️ C'est délibéré — `score.py` ne doit dépendre ni de numpy ni du
+    paquet `agrume/`, donc il n'importe pas `collect`. Mais deux
+    définitions d'une même chaîne, c'est une divergence qui attend son
+    heure : le jour où l'une prend un `_p0{i}` et l'autre un `_p{i}`,
+    la notation lirait une clé que la collecte n'écrit jamais, et
+    l'archive serait « complète » des deux côtés.
+    """
+    import collect as C
+    for partie in (1, 2, 3):
+        check(f"clé de la partie {partie} : collect == score",
+              C.fcst_cle(DAY, partie), J.fcst_key(DAY, partie))
+    check("manifeste : collect == score",
+          C.manifeste_cle(DAY), J.fcst_manifeste_key(DAY))
+    check("et le flux partitionné porte le même nom des deux côtés",
+          C.FLUX_PARTITIONNE, "fcst")
+    check("la version de manifeste écrite est celle qui est lue",
+          C.MANIFESTE_VERSION, J.MANIFESTE_VERSION_LUE)
+    # Le manifeste réellement construit par `collect.py` doit être lu par
+    # `score.py` sans traduction — c'est le seul contrat entre les deux.
+    m = C.construire_manifeste(DAY, 657)
+    check("le manifeste construit déclare autant de parties que de groupes",
+          m["parties"], len(C.groupes_requete()))
+    check("il nomme son flux", m["flux"], "fcst")
+    check("et son poids par point est celui de `poids_par_point()`, "
+          "dérivé et jamais recopié",
+          m["poids_point_total"], round(C.poids_par_point(), 4))
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LOT S2 — L'ERREUR CORRIGÉE DU BIAIS DE SITE (22/08/2026)
+# ══════════════════════════════════════════════════════════════════
+
+def _archive_biaisee(root, jours, facteur, station="900", model="icon_d2",
+                     bruit=None):
+    """Écrit `n` journées où l'observation vaut `facteur ×` la prévision.
+
+    Le modèle est donc PARFAIT à ce facteur près : c'est le cas d'école
+    du §S2 — brut mauvais, corrigé quasi nul.
+
+    ⚠️ UN SOCLE DE 12 km/h SOUS LA BRISE, et ce n'est pas cosmétique.
+    `brise()` seule rend zéro douze heures sur vingt-quatre : la MÉDIANE
+    de l'erreur d'une telle journée est alors dominée par des heures où
+    prévu = observé = 0, et elle reste petite quel que soit le biais.
+    Le premier jet de ce banc l'a payé — il affirmait « brut mauvais »
+    sur une journée dont l'erreur médiane valait 1,8 km/h. Le socle met
+    aussi les deux côtés au-dessus de `DIR_MIN_WIND_KMH` (5 km/h), donc
+    l'erreur reste VECTORIELLE de bout en bout, comme en production.
+    """
+    import gzip as _gz
+    import json as _json
+
+    def prevu(i):
+        return round(12.0 + brise(i % 24), 3)
+
+    for d in jours:
+        fk = root / J.fcst_key(d)
+        fk.parent.mkdir(parents=True, exist_ok=True)
+        fk.write_bytes(_gz.compress(_json.dumps(
+            fcst_line(station, model, d, prevu,
+                      aloft=(30.0, 10.0))).encode()))
+        ok = root / J.obs_key(d)
+        ok.parent.mkdir(parents=True, exist_ok=True)
+
+        def vitesse(h, f=facteur):
+            return round(f * (12.0 + brise(h % 24)), 3)
+
+        ok.write_bytes(_gz.compress(_json.dumps(
+            obs_line(station, d, vitesse)).encode()))
+
+
+def test_s2_correction_du_biais_de_site():
+    """Les trois bancs demandés par le §S2, plus celui qui doit échouer.
+
+    ⚠️ Le troisième est le seul qui compte vraiment : « J ne se corrige
+    jamais avec J ». Les deux premiers vérifient une arithmétique ; le
+    troisième vérifie qu'on n'a pas triché.
+    """
+    print("── lot S2 : la colonne corrigée du biais de site ──")
+    import tempfile
+    from pathlib import Path
+
+    # ── 1. une balise à ×0,6 constant sur 10 jours ────────────────
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(11)]
+        _archive_biaisee(root, jours, 0.6)
+        # On remplit le cache de rejeu du plus ancien au plus récent :
+        # c'est ce que fait `replay_window` nuit après nuit.
+        for d in reversed(jours[1:]):
+            J.replay_day(root, d, None, 0)
+
+        prior = J.prior_biais(root, DAY)
+        cle = ("pioupiou:900", "icon_d2", 6)
+        check("un antécédent existe pour la balise biaisée",
+              cle in prior, True)
+        pente, cap, n_j = prior[cle]
+        check("… et sa pente retrouve le ×0,6 imposé", pente, 0.6, 0.02)
+        check("… sur les 10 journées antérieures", n_j, 10)
+
+        rows = J.replay_day(root, DAY, None, 0)
+        ligne = next(r for r in rows if r["lead_h"] == 6)
+        # 4,8 = 0,4 × 12 : l'erreur médiane est celle du socle, les
+        # heures de brise étant minoritaires dans une journée.
+        check("le BRUT porte l'entièreté du biais (0,4 × le socle)",
+              ligne["err_vec_med"], 4.8, 0.01)
+        check("le CORRIGÉ est quasi nul",
+              ligne["err_vec_med_corr"] < 0.05, True)
+        check("… et `bias_n_days` dit sur combien de jours il repose",
+              ligne["bias_n_days"], 10)
+        check("`mse_model_corr` s'effondre aussi",
+              ligne["mse_model_corr"] < 0.2, True)
+
+        # ⛔ LE BANC QUI DOIT SAVOIR ÉCHOUER. Sans antécédent, la colonne
+        # se tait — elle ne retombe pas sur le biais du jour même.
+        rows_nu, _ = J.daily_rows(
+            DAY, {off: J.snapshot_rows(root, DAY - timedelta(days=off), None)
+                  for off in J.LEAD_BY_OFFSET},
+            J.all_obs_rows(root, DAY, None),
+            J.all_obs_rows(root, DAY - timedelta(days=1), None), 0)
+        nue = next(r for r in rows_nu if r["lead_h"] == 6)
+        check("sans antécédent, `err_vec_med_corr` est NUL, pas égal au brut",
+              nue["err_vec_med_corr"], None)
+        check("… et le brut, lui, n'a pas bougé d'un cheveu",
+              nue["err_vec_med"], ligne["err_vec_med"])
+
+    # ── 2. une balise SANS biais : les deux colonnes se confondent ─
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(11)]
+        _archive_biaisee(root, jours, 1.0)
+        for d in reversed(jours[1:]):
+            J.replay_day(root, d, None, 0)
+        rows = J.replay_day(root, DAY, None, 0)
+        ligne = next(r for r in rows if r["lead_h"] == 6)
+        check("sans biais, la pente antérieure vaut 1",
+              J.prior_biais(root, DAY)[("pioupiou:900", "icon_d2", 6)][0],
+              1.0, 0.01)
+        check("… et les deux colonnes sont identiques",
+              ligne["err_vec_med_corr"], ligne["err_vec_med"], 0.05)
+
+    # ── 3. J NE SE CORRIGE JAMAIS AVEC J ──────────────────────────
+    # Dix journées à ×0,6, puis une onzième à ×1,4. Si la correction
+    # avait vu le jour J, elle appliquerait ×1,4 et l'erreur tomberait à
+    # zéro. Elle applique ×0,6 sur une journée qui va dans l'autre sens,
+    # donc elle EMPIRE l'erreur — et c'est la preuve qu'elle n'a pas
+    # triché. Un banc qui ne peut pas se retourner contre son auteur ne
+    # prouve rien.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        anciens = [DAY - timedelta(days=k) for k in range(1, 11)]
+        _archive_biaisee(root, anciens, 0.6)
+        for d in reversed(anciens):
+            J.replay_day(root, d, None, 0)
+        _archive_biaisee(root, [DAY], 1.4)
+        rows = J.replay_day(root, DAY, None, 0)
+        ligne = next(r for r in rows if r["lead_h"] == 6)
+        check("la pente appliquée est celle du PASSÉ (0,6), pas celle du jour",
+              J.prior_biais(root, DAY)[("pioupiou:900", "icon_d2", 6)][0],
+              0.6, 0.02)
+        check("⛔ le corrigé est donc PIRE que le brut ce jour-là",
+              ligne["err_vec_med_corr"] > ligne["err_vec_med"], True)
+        check("… et `bias_slope` du jour, lui, vaut bien 1,4 "
+              "(il nourrira DEMAIN, pas aujourd'hui)",
+              ligne["bias_slope"], 1.4, 0.02)
+
+
+def test_s2_estimateur_sans_selection():
+    """⛔ Le banc qui démontre le défaut de `S.site_bias`.
+
+    ⚠️ LE PREMIER JET DE CE BANC SIMULAIT LA CAUSALITÉ À L'ENVERS, et il
+    est resté vert pour une mauvaise raison. Il posait `obs = prev +
+    bruit` : dans ce monde-là, `E[obs | prev] = prev` exactement, donc
+    conditionner sur `prev` ne biaise RIEN et `site_bias` rendait bien 1.
+    C'est le contraire de la réalité — c'est la PRÉVISION qui se trompe,
+    pas l'observation.
+
+    Le bon montage est donc : une vérité, une observation qui la mesure,
+    et une prévision qui vaut `vérité + erreur centrée`. Sélectionner
+    les heures où la PRÉVISION est haute sélectionne alors les heures où
+    son erreur est POSITIVE — et `obs/prev` y est mécaniquement < 1
+    alors que le modèle ne surestime rien en cumul.
+
+    C'est exactement ce qui a été mesuré en production le 22/08 :
+    `site_bias` rendait 0,761 sur ECMWF quand Σobs/Σprev valait 1,112.
+
+    ⓘ ET LA PENTE DES MOINDRES CARRÉS N'EST PAS 1 NON PLUS, ce qui est
+    normal et voulu : elle vaut Var(vérité)/(Var(vérité)+Var(erreur)),
+    l'atténuation classique. Ce n'est pas un défaut, c'est SA
+    DÉFINITION — elle rend le facteur qui minimise l'erreur quadratique,
+    pas le facteur qui « annule un biais ». Le banc vérifie donc la
+    seule chose qui compte : appliquée, elle fait mieux que ne rien
+    faire ET mieux que `site_bias`.
+
+    ⚠️ ET LA LOI DU VENT COMPTE AUTANT QUE LA CAUSALITÉ. Le deuxième jet
+    tirait la vérité UNIFORMÉMENT sur [4, 24] km/h : médiane 14, donc le
+    seuil de 8 km/h ne coupait qu'une queue étroite et l'effet ne se
+    voyait presque pas (0,956 au lieu de 1). Le vent réel est très
+    dissymétrique — médiane mesurée le 22/08 sur 40 539 heures :
+    **7,12 km/h**. Le seuil de 8 tombe donc en plein milieu de la
+    distribution, et c'est LÀ qu'il mord. On tire ici une loi
+    exponentielle de médiane ~5 km/h, et l'estimateur rend 0,78 : la
+    même valeur que sur les vraies balises.
+
+    Générateur affine à graine fixe : un banc qui bouge d'une exécution
+    à l'autre n'est pas un banc.
+    """
+    print("── lot S2 : l'estimateur, avec et sans sélection ──")
+    etat = [7]
+
+    def alea():
+        etat[0] = (1103515245 * etat[0] + 12345) % (1 << 31)
+        return etat[0] / (1 << 31)                 # dans [0 ; 1[
+
+    paires = []
+    for i in range(6000):
+        u = max(1e-6, alea())
+        verite = min(45.0, -7.5 * math.log(u))     # loi du vent, dissymétrique
+        obs = verite                               # la mesure EST la vérité
+        prev = max(0.3, verite + 16.0 * (alea() - 0.5))   # erreur centrée
+        paires.append(S.VerifPair(t=i * 3_600_000, fcst_speed=prev,
+                                  fcst_dir=200.0, obs_speed=obs,
+                                  obs_dir=200.0, n_obs=5))
+
+    somme_o = sum(p.obs_speed for p in paires)
+    somme_f = sum(p.fcst_speed for p in paires)
+    #: La version d'AVANT le second commit du lot S2, reproduite ici
+    #: pour que ce banc dise encore ce qu'il a coûté de la remplacer.
+    #: ⚠️ Elle ne s'obtient plus par `S.site_bias` : celui-ci est réparé,
+    #: et l'appeler ici ne comparerait plus que la pente à elle-même.
+    ancien = S.median([p.obs_speed / p.fcst_speed for p in paires
+                       if p.fcst_speed >= S.BIAS_MIN_WIND_KMH])
+    pente = J.pente_du_jour(paires)
+
+    check("le vent simulé a bien la médiane basse du vent réel (~5-7 km/h)",
+          4.0 < S.median([p.obs_speed for p in paires]) < 8.0, True)
+    check("en cumul, ce modèle ne surestime pour ainsi dire rien "
+          "(Σobs/Σprev ≈ 1)", somme_o / somme_f, 1.0, 0.09)
+    check("⛔ l'ANCIEN estimateur annonçait une surestimation de ~22 % "
+          "(< 0,80)", ancien < 0.80, True)
+    check("… et le miroir le prouve : en conditionnant sur l'OBSERVATION, "
+          "le même calcul passe AU-DESSUS de 1",
+          S.median([p.obs_speed / p.fcst_speed for p in paires
+                    if p.obs_speed >= 8.0]) > 1.0, True)
+
+    def mse(facteur):
+        return sum((facteur * p.fcst_speed - p.obs_speed) ** 2
+                   for p in paires) / len(paires)
+
+    check("la pente des moindres carrés fait mieux que ne rien corriger",
+          mse(pente) < mse(1.0), True)
+    check("⛔ … et mieux que l'ancien, qui SUR-corrigeait",
+          mse(pente) < mse(ancien), True)
+    check("la pente est bien entre le rapport conditionné et 1",
+          ancien < pente < 1.0, True)
+    check("… et l'écart pente / ancien est bien celui du seuil",
+          pente - ancien > 0.06, True)
+    check("⛔ et depuis la réparation, `site_bias` REND la pente — "
+          "une seule définition dans tout le projet",
+          S.site_bias(paires, min_pairs=10).speed_ratio, pente)
+
+    # ⓘ MESURÉ EN ÉCRIVANT CE BANC, ET C'EST UNE BONNE NOUVELLE :
+    # retirer les heures sous 8 km/h ne déplace la pente que de 0,002
+    # (0,8668 → 0,8649). Les moindres carrés pondèrent déjà par `prev²`,
+    # donc les heures faibles ne pèsent presque rien : l'estimateur est
+    # INSENSIBLE au seuil, là où la médiane de rapports en dépendait
+    # entièrement. La première version de ce banc voulait prouver le
+    # contraire et se trompait de propriété.
+    #
+    # ⛔ Là où le seuil faisait vraiment une différence, c'est le JOUR
+    # CALME — celui où aucune heure n'atteint 8 km/h. L'ancien s'y
+    # taisait, donc les sites abrités — ceux qui en ont le plus besoin —
+    # n'avaient jamais de correction. C'est ce que ce banc tient, et
+    # c'est lui qui tue le mutant « la pente reprend le seuil ».
+    calme = [S.VerifPair(t=i * 3_600_000, fcst_speed=2.0 + (i % 5) * 0.5,
+                         fcst_dir=200.0, obs_speed=1.4 + (i % 5) * 0.35,
+                         obs_dir=200.0, n_obs=5) for i in range(12)]
+    check("journée entièrement sous 8 km/h : l'ancien se taisait",
+          S.median([p.obs_speed / p.fcst_speed for p in calme
+                    if p.fcst_speed >= S.BIAS_MIN_WIND_KMH]), None)
+    check("⛔ … la pente, elle, répond", J.pente_du_jour(calme), 0.70, 0.03)
+
+
+def test_s2_memoire_du_biais():
+    """`AccBiais` : le poids dépend du TEMPS ÉCOULÉ, pas du nombre d'appels.
+
+    ⛔ Ce banc existe parce que le mutant « `decay = 1.0` » avait
+    survécu au premier jeu : sur dix journées consécutives d'un biais
+    CONSTANT, une moyenne pondérée et une moyenne plate rendent le même
+    chiffre. Il faut un biais qui CHANGE pour que la demi-vie se voie —
+    et c'est le cas qui compte, puisqu'un site dont le biais ne bouge
+    jamais n'a pas besoin d'une mémoire à demi-vie.
+    """
+    print("── lot S2 : la mémoire du biais ──")
+    # Vingt journées à ×1,3 puis cinq à ×0,7. La moyenne PLATE vaut
+    # exp((20·ln1,3 + 5·ln0,7)/25) = 1,149. La moyenne pondérée doit
+    # peser davantage les cinq récentes et descendre nettement dessous.
+    acc = J.AccBiais()
+    for i in range(20):
+        acc.push(i, math.log(1.3))
+    for i in range(20, 25):
+        acc.push(i, math.log(0.7))
+    plate = math.exp((20 * math.log(1.3) + 5 * math.log(0.7)) / 25)
+    check("la moyenne plate vaudrait 1,149", plate, 1.149, 0.002)
+    check("⛔ la mémoire pondérée descend sous la moyenne plate",
+          math.exp(acc.mean) < plate - 0.02, True)
+    check("… sans pour autant oublier les vingt anciennes",
+          math.exp(acc.mean) > 1.05, True)
+    check("elle compte bien 25 journées", acc.days, 25)
+
+    # Une interruption de service ne doit pas faire peser la journée de
+    # reprise comme une journée consécutive (même règle que
+    # `S.accumulate`, et pour la même raison).
+    trou = J.AccBiais()
+    trou.push(0, math.log(2.0))
+    trou.push(120, math.log(1.0))       # quatre demi-vies plus tard
+    check("après quatre demi-vies, l'ancienne journée ne pèse presque plus",
+          math.exp(trou.mean) < 1.05, True)
+
+    # Une journée déjà intégrée ne se réintègre pas : le rejeu doit
+    # pouvoir repasser deux fois sans épaissir la mémoire.
+    deux = J.AccBiais()
+    deux.push(5, math.log(0.5))
+    deux.push(5, math.log(0.5))
+    check("une journée déjà intégrée est refusée", deux.days, 1)
+    check("… et une journée ANTÉRIEURE aussi (l'ordre est chronologique)",
+          (deux.push(4, math.log(2.0)), deux.days)[1], 1)
+
+
+def test_s2_gardes_fous_et_temoin():
+    """Les refus, et le témoin qui dit ce que le gain n'est pas."""
+    print("── lot S2 : garde-fous et témoin ──")
+    import tempfile
+    from pathlib import Path
+
+    # Une pente aberrante ne se rabote pas : elle ne s'applique pas.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(1, 11)]
+        _archive_biaisee(root, jours, 0.2)        # sous BIAIS_PENTE_MIN
+        for d in reversed(jours):
+            J.replay_day(root, d, None, 0)
+        prior = J.prior_biais(root, DAY)
+        cle = ("pioupiou:900", "icon_d2", 6)
+        check("une pente sous le garde-fou N'EST PAS APPLIQUÉE",
+              prior.get(cle, (None,))[0], None)
+        # ⓘ La clé peut subsister pour son écart de CAP : une vitesse
+        # aberrante ne dit rien de la girouette, et jeter l'un avec
+        # l'autre serait perdre une information valide par association.
+        check("… et la pente n'est pas non plus rabotée à 0,4",
+              any(p is not None and p < J.BIAIS_PENTE_MIN
+                  for p, _c, _n in prior.values()), False)
+
+    # Sous BIAIS_MIN_JOURS, la correction se tait.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(1, 3)]   # 2 jours
+        _archive_biaisee(root, jours, 0.6)
+        for d in reversed(jours):
+            J.replay_day(root, d, None, 0)
+        check(f"sous {J.BIAIS_MIN_JOURS} journées, pas d'antécédent",
+              J.prior_biais(root, DAY), {})
+
+    # Le témoin : il rend None sous l'échantillon minimal, et il calcule
+    # bien trois médianes quand il en a assez.
+    check("le témoin se tait sous 30 balise-jours échantillonnés",
+          J.bilan_temoin([(5.0, 3.0, 4.0)] * 10), None)
+    b = J.bilan_temoin([(5.0, 3.0, 4.0)] * 40)
+    check("… et sinon il publie le gain du vrai antécédent", b["gain_pct"], 40.0)
+    check("… celui d'une AUTRE balise", b["gain_placebo_pct"], 20.0)
+    check("… et la différence, qui est la part imputable au site",
+          b["part_site_pct"], 20.0)
+    check("… en toutes lettres dans le journal du run",
+          "rétrécissement de la prévision" in b["texte"], True)
+
+
+def test_s2_colonnes_de_zone():
+    """La case publie son corrigé À CÔTÉ du brut, avec sa population."""
+    print("── lot S2 : les colonnes de zone ──")
+    zones = {f"pioupiou:{i}": {"source": "pioupiou", "station_id": str(i),
+                               "zone_id": "b45.22_6.60:valley",
+                               "landform": "valley", "massif_id": "alpes-nord",
+                               "basin_id": "b1"} for i in range(6)}
+    units = []
+    for i in range(6):
+        for k in range(5):
+            units.append({
+                "unit": f"pioupiou:{i}", "day": f"2026-08-0{k + 1}",
+                "model": "icon_d2", "lead_h": 6, "n_hours": 12,
+                # Brut : le modèle PERD contre la climatologie (50 > 45).
+                # Corrigé : il la bat largement (12 < 45). C'est
+                # exactement la bascule que le §1.b du point d'étape
+                # attend des Alpes.
+                "err_vec_med": 6.0, "mse_model": 50.0, "mse_persist": 55.0,
+                "mse_clim": 45.0,
+                # Trois balises sur six ont un antécédent : le corrigé
+                # existe donc sur une population PLUS PETITE.
+                **({"err_vec_med_corr": 3.0, "mse_model_corr": 12.0,
+                    "bias_n_days": 9} if i < 3 else {}),
+            })
+    rows = J._case_rows(units, zones, DAY, "rolling15", "all", 3,
+                        with_ci=False)
+    fine = next(r for r in rows if r["agg_level"] == "basin_landform")
+    check("le brut reste le score de référence", fine["typical_err_kmh"], 6.0)
+    check("le corrigé sort à côté", fine["typical_err_kmh_corr"], 3.0)
+    check("`n_corr` dit sur combien de balise-jours il repose",
+          fine["n_corr"], 15)
+    check("… contre `occurrences` pour le brut", fine["occurrences"], 30)
+    check("le modèle brut NE bat PAS la climatologie ici",
+          fine["beats_clim"], False)
+    check("… et corrigé, il la bat", fine["beats_clim_corr"], True)
+    check("`skill_clim` reste négatif en brut", fine["skill_clim"] < 0, True)
+    check("… et devient franchement positif corrigé",
+          fine["skill_clim_corr"] > 0.5, True)
+    check("`bias_n_days` voyage jusqu'à la case", fine["bias_n_days"], 9.0)
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -1326,7 +1955,17 @@ def main() -> int:
                test_familles_publiees, test_lecture_paginee,
                test_plancher_de_skill,
                test_pression_appariement, test_pression_refus,
-               test_pression_appariement_stable_entre_echeances):
+               test_pression_appariement_stable_entre_echeances,
+               # ── lot S0.6 ──
+               test_partition_parties_manquantes,
+               test_rang_sur_journee_incomplete,
+               test_les_deux_cles_fcst_sont_la_meme_chaine,
+               # ── lot S2 ──
+               test_s2_correction_du_biais_de_site,
+               test_s2_estimateur_sans_selection,
+               test_s2_memoire_du_biais,
+               test_s2_gardes_fous_et_temoin,
+               test_s2_colonnes_de_zone):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0

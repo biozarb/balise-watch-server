@@ -6,6 +6,569 @@
 
 ---
 
+## 22/08/2026 — un garde-fou dont la fenêtre dépasse ce que l'élagage retient est MUET, pas absent
+
+Le lot S0.3 affirmait deux fois que « ajouter le plafond mensuel
+Open-Meteo (300 000 en 30 jours) à `FENETRES` est une ligne ». Ligne
+fausse : `Budget._reserver` élague les événements à **86 400 s (24 h)
+EN DUR**, pour empêcher le fichier d'état de grossir sans fin. Ajouter
+une fenêtre de 2 592 000 s (30 jours) à `FENETRES` SANS toucher cet
+élagage donnerait un garde-fou qui ne verrait JAMAIS plus de 24 h
+d'événements : il compterait ~4 000 pondérés au lieu des ~122 000
+réels, et ne se déclencherait donc JAMAIS — tout en laissant croire,
+à la lecture du code, que le plafond mensuel est couvert.
+
+⚠️ **Piège réutilisable** : *avant d'ajouter une fenêtre temporelle à
+un compteur qui élague déjà son historique, vérifier que la durée
+d'élagage couvre au moins la nouvelle fenêtre — pas seulement que la
+nouvelle fenêtre est arithmétiquement correcte.* Un garde-fou dont la
+fenêtre nominale dépasse ce que le stockage sous-jacent retient n'est
+pas un garde-fou trop large : c'est un garde-fou MUET, plus dangereux
+que son absence, parce qu'il donne l'illusion d'une couverture qui
+n'existe pas.
+
+ⓘ Prouvé par le banc
+(`tools/test_quota_openmeteo.py::TestVersionNaiveEstRouge`) — pas
+déduit : la version naïve est reproduite à l'identique (l'ajout
+littéral à `FENETRES`, élagage inchangé) et montrée muette sur
+300 000 pondérés déjà consommés mais vieux de plus de 24 h. La forme
+retenue (lot S0.7) compte le mensuel À PART, en seaux journaliers
+agrégés, hors de l'élagage à 24 h — cf. `tools/quota_openmeteo.py`.
+
+---
+
+## 22/08/2026 — le rattrapage filtre par SUFFIXE, et le nouvel objet n'en avait pas le bon
+
+Le lot S0.6 ajoute à l'archive un objet d'un TYPE nouveau : un manifeste
+`fcst/2026/08/fcst_2026-08-23.**manifeste.json**`, qui déclare combien
+de parties la nuit attend. Tout le reste de l'archive est en
+`*.ndjson.gz`.
+
+Or le rattrapage d'envoi R2 cherchait exactement ça :
+
+```python
+def en_retard(out):
+    return sorted(p for p in out.rglob("*.ndjson.gz") if not temoin(p).exists())
+```
+
+⇒ Un manifeste dont l'envoi R2 échoue n'aurait **jamais** été retenté.
+Et ce n'est pas « un fichier de moins » : côté `score.py`, un manifeste
+absent sur R2 se lit **« journée d'avant la partition »**, donc « une
+seule partie », donc la nuit est notée sur **une partie sur deux** — en
+silence, avec un classement publié sur deux modèles au lieu de neuf.
+**300 octets qui manquent, et le garde-fou tout entier devient muet.**
+
+Le contrôle de fin de run (« ❌ N archives ne sont PAS sur R2 ») avait
+le même trou, au même endroit et pour la même raison : il appelle
+`en_retard()`.
+
+⚠️ **Piège réutilisable** : *quand on ajoute un TYPE d'objet à une
+archive, la question n'est pas « est-ce qu'il s'écrit » mais « qui
+d'autre balaie ce répertoire, et par quoi filtre-t-il ».* Ici trois
+mécanismes filtrent par suffixe — le rattrapage, le contrôle de fin de
+run, et l'en-tête HTTP de l'envoi (`Content-Encoding: gzip` sur du JSON
+clair aurait fait échouer tout client qui respecte l'en-tête). Les
+trois ont dû être élargis, et aucun ne l'aurait dit en échouant : ils
+auraient simplement **ignoré** le nouvel objet.
+
+ⓘ Corrigé et **bancé par mutation** : rétablir le filtre d'origine rend
+une assertion rouge. ⚠️ Et la première version de ce banc-là ne
+prouvait rien — elle s'appuyait sur un run où l'envoi R2 était simulé
+comme réussi, donc « rien en retard » était vrai sans que la propriété
+le soit. Le cas est maintenant construit à la main.
+
+---
+
+## 22/08/2026 — un horaire déduit d'une durée espérée, quand le journal donne la mesurée
+
+Le lot S0.4 recommandait de lancer la seconde passe de collecte à
+**04:25 UTC**, sur ce raisonnement : « la passe 1 finit au plus tard
+vers 03:22, son heure est donc rendue à 04:22 ».
+
+Mesuré au lot S0.6 sur **14 nuits de `journalctl -u bw-model-collect`** :
+la passe de prévisions finit ses appels Open-Meteo entre **03:24:08 et
+03:28:02**. Le pire cas rend donc son heure à **04:28** — trois minutes
+**après** l'horaire recommandé. Une passe 2 partie à 04:25 se serait
+retrouvée dans une fenêtre horaire encore occupée par 4 730 pondérés, et
+se serait fait refuser point par point.
+
+Le raisonnement n'était pas faux, il était **incomplet** : il partait de
+la durée *espérée* de la passe réduite, sans regarder la durée *mesurée*
+de la passe actuelle, qui borne le pire cas.
+
+⚠️ **Piège réutilisable** : *une heure de fin se LIT dans le journal ;
+elle ne se déduit pas d'une durée qu'on attend.* Quand un horaire doit
+s'intercaler entre deux voisins, les deux bornes doivent venir de
+`journalctl` ou du fichier de budget — pas d'une addition. Et il faut
+prendre le **pire cas observé**, pas la médiane : c'est la nuit longue
+qui casse, pas la nuit moyenne.
+
+ⓘ Corollaire tiré au passage : ce qui compte pour une fenêtre
+**glissante**, c'est l'instant du **dernier appel facturé**, pas la fin
+du run. La collecte du 22/08 a fini ses appels Open-Meteo à 03:28:02 et
+son run à 03:45:46 — 17 minutes plus tard, sans consommer un pondéré.
+Raisonner sur la fin du run aurait décalé l'horaire d'un quart d'heure
+pour rien.
+
+---
+
+## 22/08/2026 — conclure sur le travail de la session d'à côté sans lire ce qu'elle en a écrit (deux fois, même fichier)
+
+Deux sessions ouvertes le même matin sur le même dépôt (S0.4 : la
+collecte ; S0.5 : AROME/R2). La S0.5 a déployé par `rsync -a` de **tout**
+`model-verif/`, ce qui a emporté le `collect.py` que la S0.4 venait de
+modifier. Jusque-là, une maladresse. **Ce qui a coûté, c'est ce qui a
+été AFFIRMÉ ensuite, deux fois, sans vérifier :**
+
+| affirmation | ce que la session voisine avait écrit |
+|---|---|
+| « retour en arrière **impossible** » | son **§11** décrivait la sauvegarde qu'elle avait posée : `/tmp/collect.avant-s04.py` |
+| « déployé **sans validation** » | sa ligne de roadmap disait « ✅ DÉPLOYÉ, **sur l'accord explicite de Yann** » |
+
+⇒ Sur la seconde, Yann a joué un retour arrière qui **a défait un
+déploiement qu'il avait lui-même approuvé** — et le VPS s'est retrouvé
+en retard de deux crans, avec une échéance de quota ressuscitée.
+
+⚠️ **Piège réutilisable** : **la note et la roadmap de l'autre session
+sont des SOURCES, pas du contexte.** Elles sont réécrites *pendant* la
+séance — celle du S0.4 est passée de « ⬜ RIEN DÉPLOYÉ » à « ✅ DÉPLOYÉ,
+accord explicite » en une heure. **Les relire juste avant toute
+affirmation sur son travail**, jamais une seule fois au début. Et le
+signal qui aurait suffi : `ls -laT` sur les fichiers voisins — une
+mtime plus récente que la sienne veut dire *quelqu'un travaille ici en
+ce moment*, donc *va lire ce qu'il en dit* avant de conclure.
+
+ⓘ Corollaire côté commande : déployer **la liste de fichiers qu'on
+possède**, jamais le dossier. `rsync -a model-verif/` est un
+déploiement de tout ce que le dossier contient, y compris ce qu'on n'a
+pas écrit.
+
+---
+
+## 22/08/2026 — un point de retour à DEUX fichiers restauré à moitié, et seul le banc le dit
+
+Le lot S0.4 avait posé sa sauvegarde avant de modifier la collecte :
+**`/tmp/collect.avant-s04.py` ET `/tmp/test_collect.avant-s04.py`**,
+horodatés à la même seconde. Le retour arrière, joué quelques heures plus
+tard, n'a copié que **le premier**.
+
+Résultat, mesuré aussitôt sur le VPS :
+
+| | `groupes_requete` | version |
+|---|---:|---|
+| `collect.py` | **0** | celle d'avant ✅ |
+| `test_collect.py` | **4** | celle d'après ⛔ |
+
+```
+AttributeError: module 'collect' has no attribute 'poids_par_point'
+```
+
+⚠️ **La production n'était pas touchée** — `run.sh` n'exécute jamais un
+banc, et la collecte de la nuit aurait tourné normalement. Le dégât est
+ailleurs : **un banc rouge abandonné sur le VPS se lit comme une panne du
+code**, alors que c'est un décalage de version. La prochaine session
+aurait cherché un bug qui n'existe pas — ou, pire, aurait cessé de faire
+confiance au banc.
+
+⚠️ **Piège réutilisable** : *un point de retour composé de plusieurs
+fichiers doit être restauré EN ENTIER, et le seul contrôle qui le dise
+est le banc.* Le code seul « marche » — il est cohérent avec lui-même.
+**Après tout retour arrière : rejouer le banc du module restauré, sur la
+machine où on vient de le poser.** Deux lignes, et elles distinguent
+« restauré » de « à moitié restauré ».
+
+ⓘ Et le corollaire de l'aller : `rsync -a` d'un RÉPERTOIRE déploie tout
+ce qu'il contient, y compris le travail d'une autre session ouverte le
+même matin. Déployer la **liste de fichiers qu'on possède**, pas le
+dossier.
+
+---
+
+## 22/08/2026 — le DERNIER flux qui porte `aloft_speed` vole le régime de tout le monde
+
+**Contexte** : lot S0.5, un second collecteur R2 (`arome_fcst.py`) qui
+écrit un flux de prévision à côté de `fcst` et de `fcstagrume`.
+
+`score.daily_rows` choisit le vent d'altitude de référence ainsi :
+
+```python
+for row in snapshots.get(0, []):
+    if "aloft_speed" in row:
+        ref_by_st[f"{source}:{station_id}"] = row
+```
+
+**Le dernier gagne**, et `snapshot_rows` lit `fcst` en PREMIER. Or
+`collect.py` ne pose `aloft_*` que sur `REGIME_REF_MODEL`
+(`ecmwf_ifs025`), précisément parce que `day_regime` dit en toutes
+lettres « un seul modèle de référence, le même pour tout le monde » —
+sans quoi un modèle qui voit du flux là où les autres voient du
+thermique se ferait juger sur une autre population de journées.
+
+⇒ Un flux ajouté APRÈS, qui écrirait `aloft_speed` sous ce nom-là,
+**changerait le régime des 570 balises déjà notées** — 13 795 lignes par
+nuit — sans un message, sans un banc rouge, et sans que rien dans le
+diff ne le laisse voir. Mesuré : sur une balise à 45 km/h de vent à
+850 hPa, la journée passe de `fluxW` à `thermal`.
+
+⚠️ **Piège réutilisable** : quand un dictionnaire est rempli par une
+boucle « le dernier gagne » sur une liste CONCATÉNÉE, l'ordre de
+concaténation est un contrat, et personne ne l'a écrit. **Chercher, à
+chaque nouveau flux : quel champ, en existant simplement, change le sens
+d'une colonne pour des lignes qui ne sont pas les siennes ?**
+
+La sortie retenue : `arome_fcst.py` écrit `arome_aloft_speed` /
+`arome_aloft_dir` / `arome_aloft_level`. La donnée est là dès la
+première nuit — les tuiles `arome/sol` sont réécrites toutes les 3 h,
+ne pas l'écrire serait irrattrapable — et la décision « d'où vient le
+régime de ces balises » se prend plus tard, par un renommage, sans rien
+rejouer. Tenu par `test_arome_fcst.py::test_aloft_ne_vole_pas_le_regime`,
+qui ne teste pas le NOM du champ mais la propriété : *ajouter le flux ne
+change pas le régime des balises déjà notées*.
+
+---
+
+## 22/08/2026 — « 1ᵉʳ sur 1 » publié comme un vainqueur prouvé
+
+`inference.rank_models` rendait, quand un seul modèle d'une case
+atteignait le quorum d'occurrences :
+
+```python
+if len(usable) == 1:
+    return {usable[0]["model"]: 1}, "ok", None
+```
+
+Et `rankReasonFr("ok")` s'affiche **« un modèle se détache »**. Un rang 1
+sous cette phrase se lit « ce modèle est le meilleur ici » — alors qu'il
+n'a battu personne. C'est exactement le reproche que le lot G2 faisait au
+🏆 de l'ancien score, et le fichier le dit lui-même : « on ne publie un
+ordre que quand la MARCHE DU HAUT est prouvée ».
+
+**Ce n'était pas grave, et ça le devenait.** Compté le 22/08 sur
+`model_score_zone` : **2 lignes sur 276 035** passaient par là — les
+cases portent neuf à dix modèles, il fallait que huit tombent sous le
+quorum. Répétition à blanc du flux AROME/R2 : **363 cases fines** sur
+408, parce que 2 938 balises n'ont qu'un seul modèle par construction.
+
+⚠️ **Piège réutilisable** : une branche « cas dégénéré » écrite quand la
+population rendait le cas rare devient la branche PRINCIPALE le jour où
+la population change. **Chercher, avant d'élargir une population : quels
+`if len(...) == 1` deviennent le cas courant ?** Un compte en base
+(deux lignes) suffit à distinguer « c'est déjà faux mais invisible » de
+« c'est sur le point d'être partout ».
+
+Corrigé en `return {}, "single_model", None` ; `rank` nul est un
+résultat de première classe. La contrainte en base demande
+`supabase_step42_lot_s05.sql` — et `score._upsert_scores` renvoie une
+fois avec `rank_reason = null` si la base refuse en nommant sa
+contrainte, pour que la nuit passe quand même (le lot G avait perdu
+cette nuit-là).
+
+---
+
+## 22/08/2026 — le manifeste d'une chaîne d'ingestion est écrit APRÈS ce qu'il décrit
+
+`arome-wind/ingest.py` téléverse, dans cet ordre : les **63** tuiles
+`arome/sol`, puis les **441** tuiles `arome/alt`, puis
+`arome/manifest.json`. Mesuré sur le run 00 Z du 22/08 : `sol` entre
+**05:34:25 et 05:34:44 Z**, `alt` jusqu'à **05:42:07 Z**, manifeste
+juste après. **Huit minutes** pendant lesquelles le manifeste annonce
+encore le run PRÉCÉDENT alors que les tuiles `sol` portent déjà le
+nouveau.
+
+Un consommateur qui daterait ses lignes d'après `manifest["run"]` les
+daterait donc de **trois heures trop tôt**, sans une erreur, une nuit sur
+huit environ. Et `generatedAt` n'aide pas : il porte l'heure de DÉBUT du
+run (05:30:05 Z), pas celle de la publication.
+
+⚠️ **Piège réutilisable** : dans un bucket entièrement mutable, l'index
+et les objets ne sont jamais cohérents pendant la durée du
+téléversement. **Préférer un objet qui se DÉCRIT LUI-MÊME** : chaque
+tuile porte `times`, dont `times[0]` EST l'heure du run
+(`keep_step(0)` rend toujours `True`). `arome_fcst.py` en tire son `t0`
+et refuse de mélanger deux runs dans la même archive
+(`test_tuiles_de_deux_runs`).
+
+ⓘ Et le corollaire, mesuré aussi : les échéances de ces tuiles **ne
+sont pas contiguës**. `keep_step()` garde l'heure pleine le jour et une
+sur trois la nuit (fenêtre 22-04 UTC) — **42 échéances pour 52 heures**
+d'horizon sur un run 00 Z, les heures 1, 2, 22, 23, 25, 26, 46, 47, 49
+et 50 manquent. Ranger ces valeurs dans l'ordre du tableau décale tout
+ce qui suit le premier trou : même défaut que la dé-accumulation
+positionnelle du 13/08, sous un autre déguisement.
+
+---
+
+## 22/08/2026 — le commentaire qui JUSTIFIE un partage de budget se trompait de 14×, et l'app « qui n'y touche pas » y touche
+
+**Contexte** : lot S0.4, audit des autres consommateurs Open-Meteo après
+que le découpage de `collect.py` ait rendu 1 051 pondérés par nuit. La
+question posée était « le même gaspillage dort-il ailleurs ? ». Réponse :
+**non** — `collect.py` est le seul script du dépôt qui demande
+**plusieurs modèles dans une requête**, donc le multiplicateur qui coûtait
+vaut 1 partout ailleurs, et aucun des quatre scripts ne demande une
+variable qu'il ne relit pas (vérifié ligne à ligne).
+
+**Mais l'audit a rapporté deux faits écrits faux, tous deux dans des
+commentaires qui servent d'ARGUMENT.**
+
+**(a)** `traces/entretien/balise-entretien.service` justifiait
+`ReadWritePaths=/var/lib/bw-quota` en écrivant que « `backfill_packs.py`
+ne pèse que **18 pondérés par jour** ». Mesuré sur le fichier de budget,
+**deux jours de suite : 252,0** (210 requêtes × 1,2), le 21/08 de
+04:39:09 à 04:42:49 UTC et le 22/08 de 04:30:30 à 04:33:31. **Quatorze
+fois l'affirmation** — 2,7 % du plafond journalier et non 0,2 %.
+
+**(b)** `collect.py::quota_projete` affirmait que l'app « interroge
+Open-Meteo depuis le navigateur des pilotes, **jamais depuis ce
+serveur** ». Mesuré : `index.js` appelle Open-Meteo **côté serveur** aux
+lignes 1426, 4302 et 6007 — et celui de la l. 4302 est **multi-points**
+(`latitude=a,b&longitude=c,d`), donc pondéré aussi par le nombre de
+lieux. Ce qui protège la collecte n'est pas la vertu de l'app : c'est
+qu'`index.js` tourne sur **Render**, donc sur une **autre IP** (vérifié :
+`pgrep -af "node.*index.js"` ne rend rien sur le VPS).
+
+⚠️ **Piège réutilisable** : un commentaire qui porte un CHIFFRE et qui
+sert à justifier une décision d'architecture doit être remesuré quand on
+passe à côté — c'est le troisième de ce genre en deux jours sur ce
+chantier (après « aucun timer n'appelle `backfill_packs` », démenti le
+22/08 au matin). Et une phrase qui dit « X ne fait jamais Y » mérite
+qu'on cherche **pourquoi** : ici la vraie raison n'était pas celle
+écrite, et elle **cesserait d'être vraie** si l'app était un jour
+rapatriée sur le VPS — elle partagerait alors le plafond sans écrire
+dans `/var/lib/bw-quota`, et le compteur serait faux du côté qui ne
+protège pas, en silence.
+
+✅ Les deux commentaires sont corrigés, datés et déployés.
+`claude/lot-s04-seconde-passe-22-08.md` §14. ⚠️ La copie **installée**
+de `balise-entretien.service` dans `/etc/systemd/system/` n'a pas été
+touchée (root) — la différence est **uniquement en commentaire**, donc
+sans effet sur le service.
+
+---
+
+## 22/08/2026 — on payait 22 % du run pour deux variables qu'un seul modèle sur neuf archive
+
+**Contexte** : lot S0.4, ouvert pour partitionner la collecte avant que
+le garde-fou horaire ne refuse de démarrer (657 points sur 659).
+
+`_hourly_vars()` demandait **huit** variables, dont
+`wind_speed_850hPa` et `wind_direction_850hPa`. Or `forecast_rows` ne les
+archive que sous `if model == REGIME_REF_MODEL`. Compté sur l'archive du
+22/08 (`fcst_2026-08-22.ndjson.gz`, 5 595 lignes, 657 points) :
+**657 lignes portent `aloft_speed`, toutes en `ecmwf_ifs025`.** Les huit
+autres modèles recevaient ces deux variables et on jetait la réponse.
+
+Et Open-Meteo facture **variables × modèles**, pas requêtes :
+
+```
+2 variables × 8 modèles inutiles / 10 = 1,6 pondéré par point
+1,6 × 657 points = 1 051,2 pondérés par nuit = 146 points de budget = 22 % du run
+```
+
+Le poids d'un point tombe de **7,2 à 5,8** en mettant les deux variables
+d'altitude dans **leur propre requête** — il en faut une seconde, parce
+qu'Open-Meteo prend **UNE** liste `hourly` pour tous les modèles d'une
+requête. Le garde-fou horaire passe de 659 à **818 points**, et la marge
+de **2 à 161**.
+
+⚠️ **Piège réutilisable, et il vaut au-delà d'Open-Meteo** : sur une API
+qui facture **le produit** de deux listes, toute variable qu'un seul
+élément de l'autre liste exploite doit être dans sa propre requête. Le
+coût d'une variable inutile n'est pas « une variable », c'est « une
+variable × tous les modèles ». **Chercher, sur toute requête groupée :
+qu'est-ce qu'on demande à tout le monde et qu'on ne relit que d'un
+seul ?** ⓘ Non vérifié ailleurs : `backfill_packs` (252 pondérés/jour),
+`day_features`, `match_analogs`, `sonde_openmeteo`.
+
+⚠️ **Deuxième piège, dans la correction** : un groupe de requête ne doit
+JAMAIS contenir un seul modèle. Open-Meteo ne suffixe les clés par
+`_<model>` que si **plusieurs modèles SERVENT** le point ; à un seul
+modèle demandé, la réponse est nue, `forecast_rows` cherche
+`wind_speed_10m_<model>` et n'écrit **rien**, en silence, avec un
+HTTP 200 parfaitement formé. D'où `COMPAGNON_ALTITUDE` — et le compagnon
+doit être **mondial**, vérifié sur l'archive (657/657) et non supposé.
+
+✅ Corrigé et bancé : `groupes_requete()`, `poids_par_point()`, et
+`test_collect.py` section S0.4 (170 assertions, six mutations rouges,
+dont une qui compare l'archive **ligne pour ligne** entre la forme à une
+requête et la forme à deux). `claude/lot-s04-seconde-passe-22-08.md` §2.
+
+---
+
+## 22/08/2026 — deux garde-fous qui se recouvrent, et c'était le moins utile qui parlait
+
+**Contexte** : lot S0.4, en mutant `test_collect.py` pour vérifier qu'il
+sait échouer. On a remplacé le `raise` du seuil journalier par un
+`if False` — et **aucune assertion n'est devenue rouge.**
+
+La raison est arithmétique, et elle ne dépend d'aucune mesure :
+
+```
+QUOTA_HEURE × 0,95 = 4 750    <    QUOTA_JOUR × 0,60 = 6 000
+```
+
+Tout run d'**une** passe qui franchit 6 000 franchit forcément 4 750. Le
+seuil journalier, testé **en premier** dans `quota_projete`, ne décidait
+donc jamais **si** le run est refusé — seulement **quel message sort**.
+Et il sortait le moins utile des deux : « > 60 % du plafond JOURNALIER »,
+alors que la fenêtre qui ferme réellement la porte, et pour une heure
+entière, est l'**HORAIRE**. À 6 h du matin, ce message envoie chercher au
+mauvais endroit.
+
+✅ **Corrigé** : les deux gardes sont inversées, l'heure parle d'abord.
+Le seuil journalier reste écrit — il redevient le **seul** garde-fou
+utile le jour où la collecte sera partitionnée en plusieurs passes
+horaires (chaque passe sous 4 750, c'est leur **somme** qui devra tenir
+sous le plafond du jour), et il devra alors comparer au budget **mesuré**
+(`Budget.etat()`) et non à 60 % d'un plafond brut, sinon il refuserait
+deux passes qui passent séparément.
+
+⚠️ **Piège réutilisable, et c'est le vrai** : deux garde-fous qui
+protègent la même chose à deux seuils différents ne font pas deux
+protections. Le plus strict fait tout le travail, l'autre ne change que
+le libellé de l'erreur — et **il peut le changer pour le pire**. Quand on
+en empile deux, ordonner du plus strict au plus large, et **vérifier par
+mutation** que chacun sait encore refuser quelque chose que l'autre
+laisse passer. Un mutant équivalent n'est pas un banc qui va bien : c'est
+un garde-fou qui ne garde plus.
+
+ⓘ Ce piège n'a pas été trouvé en lisant le code — il a été trouvé en
+**demandant au banc de savoir échouer**. C'est l'argument pour le faire
+à chaque lot, pas seulement quand le code est neuf.
+
+---
+
+## 22/08/2026 — un garde-fou de QUOTA qui détruit une archive que le quota ne concerne pas
+
+**Contexte** : lot S0.3. `collect.py::quota_projete()` refuse de démarrer
+si le run dépasse 95 % du plafond HORAIRE d'Open-Meteo — le garde-fou
+écrit le 09/08, et il a la bonne raison (aucune cadence ne fait tenir un
+volume dans une fenêtre). Mais `main()` en fait ceci :
+
+```python
+try:
+    quota_projete(len(stations), args.forecast_days)
+except Abort as exc:
+    print(f"❌ {exc}", file=sys.stderr)
+    return 1
+```
+
+Ce `return 1` est **avant `rattraper()`, avant la passe prévisions, et
+avant la passe OBSERVATIONS**. Or les observations ne consomment aucun
+quota Open-Meteo : elles lisent Pioupiou, winds.mobi, nos tables MF/AEMET
+et notre objet R2 Infoclimat. Une nuit refusée pour dépassement de quota
+perd donc **aussi** l'archive d'observation des cinq réseaux — dont trois
+ont **30 à 48 h de rétention amont**, c'est-à-dire aucune reprise
+possible.
+
+Et ce n'est pas théorique : mesuré le 22/08, le référentiel Pioupiou
+compte **657 points** pour un plafond d'`Abort` à **659**
+(`4 750 / 7,2`). `load_stations()` le rafraîchit **tous les 7 jours** en
+**ajout seul** (« on ajoute, on marque `seen_at`, on ne retire jamais ») :
+648 le 07/08, 651 le 15/08, 657 le 22/08. Il ne peut que monter.
+
+⚠️ **Piège réutilisable** : un garde-fou placé en tête de `main()` coupe
+tout ce qui suit, y compris ce qu'il n'a aucune raison de protéger. La
+règle « un trou nommé vaut mieux qu'un run tué » du budget partagé
+s'arrête à la porte du run — alors qu'elle devrait s'appliquer **par
+passe**. Chercher, dans tout garde-fou : *qu'est-ce que ce refus emporte
+avec lui qui ne le concerne pas ?*
+
+✅ **CORRIGÉ le 22/08 (lot S0.4)**, et la correction n'a pas demandé
+l'arbitrage qu'on croyait. Mesuré d'abord : **aucune** des six passes
+d'observation ne consomme de quota Open-Meteo — `fetch_archive` interroge
+Pioupiou, les autres Iowa State / winds.mobi / Infoclimat / MF / AEMET,
+et sur 24 h glissantes le fichier de budget ne connaît que **deux**
+consommateurs (`collect`, `backfill_packs`). Le refus saute donc
+désormais la **seule** passe qui déborde (`args.skip_forecast = True`),
+laisse tourner les six autres, et **sort quand même en 1** pour que
+`run.sh` alerte (`SEUIL_ALERTE=1`). **Alerter ET collecter.**
+
+⚠️ **Et le rappel s'écrit en DERNIER dans le journal.** Le corps du mail
+d'alerte de `run.sh` est un `tail -n 25` : un refus annoncé à la première
+seconde du run serait noyé sous six passes d'observation et
+**n'arriverait jamais dans le mail**. La dernière chose écrite est la
+première chose lue. Banc : `test_collect.py`, section S0.4 — rejoué
+contre le `return 1`, il devient rouge sur « le fichier d'observations
+existe ».
+
+ⓘ L'échéance elle-même (657/659) a été levée autrement — voir l'entrée
+« on payait 22 % du run » ci-dessous. `claude/lot-s04-seconde-passe-22-08.md`.
+
+---
+
+## 22/08/2026 — `arome/sol` annonce un modèle qu'il ne contient pas, et ce nom est INTERDIT en base
+
+**Contexte** : lot S0.3, instruction de la piste « lire AROME sur R2
+plutôt que de payer du quota Open-Meteo ». Les tuiles de vent au sol
+portent :
+
+```json
+{"model": "meteofrance_seamless", "kind": "sol", "level": null, ...}
+```
+
+C'est `MODEL_KEY` dans `arome-wind/ingest.py` (l. 123), commenté
+`# clé "model" écrite dans le JSON (AROME)`. **Le contenu n'est pas du
+seamless** : il vient de `pnt/{ref}/arome/001/SP1/`, soit de l'AROME-HD
+0,01° pur, comme le dit le reste du fichier. Le libellé est un vestige de
+l'époque où la tuile servait un calque de carte, où le nom du modèle
+n'était qu'une étiquette d'affichage.
+
+Trois raisons pour lesquelles ça ne peut pas rester si ce flux entre au
+scoring :
+
+* `collect.py` interdit explicitement les modèles `*_seamless`, avec la
+  raison écrite : « archiver du seamless produirait un fichier où la
+  colonne AROME contient de l'ARPEGE une partie du temps, sans qu'aucune
+  trace ne permette de le savoir après coup » ;
+* `model_verif_daily.model` porte un **CHECK `not like '%\_seamless'`** ⇒
+  une insertion sous ce nom **échoue en base**, et l'upsert entier avec
+  elle ;
+* et un lecteur du JSON croit lire du seamless. C'est un mensonge dans un
+  champ.
+
+⚠️ **Piège réutilisable** : un champ d'identité écrit à une époque où il
+n'était qu'une étiquette d'affichage devient faux le jour où quelqu'un
+s'en sert pour décider. Avant de brancher un produit existant sur une
+chaîne neuve, **vérifier ce que ses champs d'identité prétendent**, pas
+seulement ce que ses valeurs valent.
+
+ⓘ Trouvé au passage, même famille : `quota_projete()` affirme dans son
+pavé qu'« aucun timer ni cron n'appelle `traces/backfill_packs.py` ».
+Mesuré le 22/08 : `balise-entretien.timer` l'appelle **tous les jours vers
+04:30 UTC, pour 252 appels pondérés**. Le commentaire servait d'argument
+pour dimensionner une marge — il la sous-estime maintenant d'un
+consommateur entier.
+
+---
+
+## 22/08/2026 — Open-Meteo a QUATRE plafonds, `FENETRES` n'en connaît que trois
+
+**Contexte** : lot S0.3. `tools/quota_openmeteo.py` modélise 600/min,
+5 000/h et 10 000/j — les trois plafonds que la panne du 09/08 avait fait
+découvrir un par un. La page de tarification d'Open-Meteo en annonce
+**quatre** pour le palier gratuit : « 600 calls / min, 5.000 calls /
+hour, 10.000 calls / day, **300.000 calls / month** ».
+
+On en consomme **~149 500 par mois**, soit **50 %** : il ne mord pas
+aujourd'hui. Mais c'est très exactement la forme du défaut du 09/08 —
+« le palier gratuit compte AUSSI 5 000 appels pondérés par HEURE, et
+l'heure n'existait nulle part dans le code » — rejoué un cran plus haut.
+Toute extension du référentiel (P1 = +72 %, les 2 938 candidates = 261 %)
+le franchit avant que quoi que ce soit ne le signale.
+
+⚠️ **Piège réutilisable** : quand une panne révèle un plafond manquant,
+aller relire **la liste complète des plafonds annoncés**, pas seulement
+ajouter celui qui vient de mordre. Un seau à trois fenêtres sur un
+service qui en compte quatre donne la même illusion de surveillance
+qu'un seau à deux.
+
+⬜ **Non corrigé** : une ligne dans `FENETRES` + une constante, mais c'est
+un changement du garde-fou de production — arbitrage n°5 de
+`claude/lot-s03-balises-non-notees-22-08.md`.
+
+---
+
 ## 20/08/2026 — `zip()` tronque en silence, et écrivait un domaine sous le nom d'un autre
 
 **Contexte** : Lot Q2, écriture de la pluie à venir. `piaf.ecrire()`
@@ -345,6 +908,104 @@ correction de coordonnées vs évolution du domaine).
 écart de 10 = exactement les 10 balises listées dans le commit.
 
 ---
+
+---
+
+## Un estimateur qui conditionne sur la prévision fabrique le biais qu'il mesure (22/08/2026, lot S2)
+
+**Symptôme** : `bias_ratio` (colonne de `model_verif_daily`, et métrique
+`speedRatio` de `model_character`) annonçait depuis le 08/08 que TOUS
+les modèles surestiment le vent d'environ 25 % à toutes les balises —
+médiane 0,70 sur 195 696 balise-jours. Un défaut aussi uniforme aurait
+dû alerter : neuf centres de prévision indépendants ne se trompent pas
+tous du même quart dans le même sens.
+
+**Cause** : `scoring.site_bias()` rendait `median(obs/prev)` sur les
+seules heures où `fcst_speed >= BIAS_MIN_WIND_KMH` (8 km/h).
+Conditionner sur la PRÉVISION sélectionne les heures où le modèle est
+haut — donc, comme c'est lui qui se trompe, celles où son erreur est
+POSITIVE. Le rapport y est mécaniquement inférieur à 1 même sur un
+modèle sans aucun biais. C'est un retour vers la moyenne, pas un biais
+de site.
+
+**Ce qui l'a prouvé** : le MIROIR. Le même calcul, conditionné sur
+l'OBSERVATION au lieu de la prévision, bascule de l'autre côté.
+Mesuré le 22/08 sur 40 539 heures appariées, ECMWF IFS 0,25° :
+
+| estimateur | valeur |
+|---|---:|
+| `med(obs/prev \| prev >= 8)` — l'ancien | **0,761** |
+| `med(obs/prev \| prev >= 1)` | 1,003 |
+| `Somme(obs) / Somme(prev)` | **1,112** |
+| `Somme(obs*prev) / Somme(prev^2)` — le neuf | 0,894 |
+| `med(obs/prev \| obs >= 8)` — le miroir | **1,514** |
+
+**Piège réutilisable, et c'est le vrai enseignement** : *un ratio
+conditionné sur l'une des deux grandeurs qu'il compare mesure d'abord sa
+propre condition.* Le test qui le détecte tient en une ligne — refaire
+le calcul en conditionnant sur l'AUTRE grandeur. Si les deux réponses
+encadrent 1 au lieu de coïncider, le seuil parle plus fort que la
+donnée. À appliquer partout où un seuil trie avant un rapport ; le
+scoring en compte plusieurs autres (`DIR_MIN_WIND_KMH`, les quorums
+d'événements) qui n'ont pas été audités dans ce lot.
+
+**Second enseignement, sur l'AMPLEUR** : l'effet dépend entièrement de
+la loi de la grandeur. Un premier banc, qui tirait la vérité
+UNIFORMÉMENT sur [4, 24] km/h (médiane 14), ne voyait presque rien — le
+seuil de 8 n'y coupait qu'une queue étroite. Le vent réel est très
+dissymétrique (médiane mesurée : **7,12 km/h**), le seuil tombe en plein
+milieu, et c'est là qu'il mord. Un banc de sélection doit reproduire la
+LOI, pas seulement le mécanisme.
+
+**Fix** : `speed_ratio` est désormais la pente des moindres carrés
+`Somme(obs*prev)/Somme(prev^2)`, sans seuil — le facteur qui minimise
+l'erreur quadratique, ce qui est précisément ce qu'on lui demande.
+⚠️ Il ne vaut PAS 1 sur un modèle sans biais : il vaut
+`Var(verite)/(Var(verite)+Var(erreur))`, l'atténuation classique. Le CAP
+garde sa médiane conditionnée à 8 km/h **des deux côtés** — une
+condition symétrique ne fabrique pas le biais qu'elle mesure. Jumeau TS
+(`verifScore.penteMoindresCarres`) écrit le même jour, parité rejouée.
+
+**Effet de bord découvert en réparant** : l'ancien seuil faisait taire
+l'estimateur sur toute journée entièrement sous 8 km/h — donc les sites
+ABRITÉS, ceux qui auraient le plus besoin d'une correction, n'en avaient
+jamais.
+
+**Vérifié** : `test_scoring.py` §1 ter reproduit la version d'avant et
+la montre fausse (patron `TestVersionNaiveEstRouge` du S0.7) ; 89
+assertions vertes dont la parité TS ; `model_character.speedRatio` purgé
+par `supabase_step50_lot_s2_purge_speedratio.sql` pour ne pas mélanger
+deux définitions dans une même moyenne exponentielle. Aucun écran ne
+lisait cette métrique (`modelCharacter.ts` n'est importé par aucun
+composant), donc aucune régression visible.
+
+---
+
+## Un « corrigé » peut gagner sans rien corriger (22/08/2026, lot S2)
+
+**Symptôme** : appliquer le biais des jours antérieurs fait tomber
+l'erreur vectorielle médiane de 29,4 % (mesuré hors échantillon sur
+30 268 balise-jours). Chiffre spectaculaire, et à moitié faux.
+
+**Cause** : multiplier une prévision bruitée par un facteur inférieur à
+1 réduit une erreur quadratique **quel que soit ce facteur**, parce que
+c'est un rétrécissement de la variance, pas une correction de biais.
+
+**Ce qui l'a prouvé** : le TÉMOIN PLACEBO — appliquer à une balise le
+biais d'une AUTRE balise. Il gagne **13,0 %**, soit 44 % du gain
+affiché. Et descendre de la case fine à la balise ne rapporte que
+**0,5 point** (28,9 % → 29,4 %).
+
+**Piège réutilisable** : *toute correction apprise doit être comparée à
+la même correction apprise sur le mauvais sujet.* Sans ce témoin, un
+gain de rétrécissement se lit comme un gain d'information, et on
+attribue au site ce qui appartient à l'arithmétique. Le témoin coûte
+une balise-jour sur sept.
+
+**Fix** : `score.bilan_temoin()` mesure les trois erreurs (brut,
+corrigé, placebo) à chaque run et publie la part imputable au site dans
+le journal ET dans le `meta` du JSON publié — pour qu'on ne puisse pas
+lire le gain sans son témoin.
 
 ## Voir aussi
 

@@ -432,7 +432,29 @@ def rank_models(cases: Sequence[Mapping],
     if not usable:
         return {}, "insufficient", None
     if len(usable) == 1:
-        return {usable[0]["model"]: 1}, "ok", None
+        # ⛔ « 1ᵉʳ SUR 1 » N'EST PAS UN CLASSEMENT — changé le 22/08/2026
+        # (lot S0.5). Cette branche rendait `{modèle: 1}, "ok"`, et à
+        # l'écran un rang 1 assorti de « un vainqueur, prouvé et utile »
+        # se lit « ce modèle est le meilleur ici ». Sur une case où il
+        # est le SEUL, la phrase est fausse : il n'a battu personne.
+        #
+        # ⚠️ CE N'ÉTAIT PAS GRAVE JUSQU'ICI, ET ÇA LE DEVIENT. Mesuré le
+        # 22/08 sur `model_score_zone` : DEUX lignes publiées sur 276 035
+        # passaient par ici — les cases portent neuf à dix modèles, il
+        # fallait que huit tombent sous le quorum. Le flux AROME/R2
+        # (`arome_fcst.py`) rend le cas STRUCTUREL : 2 938 balises n'ont
+        # qu'un seul modèle, par construction, et une case fine peuplée
+        # de trois d'entre elles atteint le quorum POUR LUI SEUL.
+        #
+        # La règle du fichier ne change pas d'un pouce, elle s'applique :
+        # « on ne publie un ordre que quand la MARCHE DU HAUT est
+        # prouvée ». Sans second modèle, il n'y a pas de marche.
+        # ⓘ `typical_err_kmh`, `skill`, `beats_persist` et `beats_clim`
+        # restent publiés : ils ne comparent pas les modèles entre eux,
+        # ils comparent CE modèle à la persistance et à la climatologie,
+        # qui se calculent depuis les observations. C'est exactement ce
+        # que ces lignes-là ont le droit de dire.
+        return {}, "single_model", None
 
     ordered = sorted(usable, key=lambda c: c["typical_err_kmh"])
     best, second = ordered[0]["model"], ordered[1]["model"]

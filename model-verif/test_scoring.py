@@ -273,6 +273,71 @@ def _unit_pression():
     des séries horaires, des `pres_kind` qui peuvent manquer, des
     températures qui peuvent manquer. Le banc parle cette langue-là.
     """
+    # ── 1 ter. le biais de site, réparé (lot S2, 22/08) ───────────
+    #
+    # ⛔ CE BLOC REPRODUIT LA VERSION D'AVANT ET LA MONTRE FAUSSE, comme
+    # `TestVersionNaiveEstRouge` du S0.7. Sans ça, « l'estimateur est
+    # réparé » resterait une affirmation : on saurait ce que le nouveau
+    # rend, jamais que l'ancien rendait autre chose.
+    print("\n── 1 ter. le biais de site, réparé (S2) ──")
+
+    def _ancien_ratio(pairs):
+        """La version du 08/08 : médiane de obs/prev, prev ≥ 8 km/h."""
+        return S.median([p.obs_speed / p.fcst_speed for p in pairs
+                         if p.fcst_speed >= S.BIAS_MIN_WIND_KMH])
+
+    # Une vérité dissymétrique (loi du vent réel, médiane ~5 km/h), une
+    # observation qui la mesure, une prévision = vérité + erreur centrée.
+    etat = [7]
+
+    def alea():
+        etat[0] = (1103515245 * etat[0] + 12345) % (1 << 31)
+        return etat[0] / (1 << 31)
+
+    paires = []
+    for i in range(6000):
+        verite = min(45.0, -7.5 * math.log(max(1e-6, alea())))
+        paires.append(S.VerifPair(t=i * 3_600_000,
+                                  fcst_speed=max(0.3, verite + 16.0 * (alea() - 0.5)),
+                                  fcst_dir=200.0, obs_speed=verite,
+                                  obs_dir=200.0, n_obs=5))
+    somme = (sum(p.obs_speed for p in paires)
+             / sum(p.fcst_speed for p in paires))
+    ancien = _ancien_ratio(paires)
+    neuf = S.site_bias(paires, min_pairs=10).speed_ratio
+
+    # ⓘ 0,93 et non 1,00 : le plancher `max(0.3, …)` qui empêche une
+    # prévision négative rogne un peu la somme des prévisions. L'écart
+    # est de 7 points, contre les 22 que l'ancien estimateur annonce —
+    # c'est bien lui, et pas le plancher, qui fabrique le biais.
+    check("ce modèle ne surestime pour ainsi dire rien en cumul",
+          0.90 < somme < 1.03, True)
+    check("⛔ l'ANCIEN estimateur annonçait pourtant −22 % (< 0,80)",
+          ancien < 0.80, True)
+    check("le miroir le prouve : conditionné sur l'OBSERVATION, "
+          "le même calcul passe au-dessus de 1",
+          S.median([p.obs_speed / p.fcst_speed for p in paires
+                    if p.obs_speed >= 8.0]) > 1.0, True)
+    check("le NEUF remonte nettement au-dessus", neuf > ancien + 0.06, True)
+
+    def mse(f):
+        return sum((f * p.fcst_speed - p.obs_speed) ** 2 for p in paires)
+
+    check("… et il fait mieux que ne rien corriger", mse(neuf) < mse(1.0), True)
+    check("… et mieux que l'ancien, qui SUR-corrigeait",
+          mse(neuf) < mse(ancien), True)
+
+    # ⛔ La journée calme : l'ancien se taisait, le neuf répond.
+    calme = [S.VerifPair(t=i * 3_600_000, fcst_speed=2.0 + (i % 5) * 0.5,
+                         fcst_dir=200.0, obs_speed=1.4 + (i % 5) * 0.35,
+                         obs_dir=200.0, n_obs=5) for i in range(12)]
+    check("journée entièrement sous 8 km/h : l'ancien rendait `None`",
+          _ancien_ratio(calme), None)
+    check("⛔ le neuf répond — les sites abrités sont corrigeables",
+          round(S.site_bias(calme, min_pairs=10).speed_ratio, 2), 0.7)
+    check("… et le CAP, lui, se tait toujours (girouette sous 8 km/h)",
+          S.site_bias(calme, min_pairs=10).dir_offset, None)
+
     print("\n── 1 bis. la pression (S1) ──")
 
     # ── la physique, aux deux bouts ──
@@ -450,7 +515,21 @@ def build_fixtures():
                         {"pairs": []}],
         "siteBias": [{"pairs": [_pair_json(p) for p in pairs_long], "minPairs": 48},
                      {"pairs": [_pair_json(p) for p in pairs_a], "minPairs": 48},
-                     {"pairs": [_pair_json(p) for p in pairs_a], "minPairs": 10}],
+                     {"pairs": [_pair_json(p) for p in pairs_a], "minPairs": 10},
+                     # ⛔ LOT S2 — LA JOURNÉE CALME. Aucune heure
+                     # n'atteint `BIAS_MIN_WIND_KMH` (8 km/h) : jusqu'au
+                     # 22/08 les deux moitiés rendaient `null` ici, donc
+                     # les sites abrités — ceux qui ont le plus besoin
+                     # d'une correction — n'en avaient jamais. Depuis la
+                     # réparation, la force répond et le cap se tait.
+                     # Ce cas est dans les fixtures pour que la parité
+                     # tienne AUSSI sur le chemin qui vient de changer.
+                     {"pairs": [{"t": i * 3_600_000,
+                                 "fcstSpeed": 2.0 + (i % 5) * 0.5,
+                                 "fcstDir": 200.0,
+                                 "obsSpeed": 1.4 + (i % 5) * 0.35,
+                                 "obsDir": 200.0, "nObs": 5}
+                                for i in range(12)], "minPairs": 10}],
         "persistenceReference": [
             {"obs": _obs_json(obs_j01), "t": DAY_MS + 14 * 3_600_000},
             {"obs": _obs_json(obs_j01), "t": 14 * 3_600_000},

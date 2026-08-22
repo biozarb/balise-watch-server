@@ -51,8 +51,9 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|score|garde-fou-r2|agrume) ;;
-  *) echo "usage: run.sh collect|score|garde-fou-r2|agrume" >&2; exit 2 ;;
+  collect|collect-p2|score|garde-fou-r2|agrume|arome) ;;
+  *) echo "usage: run.sh collect|collect-p2|score|garde-fou-r2|agrume|arome" >&2
+     exit 2 ;;
 esac
 
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,10 +73,36 @@ ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `LIBELLE` sert de sujet d'alerte. Sans lui, une jauge R2 qui déborde
 # enverrait un mail intitulé « score modèles » — et on chercherait le
 # problème dans la mauvaise moitié du projet.
+#
+# ⛔ ET `EXTRA` : LES ARGUMENTS QUE LE MODE IMPOSE, DÉRIVÉS ICI ET PAS
+# RECOPIÉS DANS L'UNITÉ SYSTEMD (lot S0.6, 22/08/2026). La passe 2 de
+# la collecte a besoin de `--passe 2`. Le mettre dans l'`ExecStart`
+# marcherait — jusqu'au jour où quelqu'un réinstalle l'unité sans le
+# drapeau : la passe 2 collecterait alors TOUS les modèles, dans la
+# fenêtre horaire de 04:35, et l'archive porterait deux fois les mêmes
+# lignes sous deux clés. Ici, le mode et son drapeau ne peuvent pas se
+# séparer.
+EXTRA=()
 case "$MODE" in
   collect|score)  SCRIPT="$ICI/$MODE.py";               LIBELLE="score modeles" ;;
+  # ⚠️ UN MODE À PART, DONC UN VERROU, UN COMPTEUR D'ÉCHECS ET UN PING
+  # À PART — et c'est tout l'intérêt. `run.sh collect --passe 2`
+  # aurait partagé `verrou.collect` avec la passe 1 : le soir où la
+  # passe 1 déborde, la passe 2 serait sortie sur « run déjà en
+  # cours », SANS ALERTE et sans une ligne dans le journal du bon job.
+  # Une nuit à une passe sur deux doit se voir, pas se taire.
+  collect-p2)     SCRIPT="$ICI/collect.py"; EXTRA=(--passe 2)
+                  LIBELLE="score modeles (passe 2 - surface)" ;;
   garde-fou-r2)   SCRIPT="$ICI/../tools/audit_r2.py";   LIBELLE="garde-fou R2" ;;
   agrume)         SCRIPT="$ICI/agrume_fcst.py";         LIBELLE="flux AGRUME" ;;
+  # ⚠️ CE MODE-CI N'ARCHIVE PAS HIER, IL ARCHIVE AUJOURD'HUI, et c'est
+  # la seule différence de fond avec `agrume`. Les tuiles `arome/sol`
+  # sont RÉÉCRITES EN PLACE toutes les 3 h par l'Action `arome-wind` :
+  # il n'existe aucune archive des runs passés. Un run manqué n'est
+  # donc pas « à rattraper demain », il est PERDU — d'où l'horaire
+  # serré du timer (06:00 UTC, entre la publication du run 00 Z vers
+  # 05:42 et son écrasement vers 08:30) et d'où l'alerte.
+  arome)          SCRIPT="$ICI/arome_fcst.py";          LIBELLE="flux AROME R2" ;;
 esac
 if [[ ! -f "$SCRIPT" ]]; then
   echo "job introuvable : $SCRIPT" >&2; exit 2
@@ -98,7 +125,18 @@ MAX_LOG_MO=20
 # Les gardes sont larges, mais sous les TimeoutStartSec des unités : on
 # veut que ce soit CE script qui constate l'échec et alerte, pas systemd
 # qui tue tout sans que personne ne l'apprenne.
-if [[ "$MODE" == "collect" ]]; then
+if [[ "$MODE" == "collect-p2" ]]; then
+  # ⚠️ 40 MIN COMME `collect`, ET IL FAUT SAVOIR CE QU'ILS COUVRENT :
+  # jusqu'à `ATTENTE_PASSE_MAX_S` = 25 min d'attente de quota au
+  # démarrage (si la passe 1 a débordé sur son heure), puis ~8 min de
+  # collecte à 965 points. 33 min mesurés au pire, 40 de garde.
+  # ⛔ Relever l'un sans l'autre casserait le raisonnement : c'est le
+  # couple (attente bornée, chien de garde) qui tient, pas l'un des deux.
+  MAX_MINUTES="${BW_MODEL_VERIF_P2_MAX_MINUTES:-40}"
+  # Même nature de perte que `collect` : une nuit de prévisions non
+  # collectée ne se rattrape jamais. Alerte au PREMIER échec.
+  SEUIL_ALERTE=1
+elif [[ "$MODE" == "collect" ]]; then
   MAX_MINUTES="${BW_MODEL_VERIF_MAX_MINUTES:-40}"
   # ⚠️ Une nuit non collectée est perdue définitivement — aucun modèle
   # Météo-France n'a d'historique de runs passés chez Open-Meteo (sondé
@@ -118,6 +156,21 @@ elif [[ "$MODE" == "agrume" ]]; then
   # et on cesserait de lire les alertes de `collect`, qui, elle, ne
   # se rattrape pas.
   SEUIL_ALERTE=2
+elif [[ "$MODE" == "arome" ]]; then
+  # 98 objets lus sur R2 (~540 Mo), un objet écrit. Mesuré le 22/08 :
+  # 46 s de lecture, 78 s en tout. 15 min laisse dix fois la marge, et
+  # reste sous le TimeoutStartSec de l'unité.
+  MAX_MINUTES="${BW_AROME_FCST_MAX_MINUTES:-15}"
+  # ⛔ SEUIL_ALERTE=1, COMME `collect` ET PAS COMME `agrume`, et la
+  # raison est exactement la même que pour la collecte Open-Meteo :
+  # CE FLUX NE SE REJOUE PAS. `arome-wind/ingest.py` réécrit ses tuiles
+  # EN PLACE toutes les 3 h (bucket entièrement mutable), il n'existe
+  # aucune archive des runs passés. Une nuit manquée est perdue pour
+  # toujours — il n'y a pas de `--day AAAA-MM-JJ` qui la ramène.
+  # ⚠️ Et la fenêtre est étroite : le run 00 Z n'est en ligne que de
+  # ~05:42 à ~08:30 UTC. Un échec doit sonner le matin même, tant qu'un
+  # rattrapage à la main est encore possible.
+  SEUIL_ALERTE=1
 elif [[ "$MODE" == "garde-fou-r2" ]]; then
   # Un listing complet des buckets, rien de plus. 10 min est déjà très
   # large ; si un jour ça dépasse, c'est que le compte a explosé — et
@@ -294,12 +347,18 @@ dire "▶ $MODE — bucket R2 « $BUCKET », python $PYTHON"
 # `${PIPESTATUS[0]}` et pas `$?` : c'est le code du JOB qu'on veut, pas
 # celui de `tee`, qui réussit toujours.
 if command -v timeout >/dev/null 2>&1; then
+  # `${EXTRA[@]+"${EXTRA[@]}"}` et pas `"${EXTRA[@]}"` : sous `set -u`,
+  # un tableau VIDE fait sortir bash en erreur avant la 4.4. Le VPS est
+  # en 5.x, mais un script d'infrastructure ne doit pas dépendre d'une
+  # version de shell qu'il ne vérifie pas.
   timeout --signal=TERM --kill-after=60s "${MAX_MINUTES}m" \
-    "$PYTHON" "$SCRIPT" --out "$ETAT" "${@:2}" 2>&1 | tee -a "$LOG"
+    "$PYTHON" "$SCRIPT" --out "$ETAT" ${EXTRA[@]+"${EXTRA[@]}"} "${@:2}" \
+    2>&1 | tee -a "$LOG"
   code=${PIPESTATUS[0]}
 else
   dire "⚠️ timeout absent — run sans chien de garde (seul TimeoutStartSec borne)"
-  "$PYTHON" "$SCRIPT" --out "$ETAT" "${@:2}" 2>&1 | tee -a "$LOG"
+  "$PYTHON" "$SCRIPT" --out "$ETAT" ${EXTRA[@]+"${EXTRA[@]}"} "${@:2}" \
+    2>&1 | tee -a "$LOG"
   code=${PIPESTATUS[0]}
 fi
 duree=$(( $(date +%s) - debut ))

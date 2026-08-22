@@ -1,0 +1,64 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-arome.service — le flux AROME/R2 du scoring
+#                                            (lot S0.5, 22/08/2026)
+#
+#  Lit les tuiles `arome/sol` (et `arome/alt/850`) qu'`arome-wind`
+#  publie sur R2, y prend le vent 10 m à la coordonnée de chaque
+#  balise, et écrit `fcstarome/…` que `bw-model-score` relira le
+#  LENDEMAIN matin. Il note ainsi 2 938 balises d'observation que le
+#  quota Open-Meteo ne peut pas atteindre — et il ne consomme aucun
+#  pondéré, c'est sa raison d'être.
+#
+#  ⛔ CE JOB NE SE REJOUE PAS, ET C'EST CE QUI LE DISTINGUE DE
+#  `bw-model-agrume`. `arome-wind/ingest.py` RÉÉCRIT ses tuiles EN
+#  PLACE à chaque run (8 fois par jour, `CACHE_REECRIT`, « bucket
+#  entièrement mutable ») : la grille d'hier n'existe plus nulle part.
+#  Une nuit manquée est perdue pour toujours, comme une nuit de
+#  `bw-model-collect` — pas comme une nuit de `bw-model-agrume`, dont le
+#  produit A est encore là. D'où `SEUIL_ALERTE=1` dans `run.sh`.
+#
+#  ⚠️ ET IL ARCHIVE AUJOURD'HUI, PAS HIER. `agrume_fcst.py` relit la
+#  veille ; celui-ci lit le run du matin même. `fcstarome_{J}` porte
+#  donc bien « les prévisions émises le jour J », exactement comme
+#  `fcst_{J}` que la collecte écrit à 03:19 le même matin.
+#
+#  ⚠️ Il lit un AUTRE bucket que les autres modes (`balise-watch-grids`,
+#  pas `model-verif`) et avec un AUTRE jeton (le jeton ordinaire du VPS
+#  écrit sur les grilles sans pouvoir les lire — 403 mesuré le 13/08).
+#  `tools/r2_lecture.py` porte les deux gardes ; sans eux, le job
+#  sortirait en vert toutes les nuits avec zéro ligne.
+#
+#  ⓘ Il n'exige PAS numpy, contrairement à `bw-model-agrume` : les
+#  tuiles sont du JSON, pas un `.npz`.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — flux AROME/R2 pour le scoring (journée en cours)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh arome
+TimeoutStartSec=20min
+Nice=10
+
+# ── Cloisonnement, calqué sur bw-model-agrume.service ────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

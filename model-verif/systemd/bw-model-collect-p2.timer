@@ -1,0 +1,34 @@
+[Unit]
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ NE PAS INSTALLER TANT QUE LA PARTITION N'EST PAS DÉCIDÉE.
+#  Installer ce timer, c'est activer la partition — et déplacer sept
+#  modèles de 03:19 à 04:35 UTC dans une archive comparée sur 15 jours.
+#  Le raisonnement complet, les mesures et les deux déclencheurs sont
+#  dans `bw-model-collect-p2.service`.
+#
+#  ⚠️ ET IL Y A UN ORDRE. La partition ne devient VRAIE qu'à
+#  l'installation de ce timer : sans lui, `collect.py` tourne en
+#  `--passe 0` (toutes les passes en une fois), écrit la clé historique
+#  et un manifeste à UNE partie. Le code est donc déployable, et
+#  inerte, avant que la décision soit prise.
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — passe 2 de la collecte (surface), 04:35 UTC
+
+[Timer]
+# ⚠️ `UTC` EXPLICITE, comme les quatre autres timers du projet. Sans
+# lui, `OnCalendar` suit l'heure LOCALE du VPS (Europe/Paris) et la
+# passe se décalerait d'une heure au changement d'heure — donc
+# retomberait dans la fenêtre glissante de la passe 1 chaque automne.
+OnCalendar=*-*-* 04:35:00 UTC
+# ⚠️ 60 s ET PAS 300, contrairement à `bw-model-collect`. La fenêtre de
+# 04:35 est calculée au quart d'heure près entre la queue de la passe 1
+# (04:28 au pire mesuré) et `backfill_packs` (04:30-04:34) : une gigue
+# de 5 min la rendrait floue des deux côtés.
+RandomizedDelaySec=60
+# Une nuit de prévisions manquée ne se rattrape jamais : si le VPS était
+# éteint à 04:35, on part dès qu'il revient. `attendre_la_place`
+# demandera de toute façon au budget si l'heure est libre.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

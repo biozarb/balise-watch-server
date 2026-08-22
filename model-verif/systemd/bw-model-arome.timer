@@ -1,0 +1,50 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-arome.timer — dans la fenêtre où le run 00 Z est en ligne
+#                                            (lot S0.5, 22/08/2026)
+#
+#  ⛔ CET HORAIRE N'EST PAS UN CONFORT, C'EST UNE FENÊTRE. Mesuré le
+#  22/08/2026 sur R2 et sur `.github/workflows/arome-wind.yml` :
+#
+#    · l'Action `arome-wind` tourne à 02, 05, 08, 11, 14, 17, 20, 23 UTC ;
+#    · celle de 05:00 a retenu le run 00 Z, écrit ses 63 tuiles `sol`
+#      entre 05:34:25 et 05:34:44 Z, ses 441 tuiles `alt` jusqu'à
+#      05:42:07 Z, puis le manifeste ;
+#    · celle de 08:00 les ÉCRASERA (bucket entièrement mutable), avec un
+#      run 03 Z ou plus frais.
+#
+#  ⇒ La fenêtre du run 00 Z va de ~05:42 à ~08:30 UTC. 06:00 s'y place
+#  avec 18 min de marge après la publication et 2 h 30 avant
+#  l'écrasement. C'est le seul créneau de la journée où l'on peut lire
+#  un run admis (00 Z ou 03 Z) — à 11:00 UTC ce serait du 06 Z ou du
+#  09 Z, qui donnerait à AROME dix heures de fraîcheur d'avance sur les
+#  autres modèles sous le même intitulé « +6 h ».
+#
+#  ⚠️ ET IL N'EST PAS SERRÉ CONTRE `bw-model-score`, contrairement à
+#  `bw-model-agrume`. L'archive écrite ici à 06:00 le jour J est lue par
+#  la notation à 03:56 Z le jour J+1 : vingt-deux heures d'avance. Il n'y
+#  a donc AUCUN `Before=` dans l'unité — un `Before=bw-model-score`
+#  serait un lien faux, qui laisserait croire à une contrainte du même
+#  matin.
+#
+#  ⚠️ `Persistent=true` NE SAUVE RIEN ICI, et il faut le savoir. Si le
+#  VPS est éteint à 06:00 et rallumé à 09:00, systemd rattrapera le
+#  job — mais les tuiles porteront alors le run 06 Z, non admis, et le
+#  job sortira en erreur en DISANT que la journée est perdue. C'est le
+#  bon comportement : mieux vaut une alerte qu'une journée où AROME
+#  gagne par l'horaire. On le garde quand même, pour le cas d'un
+#  redémarrage de quelques minutes.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — flux AROME/R2 pour le scoring
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 UTC
+Persistent=true
+# ⚠️ Plus court que les 120 s des autres timers : la marge après la
+# publication du manifeste (~05:42 Z) est de 18 min, et un délai
+# aléatoire de deux minutes la ronge sans rien apporter — ce job ne
+# frappe aucun service tiers, il lit R2.
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

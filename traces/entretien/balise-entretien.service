@@ -51,9 +51,20 @@ ProtectHome=read-only
 ReadWritePaths=/home/debian/.balise-watch-entretien
 ReadWritePaths=/home/debian/balise-watch/balise-watch-server/traces/traces_cache
 # ⚠️ AJOUTÉ LE 09/08 — le budget Open-Meteo partagé, et il l'est
-# VRAIMENT : `backfill_packs.py` ne pèse que 18 pondérés par jour contre
-# ~4 700 pour la collecte, mais le plafond est par ADRESSE IP et les
-# deux chaînes en partagent une. Un compteur auquel un seul des deux
+# VRAIMENT.
+#
+# ⛔ CHIFFRE CORRIGÉ LE 22/08 (lot S0.4) : cette ligne annonçait
+# « 18 pondérés par jour ». **MESURÉ SUR LE FICHIER DE BUDGET, deux
+# jours de suite : 252,0** — 210 requêtes × 1,2 (12 variables × 1 modèle
+# / 10), le 21/08 de 04:39:09 à 04:42:49 UTC et le 22/08 de 04:30:30 à
+# 04:33:31. **Quatorze fois l'affirmation.** Ce n'est toujours pas
+# grand-chose devant les ~3 800 de la collecte (elle-même retombée de
+# 4 730 le 22/08), mais un chiffre faux dans le commentaire qui JUSTIFIE
+# le partage du budget est précisément ce qui fait sous-estimer une
+# marge. Il vaut 2,7 % du plafond journalier, pas 0,2 %.
+#
+# Le plafond est par ADRESSE IP et les deux chaînes en partagent une.
+# Un compteur auquel un seul des deux
 # consommateurs écrit ne compte rien : il rendrait la collecte prudente
 # vis-à-vis d'elle-même et aveugle au reste, ce qui est le problème
 # d'origine sous un autre nom. `ProtectSystem=strict` rend `/var` en

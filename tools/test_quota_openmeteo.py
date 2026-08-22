@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -24,12 +25,15 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import quota_openmeteo as qo                             # noqa: E402
 from quota_openmeteo import (  # noqa: E402
     Budget, BudgetRefuse, FENETRES, PAUSE_REPLI_S, PLAFOND_HEURE,
-    PLAFOND_JOUR, PLAFOND_MINUTE, plafond_effectif, poids, poids_url,
+    PLAFOND_JOUR, PLAFOND_MINUTE, PLAFOND_MOIS, plafond_effectif,
+    plafond_mois_effectif, poids, poids_url,
 )
 
 
@@ -327,6 +331,125 @@ class TestAttenteBornee(BaseBudget):
 #  5. LE BUDGET N'EST PAS UN POINT DE PANNE
 # ══════════════════════════════════════════════════════════════════
 
+class TestAttenteFenetre(BaseBudget):
+    """⭐ `attente_fenetre` — le lot S0.6 (22/08/2026).
+
+    ⛔ CE QU'ELLE RÉPARE. Une passe de collecte lancée pendant que la
+    précédente déborde encore se faisait refuser POINT PAR POINT jusqu'à
+    `ATTENTE_MAX_S` : 657 refus, 657 trous déclarés, là où UNE attente
+    de douze minutes ramène toute la donnée. `_quand_possible` savait
+    déjà calculer l'instant exact où la place se libère — il n'était
+    exposé nulle part.
+    """
+
+    def _remplir(self, consommateur, poids_total, par_requete=5.0):
+        b = self.budget(consommateur)
+        n = int(poids_total / par_requete)
+        for _ in range(n):
+            b.demander(par_requete)
+            self.horloge.avancer(0.06)
+        return b
+
+    def test_place_libre_rend_zero(self):
+        b = self.budget("collect")
+        self.assertEqual(b.attente_fenetre(2759.4, "heure"), 0.0)
+
+    def test_dit_QUAND_la_place_se_libere_a_la_seconde(self):
+        """L'attente rendue est l'instant EXACT, ni avant ni après.
+
+        ⚠️ LA PROPRIÉTÉ EST VÉRIFIÉE, PAS RECALCULÉE À LA MAIN. Un banc
+        qui recopierait l'arithmétique de la fonction validerait sa
+        propre copie : il faut assez de poids POUR CETTE DEMANDE-CI qui
+        sorte de la fenêtre, ce qui n'est presque jamais le premier
+        événement. On teste donc les deux bords — une seconde avant,
+        la place n'est pas là ; à l'instant dit, elle l'est.
+        """
+        self._remplir("passe1", 4500.0)          # l'heure est presque pleine
+        b = self.budget("passe2")
+        attente = b.attente_fenetre(1000.0, "heure")
+        self.assertGreater(attente, 0.0)
+
+        self.horloge.avancer(attente - 1.0)
+        self.assertGreater(b.attente_fenetre(1000.0, "heure"), 0.0,
+                           "une seconde trop tôt, la place n'est pas là")
+        self.horloge.avancer(1.0)
+        self.assertEqual(b.attente_fenetre(1000.0, "heure"), 0.0,
+                         "à l'instant annoncé, la place EST là")
+
+    def test_UNE_attente_remplace_657_refus(self):
+        """⭐⭐ La propriété du lot, mesurée plutôt que raisonnée."""
+        self._remplir("passe1", 4700.0)
+        b = self.budget("passe2")
+        attente = b.attente_fenetre(2000.0, "heure")
+        self.assertGreater(attente, 0.0)
+        # On dort UNE fois, puis les points passent — et aucun n'est
+        # refusé. Sans l'attente, chacun aurait pris son propre refus.
+        self.horloge.dormir(attente)
+        refuses = 0
+        for _ in range(50):
+            try:
+                b.demander(4.2)
+            except BudgetRefuse:
+                refuses += 1
+            self.horloge.avancer(0.06)
+        self.assertEqual(refuses, 0)
+
+    def test_la_MINUTE_n_est_pas_interrogee(self):
+        """⛔ C'est toute la différence avec `_quand_possible`.
+
+        Le poids d'une passe entière (2 759) dépasse à lui seul le
+        plafond de la minute (600). `_quand_possible`, qui interroge
+        TOUTES les fenêtres, rendrait donc `inf` — une réponse fausse à
+        une question qui en a une bonne.
+        """
+        b = self.budget("passe2")
+        self.assertEqual(b.attente_fenetre(2759.4, "heure"), 0.0)
+        self.assertEqual(b.attente_fenetre(2759.4, "minute"), float("inf"))
+
+    def test_un_poids_qui_ne_tient_jamais_rend_inf(self):
+        b = self.budget("passe2")
+        self.assertEqual(b.attente_fenetre(PLAFOND_HEURE + 1, "heure"),
+                         float("inf"))
+
+    def test_ne_reserve_RIEN(self):
+        """⚠️ C'est un CONSEIL, pas un droit : la réservation reste
+        celle de `demander()`, sous verrou, point par point.
+
+        ⛔ LES DEUX CHEMINS SONT ÉPROUVÉS, ET LA PREMIÈRE VERSION DE CE
+        BANC N'EN ÉPROUVAIT QU'UN. Trouvé par mutation (M12, 22/08) :
+        ajouter `self.consomme += poids_total` sur le chemin « fenêtre
+        pleine » ne rendait AUCUNE assertion rouge, parce que le banc
+        n'interrogeait qu'une fenêtre vide et sortait avant d'y arriver.
+        Un mutant qui survit dit toujours quelque chose — ici, que la
+        moitié de la fonction n'était pas couverte.
+        """
+        # ── chemin « il y a la place » ──
+        b = self.budget("passe2")
+        avant = self.chemin.read_text() if self.chemin.exists() else ""
+        for _ in range(20):
+            b.attente_fenetre(100.0, "heure")
+        apres = self.chemin.read_text() if self.chemin.exists() else ""
+        self.assertEqual(avant, apres, "fenêtre libre : aucune écriture")
+        self.assertEqual(b.consomme, 0.0)
+
+        # ── chemin « la fenêtre est pleine », celui qui calcule ──
+        self._remplir("passe1", 4700.0)
+        b2 = self.budget("passe2")
+        avant2 = self.chemin.read_text()
+        for _ in range(20):
+            self.assertGreater(b2.attente_fenetre(2000.0, "heure"), 0.0)
+        self.assertEqual(self.chemin.read_text(), avant2,
+                         "fenêtre pleine : toujours aucune écriture")
+        self.assertEqual(b2.consomme, 0.0,
+                         "et rien n'est décompté — ce n'est pas une "
+                         "réservation, c'est une question")
+
+    def test_fenetre_inconnue_leve(self):
+        b = self.budget("passe2")
+        with self.assertRaises(KeyError):
+            b.attente_fenetre(10.0, "semaine")
+
+
 class TestDegradation(BaseBudget):
 
     def test_fichier_corrompu_la_collecte_tourne_quand_meme(self):
@@ -453,6 +576,229 @@ class TestConcurrence(BaseBudget):
         self.assertGreater(sum(sorties), 400)
         qui = {q for _t, _w, q in evenements}
         self.assertEqual(qui, {"collect", "backfill"})
+
+
+# ══════════════════════════════════════════════════════════════════
+#  8. LE QUATRIÈME PLAFOND — 300 000/MOIS (lot S0.7, 22/08/2026)
+# ══════════════════════════════════════════════════════════════════
+
+class TestVersionNaiveEstRouge(BaseBudget):
+    """⛔⛔ L'ASSERTION CENTRALE DU LOT S0.7.
+
+    Le S0.3 a écrit deux fois que « l'ajouter à FENETRES est une
+    ligne ». C'est faux : `_reserver` élague les événements à 86 400 s
+    EN DUR, et cette ligne ne bouge pas dans ce lot (cf. l'en-tête de
+    `quota_openmeteo.py`). Ce test REPRODUIT la version naïve — l'ajout
+    littéral d'une ligne `("mois", 2_592_000, 300_000)` à FENETRES,
+    combiné à l'élagage inchangé — et PROUVE qu'elle ne se déclenche
+    JAMAIS, même quand 300 000 pondérés ont déjà été consommés. C'est
+    pire que l'absence du garde-fou, parce qu'on croirait le plafond
+    couvert.
+    """
+
+    def test_lajout_naif_a_FENETRES_ne_se_declenche_jamais(self):
+        maintenant = self.horloge.maintenant()
+        # 300 000 pondérés déjà consommés, mais VIEUX de plus de 24h —
+        # ce qu'un mois réel contient la plupart du temps.
+        vieux = [(maintenant - 86400.0 - 3600.0 * i, 5_000.0, "collect")
+                 for i in range(60)]                       # 60 × 5000 = 300 000
+        recent = [(maintenant - 10.0, 1.0, "collect")]      # dans les 24h
+
+        FENETRES_NAIVES = qo.FENETRES + (
+            ("mois", 2_592_000.0, qo.PLAFOND_MOIS),)
+        with mock.patch.object(qo, "FENETRES", FENETRES_NAIVES):
+            # La ligne EN DUR de `_reserver`, reproduite à l'identique —
+            # ⛔ elle ne bouge pas dans ce lot, cf. son en-tête.
+            elagues = [e for e in (vieux + recent)
+                      if e[0] > maintenant - 86400.0]
+            attente = qo.Budget._quand_possible(elagues, 1.0, maintenant)
+
+        self.assertEqual(elagues, recent,
+                         "l'élagage a bien jeté les 300 000 pondérés vieux "
+                         "de plus de 24h — c'est ce qui rend la version "
+                         "naïve muette")
+        self.assertEqual(attente, 0.0,
+            "⛔ LA VERSION NAÏVE NE VOIT JAMAIS LES 300 000 PONDÉRÉS : le "
+            "garde-fou mensuel qu'elle prétend ajouter ne se déclenche "
+            "JAMAIS. C'est pour ça que ce lot n'ajoute PAS à FENETRES — "
+            "cf. la fenêtre `jours` agrégée à part.")
+
+    def test_FENETRES_reste_a_trois_fenetres(self):
+        """Garde-fou jumeau : la vraie FENETRES (pas une copie patchée)
+        n'a PAS gagné de quatrième élément — le mensuel vit ailleurs.
+        """
+        noms = [nom for nom, _d, _p in qo.FENETRES]
+        self.assertEqual(noms, ["minute", "heure", "jour"])
+
+
+class TestPlafondMensuel(BaseBudget):
+    """⭐ Le vrai garde-fou mensuel, en seaux journaliers agrégés."""
+
+    def _remplir_mois(self, nom_budget: str, pondere_total: float,
+                      jours_repartis: int = 30) -> Budget:
+        """Pose `pondere_total` pondérés étalés sur `jours_repartis`
+        jours, en écrivant l'état directement — poser 280 000 pondérés
+        un par un via `demander()` serait beaucoup trop lent pour un banc.
+        """
+        b = self.budget(nom_budget)
+        maintenant = self.horloge.maintenant()
+        jours: dict = {}
+        par_jour = pondere_total / jours_repartis
+        for i in range(jours_repartis):
+            cle = qo._cle_jour(maintenant - i * 86400.0)
+            jours[cle] = jours.get(cle, 0.0) + par_jour
+        b._ecrire([], jours)
+        return b
+
+    def test_mois_plein_refuse_avec_le_mot_mois_dans_le_message(self):
+        self._remplir_mois("collect", plafond_mois_effectif() - 100.0)
+        b = self.budget("collect")
+        with self.assertRaises(BudgetRefuse) as ctx:
+            b.demander(500.0)
+        message = str(ctx.exception)
+        self.assertIn("mois", message)
+        self.assertIn("collect", message)
+
+    def test_mois_a_l_aise_ne_refuse_pas(self):
+        self._remplir_mois("collect", 100_000.0)
+        b = self.budget("collect")
+        b.demander(poids(8, 10))          # ne doit pas lever
+
+    def test_le_refus_mensuel_n_attend_pas(self):
+        """⭐ Question 2 du prompt : attendre n'a aucun sens — VÉRIFIÉ,
+        pas supposé. Un `attente_max_s` généreux (une heure) ne doit
+        RIEN changer : le refus tombe immédiatement, sans dormir.
+        """
+        self._remplir_mois("collect", plafond_mois_effectif() - 100.0)
+        b = self.budget("collect", attente_max_s=3600.0)
+        t0 = self.horloge.maintenant()
+        with self.assertRaises(BudgetRefuse):
+            b.demander(500.0)
+        self.assertEqual(self.horloge.maintenant(), t0,
+                         "le refus mensuel a dormi — il ne devrait jamais")
+
+    def test_une_requete_qui_depasse_seule_le_plafond_mensuel(self):
+        b = self.budget("collect")
+        with self.assertRaises(BudgetRefuse) as ctx:
+            b.demander(PLAFOND_MOIS + 1.0)
+        self.assertIn("mois", str(ctx.exception))
+
+
+class TestMigrationVersion1(BaseBudget):
+    """⚠️ Un fichier version 1 (avant le S0.7) n'a pas de compteur
+    mensuel — il doit se lire SANS ERREUR et sans repartir de zéro EN
+    SILENCE (Livrable attendu du lot).
+    """
+
+    def test_lit_un_fichier_version_1_sans_lever_et_le_dit_une_fois(self):
+        self.chemin.write_text(json.dumps(
+            {"version": 1,
+             "evenements": [[self.horloge.maintenant() - 10, 5.0, "collect"]]}))
+        journal = io.StringIO()
+        b = Budget("collect", chemin=self.chemin,
+                   horloge=self.horloge.maintenant, dormir=self.horloge.dormir,
+                   journal=journal)
+        b.demander(poids(8, 10))
+        b.demander(poids(8, 10))          # un second appel : toujours une fois
+        trace = journal.getvalue()
+        self.assertIn("version 1", trace)
+        self.assertIn("mensuel", trace)
+        self.assertEqual(trace.count("migration"), 1,
+                         "dit une fois, pas à chaque point — même "
+                         "discipline que le pavé dégradé")
+
+    def test_rien_ne_se_perd_a_la_migration(self):
+        """L'ancien événement (minute/heure/jour) survit à la migration —
+        seul le compteur MENSUEL, qui n'existait pas avant, démarre à 0.
+        """
+        ancien = self.horloge.maintenant() - 10
+        self.chemin.write_text(json.dumps(
+            {"version": 1, "evenements": [[ancien, 5.0, "collect"]]}))
+        b = self.budget("collect")
+        b.demander(1.0)
+        brut = json.loads(self.chemin.read_text())
+        self.assertEqual(len(brut["evenements"]), 2,
+                         "l'ancien événement plus le nouveau")
+        self.assertEqual(brut["version"], 2,
+                         "réécrit en version 2 après le premier passage")
+        self.assertIn("jours", brut)
+
+
+class TestElagageJours(BaseBudget):
+    """Les seaux journaliers ne grossissent pas sans fin (cf. l'élagage
+    naïf qui, lui, ne protège rien — `TestVersionNaiveEstRouge`)."""
+
+    def test_jours_elagues_a_31_jours(self):
+        maintenant = self.horloge.maintenant()
+        jours = {qo._cle_jour(maintenant - i * 86400.0): 100.0
+                 for i in range(40)}
+        elagues = qo._jours_elagues(jours, maintenant)
+        self.assertLessEqual(len(elagues), 32)     # 31 jours + marge d'arrondi
+        self.assertIn(qo._cle_jour(maintenant), elagues)
+        self.assertNotIn(qo._cle_jour(maintenant - 39 * 86400.0), elagues)
+
+
+class TestAnnonceMensuelle(BaseBudget):
+    """⭐ Question 3 du prompt : annoncer avant de mordre — dans
+    `etat()`/`resume()`, jamais dans `model-verif/collect.py`, qui les
+    imprime déjà pour les cinq appelants (cf. l'en-tête du module).
+    """
+
+    def test_etat_expose_le_mois(self):
+        b = self.budget("collect")
+        b.demander(poids(8, 10))
+        vue = b.etat()
+        self.assertIn("mois", vue)
+        self.assertEqual(vue["mois"]["plafond"], PLAFOND_MOIS)
+        self.assertGreater(vue["mois"]["consomme"], 0.0)
+
+    def test_resume_annonce_le_mois_et_sa_projection(self):
+        b = self.budget("collect")
+        maintenant = self.horloge.maintenant()
+        jours = {qo._cle_jour(maintenant - i * 86400.0): 10_000.0
+                 for i in range(10)}
+        b._ecrire([], jours)
+        ligne = b.resume()
+        self.assertIn("mois", ligne)
+        self.assertIn("plein le", ligne)
+
+
+class TestCoutEntreesSorties(BaseBudget):
+    """⚠️ QUESTION 4 DU PROMPT S0.7 : le coût en E/S, MESURÉ — pas
+    estimé. Le fichier est réécrit 1 524 fois par nuit ; toute forme
+    qui le fait grossir se paie 1 524 fois (cf. l'en-tête du module).
+    """
+
+    def test_taille_mesuree_reste_bornee(self):
+        # État réaliste : ~1 077 événements sur 24h (chiffre mesuré sur
+        # le VPS le 22/08 à 12h UTC, cf. le pavé S0.7) plus 31 seaux
+        # journaliers.
+        maintenant = self.horloge.maintenant()
+        evenements = [(maintenant - i * 80.0, 3.8, "collect")
+                     for i in range(1077)]
+        jours = {qo._cle_jour(maintenant - i * 86400.0): 3810.6
+                for i in range(31)}
+
+        avec_jours = json.dumps(
+            {"version": 2, "evenements": evenements, "jours": jours},
+            separators=(",", ":"))
+        sans_jours = json.dumps(
+            {"version": 2, "evenements": evenements, "jours": {}},
+            separators=(",", ":"))
+        taille_totale = len(avec_jours.encode("utf-8"))
+        cout_jours = taille_totale - len(sans_jours.encode("utf-8"))
+
+        # Mesuré le 22/08 : 40 367 octets pour 1 077 événements sans le
+        # compteur mensuel. Les 31 seaux journaliers ajoutent l'essentiel
+        # de l'écart mesuré ci-dessous — sans commune mesure avec le
+        # ~1,7 Mo qu'aurait coûté le suivi événement par événement sur un
+        # mois entier (~45 700 événements projetés, cf. l'en-tête).
+        self.assertLess(cout_jours, 1200,
+            f"31 seaux journaliers coûtent {cout_jours} octets mesurés — "
+            f"devrait rester de l'ordre du kilo-octet")
+        self.assertLess(taille_totale, 60_000,
+            f"état complet mesuré à {taille_totale} octets — loin des "
+            f"~1,7 Mo qu'aurait coûté l'option naïve")
 
 
 if __name__ == "__main__":

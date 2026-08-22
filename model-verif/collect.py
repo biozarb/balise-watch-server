@@ -422,13 +422,285 @@ def load_stations(path: pathlib.Path, max_age_days: int = 7) -> list[dict]:
 NEW_SURFACE_VARS = ["precipitation", "pressure_msl", "temperature_2m"]
 
 
-def _hourly_vars() -> list[str]:
+#: ⛔ LES DEUX VARIABLES D'ALTITUDE NE SERVENT QU'À UN SEUL MODÈLE, ET
+#: ON LES PAYAIT POUR LES NEUF. C'est la mesure qui ouvre le lot S0.4
+#: (22/08/2026), et elle est arithmétique, pas d'opinion :
+#:
+#:   · `forecast_rows` n'écrit `aloft_speed`/`aloft_dir` que `if model ==
+#:     REGIME_REF_MODEL` — vérifié sur l'archive du 22/08 :
+#:     657 lignes portent `aloft_speed`, toutes en `ecmwf_ifs025`,
+#:     sur 5 595 lignes ;
+#:   · `score.py` ne les lit que là (`if "aloft_speed" in row`) ;
+#:   · mais Open-Meteo compte VARIABLES × MODÈLES : demander les deux
+#:     variables de 850 hPa pour les neuf modèles coûtait
+#:     2 × 8 / 10 = 1,6 pondéré par point pour huit modèles dont on
+#:     jette la réponse. Sur 657 points : **1 051,2 pondérés par nuit,
+#:     soit 146 points de budget, soit 22 % du run.**
+#:
+#: On ne peut pas les demander « pour un seul modèle » dans une requête
+#: qui en demande neuf : Open-Meteo prend UNE liste `hourly` pour tous
+#: les modèles de la requête. Il faut donc DEUX requêtes par point —
+#: c'est tout ce que `groupes_requete()` fait.
+ALOFT_VARS = [f"wind_speed_{REGIME_LEVEL}", f"wind_direction_{REGIME_LEVEL}"]
+
+
+def _surface_vars() -> list[str]:
+    """Les variables demandées à TOUS les modèles."""
     return ["wind_speed_10m", "wind_direction_10m", "wind_gusts_10m",
-            *NEW_SURFACE_VARS,
-            f"wind_speed_{REGIME_LEVEL}", f"wind_direction_{REGIME_LEVEL}"]
+            *NEW_SURFACE_VARS]
 
 
-def quota_projete(n_points: int, forecast_days: int) -> float:
+def _hourly_vars() -> list[str]:
+    """L'union des variables demandées, tous groupes confondus.
+
+    ⚠️ CE N'EST PLUS LA LISTE D'UNE REQUÊTE. Depuis le S0.4 la requête
+    d'un point est découpée par `groupes_requete()` ; cette fonction ne
+    sert plus qu'à dire « ce que l'archive peut contenir ». La garder
+    évite qu'un lecteur pressé croie que les variables ont disparu.
+    """
+    return [*_surface_vars(), *ALOFT_VARS]
+
+
+#: ⚠️ POURQUOI LE GROUPE D'ALTITUDE PORTE DEUX MODÈLES ET PAS UN.
+#: `forecast_rows` ABANDONNE bruyamment un point dont la réponse n'a pas
+#: de suffixe de modèle — et Open-Meteo ne suffixe que si PLUSIEURS
+#: modèles SERVENT le point (piège du 08/08, cf. le pavé de
+#: `forecast_rows`). Un groupe à un seul modèle produirait donc zéro
+#: ligne partout, avec des HTTP 200 parfaitement formés.
+#:
+#: Le compagnon doit donc être MONDIAL — servir tous les points de la
+#: BBOX, y compris ceux que le référentiel ajoutera. Mesuré sur
+#: `fcst/2026/08/fcst_2026-08-22.ndjson.gz` (657 points, 5 595 lignes) :
+#: `ecmwf_ifs025` 657/657, `gfs_global` 657/657, et AUCUN point n'a
+#: moins de deux modèles servis dans ce groupe. Côté groupe de surface,
+#: le minimum mesuré est de 3 modèles servis sur les sept.
+#:
+#: ⚠️ Le coût ne dépend PAS de quels modèles sont dans le groupe
+#: d'altitude, seulement de COMBIEN : le total vaut
+#: 6 × 9 + 2 × n_altitude combinaisons. Il est donc minimal à n = 2, et
+#: n = 1 est interdit par la règle du suffixe. Deux, et pas trois.
+COMPAGNON_ALTITUDE = "gfs_global"
+
+
+def groupes_requete() -> list[tuple[list[str], list[str]]]:
+    """La requête d'un point, découpée en `(modèles, variables)`.
+
+    ⚠️ DÉRIVÉ DE `MODELS` ET DE `REGIME_REF_MODEL`, JAMAIS RECOPIÉ.
+    Ajouter un modèle demain le met automatiquement dans le groupe de
+    surface et renchérit le run — un découpage figé, lui, se serait tu.
+    C'est la même discipline que `poids_url()` : dériver, jamais
+    recopier (panne du 09/08, où un `5` était devenu `8` sans que le
+    garde-fou bouge).
+    """
+    for nom in (REGIME_REF_MODEL, COMPAGNON_ALTITUDE):
+        if nom not in MODELS:
+            raise Abort(
+                f"{nom} absent de MODELS : le groupe d'altitude ne peut plus "
+                f"se construire. Il lui faut le modèle de régime "
+                f"({REGIME_REF_MODEL}) ET un compagnon mondial, sans quoi "
+                f"Open-Meteo rend une réponse SANS suffixe de modèle et "
+                f"`forecast_rows` abandonne tous les points.")
+    altitude = [REGIME_REF_MODEL, COMPAGNON_ALTITUDE]
+    surface = [m for m in MODELS if m not in altitude]
+    return [(altitude, [*_surface_vars(), *ALOFT_VARS]),
+            (surface, _surface_vars())]
+
+
+def poids_par_point() -> float:
+    """Poids Open-Meteo d'UN point, tous groupes de requête confondus.
+
+    ⚠️ La division par 10 et le produit variables × modèles sont ceux de
+    `quota_openmeteo.poids()` — répétés ici seulement pour que
+    `quota_projete` reste lisible sans le module de budget, qui peut
+    être absent du VPS (cf. `charger_quota`).
+    """
+    return sum(len(v) * len(m) for m, v in groupes_requete()) / 10
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LA PARTITION EN PASSES HORAIRES (lot S0.6, 22/08/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ CE QUE CE BLOC FERME, ET C'EST LE PIÈGE CENTRAL DU LOT.
+#  Le jour où la collecte tourne en DEUX passes séparées d'une heure,
+#  `score.py` ne doit JAMAIS déduire le nombre de parties des clés qui
+#  existent. Si la partie 2 échoue et que la notation lit « les clés
+#  qu'elle trouve », la nuit est notée sur sept modèles en moins SANS
+#  QUE RIEN NE LE DISE — et un modèle absent se lit alors « le modèle a
+#  changé de couverture », qui est faux et invérifiable après coup.
+#
+#  ⇒ L'archive DÉCLARE ce qu'elle attend, dans un objet à part, écrit
+#  UNE FOIS par la première passe, AVANT la moindre ligne de données.
+#
+#  Trois formes ont été instruites (§5.3 du lot S0.4) ; les deux autres
+#  perdent, et pour une raison chacune :
+#   · une ligne `_meta` en tête de fichier changerait la forme d'une
+#     archive irremplaçable, pour toujours, et les 15 nuits déjà
+#     écrites n'en ont pas — « absent » vaudrait « une partie », qui
+#     est exactement le trou qu'on veut fermer ;
+#   · un nom de clé qui porte le total (`_p2sur2`) ne parle que si
+#     CETTE partie existe : si la partie 1 manque, plus rien ne déclare
+#     rien. Et `tools/storage.py` n'a pas de `list` — il faudrait
+#     sonder n × n clés.
+#
+#  Le manifeste latéral, lui, survit à la perte de N'IMPORTE QUELLE
+#  partie, y compris la première.
+
+#: Version du format de manifeste. Un lecteur qui voit un numéro qu'il
+#: ne connaît pas doit s'ARRÊTER, pas deviner.
+MANIFESTE_VERSION = 1
+
+#: Le flux que la partition découpe — et il n'y en a qu'un.
+#: ⚠️ `score.py::snapshot_rows` en lit TROIS depuis le lot S0.5
+#: (22/08/2026) : `fcst` + `fcstagrume` + `fcstarome`. Seul `fcst/` est
+#: partitionné, parce que c'est le seul qui coûte du quota Open-Meteo et
+#: le seul qui cesse de tenir dans une fenêtre horaire quand le
+#: référentiel grandit ; les deux autres sont écrits par leurs propres
+#: jobs, en un objet chacun. Le manifeste ne parle donc QUE de `fcst/`,
+#: et tout bilan qui le rend doit NOMMER son flux — sans ça,
+#: « 1 partie sur 2 » se lira « il manque un flux sur deux ».
+FLUX_PARTITIONNE = "fcst"
+
+
+def fcst_cle(quand: datetime, partie: int = 1) -> str:
+    """La clé R2 d'UNE partie du flux `fcst/`.
+
+    ⛔ LA PARTIE 1 GARDE LA CLÉ HISTORIQUE, SANS CONDITION ET SANS DATE
+    DE BASCULE DANS LE CODE. Les nuits déjà écrites (15 au 22/08/2026)
+    restent lisibles telles quelles : `score.py` lit cette clé comme il
+    l'a toujours fait, plus les parties que le manifeste déclare. Une
+    journée d'avant la partition n'a pas de manifeste, n'a qu'une clé,
+    et son union est complète.
+
+    ⚠️ Il n'y a donc AUCUN `if jour >= 2026-08-XX` nulle part. Une
+    bascule datée en dur est une ligne que personne ne relit et que
+    personne ne teste — c'est la forme de panne que ce projet a déjà
+    payée deux fois (le `5` devenu `8` du 09/08, le commentaire périmé
+    de `backfill_packs`).
+    """
+    if partie < 1:
+        raise Abort(f"partie {partie} : les parties se comptent à partir de 1")
+    suffixe = "" if partie == 1 else f"_p{partie}"
+    return f"fcst/{quand:%Y/%m}/fcst_{quand:%Y-%m-%d}{suffixe}.ndjson.gz"
+
+
+def manifeste_cle(quand: datetime) -> str:
+    """La clé du manifeste — LATÉRALE, jamais une ligne dans l'archive.
+
+    ⚠️ Elle ne finit pas par `.ndjson.gz`, et ce n'est pas anodin :
+    `en_retard()` cherche `*.ndjson.gz`. Le rattrapage a donc dû être
+    élargi explicitement (cf. `en_retard`), sinon un manifeste dont
+    l'envoi R2 échoue ne serait JAMAIS retenté — et son absence se
+    lirait « journée d'avant la partition », c'est-à-dire le trou même
+    que le manifeste existe pour fermer.
+    """
+    return f"fcst/{quand:%Y/%m}/fcst_{quand:%Y-%m-%d}.manifeste.json"
+
+
+def construire_manifeste(quand: datetime, n_points: int,
+                         groupes: list | None = None) -> dict:
+    """Ce que la nuit DÉCLARE attendre, avant d'avoir collecté quoi que
+    ce soit.
+
+    ⚠️ ÉCRIT PAR LA PASSE 1, AVANT LA PREMIÈRE LIGNE DE DONNÉES, et
+    JAMAIS RÉÉCRIT. « Une clé R2 s'écrit une fois » est la règle du
+    dépôt ; ici elle est en plus ce qui rend le manifeste utile : un
+    manifeste que la passe 2 compléterait ne dirait plus rien le jour
+    où c'est la passe 2 qui manque.
+
+    Le contenu est DÉRIVÉ de `groupes_requete()`, jamais recopié — même
+    discipline que `poids_par_point()`. Ajouter un modèle demain change
+    la déclaration sans que personne n'ait à y penser.
+    """
+    groupes = groupes if groupes is not None else groupes_requete()
+    detail = []
+    for i, (modeles, variables) in enumerate(groupes, 1):
+        detail.append({
+            "i": i,
+            "cle": fcst_cle(quand, i),
+            "modeles": list(modeles),
+            "n_vars": len(variables),
+            "poids_point": round(len(modeles) * len(variables) / 10, 4),
+        })
+    return {
+        "version": MANIFESTE_VERSION,
+        "flux": FLUX_PARTITIONNE,
+        "jour": f"{quand:%Y-%m-%d}",
+        "parties": len(groupes),
+        "n_points": n_points,
+        "poids_point_total": round(
+            sum(d["poids_point"] for d in detail), 4),
+        "detail": detail,
+        "ecrit_par": "collect.py passe 1",
+        "ecrit_a": quand.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+#: Borne de l'attente de démarrage d'une passe (cf. `attendre_la_place`).
+#: ⚠️ ELLE DOIT TENIR DANS `MAX_MINUTES` DE `run.sh`, chien de garde
+#: compris, ET LAISSER LA PLACE AU RUN LUI-MÊME. Mesuré le 22/08/2026
+#: sur 14 nuits de `journalctl` : la passe de prévisions est bornée par
+#: le plafond de la MINUTE (534,5 pondérés/min mesurés contre 540 de
+#: seuil interne), donc sa durée vaut son poids divisé par ~540 —
+#: 8 min 51 s pour 4 730,4 pondérés le 22/08. À 965 points (liste P1),
+#: la passe de surface pèse 4 053 et prend donc ~7 min 30 s.
+#: 25 min d'attente + 8 min de run = 33 min, sous les 40 de `run.sh`.
+ATTENTE_PASSE_MAX_S = 1500.0
+
+
+def attendre_la_place(budget, poids_total: float, passe: int,
+                      dormir=time.sleep) -> float:
+    """Dormir UNE FOIS, de façon bornée, au lieu d'être refusé 657 fois.
+
+    ⛔ C'EST LE POINT QUE LE LOT S0.4 SIGNALE ET NE RÉSOUT PAS. Si la
+    passe 1 déborde — son chien de garde vaut 40 min — ses événements ne
+    sortent de la fenêtre glissante qu'une heure après son DERNIER appel
+    Open-Meteo. Une passe 2 qui partirait pendant ce temps se ferait
+    refuser point par point jusqu'à `ATTENTE_MAX_S`, en fabriquant des
+    centaines de trous DÉCLARÉS là où attendre douze minutes une seule
+    fois aurait tout ramené.
+
+    ⚠️ UNE PASSE NE SUPPOSE PAS QUE SON HEURE EST LIBRE, ELLE DEMANDE.
+    `Budget.attente_fenetre` sait calculer l'instant EXACT où assez de
+    poids sort de la fenêtre : c'est cet instant qu'on attend, une fois,
+    et on le DIT dans le journal. Une attente muette serait un run lent
+    sans raison lisible à 6 h du matin.
+
+    Rend le nombre de secondes attendues. Lève `Abort` si la place ne
+    vient pas dans la borne — c'est alors un refus ARGUMENTÉ, pas une
+    panne, et l'appelant en fait une passe sautée plutôt qu'un run tué.
+    """
+    if budget is None:
+        return 0.0
+    attente = budget.attente_fenetre(poids_total, "heure")
+    if attente <= 0.0:
+        return 0.0
+    if attente == float("inf"):
+        raise Abort(
+            f"passe {passe} : {poids_total:.0f} pondérés ne tiennent JAMAIS "
+            f"dans une fenêtre horaire — ce n'est pas une attente, c'est un "
+            f"volume. Il faut une passe de plus, pas une minute de plus "
+            f"(cf. `groupes_requete`).")
+    if attente > ATTENTE_PASSE_MAX_S:
+        raise Abort(
+            f"passe {passe} : la fenêtre horaire ne libérera pas "
+            f"{poids_total:.0f} pondérés avant {attente:.0f}s, au-delà de la "
+            f"borne de {ATTENTE_PASSE_MAX_S:.0f}s (qui doit tenir dans le "
+            f"chien de garde de run.sh). La passe précédente a probablement "
+            f"débordé : regarder `journalctl -u bw-model-collect` et "
+            f"`python3 tools/quota_openmeteo.py`. Passe NON collectée — "
+            f"trou déclaré, et le manifeste dira lequel.")
+    print(f"⏳ passe {passe} : la fenêtre horaire n'a pas encore la place "
+          f"pour {poids_total:.0f} pondérés — attente de {attente:.0f}s "
+          f"({attente / 60:.1f} min), UNE fois, puis on part. "
+          f"(la passe précédente a débordé sur son heure)")
+    dormir(attente)
+    print(f"  ✅ place libérée après {attente:.0f}s d'attente")
+    return attente
+
+
+def quota_projete(n_points: int, forecast_days: int,
+                  groupes: list | None = None, passe: int = 0) -> float:
     """Chiffre le run AVANT de le lancer, et refuse de démarrer s'il
     déborde.
 
@@ -436,8 +708,24 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     ce projet une fois (BUGS.md, 19/07) : sans cache, la veille se
     prenait des 429 **silencieusement**. La ligne journalisée à chaque
     run est ce qui rend une dérive visible avant la panne.
+
+    ⚠️ `groupes` EST CELUI DE CETTE PASSE, ET LES DEUX GARDES NE
+    REGARDENT PLUS LA MÊME CHOSE (lot S0.6, 22/08/2026) — le pavé du
+    seuil journalier, plus bas, l'annonçait mot pour mot depuis le
+    S0.4 :
+      · la fenêtre HORAIRE se juge sur CETTE passe, parce que c'est
+        elle qui part maintenant et qu'elle est seule dans son heure ;
+      · le seuil JOURNALIER se juge sur LA SOMME DE TOUTES LES PASSES,
+        parce qu'elles tombent toutes dans la même journée. Le juger sur
+        une seule refuserait deux passes qui passent séparément — ou,
+        pire, laisserait passer deux passes dont la somme déborde.
+    Tant qu'il n'y a qu'une passe, les deux chiffres sont égaux et rien
+    ne change. `passe = 0` veut dire « toutes les passes d'un coup »,
+    c'est-à-dire le comportement d'avant ce lot.
     """
-    n_vars = len(_hourly_vars()) * len(MODELS)
+    toutes = groupes_requete()
+    groupes = toutes if groupes is None else groupes
+    n_vars = sum(len(v) * len(m) for m, v in groupes)
     # ⚠️ LA REMISE `jours/14` A ÉTÉ RETIRÉE LE 07/08, ET C'EST LE CŒUR DU
     # DÉFAUT. Avec elle, une requête pesait 3/14 × 50/10 = 1,07, et cet
     # encadré annonçait fièrement « 6,9 % du plafond ». À 240 requêtes
@@ -460,16 +748,73 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     # plafond horaire ci-dessous, qui est le seul garde-fou qui restait
     # à écrire.
     points_par_heure = QUOTA_HEURE / par_point
+    # ⚠️ LE PLAFOND HORAIRE EST CELUI QUI MORD, ET IL A UNE DATE. Ce
+    # bloc dit donc COMBIEN DE POINTS IL RESTE avant que ce même
+    # garde-fou refuse de démarrer. Le référentiel Pioupiou grandit en
+    # AJOUT SEUL, tous les 7 jours (`load_stations`, `max_age_days=7`) :
+    # sans cette ligne, la marge n'est visible nulle part et on la
+    # découvre le matin où elle est franchie — c'est exactement ce qui
+    # s'est passé le 09/08, et ce que le S0.3 a dû aller mesurer à la
+    # main le 22/08. Un garde-fou qui annonce sa propre échéance vaut
+    # mieux qu'un garde-fou qui la subit.
+    points_max_heure = int(QUOTA_HEURE * 0.95 // par_point)
+    marge = points_max_heure - n_points
+    # ⚠️ CE QUE LA JOURNÉE PÈSE, TOUTES PASSES CONFONDUES. Ce n'est pas
+    # `total` dès qu'il y a plus d'une passe, et c'est ce chiffre-là que
+    # le seuil journalier doit juger.
+    par_point_jour = sum(len(v) * len(m) for m, v in toutes) / 10
+    total_jour = n_points * par_point_jour
     print("┌─ QUOTA OPEN-METEO PROJETÉ ───────────────────────────────────")
+    if passe:
+        modeles_passe = [m for grp, _v in groupes for m in grp]
+        print(f"│ PASSE                  : {passe}/{len(toutes)} — "
+              f"{', '.join(modeles_passe)}")
     print(f"│ points                 : {n_points}")
-    print(f"│ modèles × variables    : {len(MODELS)} × {len(_hourly_vars())} = {n_vars}")
-    print(f"│ pondération / requête  : {n_vars}/10 = {par_point:.2f} "
+    print(f"│ requêtes / point       : {len(groupes)} "
+          + " + ".join(f"({len(m)} modèles × {len(v)} vars)"
+                       for m, v in groupes))
+    for m, v in groupes:
+        print(f"│   · {', '.join(m[:2])}{'…' if len(m) > 2 else ''}"
+              f"{' ' * max(0, 18 - len(', '.join(m[:2])))}: "
+              f"{len(m)} × {len(v)} = {len(m) * len(v)} combinaisons, "
+              f"{len(m) * len(v) / 10:.1f} pondéré/point")
+    print(f"│ pondération / point    : {n_vars}/10 = {par_point:.2f} "
           f"(sans remise sur {forecast_days} jours — cf. 07/08)")
     print(f"│ TOTAL du run           : {total:.0f} appels pondérés "
           f"({total / QUOTA_JOUR * 100:.1f} % du plafond journalier)")
+    if passe:
+        print(f"│ TOTAL de la JOURNÉE    : {total_jour:.0f} pondérés pour les "
+              f"{len(toutes)} passes réunies "
+              f"({total_jour / QUOTA_JOUR * 100:.1f} % du plafond journalier) "
+              f"— c'est CE chiffre que juge le seuil journalier")
     print(f"│ fenêtre HORAIRE        : {total:.0f} / {QUOTA_HEURE} "
-          f"({total / QUOTA_HEURE * 100:.1f} %) — l'heure autorise "
-          f"{points_par_heure:.0f} points à ce poids")
+          f"({total / QUOTA_HEURE * 100:.1f} %) — seuil de refus à "
+          f"{QUOTA_HEURE * 0.95:.0f}, soit {points_max_heure} points à ce poids")
+    # ⛔ DÈS QU'IL Y A PLUS D'UNE PASSE, CE N'EST PLUS L'HEURE QUI MORD,
+    # C'EST LE JOUR — et une ligne « MARGE AVANT REFUS : 473 points »
+    # calculée sur la seule fenêtre horaire mentirait de 96 points.
+    # Mesuré le 22/08 (lot S0.6) : à 5,80 pondéré/point, le seuil
+    # journalier de 60 % refuse au 1 035ᵉ point, alors que la passe de
+    # surface tient l'heure jusqu'au 1 130ᵉ. C'est le seuil journalier
+    # qui devient le premier à parler — exactement ce que le pavé du
+    # S0.4 annonçait (« il redevient le SEUL garde-fou utile »).
+    # ⇒ La marge annoncée est celle du garde-fou qui MORD LE PREMIER, et
+    # la ligne DIT lequel. Un garde-fou qui annonce sa propre échéance
+    # ne sert à rien s'il annonce celle d'un autre.
+    points_max_jour = int(QUOTA_JOUR * 0.6 // par_point_jour)
+    if points_max_jour < points_max_heure:
+        plafond_reel, qui = points_max_jour, "seuil JOURNALIER (60 %)"
+    else:
+        plafond_reel, qui = points_max_heure, "fenêtre HORAIRE"
+    marge = plafond_reel - n_points
+    if passe:
+        print(f"│ seuil JOURNALIER       : {total_jour:.0f} / "
+              f"{QUOTA_JOUR * 0.6:.0f} — soit {points_max_jour} points à "
+              f"{par_point_jour:.2f} pondéré/point, toutes passes réunies")
+    print(f"│ MARGE AVANT REFUS      : {marge} points "
+          f"(référentiel {n_points}, plafond {plafond_reel} — {qui})"
+          + ("  ⛔ LE PROCHAIN RAFRAÎCHISSEMENT DU RÉFÉRENTIEL PEUT LA "
+             "FRANCHIR" if marge < 15 else ""))
     print(f"│ cadence                : tenue par le seau à jetons "
           f"(tools/quota_openmeteo.py), plafonds {QUOTA_MINUTE}/min · "
           f"{QUOTA_HEURE}/h · {QUOTA_JOUR}/j")
@@ -483,21 +828,56 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
     # trois variables et on a recompté ». 60 % laisse 4 000 appels
     # pondérés de marge sur la journée.
     #
-    # ⚠️ CE QUE CETTE MARGE DOIT COUVRIR — vérifié sur le VPS le 08/08,
-    # pas supposé. Ce job est le seul consommateur Open-Meteo PLANIFIÉ
-    # depuis cette IP (`systemctl list-timers` : les autres timers sont
-    # `balise-infoclimat`, qui interroge Infoclimat, et l'entretien ;
-    # aucun timer ni cron n'appelle `traces/backfill_packs.py`,
-    # `match_analogs.py`, `day_features.py` ni `sonde_openmeteo.py`).
-    # Mais ces quatre-là appellent bien Open-Meteo quand quelqu'un les
-    # lance À LA MAIN, depuis la même IP et donc sur le même plafond
-    # journalier. La marge de 4 000 est là pour ça : un backfill lancé
-    # dans la journée ne doit pas faire tomber la collecte de la nuit.
-    # L'app, elle, n'y touche pas — elle interroge Open-Meteo depuis le
-    # navigateur des pilotes, jamais depuis ce serveur.
-    if total > QUOTA_JOUR * 0.6:
-        raise Abort(f"{total:.0f} appels pondérés > 60 % du plafond journalier — "
-                    f"comprendre AVANT de forcer (nb de points ? de modèles ?)")
+    # ⚠️ CE QUE CETTE MARGE DOIT COUVRIR — CORRIGÉ LE 22/08 (S0.4), et
+    # l'ancienne version de ce pavé était FAUSSE : elle affirmait
+    # qu'« aucun timer ni cron n'appelle `traces/backfill_packs.py` ».
+    # Mesuré sur `/var/lib/bw-quota/openmeteo.json` les 21 et 22/08 :
+    # `balise-entretien.timer` (04:30 UTC) l'appelle TOUS LES JOURS, pour
+    # **210 requêtes × 1,2 = 252,0 pondérés**. Un commentaire périmé qui
+    # sert d'argument est pire qu'un commentaire absent — entrée
+    # `BUGS.md` du 22/08.
+    #
+    # Consommateurs Open-Meteo réels depuis cette IP, mesurés sur les
+    # 24 h glissantes du fichier de budget (22/08 07 h UTC) :
+    #   · `collect`         — ce job, 03:19-03:28 UTC ;
+    #   · `backfill_packs`  — l'entretien, 04:30-04:33 UTC, 252/jour.
+    # Et, quand quelqu'un les lance À LA MAIN depuis la même IP :
+    # `match_analogs.py`, `day_features.py`, `sonde_openmeteo.py`.
+    # La marge est là pour ceux-là : un backfill lancé dans la journée
+    # ne doit pas faire tomber la collecte de la nuit.
+    #
+    # ⚠️ ET L'APP, ELLE — précisé le 22/08, parce que la phrase d'avant
+    # (« elle n'y touche pas, elle interroge Open-Meteo depuis le
+    # navigateur des pilotes ») était vraie par accident. Mesuré :
+    # `index.js` appelle bel et bien Open-Meteo CÔTÉ SERVEUR (l. 1426,
+    # 4302 et 6007, dont un appel MULTI-POINTS `latitude=a,b,c` qui pèse
+    # donc aussi par le nombre de lieux). Ce qui sauve la collecte, ce
+    # n'est pas que l'app s'abstienne : c'est qu'`index.js` tourne sur
+    # RENDER, donc sur une AUTRE adresse IP (vérifié le 22/08 : aucun
+    # processus `node index.js` sur ce VPS, seuls les trois pollers
+    # AGRUME y tournent).
+    #
+    # ⛔ Le jour où l'app serait rapatriée sur ce VPS, elle partagerait
+    # le plafond SANS écrire dans `/var/lib/bw-quota` — et le compteur
+    # deviendrait faux du côté qui ne protège pas, en silence. C'est la
+    # condition à vérifier avant tout rapatriement, pas après.
+    # ⚠️ L'ORDRE DES DEUX GARDES A ÉTÉ INVERSÉ LE 22/08 (S0.4), ET CE
+    # N'EST PAS COSMÉTIQUE. Les deux seuils se recouvrent :
+    #
+    #     QUOTA_HEURE × 0,95 = 4 750  <  QUOTA_JOUR × 0,60 = 6 000
+    #
+    # Tout run d'UNE passe qui franchit 6 000 franchit donc aussi 4 750.
+    # Tant que le seuil journalier était testé EN PREMIER, un run à
+    # 7 540 pondérés sortait avec le message « > 60 % du plafond
+    # JOURNALIER » — alors que la fenêtre qui ferme réellement la porte,
+    # et pour une heure entière, est l'HORAIRE. Le message désignait la
+    # mauvaise fenêtre, à 6 h du matin, à quelqu'un qui cherche quoi
+    # faire. Trouvé en mutant le banc : remplacer le `raise` journalier
+    # par un `if False` ne rendait AUCUNE assertion rouge.
+    #
+    # On teste donc l'heure d'abord — elle est plus stricte, et c'est
+    # elle qui a tué la nuit du 09/08. Entrée `BUGS.md` du 22/08.
+    #
     # ⚠️ LE GARDE-FOU QUI MANQUAIT, ET QUI AURAIT SAUVÉ LA NUIT DU 09/08.
     # L'ancien comparait une cadence espérée au plafond de la minute ;
     # celui-ci compare le VOLUME du run au plafond de l'HEURE, qui est
@@ -516,25 +896,83 @@ def quota_projete(n_points: int, forecast_days: int) -> float:
             f"l'heure n'en autorise que {QUOTA_HEURE} — soit "
             f"{points_par_heure:.0f} points à {par_point:.1f} de poids. "
             f"C'est exactement ce qui a tué la nuit du 09/08. Aucune "
-            f"cadence ne corrige un volume : retirer une variable ou un "
-            f"modèle, ou étaler la passe sur deux heures (et relever "
-            f"alors MAX_MINUTES, qui vaut 40).")
+            f"cadence ne corrige un volume. Les issues, dans l'ordre où "
+            f"elles ont été chiffrées le 22/08 (lot S0.4) : (1) retirer "
+            f"des variables qu'on ne relit pas — c'est ce qu'a fait "
+            f"`groupes_requete()`, qui a rendu 1,4 pondéré par point ; "
+            f"(2) PARTITIONNER la passe en N passes horaires distinctes, "
+            f"chacune avec sa propre clé R2 et un manifeste qui dit "
+            f"combien de parties la nuit attend (conception écrite dans "
+            f"`claude/lot-s04-seconde-passe-22-08.md`, §5) ; (3) retirer "
+            f"un modèle — mais alors REFAIRE la mesure du 09/08, cf. le "
+            f"pavé de MODELS. ⛔ Pas de relèvement du 0,95 : le plafond "
+            f"horaire est réel, il a tué une nuit.")
+    # ⚠️ ET LE SEUIL JOURNALIER EN SECOND — ET IL A CHANGÉ D'OBJET LE
+    # 22/08 (lot S0.6). Le pavé d'avant disait exactement ce qu'il
+    # fallait faire, et le voici fait :
+    #
+    #   « il redevient le SEUL garde-fou utile le jour où la collecte
+    #     sera PARTITIONNÉE — chaque passe tiendra alors sous 4 750, et
+    #     c'est LEUR SOMME qui devra tenir sous le plafond du jour. »
+    #
+    # ⛔ IL JUGE DONC `total_jour`, PAS `total`. Une passe de surface à
+    # 4 053 pondérés passe l'heure sans peine ; ce qui doit être surveillé
+    # c'est qu'AVEC la passe d'altitude elles ne franchissent pas la
+    # journée. Le juger sur la passe seule, c'est le rendre inerte une
+    # seconde fois — et cette fois pour de bon, puisqu'il n'y aurait plus
+    # personne pour regarder la somme.
+    #
+    # ⓘ Tant qu'il n'y a qu'une passe, `total_jour == total` et le
+    # comportement est inchangé au pondéré près. Le mutant M7 du S0.4
+    # (« le seuil journalier ne refuse rien ») cesse donc d'être
+    # ÉQUIVALENT dès qu'il y a deux passes : c'est le banc
+    # `test_seuil_journalier_juge_la_somme_des_passes` qui le tient.
+    #
+    # ⚠️ CE QU'IL NE FAIT TOUJOURS PAS : lire le budget MESURÉ
+    # (`Budget.etat()`) plutôt que 60 % d'un plafond brut. Il ignore donc
+    # `backfill_packs` (252,0/jour, mesuré les 21 et 22/08) et tout script
+    # lancé à la main. C'est volontairement conservateur — 60 % de 10 000
+    # laisse 4 000 pondérés à ces consommateurs-là — mais ça reste une
+    # approximation, et elle est écrite ici plutôt que supposée.
+    if total_jour > QUOTA_JOUR * 0.6:
+        raise Abort(
+            f"{total_jour:.0f} appels pondérés pour la JOURNÉE "
+            f"({len(toutes)} passe(s) × {n_points} points à "
+            f"{par_point_jour:.2f}) > 60 % du plafond journalier "
+            f"({QUOTA_JOUR * 0.6:.0f}) — comprendre AVANT de forcer "
+            f"(nb de points ? de modèles ? de passes ?). ⚠️ Ce seuil juge "
+            f"la SOMME des passes, pas celle qui part maintenant "
+            f"({total:.0f}) : partitionner davantage ne le fera pas "
+            f"reculer, seul un run moins lourd le fera.")
     return total
 
 
-def fetch_forecast(lat: float, lon: float, forecast_days: int):
+def fetch_forecast(lat: float, lon: float, forecast_days: int,
+                   models: list[str] | None = None,
+                   variables: list[str] | None = None):
+    """Une requête de prévision, pour UN groupe de modèles.
+
+    ⚠️ `models` et `variables` ne sont plus facultatifs en pratique :
+    ils viennent de `groupes_requete()`. Les défauts restent là pour
+    qu'un appel à la main (`python3 -c`) reste possible, et ils
+    reproduisent la requête d'AVANT le S0.4 — pas un état intermédiaire.
+    """
+    models = models or MODELS
+    variables = variables or _hourly_vars()
     params = {
         "latitude": f"{lat:.4f}", "longitude": f"{lon:.4f}",
-        "hourly": ",".join(_hourly_vars()),
-        "models": ",".join(MODELS),
+        "hourly": ",".join(variables),
+        "models": ",".join(models),
         "forecast_days": str(forecast_days),
         "wind_speed_unit": "kmh", "timeformat": "unixtime",
     }
     return _get_json_retry(f"{FORECAST_API}?{urllib.parse.urlencode(params)}",
-                           f"prévision {lat:.3f},{lon:.3f}")
+                           f"prévision {lat:.3f},{lon:.3f} "
+                           f"[{len(models)} modèles]")
 
 
-def forecast_rows(station: dict, payload: dict, fetched_at: str):
+def forecast_rows(station: dict, payload: dict, fetched_at: str,
+                  models: list[str] | None = None):
     """Une ligne NDJSON par (station, modèle) réellement servi.
 
     ⚠️ LA SÉRIE DE TEMPS N'EST PAS RECOPIÉE, on écrit `t0` + `step_s`.
@@ -550,6 +988,12 @@ def forecast_rows(station: dict, payload: dict, fetched_at: str):
     chacune. Une archive qu'on relira dans trois ans ne doit dépendre
     d'aucune convention implicite.
     """
+    # ⚠️ `models` EST CELUI DU GROUPE DEMANDÉ, PAS `MODELS` (S0.4,
+    # 22/08). Depuis que la requête d'un point est découpée en deux
+    # groupes, une réponse ne contient QUE les modèles de son groupe :
+    # boucler sur `MODELS` chercherait des suffixes qui ne peuvent pas
+    # être là, et le garde-fou du suffixe ci-dessous compterait mal.
+    models = models or MODELS
     hourly = payload.get("hourly") or {}
     times = hourly.get("time") or []
     if len(times) < 2:
@@ -574,10 +1018,17 @@ def forecast_rows(station: dict, payload: dict, fetched_at: str):
     # « Ne devrait pas » n'est pas « ne peut pas » : si ça arrive, on
     # ABANDONNE LE POINT BRUYAMMENT plutôt que d'attribuer la série au
     # hasard. Une archive préfère un trou signalé à une ligne fausse.
-    if any(k == "wind_speed_10m" for k in hourly) and len(MODELS) > 1:
+    #
+    # ⚠️ S0.4 (22/08) : le test porte sur le GROUPE, pas sur `MODELS`.
+    # C'est pour cette règle que le groupe d'altitude porte deux modèles
+    # et non un seul (cf. `COMPAGNON_ALTITUDE`). Mesuré sur l'archive du
+    # 22/08 : les deux modèles du groupe d'altitude servent 657/657
+    # points, et le groupe de surface en sert au minimum 3 sur 7.
+    if any(k == "wind_speed_10m" for k in hourly) and len(models) > 1:
         print(f"  ⚠️  {station['source']}:{station['id']} : réponse sans suffixe de "
-              f"modèle — un seul modèle sert ce point et l'API ne dit pas lequel. "
-              f"Point abandonné (aucune ligne écrite).", file=sys.stderr)
+              f"modèle — un seul des {len(models)} modèles demandés sert ce point "
+              f"et l'API ne dit pas lequel. Groupe abandonné pour ce point "
+              f"(aucune ligne écrite).", file=sys.stderr)
         return
 
     def _serie(nom: str, model: str):
@@ -601,7 +1052,7 @@ def forecast_rows(station: dict, payload: dict, fetched_at: str):
             return None
         return s
 
-    for model in MODELS:
+    for model in models:
         speed = hourly.get(f"wind_speed_10m_{model}")
         # ⚠️ On teste le CONTENU, pas la présence de la clé. Open-Meteo
         # rend la clé même hors domaine, remplie de nulls — c'est le
@@ -636,9 +1087,29 @@ def forecast_rows(station: dict, payload: dict, fetched_at: str):
             # Le vent d'altitude ne sert qu'à étiqueter le régime, et
             # un seul modèle le porte : le stocker pour les huit
             # multiplierait le fichier par deux pour rien.
-            row["aloft_level"] = REGIME_LEVEL
-            row["aloft_speed"] = hourly.get(f"wind_speed_{REGIME_LEVEL}_{model}")
-            row["aloft_dir"] = hourly.get(f"wind_direction_{REGIME_LEVEL}_{model}")
+            #
+            # ⚠️ S0.4 : DEPUIS LE DÉCOUPAGE EN GROUPES, LES DEUX
+            # VARIABLES DE 850 hPa NE SONT DEMANDÉES QU'AU GROUPE
+            # D'ALTITUDE. Si quelqu'un sortait `REGIME_REF_MODEL` de ce
+            # groupe, `hourly.get(...)` rendrait `None` et l'archive
+            # gagnerait un `aloft_speed: null` — un champ qui ment,
+            # exactement ce que `_serie` existe pour empêcher. On passe
+            # donc par `_serie`, et on n'écrit RIEN plutôt que du vide :
+            # `score.py` teste `if "aloft_speed" in row`, donc un champ
+            # absent se lit correctement comme « pas de régime ce
+            # jour-là », tandis qu'un `null` se lirait comme une valeur.
+            a_s = _serie(f"wind_speed_{REGIME_LEVEL}", model)
+            a_d = _serie(f"wind_direction_{REGIME_LEVEL}", model)
+            if a_s is not None:
+                row["aloft_level"] = REGIME_LEVEL
+                row["aloft_speed"] = a_s
+                row["aloft_dir"] = a_d
+            else:
+                print(f"  ⚠️  {station['source']}:{station['id']} : "
+                      f"{REGIME_REF_MODEL} servi SANS vent de {REGIME_LEVEL} — "
+                      f"le régime de la journée sera « unknown » pour ce point. "
+                      f"Vérifier que {REGIME_REF_MODEL} est bien dans le groupe "
+                      f"d'altitude de `groupes_requete()`.", file=sys.stderr)
         yield row
 
 
@@ -1848,8 +2319,18 @@ def upload_r2(path: pathlib.Path, key: str) -> bool:
         # Clé HORODATÉE et immuable : un objet par jour, jamais réécrit.
         # Cache long légitime — et pas de purge à prévoir, contrairement
         # aux isobares : ~176 Mo/an, l'archive est faite pour rester.
+        #
+        # ⚠️ LE MANIFESTE N'EST NI DU NDJSON NI GZIPPÉ (lot S0.6). Le
+        # déclarer comme tel ferait servir par R2 un `Content-Encoding:
+        # gzip` sur 300 octets de JSON clair — et un client HTTP qui
+        # respecte l'en-tête échouerait à le décompresser. Le type se
+        # DÉDUIT du suffixe plutôt que de se passer en argument : un
+        # appelant qui doit y penser finira par ne pas y penser.
+        est_manifeste = key.endswith(".manifeste.json")
         st.put(key, path.read_bytes(), cache_control=CACHE_IMMUABLE,
-               content_type="application/x-ndjson", content_encoding="gzip")
+               content_type=("application/json" if est_manifeste
+                             else "application/x-ndjson"),
+               content_encoding=(None if est_manifeste else "gzip"))
         st.bilan()
         temoin(path).write_text(
             datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") + "\n",
@@ -1862,8 +2343,21 @@ def upload_r2(path: pathlib.Path, key: str) -> bool:
 
 
 def en_retard(out: pathlib.Path) -> list[pathlib.Path]:
-    """Les archives locales qui ne sont jamais montées sur R2."""
-    return sorted(p for p in out.rglob("*.ndjson.gz") if not temoin(p).exists())
+    """Les archives locales qui ne sont jamais montées sur R2.
+
+    ⛔ LES MANIFESTES EN FONT PARTIE, ET C'EST UNE CORRECTION DU LOT S0.6.
+    Cette fonction ne cherchait que `*.ndjson.gz`. Un manifeste
+    (`*.manifeste.json`) dont l'envoi R2 échoue n'aurait donc JAMAIS été
+    retenté — et son absence sur R2 se lit, côté `score.py`, « journée
+    d'avant la partition », c'est-à-dire précisément le trou que le
+    manifeste existe pour fermer. Un objet de 300 octets qui manque
+    ferait alors noter la nuit sur une partie sur deux, en silence.
+
+    ⓘ Le témoin (`.r2ok`) marche à l'identique pour les deux : il est
+    posé À CÔTÉ du fichier, quel que soit son suffixe.
+    """
+    return sorted(p for motif in ("*.ndjson.gz", "*.manifeste.json")
+                  for p in out.rglob(motif) if not temoin(p).exists())
 
 
 def rattraper(out: pathlib.Path, plafond: int = 30) -> None:
@@ -1919,7 +2413,42 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
+    # ⛔ LA PARTITION EN PASSES HORAIRES (lot S0.6, 22/08/2026).
+    #
+    # `--passe 0` (défaut) = TOUTES les passes d'un coup, dans une seule
+    # fenêtre horaire. C'est le comportement d'avant ce lot, et il reste
+    # le défaut EXPRÈS : tant que le référentiel tient sous 818 points
+    # (marge 161 le 22/08), partitionner ne rapporte rien et coûterait
+    # une discontinuité de fraîcheur de run dans une archive comparée
+    # sur 15 jours. La partition s'ACTIVE en installant le second timer,
+    # pas en modifiant du code.
+    #
+    # ⚠️ ET LE DÉCOUPAGE SE FAIT PAR GROUPE DE MODÈLES, JAMAIS PAR
+    # BALISE. Une partie manquante doit se lire « sept modèles absents
+    # cette nuit-là » et jamais « le modèle a changé de couverture » —
+    # et découper `stations` fabriquerait en plus un biais de fraîcheur
+    # de run corrélé à un découpage arbitraire, invisible et
+    # systématique. Les quatre critères sont au §5.1 du lot S0.4.
+    ap.add_argument("--passe", type=int, default=0, metavar="N",
+                    help="ne collecter QUE la passe N de `groupes_requete()` "
+                         "(1 = altitude + clé historique, 2 = surface). "
+                         "0 (défaut) = toutes les passes en une fois.")
     args = ap.parse_args()
+
+    groupes_tous = groupes_requete()
+    if args.passe and not 1 <= args.passe <= len(groupes_tous):
+        print(f"❌ --passe {args.passe} : il n'y a que {len(groupes_tous)} "
+              f"passe(s) dans `groupes_requete()`.", file=sys.stderr)
+        return 1
+    # ⛔ ON NE PARTITIONNE PAS LA PASSE OBSERVATIONS, ET CE N'EST PAS UN
+    # OUBLI. Elle boucle sur le même `stations`, ne consomme AUCUN quota
+    # Open-Meteo (mesuré : le fichier de budget ne connaît sur 24 h que
+    # `collect` et `backfill_packs`), et la couper en deux couperait
+    # l'archive d'observation Pioupiou en deux fichiers — un dégât
+    # gratuit. Une passe ≥ 2 ne fait donc QUE des prévisions.
+    if args.passe and args.passe > 1:
+        args.skip_obs = args.skip_metar = args.skip_windsmobi = True
+        args.skip_infoclimat = args.skip_mf = args.skip_aemet = True
 
     out = pathlib.Path(args.out)
     stations_path = pathlib.Path(args.stations) if args.stations else out / "stations.json"
@@ -1930,88 +2459,277 @@ def main() -> int:
         print(f"❌ {exc}", file=sys.stderr)
         return 1
     if args.limit:
+        # ⛔ UNE SOUPAPE QUI TRONQUE DOIT COMPTER ET NOMMER CE QU'ELLE
+        # ÉCARTE (S0.4, 22/08). Avant, cette ligne coupait la liste en
+        # silence — et comme le référentiel est trié par `id` et non par
+        # ancienneté, ce sont des balises arbitraires qui disparaissaient
+        # d'une archive irremplaçable, sans une ligne de journal. Un trou
+        # nommé vaut mieux qu'un run tué ; un trou ANONYME ne vaut rien
+        # du tout, parce qu'on ne saura jamais qu'il est là.
+        ecartees = stations[args.limit:]
         stations = stations[: args.limit]
+        if ecartees:
+            apercu = ", ".join(f"{s['source']}:{s['id']}" for s in ecartees[:5])
+            print(f"⚠️ --limit {args.limit} : {len(ecartees)} point(s) ÉCARTÉ(S) "
+                  f"de la passe prévisions ET de la passe observations — "
+                  f"{apercu}" + (" …" if len(ecartees) > 5 else "")
+                  + f" (liste triée par id, pas par ancienneté)",
+                  file=sys.stderr)
 
     now = datetime.now(timezone.utc)
     fetched_at = now.isoformat()
     today = now.strftime("%Y-%m-%d")
     obs_day = args.obs_day or (now - timedelta(days=1)).strftime("%Y-%m-%d")
 
+    # ⛔⛔ UN GARDE-FOU DE QUOTA NE DOIT PAS DÉTRUIRE UNE DONNÉE QUE LE
+    # QUOTA NE CONCERNE PAS (S0.4, 22/08 — entrée `BUGS.md`).
+    #
+    # Ce `quota_projete` ne chiffre QUE la passe prévisions : c'est la
+    # seule section de ce script qui parle à Open-Meteo. Mesuré, pas
+    # supposé — les six autres sections interrogent Pioupiou
+    # (`fetch_archive`, `PIOUPIOU_ARCHIVE`), Iowa State (METAR),
+    # winds.mobi, Infoclimat, Météo-France et l'AEMET, et le fichier de
+    # budget `/var/lib/bw-quota/openmeteo.json` ne connaît sur 24 h que
+    # deux consommateurs : `collect` (cette passe) et `backfill_packs`.
+    #
+    # Or jusqu'au 22/08 cet `Abort` faisait `return 1` AVANT tout le
+    # reste. La nuit du dépassement aurait donc perdu, en plus des
+    # prévisions, l'archive d'observation des CINQ réseaux — dont trois
+    # n'ont que 30 à 48 h de rétention amont, c'est-à-dire perdues pour
+    # toujours. On saute donc la passe qui déborde, on garde celles qui
+    # ne coûtent rien, et on sort NON NUL pour que l'alerte parte quand
+    # même (`run.sh`, SEUIL_ALERTE=1) : alerter ET collecter, pas
+    # alerter OU collecter.
+    # ⚠️ LES GROUPES DE CETTE PASSE. `--passe 0` les prend tous, dans
+    # une seule fenêtre horaire — le comportement d'avant le lot S0.6.
+    groupes = ([groupes_tous[args.passe - 1]] if args.passe else groupes_tous)
+
+    rc = 0
+    quota_refuse = None
     try:
-        quota_projete(len(stations), args.forecast_days)
+        quota_projete(len(stations), args.forecast_days,
+                      groupes=groupes, passe=args.passe)
     except Abort as exc:
+        quota_refuse = str(exc)
         print(f"❌ {exc}", file=sys.stderr)
-        return 1
+        print("⚠️ passe PRÉVISIONS abandonnée faute de quota — les passes "
+              "d'observation, qui ne consomment AUCUN quota Open-Meteo, "
+              "continuent. Le run sortira quand même en erreur.",
+              file=sys.stderr)
+        args.skip_forecast = True
+        rc = 1
 
     if args.dry_run:
         print("  (dry-run : aucune requête météo, aucun fichier)")
-        return 0
-
-    rc = 0
+        return rc
 
     # ── 0. RATTRAPAGE ────────────────────────────────────────────
     # Avant tout le reste : si une nuit précédente n'a pas pu monter son
     # archive, c'est maintenant qu'on la pousse, pendant qu'on a encore
     # le fichier.
-    rattraper(out)
+    #
+    # ⚠️ SEULE LA PASSE 1 RATTRAPE (lot S0.6). Deux passes qui
+    # rattrapent, ce sont deux processus qui montent les mêmes objets et
+    # se disputent le plafond d'écritures de `Storage` (10 par chaîne) —
+    # avec, à la clé, un `Abort` « plafond atteint » sur la passe qui
+    # arrive seconde, pour un travail déjà fait. La passe 1 tourne une
+    # heure plus tôt : elle a rattrapé, il ne reste rien à rattraper.
+    # ⓘ Et si la passe 1 a échoué, sa propre archive part au rattrapage
+    # de la nuit suivante, comme toutes les autres.
+    if args.passe <= 1:
+        rattraper(out)
+
+    # ── 0 bis. LA PASSE DEMANDE SA PLACE, ELLE NE LA SUPPOSE PAS ──
+    #
+    # ⛔ C'EST LE POINT QUE LE LOT S0.4 SIGNALE ET NE RÉSOUT PAS, et il
+    # se joue ICI, avant la première requête. Si la passe précédente a
+    # débordé — son chien de garde vaut 40 min —, ses événements ne
+    # sortent de la fenêtre glissante qu'une heure après son DERNIER
+    # appel Open-Meteo. Une passe qui partirait quand même se ferait
+    # refuser POINT PAR POINT jusqu'à `ATTENTE_MAX_S`, en fabriquant des
+    # centaines de trous DÉCLARÉS là où attendre une fois, douze
+    # minutes, ramène toute la donnée.
+    #
+    # ⚠️ On ne le fait QUE pour une passe nommée (`--passe N`). Sans
+    # partition il n'y a personne devant, et attendre serait attendre
+    # sa propre ombre.
+    attendu_demarrage = 0.0
+    if args.passe and not args.skip_forecast:
+        _qm0 = charger_quota()
+        try:
+            attendu_demarrage = attendre_la_place(
+                _qm0.Budget("collect") if _qm0 else None,
+                len(stations) * sum(len(v) * len(m) for m, v in groupes) / 10,
+                args.passe)
+        except Abort as exc:
+            print(f"❌ {exc}", file=sys.stderr)
+            quota_refuse = str(exc)
+            args.skip_forecast = True
+            rc = 1
 
     # ── 1. PRÉVISIONS ────────────────────────────────────────────
     # En premier, et c'est délibéré : c'est la partie non rattrapable.
     # Les observations Pioupiou, elles, restent lisibles des mois plus
     # tard dans l'archive publique.
     if not args.skip_forecast:
-        key = f"fcst/{now:%Y/%m}/fcst_{today}.ndjson.gz"
+        # ⚠️ LA PARTIE 1 GARDE LA CLÉ HISTORIQUE, sans condition et sans
+        # date de bascule : `fcst_cle(now, 1)` rend exactement la chaîne
+        # d'avant ce lot. Les parties ≥ 2 prennent `_p{i}`.
+        partie = args.passe or 1
+        key = fcst_cle(now, partie)
         path = out / key
-        print(f"▶ prévisions : {len(stations)} points × {len(MODELS)} modèles → {path}")
-        failed = 0
+        # ⚠️ DEUX REQUÊTES PAR POINT DEPUIS LE S0.4, PAS UNE (22/08).
+        # Le contenu de l'archive est INCHANGÉ — mêmes lignes, mêmes
+        # champs, même `fetched_at` (calculé une fois, avant la boucle,
+        # donc identique pour les deux groupes). Seul le nombre de
+        # requêtes change, et le poids : 7,2 → 5,8 pondérés par point,
+        # parce que les deux variables de 850 hPa ne sont plus demandées
+        # aux huit modèles qui ne les portent pas. Cf. `groupes_requete`.
+        # `groupes` est déjà celui de CETTE passe (calculé plus haut).
+        modeles_passe = [m for grp, _v in groupes for m in grp]
+        print(f"▶ prévisions"
+              + (f" — PASSE {partie}/{len(groupes_tous)} "
+                 f"({len(modeles_passe)} modèles : "
+                 f"{', '.join(modeles_passe)})" if args.passe else "")
+              + f" : {len(stations)} points × {len(modeles_passe)} modèles, "
+              + f"en {len(groupes)} requête(s) par point "
+              + " + ".join(f"{len(m)}×{len(v)}" for m, v in groupes)
+              + f" → {path}")
+
+        # ⛔ LE MANIFESTE, ÉCRIT PAR LA PASSE 1, AVANT LA MOINDRE LIGNE
+        # DE DONNÉES — et jamais réécrit ensuite.
+        #
+        # C'est l'ORDRE qui fait tout le travail : si l'écriture des
+        # données échoue après, la déclaration existe déjà et la
+        # notation saura qu'il manque quelque chose. L'inverse — écrire
+        # d'abord, déclarer ensuite — laisserait exactement le trou que
+        # ce lot ferme, parce que le cas qui nous intéresse est celui où
+        # la passe meurt en cours de route.
+        #
+        # ⚠️ Il est écrit MÊME quand `--passe 0`, c'est-à-dire même
+        # quand la nuit n'a qu'une passe. Sans ça, « manifeste absent »
+        # voudrait dire deux choses (avant la partition / la passe 1 est
+        # morte) et il faudrait deviner laquelle. Avec, il n'en veut
+        # plus dire qu'une : la journée est antérieure à ce lot.
+        # ⓘ Un objet de ~500 octets par jour. `Storage` en compte une
+        # écriture sur son plafond de 10 : la passe 1 en fait deux
+        # (manifeste + archive), la passe 2 une seule.
+        if partie == 1:
+            m_key = manifeste_cle(now)
+            m_path = out / m_key
+            m_path.parent.mkdir(parents=True, exist_ok=True)
+            m_path.write_text(
+                json.dumps(construire_manifeste(now, len(stations),
+                                                groupes_tous),
+                           ensure_ascii=False, indent=1) + "\n",
+                encoding="utf-8")
+            print(f"  ⓘ manifeste : {len(groupes_tous)} partie(s) déclarée(s) "
+                  f"pour le flux `{FLUX_PARTITIONNE}/` du {today} → {m_key}")
+            if not upload_r2(m_path, m_key):
+                # ⚠️ PAS FATAL, MAIS DIT. L'objet local reste, `rattraper`
+                # le reprendra la nuit suivante (il cherche désormais
+                # aussi les `*.manifeste.json`), et `score.py` lit le
+                # disque local AVANT R2 — sur le VPS, la notation le
+                # trouvera donc quand même dès ce soir.
+                print("  ⚠️ manifeste non monté sur R2 — présent en local, "
+                      "rattrapage au prochain run", file=sys.stderr)
+
+        failed = 0            # points ayant perdu AU MOINS un groupe
+        partiels = 0          # points ayant perdu un groupe mais pas tous
 
         # ⚠️ LE SEAU EST CONSTRUIT ICI, PAS DANS LA BOUCLE : c'est lui
         # qui porte le compte, et un seau reconstruit à chaque point
         # relirait l'état 648 fois pour rien.
         qm = charger_quota()
         budget = qm.Budget("collect") if qm else None
-        # ⚠️ POIDS DÉRIVÉ, JAMAIS RECOPIÉ. Si quelqu'un ajoute demain une
-        # variable ou un modèle, ce calcul suit ; un `8` en dur, non.
-        poids_point = (qm.poids(len(_hourly_vars()), len(MODELS))
-                       if qm else None)
+        # ⚠️ POIDS DÉRIVÉ, JAMAIS RECOPIÉ, ET UN PAR GROUPE. Si quelqu'un
+        # ajoute demain une variable ou un modèle, ce calcul suit ; un
+        # `8` en dur, non. Le seau doit réserver le poids DU GROUPE au
+        # moment où il part : réserver 5,8 d'un coup pour deux requêtes
+        # espacées ferait mentir le compteur de la minute.
+        poids_groupe = ([qm.poids(len(v), len(m)) for m, v in groupes]
+                        if qm else [None] * len(groupes))
         refuses = 0
+        # Ce que chaque groupe a collecté et refusé — c'est la ligne que
+        # le journal doit porter pour qu'une nuit à demi collectée se
+        # lise comme telle.
+        collectes_g = [0] * len(groupes)
+        refuses_g = [0] * len(groupes)
 
         def _fcst_rows():
-            nonlocal failed, refuses
+            nonlocal failed, refuses, partiels
             for i, st in enumerate(stations, 1):
-                # Le droit de parler AVANT de parler. En dégradé comme
-                # en nominal, `demander` rend la main quand c'est l'heure.
-                if budget is not None:
-                    try:
-                        budget.demander(
-                            poids_point,
-                            etiquette=f"{st['lat']:.3f},{st['lon']:.3f}")
-                    except qm.BudgetRefuse as exc:
-                        # ⚠️ TROU DÉCLARÉ, JAMAIS COMBLÉ. Un point non
-                        # collecté se dit ; il ne s'interpole pas, et il
-                        # ne fait pas non plus tuer le run par le chien
-                        # de garde — c'était la mort du 09/08.
-                        print(f"  ⛔ {exc}", file=sys.stderr)
-                        refuses += 1
-                        failed += 1
-                        continue
-                else:
-                    # Module absent : cadence conservatrice d'avant le
-                    # lot, celle qui a tenu le 08/08.
-                    time.sleep(0.70)
+                perdus = 0
+                for gi, ((modeles, variables), p) in enumerate(
+                        zip(groupes, poids_groupe)):
+                    # Le droit de parler AVANT de parler. En dégradé
+                    # comme en nominal, `demander` rend la main quand
+                    # c'est l'heure.
+                    if budget is not None:
+                        try:
+                            budget.demander(
+                                p,
+                                etiquette=f"{st['lat']:.3f},{st['lon']:.3f} "
+                                          f"g{gi + 1}")
+                        except qm.BudgetRefuse as exc:
+                            # ⚠️ TROU DÉCLARÉ, JAMAIS COMBLÉ. Un point
+                            # non collecté se dit ; il ne s'interpole
+                            # pas, et il ne fait pas non plus tuer le
+                            # run par le chien de garde — c'était la
+                            # mort du 09/08.
+                            print(f"  ⛔ {exc}", file=sys.stderr)
+                            refuses += 1
+                            refuses_g[gi] += 1
+                            perdus += 1
+                            continue
+                    else:
+                        # Module absent : cadence conservatrice d'avant
+                        # le lot, celle qui a tenu le 08/08. Divisée par
+                        # le nombre de groupes : c'est le même volume de
+                        # pondérés par seconde, en deux fois plus de
+                        # requêtes plus légères.
+                        time.sleep(0.70 / len(groupes))
 
-                payload = fetch_forecast(st["lat"], st["lon"], args.forecast_days)
-                if payload is None:
+                    payload = fetch_forecast(st["lat"], st["lon"],
+                                             args.forecast_days,
+                                             modeles, variables)
+                    if payload is None:
+                        perdus += 1
+                    else:
+                        collectes_g[gi] += 1
+                        yield from forecast_rows(st, payload, fetched_at,
+                                                 modeles)
+                if perdus:
                     failed += 1
-                else:
-                    yield from forecast_rows(st, payload, fetched_at)
+                    if perdus < len(groupes):
+                        partiels += 1
                 if i % 50 == 0:
-                    print(f"  … {i}/{len(stations)} ({failed} échecs)")
+                    print(f"  … {i}/{len(stations)} ({failed} points entamés)")
 
         n = write_ndjson_gz(path, _fcst_rows())
-        print(f"✅ {n} lignes, {failed} points en échec "
-              f"(dont {refuses} refusés par le quota), "
-              f"{path.stat().st_size / 1024:.0f} Ko")
+        # ⚠️ `failed` compte les points qui ont perdu AU MOINS UN groupe,
+        # pas seulement ceux qui ont tout perdu : c'est le comptage
+        # STRICT, et un garde-fou qui se trompe doit se tromper du côté
+        # qui protège. Un point « partiel » a bien des lignes dans
+        # l'archive, mais il lui manque des modèles — et une balise à
+        # laquelle il manque des modèles fausse un classement de zone
+        # sans qu'aucun trou ne soit visible.
+        print(f"✅ {n} lignes"
+              + (f" [PARTIE {partie}/{len(groupes_tous)} du flux "
+                 f"`{FLUX_PARTITIONNE}/`]" if args.passe else "")
+              + f", {failed} point(s) ayant perdu au moins un groupe "
+              + f"(dont {partiels} partiel(s), {refuses} refus de quota), "
+              + f"{path.stat().st_size / 1024:.0f} Ko"
+              + (f", après {attendu_demarrage:.0f}s d'attente de quota au "
+                 f"démarrage" if attendu_demarrage else ""))
+        for gi, (modeles, variables) in enumerate(groupes):
+            print(f"   groupe {gi + 1}/{len(groupes)} "
+                  f"({len(modeles)} modèles × {len(variables)} vars, "
+                  f"{len(modeles) * len(variables) / 10:.1f} pondéré/point) : "
+                  f"{collectes_g[gi]}/{len(stations)} points collectés, "
+                  f"{refuses_g[gi]} refusés faute de budget — "
+                  f"{collectes_g[gi] * len(modeles) * len(variables) / 10:.1f} "
+                  f"pondérés")
         # ⚠️ LA LIGNE QUI NOMME LES CONSOMMATEURS. Un budget partagé qui
         # ne dit pas QUI a consommé QUOI déplace le problème au lieu de
         # le résoudre : quand la collecte échouera, on doit pouvoir lire
@@ -2200,6 +2918,28 @@ def main() -> int:
               f"que sur ce disque : {apercu}"
               + (" …" if len(reste) > 5 else ""), file=sys.stderr)
         rc = rc or 2
+
+    # ⚠️ EN DERNIER, ET C'EST DÉLIBÉRÉ. Le corps du mail d'alerte de
+    # `run.sh` est un `tail -n 25` du journal : un refus de quota
+    # annoncé à la première seconde du run n'y apparaîtrait pas, noyé
+    # sous six passes d'observation. Le rappel doit être la dernière
+    # chose écrite pour être la première chose lue.
+    if quota_refuse:
+        # ⚠️ LE RAPPEL NOMME LA PARTIE ET LES MODÈLES PERDUS (lot S0.6).
+        # « la passe prévisions n'a pas eu lieu » suffisait tant qu'il
+        # n'y en avait qu'une. Avec deux, il faut dire LAQUELLE et donc
+        # QUELS MODÈLES manquent à cette nuit-là — sinon le journal dit
+        # « une passe a échoué » et la notation, elle, dira « sept
+        # modèles absents » : deux phrases pour le même fait, qu'on
+        # passera la matinée à rapprocher.
+        quoi = ""
+        if args.passe:
+            perdus = [m for grp, _v in groupes for m in grp]
+            quoi = (f" [PARTIE {args.passe}/{len(groupes_tous)} — modèles "
+                    f"perdus pour cette nuit : {', '.join(perdus)}]")
+        print(f"❌ RAPPEL — la passe PRÉVISIONS du {today}{quoi} n'a PAS eu "
+              f"lieu, et cette journée ne se rattrapera jamais : "
+              f"{quota_refuse}", file=sys.stderr)
 
     return rc
 
