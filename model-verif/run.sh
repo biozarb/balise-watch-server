@@ -367,6 +367,77 @@ if [[ "$MODE" == "agrume" ]] && ! "$PYTHON" -c "import numpy" >/dev/null 2>&1; t
   exit 1
 fi
 
+# ── Contrôle n°1 : l'injection, AVANT la notation (lot S3, 23/08) ────
+#
+# ⛔ TROIS CODES, TROIS SUITES DIFFÉRENTES, et c'est tout l'intérêt :
+#
+#   0  vert                        → la nuit continue
+#   2  LE SCORING EST FAUX         → on s'arrête, RIEN n'est écrit
+#   *  le contrôle n'a pas pu      → on alerte ET la nuit continue
+#
+# La distinction 2 / 3 n'est pas de la coquetterie. Un garde-fou qui
+# tue la nuit pour SA PROPRE panne (un import, une fixture, un chemin)
+# est un garde-fou qu'on désarme au bout de trois faux positifs — et il
+# aura alors coûté exactement ce qu'il devait éviter.
+#
+# ⚠️ CE QU'UN BLOCAGE COÛTE, VÉRIFIÉ ET PAS RECOPIÉ : la notation LIT
+# une archive déjà écrite (`collect` a fini à 03:2x, `arome` tournera à
+# 06:00 — deux jobs séparés, que ceci n'empêche pas) et elle SE REJOUE
+# (`score.py --day AAAA-MM-JJ`, `accumulate` refuse une journée déjà
+# intégrée, donc le rejeu est idempotent). Un faux positif ici coûte un
+# re-run, pas une nuit. C'est ce qui autorise à le rendre bloquant dès
+# la première nuit — contrairement au bloquant de `collect`, dont
+# l'amont ne se rattrape jamais.
+#
+# ⛔⛔ ET UN INTERRUPTEUR, `BW_MODEL_SELF_TEST_BLOQUANT` (défaut : 1).
+# Posé à 0, un verdict « scoring faux » alerte aussi fort mais LAISSE
+# PASSER la nuit. Arbitré par Yann le 23/08 pour la PREMIÈRE nuit : on
+# regarde ce que le contrôle dit en production avant de lui donner le
+# pouvoir d'arrêter le run.
+#
+# ⚠️ LE DANGER D'UN INTERRUPTEUR EST QU'ON L'OUBLIE, et un garde-fou
+# oublié en position ouverte a exactement l'allure d'un garde-fou armé.
+# D'où la ligne ci-dessous : elle sort à CHAQUE run tant que le
+# désarmement dure, verte ou rouge, et pas seulement le jour où ça
+# casse. C'est la même règle que « PERSONNE NE SURVEILLE CE JOB ».
+if [[ "$MODE" == "score" ]]; then
+  BLOQUANT="${BW_MODEL_SELF_TEST_BLOQUANT:-1}"
+  if [[ "$BLOQUANT" != "1" ]]; then
+    dire "⛔ SELF-TEST NON BLOQUANT (BW_MODEL_SELF_TEST_BLOQUANT=$BLOQUANT) — le garde-fou est DÉSARMÉ, à RÉARMER dans $ALERTES_FILE"
+  fi
+  "$PYTHON" "$SCRIPT" --self-test 2>&1 | tee -a "$LOG"
+  st_code=${PIPESTATUS[0]}
+  if (( st_code == 2 )) && [[ "$BLOQUANT" != "1" ]]; then
+    alerter "$LIBELLE ($MODE) — SELF-TEST ROUGE, MAIS DESARME" \
+      "Le controle d'injection dit que le scoring est FAUX, et la nuit a ete notee QUAND MEME parce que BW_MODEL_SELF_TEST_BLOQUANT=$BLOQUANT. Les lignes ecrites cette nuit sont suspectes. Dernieres lignes :
+$(tail -n 25 "$LOG")"
+    dire "⛔ self-test ROUGE mais désarmé — la notation continue, les lignes de cette nuit sont SUSPECTES"
+  elif (( st_code == 2 )); then
+    # ⭐ ON ALERTE DÈS LE PREMIER, sans passer par `SEUIL_ALERTE` (qui
+    # vaut 2 pour `score`). Ce seuil-là existe parce qu'un run de
+    # notation raté est souvent un aléa qui se répare tout seul la nuit
+    # suivante. Un self-test rouge, non : il ne dépend d'aucune donnée
+    # réelle, d'aucun réseau et d'aucun horaire. S'il est rouge cette
+    # nuit, il le sera demain.
+    n=$(( $(cat "$ECHECS" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$ECHECS"
+    alerter "$LIBELLE ($MODE) — SELF-TEST ROUGE" \
+      "Le contrôle d'injection dit que le scoring est FAUX. Aucune ecriture en base cette nuit. $n echec(s) consecutif(s). Dernieres lignes :
+$(tail -n 25 "$LOG")"
+    dire "run $MODE ARRÊTÉ par le self-test (code 2) — rien écrit"
+    exit 2
+  elif (( st_code != 0 )); then
+    # ⚠️ ON ALERTE QUAND MÊME, ET AUSSI FORT. Un contrôle désarmé et un
+    # contrôle vert se ressemblent trop pour qu'on laisse la différence
+    # dans un journal que personne n'ouvre. ⓘ `alerter` pingue
+    # `/fail` : le check passera au rouge puis reviendra au vert au
+    # ping de fin de run — la trace durable, c'est le mail.
+    alerter "$LIBELLE ($MODE) — SELF-TEST INDISPONIBLE" \
+      "Le controle d'injection n'a pas pu tourner (code $st_code). Ce n'est PAS un verdict sur le scoring : la notation continue, mais le garde-fou est DESARME. Dernieres lignes :
+$(tail -n 25 "$LOG")"
+  fi
+fi
+
 # ── Le run ───────────────────────────────────────────────────────────
 debut=$(date +%s)
 dire "▶ $MODE — bucket R2 « $BUCKET », python $PYTHON"
@@ -400,6 +471,29 @@ fi
 duree=$(( $(date +%s) - debut ))
 
 if (( code == 0 )); then
+  # ── Contrôle n°2 : le recalcul indépendant (lot S3, 23/08) ─────────
+  #
+  # ⛔ APRÈS la notation, et NON BLOQUANT — c'est un détecteur de
+  # dérive, pas un garde-fou. Il relit l'archive de 20 balise-jours
+  # tirés au sort (stratifiés) et refait l'erreur vectorielle À LA MAIN,
+  # sans importer une ligne de `score.py` ni de `scoring.py`, puis
+  # compare à ce qui vient d'être écrit. Un écart au-dessus de
+  # 0,05 km/h part en ⚠️ dans le journal ; le code de sortie du run
+  # n'en dépend jamais (`|| true`, et le script rend 0 de toute façon).
+  #
+  # ⓘ Mesuré le 23/08 sur le VPS : 6 s pour la journée du 21/08
+  # (17 484 lignes de prévision, 3 734 balises). C'est 0,4 % d'un run de
+  # notation à 1 500 s.
+  #
+  # ⚠️ IL NE REÇOIT PAS `"${@:2}"`. Les deux scripts prennent « hier »
+  # par défaut, ce qui suffit au run de nuit ; mais un `run.sh score
+  # --day 2026-08-19` lancé à la main ne recalculerait PAS le 19 — il
+  # faut alors appeler le recalcul séparément, avec le même `--day`.
+  RECALCUL="$ICI/../verif/recalcul_balise_jour.py"
+  if [[ "$MODE" == "score" && -f "$RECALCUL" ]]; then
+    "$PYTHON" "$RECALCUL" --out "$ETAT" 2>&1 | tee -a "$LOG" || true
+  fi
+
   echo 0 > "$ECHECS"
   ping="${!PING_VAR:-}"
   if [[ -n "$ping" ]]; then

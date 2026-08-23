@@ -3260,6 +3260,433 @@ def _upsert_scores(sb, rows: list[dict]) -> int:
         return sb.upsert("model_score_zone", rows, cle)
 
 
+# ══════════════════════════════════════════════════════════════════
+#  CONTRÔLE N°1 — L'INJECTION (`--self-test`), lot S3, 23/08/2026
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ POURQUOI CE MODE EXISTE. Le 22/08, le chantier a payé DEUX FOIS
+#  en une journée le prix d'un scoring qui se trompait sans rien lever :
+#  `rank_models` publiait « 1ᵉʳ sur 1 » avec la mention « un vainqueur,
+#  prouvé et utile », et écrire `aloft_*` volait le régime de 13 795
+#  lignes par nuit. Aucun des deux n'aurait fait rougir quoi que ce
+#  soit. Un scoring qui ne sait pas échouer publie ses fautes avec le
+#  même aplomb que ses résultats.
+#
+#  DEUX ÉPREUVES, sur des données FABRIQUÉES EN MÉMOIRE :
+#
+#    (a) parfaite  — la prévision EST l'observation
+#                  → `err_vec_med` = 0 et `skill` = 1
+#    (b) permutée  — chaque balise reçoit la prévision d'une AUTRE
+#                  → une erreur DU MÊME ORDRE QUE LA CLIMATOLOGIE
+#
+#  ⛔ CE MODE NE TOUCHE RIEN. Pas de base, pas de R2, pas d'Open-Meteo,
+#  pas de `/var/lib/bw-quota/openmeteo.json`, pas de cache de rejeu. Il
+#  n'ouvre aucun fichier et n'ouvre aucune socket : il fabrique ses
+#  données et il appelle `daily_rows` et `skill_contre`, c'est-à-dire
+#  exactement le chemin que la nuit empruntera trente secondes plus
+#  tard. `main()` sort AVANT de construire `Supabase` et `_storage`.
+#
+#  ⚠️ CE QU'IL NE COUVRE PAS, ET IL FAUT LE DIRE : le régime, le biais
+#  de site et sa colonne corrigée, les événements, la pression, les
+#  zones, le rang. Il couvre l'appariement, l'erreur vectorielle et les
+#  deux références (persistance, climatologie) — c'est-à-dire le tronc
+#  dont tout le reste dérive.
+#
+#  ⚠️ ET UNE ASYMÉTRIE CONNUE, QU'IL NE MASQUE PAS. `replay_day`
+#  (l. ~1745) appelle `daily_rows` SANS climatologie : sur tout le
+#  chemin RÉGIME, `mse_clim` est nul depuis le lot G1 (trouvé au lot S2,
+#  non corrigé). Le self-test, lui, injecte une climatologie fabriquée
+#  et vérifie donc `skill_clim` sur le chemin NOCTURNE, celui de
+#  `main()`. Il ne prétend pas couvrir l'autre, et le dire ici vaut
+#  mieux que de laisser croire que « self-test vert » veut dire « les
+#  deux chemins sont bons ».
+
+#: Balises fabriquées. 24 suffit à ce que la médiane de la population
+#: ait un sens, et le run entier tient en moins d'une seconde — ce qui
+#: compte, puisqu'il s'ajoute DEVANT une notation déjà longue.
+SELF_TEST_STATIONS = 24
+
+#: Graine de la permutation de l'épreuve (b). FIXE : un contrôle dont
+#: le verdict change d'une nuit à l'autre sans que le code ait bougé
+#: n'est pas un contrôle, c'est un tirage.
+SELF_TEST_GRAINE = 0x5EED
+
+#: L'épreuve (a) est ARITHMÉTIQUE, pas statistique : la prévision est
+#: l'observation, donc l'erreur est nulle au bit près. La tolérance ne
+#: couvre que l'arrondi de `_r` (4 décimales) et le flottant.
+SELF_TEST_ZERO_KMH = 1e-6
+
+#: ⭐ LA BORNE DE L'ÉPREUVE (b), ET ELLE EST MESURÉE — pas choisie.
+#:
+#: « Du même ordre que la climatologie » a été chiffré le 23/08/2026 en
+#: rejouant la permutation sur UNE JOURNÉE RÉELLE ARCHIVÉE (2026-08-21,
+#: 13 795 balise-jours, 10 modèles, 570 balises Pioupiou, lecture seule
+#: sur `/var/lib/bw-model-verif` + R2, aucune écriture — script jetable
+#: `/tmp/mesure_permutation.py`, à réécrire plutôt qu'à citer dans six
+#: mois). Permutation de Sattolo, la même que celle du code ci-dessous.
+#:
+#:   échéance │ err_méd honnête │ err_méd permutée │ rms perm / rms clim
+#:   ─────────┼─────────────────┼──────────────────┼────────────────────
+#:    +6 h    │  5,410 km/h     │  7,784 (×1,44)   │      1,46
+#:   +24 h    │  5,588 km/h     │  7,700 (×1,38)   │      1,45
+#:   +48 h    │  5,857 km/h     │  7,351 (×1,26)   │      1,41
+#:
+#: ⭐ Et le chiffre qui donne son nom à l'épreuve : rapporté à la
+#: PERSISTANCE, le permuté vaut 1,05 / 1,04 / 1,01. Une prévision tirée
+#: au hasard entre balises est donc, en production, exactement aussi
+#: mauvaise que « comme hier à la même heure », et 41 à 46 % pire que la
+#: climatologie horaire.
+#:
+#: ⛔ POURQUOI 1,0 EN BAS ET NON 1,4. La borne doit tenir sur une
+#: population FABRIQUÉE de 24 balises, pas sur 570 balises réelles : la
+#: exiger à 1,4 reviendrait à ajuster la fixture jusqu'à ce qu'elle
+#: reproduise un chiffre de production, c'est-à-dire à tester la
+#: fixture. 1,0 dit la seule chose qui soit vraie des deux côtés — « une
+#: prévision permutée n'est jamais MEILLEURE que la climatologie » — et
+#: garde 41 % de marge sur le chiffre mesuré.
+SELF_TEST_PERM_RATIO_CLIM_MIN = 1.0
+
+#: ⛔ ET UNE BORNE HAUTE, parce qu'une tolérance ouverte d'un seul côté
+#: laisse passer la moitié des pannes. Un facteur d'unité (m/s ↔ km/h,
+#: ×3,6) ou une direction lue en radians feraient EXPLOSER l'erreur
+#: permutée — et une explosion passe tous les seuils bas du monde.
+#: 3,0 est au-dessus du 1,46 mesuré (facteur 2 de marge) et SOUS le
+#: 3,6 d'une confusion d'unité : c'est la seule valeur qui attrape les
+#: deux fautes.
+#:
+#: ⓘ CE QUE LA FIXTURE REND VRAIMENT : **2,198** (mesuré le 23/08/2026,
+#: valeur DÉTERMINISTE — la fabrique ne tire rien au hasard). C'est plus
+#: que les 1,41-1,46 de la production, et c'est normal : 24 balises
+#: fabriquées aux régimes délibérément distincts se ressemblent moins
+#: que 570 balises réelles d'un même massif, qui partagent le flux
+#: synoptique. L'écart va dans le sens qui rend l'épreuve (b) PLUS
+#: sévère, pas moins. Marges restantes : ×2,2 sous la borne haute,
+#: ÷2,2 au-dessus de la borne basse.
+SELF_TEST_PERM_RATIO_CLIM_MAX = 3.0
+
+
+class _SelfTestIndisponible(Exception):
+    """Le self-test n'a pas pu tourner — pour une raison à LUI.
+
+    ⛔ CE N'EST PAS « LE SCORING EST FAUX », ET LES DEUX NE DOIVENT PAS
+    RENDRE LE MÊME CODE. Un garde-fou qui tue la nuit pour sa propre
+    panne — un import, une fixture, un chemin — est un garde-fou qu'on
+    désarme au bout de trois faux positifs, et il aura alors coûté
+    exactement ce qu'il devait éviter. Verdict faux ⇒ code 2, bloquant.
+    Panne du contrôle ⇒ code 3, bruyant mais NON bloquant.
+    """
+
+
+def _self_test_cycle(i: int, heure: float, decalage_h: float = 0.0) -> float:
+    """Le cycle diurne fabriqué de la balise `i`, en km/h.
+
+    Une brise : un socle, une bosse par jour, une phase propre à chaque
+    balise. Rien d'aléatoire — la fixture doit être la même à Paris et
+    sur le VPS, cette nuit et dans six mois.
+    """
+    socle = 6.0 + 2.0 * (i % 4)
+    amplitude = 8.0 + 2.0 * (i % 5)
+    pointe = 11.0 + (i % 6) + decalage_h
+    return socle + amplitude * (
+        0.5 + 0.5 * math.cos(2 * math.pi * (heure - pointe) / 24.0))
+
+
+def _self_test_direction(i: int) -> float:
+    """La direction fabriquée de la balise `i`, en degrés.
+
+    ⚠️ ÉTALÉE, MAIS PAS SUR TOUTE LA ROSE. Des balises voisines d'un
+    même massif partagent le flux synoptique : leur direction varie de
+    quelques dizaines de degrés, pas de 360. Étaler sur la rose entière
+    gonflerait artificiellement l'erreur permutée et rendrait la borne
+    haute de l'épreuve (b) inatteignable — on aurait mesuré la fixture.
+    """
+    return 200.0 + 12.0 * (i % 7) - 36.0
+
+
+def _self_test_fabrique(n: int = SELF_TEST_STATIONS):
+    """Une journée entière fabriquée : observations, prévisions, clim.
+
+    ⭐ TROIS RELEVÉS PAR HEURE, GROUPÉS À ±4 MIN DE LA MARQUE HORAIRE, et
+    ce détail EST le dispositif. `pair_series` apparie à ±20 min et
+    `mean_wind` moyenne VECTORIELLEMENT ce qu'elle trouve dans la
+    fenêtre : avec une cadence régulière de 4 min, la fenêtre de l'heure
+    h attraperait la queue de l'heure h−1 et la moyenne ne vaudrait plus
+    la valeur de l'heure h. L'épreuve (a) rendrait alors une erreur
+    petite mais non nulle, et il faudrait une tolérance — c'est-à-dire
+    qu'on mesurerait `mean_wind` au lieu de mesurer l'agrégat. Groupés,
+    les trois relevés de l'heure h sont les SEULS dans sa fenêtre : la
+    moyenne vaut la valeur de l'heure, exactement, et « 0 » veut dire 0.
+
+    ⚠️ `utc_offset_s = 0` dans tout le self-test : l'heure locale de la
+    climatologie est alors l'heure UTC, et la fixture n'a pas à porter
+    un fuseau qui ne prouve rien.
+    """
+    jour = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    jour_ms = int(jour.timestamp()) * 1000
+
+    def releves(d: datetime, decalage_h: float):
+        """Les lignes d'observation d'une journée, une par balise."""
+        base = int(d.timestamp())
+        lignes = []
+        for i in range(n):
+            t, sp = [], []
+            for h in range(24):
+                for dt_s in (-240, 0, 240):
+                    t.append(base + h * 3600 + dt_s)
+                    sp.append(_self_test_cycle(i, h, decalage_h))
+            lignes.append({
+                "station_id": f"st{i:02d}", "source": "pioupiou",
+                "lat": 45.0 + 0.01 * i, "lon": 6.0 + 0.01 * i,
+                "t": t, "speed": sp, "gust": [None] * len(t),
+                "dir": [_self_test_direction(i)] * len(t),
+            })
+        return lignes
+
+    # ⚠️ LA VEILLE EST DÉCALÉE DE CINQ HEURES, et c'est ce qui donne à la
+    # persistance une erreur non nulle. Sans ce décalage, « comme hier à
+    # la même heure » serait PARFAIT, `mse_persist` tomberait sous
+    # `SKILL_MIN_REF_MSE` et `skill_contre` rendrait `None` — l'épreuve
+    # (a) ne pourrait alors rien affirmer sur le skill, et elle le
+    # dirait au lieu de le contourner (cf. le contrôle plus bas).
+    obs_day = releves(jour, 0.0)
+    obs_prev = releves(jour - timedelta(days=1), 5.0)
+
+    # Les prévisions : la valeur de l'heure, à l'heure pile. Émises à
+    # 03:19 UTC comme `collect.py` le fait, sur 72 h comme un snapshot.
+    snapshots: dict[int, list[dict]] = {}
+    for offset in LEAD_BY_OFFSET:
+        emis = jour - timedelta(days=offset)
+        t0 = int(emis.timestamp())
+        lignes = []
+        for i in range(n):
+            speeds = []
+            for k in range(72):
+                t = t0 + k * 3600
+                # L'heure de la journée notée que ce pas recouvre — hors
+                # de cette journée, la valeur ne sera jamais appariée.
+                h = (t - int(jour.timestamp())) / 3600.0
+                speeds.append(_self_test_cycle(i, h, 0.0))
+            lignes.append({
+                "station_id": f"st{i:02d}", "source": "pioupiou",
+                "lat": 45.0 + 0.01 * i, "lon": 6.0 + 0.01 * i,
+                "model": "modele_fabrique",
+                "fetched_at": emis.replace(hour=3, minute=19).isoformat(),
+                "t0": t0, "step_s": 3600,
+                "speed": speeds, "dir": [_self_test_direction(i)] * 72,
+                "gust": [None] * 72,
+            })
+        snapshots[offset] = lignes
+
+    # La climatologie fabriquée : « le vent habituel ici à cette
+    # heure-ci », pris comme la MOYENNE JOURNALIÈRE de la balise. C'est
+    # volontairement une climatologie PLATE — elle ignore le cycle
+    # diurne, donc elle se trompe, donc `mse_clim` n'est pas nul et
+    # l'épreuve (b) a un dénominateur.
+    clim = {}
+    for i in range(n):
+        moyenne = sum(_self_test_cycle(i, h, 0.0) for h in range(24)) / 24.0
+        clim[f"pioupiou:st{i:02d}"] = {
+            h: (moyenne, _self_test_direction(i), CLIM_MIN_DAYS)
+            for h in range(24)}
+    return jour, snapshots, obs_day, obs_prev, clim
+
+
+def self_test_permuter(snapshots: dict[int, list[dict]],
+                       graine: int = SELF_TEST_GRAINE):
+    """Chaque balise reçoit la prévision d'une AUTRE, modèle par modèle.
+
+    ⭐ SATTOLO, PAS FISHER-YATES. Le tirage `j < i` STRICTEMENT rend un
+    cycle unique, donc AUCUN point fixe. Avec un mélange ordinaire, une
+    balise sur `n` garderait sa propre prévision par hasard : l'épreuve
+    (b) porterait un témoin secret, et la moyenne qu'elle mesure serait
+    tirée vers le bas d'autant.
+
+    ⚠️ `S._XorShift`, comme le demande le §S3 — le même générateur que
+    le bootstrap, donc le même à Paris, sur le VPS et en TypeScript.
+    """
+    out: dict[int, list[dict]] = {}
+    for offset, lignes in snapshots.items():
+        par_modele: dict[str, list[dict]] = defaultdict(list)
+        for r in lignes:
+            par_modele[r["model"]].append(r)
+        neuf: list[dict] = []
+        for modele, lot in par_modele.items():
+            n = len(lot)
+            ordre = list(range(n))
+            # ⛔ PAS `hash(modele)` : le hachage des chaînes est
+            # randomisé par processus (`PYTHONHASHSEED`), et le verdict
+            # d'un contrôle ne doit pas changer entre deux lancements.
+            empreinte = 0
+            for c in modele:
+                empreinte = (empreinte * 131 + ord(c)) & 0xFFFF
+            rnd = S._XorShift(graine ^ empreinte)
+            for i in range(n - 1, 0, -1):
+                j = min(i - 1, int(rnd.next() * i))
+                ordre[i], ordre[j] = ordre[j], ordre[i]
+            for i, r in enumerate(lot):
+                donneur = lot[ordre[i]]
+                copie = dict(r)
+                copie["speed"] = donneur["speed"]
+                copie["dir"] = donneur["dir"]
+                neuf.append(copie)
+        out[offset] = neuf
+    return out
+
+
+def _med(xs):
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2.0
+
+
+def self_test_epreuves(permuter=self_test_permuter, n=SELF_TEST_STATIONS,
+                       injecter=None):
+    """Joue les deux épreuves. Rend `(verdict_ok, lignes, mesures)`.
+
+    ⚠️ `permuter` ET `injecter` SONT DES PARAMÈTRES, et ce n'est pas de
+    la souplesse pour la souplesse : c'est ce qui permet au banc de
+    fabriquer l'échec de CHAQUE épreuve séparément — une permutation qui
+    n'en est pas une (l'identité) pour (b), une prévision légèrement
+    biaisée pour (a) — et d'exiger que le verdict soit ROUGE. Un
+    garde-fou dont on ne peut pas fabriquer l'échec ne se prouve pas ;
+    et sans `injecter`, la tolérance de (a) était un mutant survivant —
+    la mettre à 1 km/h ne changeait RIEN au banc, puisque l'erreur
+    parfaite vaut exactement 0. Trouvé par la campagne de mutations du
+    23/08, pas en relisant le code.
+    """
+    jour, snapshots, obs_day, obs_prev, clim = _self_test_fabrique(n)
+    if injecter is not None:
+        snapshots = injecter(snapshots)
+    lignes: list[str] = []
+    mesures: dict = {}
+    ok = True
+
+    def dire(bon: bool, texte: str):
+        nonlocal ok
+        ok = ok and bon
+        lignes.append(("     ✅ " if bon else "     ❌ ") + texte)
+
+    # ── (a) la prévision EST l'observation ────────────────────────
+    honnete, _ = daily_rows(jour, snapshots, obs_day, obs_prev, 0, clim)
+    if not honnete:
+        raise _SelfTestIndisponible(
+            "l'épreuve (a) n'a produit AUCUNE ligne : la fixture ne "
+            "s'apparie pas elle-même, ce n'est pas un verdict sur le "
+            "scoring")
+    mesures["n_lignes"] = len(honnete)
+    pire = max(r["err_vec_med"] for r in honnete)
+    dire(pire <= SELF_TEST_ZERO_KMH,
+         f"(a) prévision = observation → err_vec_med max = {pire:.6f} km/h "
+         f"(attendu ≤ {SELF_TEST_ZERO_KMH})")
+    mesures["err_max_parfaite"] = pire
+
+    mse_persist = _med([r["mse_persist"] for r in honnete])
+    mse_clim = _med([r["mse_clim"] for r in honnete])
+    # ⛔ SI LA FIXTURE NE DONNE PAS DE RÉFÉRENCE UTILISABLE, C'EST LA
+    # FIXTURE QUI EST EN CAUSE, PAS LE SCORING. On sort en `code 3` au
+    # lieu d'affirmer quoi que ce soit sur un skill qui n'existe pas —
+    # `skill_contre` rend `None` sous `SKILL_MIN_REF_MSE`, et un `None`
+    # lu comme un échec accuserait le scoring d'une faute de la fixture.
+    if mse_persist is None or mse_persist < SKILL_MIN_REF_MSE:
+        raise _SelfTestIndisponible(
+            f"la persistance fabriquée est trop bonne "
+            f"(mse_persist = {mse_persist}) : sous SKILL_MIN_REF_MSE "
+            f"({SKILL_MIN_REF_MSE}), `skill` sort à None par CONCEPTION "
+            f"et l'épreuve (a) ne peut rien affirmer")
+    if mse_clim is None or mse_clim < SKILL_MIN_REF_MSE:
+        raise _SelfTestIndisponible(
+            f"la climatologie fabriquée est trop bonne "
+            f"(mse_clim = {mse_clim}) : l'épreuve (b) n'aurait pas de "
+            f"dénominateur")
+
+    mse_modele = _med([r["mse_model"] for r in honnete])
+    skill, bat = skill_contre(mse_modele, mse_persist)
+    dire(skill is not None and abs(skill - 1.0) <= SELF_TEST_ZERO_KMH and bat,
+         f"(a) skill contre la persistance = {skill} (attendu 1, et "
+         f"`beats_persist` vrai) — mse_modèle {mse_modele}, "
+         f"mse_persist {mse_persist:.3f}")
+    skill_c, bat_c = skill_contre(mse_modele, mse_clim)
+    dire(skill_c is not None and abs(skill_c - 1.0) <= SELF_TEST_ZERO_KMH
+         and bat_c,
+         f"(a) skill contre la climatologie = {skill_c} (attendu 1) — "
+         f"mse_clim {mse_clim:.3f}")
+    mesures["skill_parfait"] = skill
+    mesures["skill_clim_parfait"] = skill_c
+
+    # ── (b) la prévision d'une AUTRE balise ───────────────────────
+    permute, _ = daily_rows(jour, permuter(snapshots, SELF_TEST_GRAINE),
+                            obs_day, obs_prev, 0, clim)
+    if len(permute) != len(honnete):
+        raise _SelfTestIndisponible(
+            f"la permutation a changé le NOMBRE de lignes "
+            f"({len(permute)} contre {len(honnete)}) : elle a déplacé "
+            f"autre chose que des séries, la comparaison n'a plus d'objet")
+    mse_perm = _med([r["mse_model"] for r in permute])
+    err_perm = _med([r["err_vec_med"] for r in permute])
+    if mse_perm is None:
+        raise _SelfTestIndisponible("aucun `mse_model` permuté mesurable")
+    rapport = math.sqrt(mse_perm) / math.sqrt(mse_clim)
+    mesures["err_med_permutee"] = err_perm
+    mesures["rapport_perm_clim"] = rapport
+    dire(SELF_TEST_PERM_RATIO_CLIM_MIN <= rapport
+         <= SELF_TEST_PERM_RATIO_CLIM_MAX,
+         f"(b) prévision permutée → rms(perm)/rms(clim) = {rapport:.3f} "
+         f"(attendu entre {SELF_TEST_PERM_RATIO_CLIM_MIN} et "
+         f"{SELF_TEST_PERM_RATIO_CLIM_MAX} ; mesuré 1,41 à 1,46 sur la "
+         f"journée réelle du 21/08) — err_vec_med médiane "
+         f"{err_perm:.3f} km/h")
+    skill_p, bat_p = skill_contre(mse_perm, mse_persist)
+    # ⭐ MESURÉ LE 23/08 SUR LE 21/08 RÉEL : le permuté vaut 1,01 à 1,05
+    # fois la persistance en RMS, donc un skill LÉGÈREMENT NÉGATIF. Une
+    # prévision tirée au hasard entre balises ne bat pas « comme hier à
+    # la même heure » — et si elle le battait, ce serait le scoring qui
+    # aurait un problème, pas la permutation.
+    dire(skill_p is not None and skill_p <= 0.0 and bat_p is False,
+         f"(b) prévision permutée → skill contre la persistance = "
+         f"{skill_p} (attendu ≤ 0, `beats_persist` faux)")
+    mesures["skill_permute"] = skill_p
+    return ok, lignes, mesures
+
+
+#: Le verdict du contrôle n°1, en codes de sortie. ⛔ LES TROIS SONT
+#: DIFFÉRENTS EXPRÈS — cf. `_SelfTestIndisponible`.
+SELF_TEST_OK = 0
+SELF_TEST_FAUX = 2
+SELF_TEST_INDISPONIBLE = 3
+
+
+def self_test() -> int:
+    """Le mode `--self-test`. Rend 0, 2 ou 3 — jamais autre chose."""
+    print("▶ self-test du scoring (contrôle n°1, lot S3) — "
+          "aucune lecture réelle, aucune écriture")
+    try:
+        ok, lignes, mesures = self_test_epreuves()
+    except _SelfTestIndisponible as exc:
+        print(f"  ⛔ SELF-TEST INDISPONIBLE : {exc}", file=sys.stderr)
+        print(f"  ⚠️ Ce n'est PAS un verdict sur le scoring. La notation "
+              f"peut continuer ; le contrôle, lui, est DÉSARMÉ tant que "
+              f"ceci n'est pas réparé.", file=sys.stderr)
+        return SELF_TEST_INDISPONIBLE
+    except Exception as exc:                            # noqa: BLE001
+        print(f"  ⛔ SELF-TEST INDISPONIBLE : {type(exc).__name__} — {exc}",
+              file=sys.stderr)
+        print("  ⚠️ Ce n'est PAS un verdict sur le scoring.", file=sys.stderr)
+        return SELF_TEST_INDISPONIBLE
+    for ligne in lignes:
+        print(ligne)
+    print(f"     ⓘ {mesures['n_lignes']} balise-jours fabriqués sur "
+          f"{SELF_TEST_STATIONS} balises × {len(LEAD_BY_OFFSET)} échéances")
+    if ok:
+        print("  ✅ self-test VERT — le scoring distingue une prévision "
+              "juste d'une prévision qui n'a rien à voir.")
+        return SELF_TEST_OK
+    print("  ⛔ SELF-TEST ROUGE — LE SCORING EST FAUX. Rien ne doit être "
+          "écrit en base cette nuit.", file=sys.stderr)
+    return SELF_TEST_FAUX
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="/var/lib/bw-model-verif")
@@ -3269,6 +3696,12 @@ def main() -> int:
                          "(défaut : 2 = heure d'été française)")
     ap.add_argument("--no-purge", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    # ⛔ LE CONTRÔLE N°1 DU LOT S3 — cf. le pavé `--self-test` ci-dessus.
+    # Il sort AVANT tout le reste : ni Supabase, ni R2, ni archive.
+    ap.add_argument("--self-test", action="store_true",
+                    help="joue les deux épreuves d'injection sur des "
+                         "données fabriquées et sort : 0 vert, 2 SCORING "
+                         "FAUX (bloquant), 3 contrôle indisponible")
     ap.add_argument("--regime-days", type=int, default=REGIME_REPLAY_DAYS,
                     help="profondeur du rejeu d'archive pour le chemin régime")
     ap.add_argument("--replay-budget", type=int, default=3,
@@ -3276,6 +3709,15 @@ def main() -> int:
                          "Borne la durée du run : rejouer trente journées d'un "
                          "coup peut la multiplier par trente.")
     args = ap.parse_args()
+
+    # ⛔ AVANT TOUT LE RESTE, ET C'EST LA PROPRIÉTÉ QUI COMPTE. Le
+    # self-test sort ici, donc AVANT `Supabase(...)` (qui exige
+    # `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`) et AVANT `_storage()` (qui
+    # ouvre R2). Il peut donc se jouer sur un poste nu, sans un seul
+    # secret et sans un octet de réseau — ce qui est exactement ce
+    # qu'on veut d'un garde-fou qu'on rejoue à la main un soir de doute.
+    if args.self_test:
+        return self_test()
 
     root = pathlib.Path(args.out)
     # ⚠️ AUCUN DATETIME NAÏF NE SORT D'ICI, et c'est délibéré. Ce qui

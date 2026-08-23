@@ -2036,6 +2036,170 @@ def test_s2_colonnes_de_zone():
           fine["skill_clim_corr"] > 0.5, True)
     check("`bias_n_days` voyage jusqu'à la case", fine["bias_n_days"], 9.0)
 
+
+# ══════════════════════════════════════════════════════════════════
+#  LOT S3 — LE CONTRÔLE N°1 : L'INJECTION (`score.py --self-test`)
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ CE QUI EST TESTÉ ICI N'EST PAS « LE SELF-TEST PASSE ». C'est
+#  « le self-test SAIT ÉCHOUER ». Un garde-fou dont on n'a jamais
+#  fabriqué l'échec est une décoration : c'est la leçon du seuil
+#  journalier inerte du S0.4, trouvé PAR MUTATION et pas en lisant le
+#  code.
+
+def test_s3_self_test_injection():
+    print("\n── lot S3 : le self-test d'injection ──")
+    ok, lignes, m = J.self_test_epreuves()
+    check("le self-test est VERT sur sa propre fixture", ok, True)
+    check("… et il a produit des balise-jours (sinon il ne teste rien)",
+          m["n_lignes"], J.SELF_TEST_STATIONS * len(J.LEAD_BY_OFFSET))
+
+    # ── (a) ──
+    check("(a) prévision = observation ⇒ err_vec_med exactement 0",
+          m["err_max_parfaite"], 0.0, tol=1e-12)
+    check("(a) skill contre la persistance = 1", m["skill_parfait"], 1.0)
+    check("(a) skill contre la climatologie = 1", m["skill_clim_parfait"], 1.0)
+
+    # ── (b) ──
+    check("(b) le rapport à la climatologie est dans la bande mesurée",
+          J.SELF_TEST_PERM_RATIO_CLIM_MIN <= m["rapport_perm_clim"]
+          <= J.SELF_TEST_PERM_RATIO_CLIM_MAX, True)
+    check("(b) et sa valeur est CELLE-CI, déterministe (la fabrique ne "
+          "tire rien au hasard) : 2,198", round(m["rapport_perm_clim"], 3),
+          2.198)
+    check("(b) une prévision permutée ne bat pas la persistance",
+          m["skill_permute"] <= 0.0, True)
+
+    # ── ⛔ MUTATION 1 — « l'injection rend toujours vert » ──
+    # On passe une permutation qui n'en est pas une : l'IDENTITÉ. Le
+    # scoring rendra alors err = 0 pour la « permutée » aussi, donc un
+    # rapport de 0 à la climatologie et un skill de 1.
+    ok_id, lignes_id, m_id = J.self_test_epreuves(permuter=lambda s, g: s)
+    check("⛔ MUTATION 1 — une permutation IDENTITÉ rend le verdict ROUGE",
+          ok_id, False)
+    rouges = [l for l in lignes_id if "❌" in l]
+    check("… et ce sont EXACTEMENT les deux assertions de (b) qui "
+          "rougissent (2), pas celles de (a)",
+          [l.split("(")[1][0] for l in rouges], ["b", "b"])
+    check("… la première parce que le rapport tombe à 0",
+          m_id["rapport_perm_clim"], 0.0)
+    check("… la seconde parce que le skill « permuté » remonte à 1",
+          m_id["skill_permute"], 1.0)
+
+    # ── ⛔ MUTATION 10 — « la tolérance de (a) élargie » ──
+    # Une prévision biaisée d'un demi-km/h doit faire rougir (a). Avec
+    # `SELF_TEST_ZERO_KMH` porté à 1 km/h, elle passerait — et c'est
+    # exactement ce que la campagne de mutations a trouvé le 23/08 :
+    # sans cette injection-ci, élargir la tolérance de (a) ne changeait
+    # RIEN au banc, puisque l'erreur parfaite vaut exactement 0.
+    def biaiser(snaps):
+        return {off: [dict(r, speed=[(v + 0.5) if v is not None else None
+                                     for v in r["speed"]])
+                      for r in lignes_]
+                for off, lignes_ in snaps.items()}
+    ok_b, lignes_b, m_b = J.self_test_epreuves(injecter=biaiser)
+    check("⛔ MUTATION 10 — un biais de 0,5 km/h rend le verdict ROUGE",
+          ok_b, False)
+    check("… et c'est bien l'épreuve (a) qui rougit",
+          all("(a)" in l for l in lignes_b if "❌" in l), True)
+    check("… l'erreur parfaite y vaut 0,5 km/h", round(m_b["err_max_parfaite"], 6),
+          0.5)
+    check("… soit 500 000 fois la tolérance de (a) — mais elle passerait "
+          "si on la portait à 1 km/h", m_b["err_max_parfaite"] <= 1.0, True)
+
+    # ── ⛔ MUTATION 4 — « la tolérance élargie jusqu'à tout accepter » ──
+    # Élargir la bande à [0, ∞[ ferait passer la permutation IDENTITÉ.
+    # On le prouve ici sans toucher au module : on rejoue la comparaison
+    # que fait l'épreuve (b) avec la borne mutée.
+    check("⛔ MUTATION 4 — avec une borne basse à 0, la permutation "
+          "IDENTITÉ passerait (la tolérance rendrait le contrôle muet)",
+          0.0 <= m_id["rapport_perm_clim"] <= 1e9, True)
+    check("… alors qu'avec la borne réelle elle ne passe pas",
+          J.SELF_TEST_PERM_RATIO_CLIM_MIN <= m_id["rapport_perm_clim"], False)
+
+    # ── la permutation elle-même : AUCUN point fixe (Sattolo) ──
+    # ⚠️ SUR VINGT GRAINES, PAS UNE. Fisher-Yates laisse en moyenne UN
+    # point fixe par tirage, mais il peut n'en laisser aucun sur une
+    # graine donnée : une seule graine ferait un mutant « équivalent »
+    # par chance, et on aurait mesuré la chance, pas la propriété.
+    _, snaps, _, _, _ = J._self_test_fabrique(12)
+    avant = {r["station_id"]: r["speed"] for r in snaps[0]}
+    fixes = 0
+    for graine in range(1, 21):
+        permutes = J.self_test_permuter(snaps, graine)
+        fixes += sum(1 for r in permutes[0]
+                     if r["speed"] is avant[r["station_id"]])
+    check("⭐ Sattolo : AUCUNE balise ne garde sa propre prévision, sur "
+          "vingt graines (Fisher-Yates en laisserait ~20 en tout)",
+          fixes, 0)
+    check("… et la permutation ne perd aucune ligne",
+          len(J.self_test_permuter(snaps)[0]), len(snaps[0]))
+
+    # ── le contrat des codes de sortie ──
+    check("`self_test()` rend 0 quand tout est vert", J.self_test(),
+          J.SELF_TEST_OK)
+    check("les trois codes sont distincts",
+          len({J.SELF_TEST_OK, J.SELF_TEST_FAUX, J.SELF_TEST_INDISPONIBLE}), 3)
+    check("⛔ « scoring faux » vaut 2", J.SELF_TEST_FAUX, 2)
+    check("⛔ « contrôle indisponible » vaut 3, PAS 2 — un garde-fou qui "
+          "tue la nuit pour sa propre panne finit désarmé",
+          J.SELF_TEST_INDISPONIBLE, 3)
+
+    # ── ⛔ une panne du contrôle rend 3, jamais 2 ──
+    def permuter_qui_plante(s, g):
+        raise RuntimeError("fixture cassée pour le banc")
+    try:
+        J.self_test_epreuves(permuter=permuter_qui_plante)
+        check("une panne du contrôle lève bien", True, False)
+    except RuntimeError:
+        check("une panne du contrôle lève au lieu de rendre un verdict",
+              True, True)
+    # Et le mode complet la transforme en 3 (jamais en 2).
+    #
+    # ⚠️ ON REMPLACE `_self_test_fabrique`, PAS `self_test_permuter` — et
+    # ce détail a été trouvé PAR LE BANC, au premier essai. `permuter`
+    # est un ARGUMENT PAR DÉFAUT : Python le lie une fois pour toutes à
+    # la définition de la fonction, donc réaffecter `J.self_test_permuter`
+    # ne change rien à ce que `self_test()` appellera. La mutation ne
+    # s'appliquait pas, le banc restait vert, et j'aurais cru avoir
+    # mesuré « le code 3 marche » alors que je n'avais rien muté —
+    # exactement la leçon (a) du S0.11.
+    vraie_fabrique = J._self_test_fabrique
+    try:
+        def fabrique_cassee(n=0):
+            raise RuntimeError("fixture cassée pour le banc")
+        J._self_test_fabrique = fabrique_cassee
+        check("⛔ `self_test()` rend 3 quand SA fixture casse — jamais 2",
+              J.self_test(), J.SELF_TEST_INDISPONIBLE)
+    finally:
+        J._self_test_fabrique = vraie_fabrique
+    check("… et il redevient vert une fois la fixture réparée",
+          J.self_test(), J.SELF_TEST_OK)
+    check("⭐ et le chemin de PRODUCTION n'est pas remplaçable : "
+          "`permuter` est un argument PAR DÉFAUT, lié à la définition",
+          J.self_test_epreuves.__defaults__[0] is J.self_test_permuter, True)
+
+    # ── ⛔ LE SELF-TEST NE TOUCHE RIEN ──
+    # Preuve statique : aucune des trois fonctions n'appelle quoi que ce
+    # soit qui lise un fichier, la base ou R2.
+    import ast as _ast
+    import inspect as _inspect
+    interdits = {"Supabase", "_storage", "read_ndjson", "read_json",
+                 "replay_write", "replay_read", "upsert", "select",
+                 "open", "urlopen"}
+    for fn in (J._self_test_fabrique, J.self_test_permuter,
+               J.self_test_epreuves, J.self_test):
+        arbre = _ast.parse(_inspect.getsource(fn).lstrip())
+        appels = set()
+        for n in _ast.walk(arbre):
+            if isinstance(n, _ast.Call):
+                cible = n.func
+                appels.add(getattr(cible, "id", None)
+                           or getattr(cible, "attr", None))
+        check(f"⛔ `{fn.__name__}` n'appelle rien qui lise ou écrive",
+              sorted(appels & interdits), [])
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -2060,7 +2224,9 @@ def main() -> int:
                test_s2_estimateur_sans_selection,
                test_s2_memoire_du_biais,
                test_s2_gardes_fous_et_temoin,
-               test_s2_colonnes_de_zone):
+               test_s2_colonnes_de_zone,
+               # ── lot S3 : le scoring doit savoir échouer ──
+               test_s3_self_test_injection):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0
