@@ -598,7 +598,8 @@ def manifeste_cle(quand: datetime) -> str:
 
 
 def construire_manifeste(quand: datetime, n_points: int,
-                         groupes: list | None = None) -> dict:
+                         groupes: list | None = None,
+                         partitionne: bool = True) -> dict:
     """Ce que la nuit DÉCLARE attendre, avant d'avoir collecté quoi que
     ce soit.
 
@@ -611,22 +612,63 @@ def construire_manifeste(quand: datetime, n_points: int,
     Le contenu est DÉRIVÉ de `groupes_requete()`, jamais recopié — même
     discipline que `poids_par_point()`. Ajouter un modèle demain change
     la déclaration sans que personne n'ait à y penser.
+
+    ⛔ LE DISCRIMINANT EST `partitionne` (= ce RUN est-il partitionné,
+    c'est-à-dire `args.passe` non nul), JAMAIS `len(groupes)`.
+    `groupes_requete()` rend TOUJOURS deux groupes, que la nuit soit
+    partitionnée ou non (lot S0.9, 23/08/2026) — c'est le défaut trouvé
+    ce jour-là : en `--passe 0`, les deux groupes sont bien collectés,
+    mais TOUT est écrit dans la clé de la partie 1 (`partie = args.passe
+    or 1`, dans `main()`), alors que ce manifeste-ci en déclarait deux.
+    Ce que la nuit DÉCLARE doit être ce que CE RUN écrit VRAIMENT :
+
+        `--passe 0` (une seule clé écrite, l'historique)  → 1 partie
+        `--passe 1` (partition active)                    → 2 parties
+        `--passe 2` (n'écrit jamais le manifeste)          → n'appelle
+                                                              pas cette
+                                                              fonction
+
+    ⛔ ET UN MANIFESTE À 1 PARTIE DOIT PORTER LES NEUF MODÈLES, pas
+    seulement ceux d'un groupe : le manifeste sert à NOMMER ce qui
+    manque, et le jour où cette clé unique serait perdue, le journal
+    doit annoncer neuf modèles perdus, pas deux. `n_vars` est ici une
+    UNION de variables et non celui d'une requête — les deux groupes
+    n'ont pas le même nombre de variables (8 et 6 le 23/08/2026), un
+    champ scalaire ne peut pas porter les deux : on garde la valeur qui
+    reste vraie, `len(_hourly_vars())`. `poids_point`, lui, est bien
+    celui de la clé réelle, tous groupes confondus : `poids_par_point()`.
     """
     groupes = groupes if groupes is not None else groupes_requete()
-    detail = []
-    for i, (modeles, variables) in enumerate(groupes, 1):
-        detail.append({
-            "i": i,
-            "cle": fcst_cle(quand, i),
-            "modeles": list(modeles),
-            "n_vars": len(variables),
-            "poids_point": round(len(modeles) * len(variables) / 10, 4),
-        })
+    if partitionne:
+        detail = []
+        for i, (modeles, variables) in enumerate(groupes, 1):
+            detail.append({
+                "i": i,
+                "cle": fcst_cle(quand, i),
+                "modeles": list(modeles),
+                "n_vars": len(variables),
+                "poids_point": round(len(modeles) * len(variables) / 10, 4),
+            })
+    else:
+        # ⛔ CE RUN N'ÉCRIT QU'UNE SEULE CLÉ : celle de la partie 1,
+        # l'historique. `modeles` est l'UNION des groupes, DANS L'ORDRE
+        # DE `MODELS` (jamais une liste recopiée) — comme
+        # `groupes_requete()` partitionne exactement `MODELS` en deux
+        # groupes disjoints, cette union vaut `MODELS` en entier.
+        _dans_un_groupe = {m for grp, _v in groupes for m in grp}
+        modeles_union = [m for m in MODELS if m in _dans_un_groupe]
+        detail = [{
+            "i": 1,
+            "cle": fcst_cle(quand, 1),
+            "modeles": modeles_union,
+            "n_vars": len(_hourly_vars()),
+            "poids_point": round(poids_par_point(), 4),
+        }]
     return {
         "version": MANIFESTE_VERSION,
         "flux": FLUX_PARTITIONNE,
         "jour": f"{quand:%Y-%m-%d}",
-        "parties": len(groupes),
+        "parties": len(detail),
         "n_points": n_points,
         "poids_point_total": round(
             sum(d["poids_point"] for d in detail), 4),
@@ -2618,13 +2660,19 @@ def main() -> int:
             m_key = manifeste_cle(now)
             m_path = out / m_key
             m_path.parent.mkdir(parents=True, exist_ok=True)
+            # ⛔ `partitionne=bool(args.passe)` — PAS `len(groupes_tous)`,
+            # qui vaut toujours 2. Le discriminant est CE RUN écrit-il
+            # une seule clé (`--passe 0`) ou une par groupe (`--passe
+            # N ≥ 1`) — cf. le pavé de `construire_manifeste` (lot S0.9,
+            # 23/08/2026).
+            manifeste = construire_manifeste(now, len(stations), groupes_tous,
+                                             partitionne=bool(args.passe))
             m_path.write_text(
-                json.dumps(construire_manifeste(now, len(stations),
-                                                groupes_tous),
-                           ensure_ascii=False, indent=1) + "\n",
+                json.dumps(manifeste, ensure_ascii=False, indent=1) + "\n",
                 encoding="utf-8")
-            print(f"  ⓘ manifeste : {len(groupes_tous)} partie(s) déclarée(s) "
-                  f"pour le flux `{FLUX_PARTITIONNE}/` du {today} → {m_key}")
+            print(f"  ⓘ manifeste : {manifeste['parties']} partie(s) "
+                  f"déclarée(s) pour le flux `{FLUX_PARTITIONNE}/` du "
+                  f"{today} → {m_key}")
             if not upload_r2(m_path, m_key):
                 # ⚠️ PAS FATAL, MAIS DIT. L'objet local reste, `rattraper`
                 # le reprendra la nuit suivante (il cherche désormais

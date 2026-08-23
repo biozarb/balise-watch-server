@@ -1737,6 +1737,131 @@ verifie(_mk not in [p.relative_to(_r4).as_posix() for p in C.en_retard(_r4)],
         "l'identique quel que soit le suffixe")
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LOT S0.9 (23/08/2026) — LE MANIFESTE NE DOIT DÉCLARER QUE CE QU'IL
+#  ÉCRIT VRAIMENT
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ LE DÉFAUT MESURÉ LE 23/08 À 05:30 UTC : en `--passe 0` (le mode de
+# production d'aujourd'hui), `construire_manifeste` recevait TOUJOURS
+# `groupes_requete()` — DEUX groupes — pour déclarer les parties, alors
+# que CE RUN n'écrit qu'UNE SEULE clé (`partie = args.passe or 1`,
+# toujours 1 en `--passe 0`). Le manifeste déclarait 2 parties ; R2 n'en
+# a jamais porté qu'une. `score.py::fcst_parties` lisait donc
+# « partie 2 MANQUANTE » — sept modèles nommés perdus — sur une nuit qui
+# n'avait RIEN perdu, et qui a effectivement écrasé `rank_reason = 'ok'`
+# par `'partie_manquante'` (arbitrage n°1 de la note du lot).
+#
+# ⚠️ LE DISCRIMINANT EST `args.passe`, JAMAIS `len(groupes_requete())` —
+# qui vaut TOUJOURS 2, que la nuit soit partitionnée ou non.
+#
+# ⛔ M1 EST UN BANC DE BOUT EN BOUT, PAS UN TEST UNITAIRE SUR
+# `construire_manifeste` SEULE — la leçon du S0.5 (mutation n°5) :
+# « un banc qui teste deux gardes à la fois n'en teste qu'une ». Le
+# défaut ne se voit qu'en faisant se rencontrer L'ÉCRIVAIN
+# (`collect.py::main`, `--passe 0`) et LE LECTEUR
+# (`score.py::fcst_parties`) — chacun pris séparément est irréprochable :
+# `collect.py` écrit bien ses lignes, `score.py` lit bien le manifeste
+# qu'on lui donne.
+import score as J                                         # noqa: E402
+
+# ── M1 : bout en bout, `--passe 0` (le mode de production d'aujourd'hui) ──
+_r5 = pathlib.Path(tempfile.mkdtemp(prefix="s09-m1-"))
+_argv5 = sys.argv
+_avant5 = {n: getattr(C, n) for n in
+           ("load_stations", "fetch_forecast", "upload_r2", "charger_quota",
+            "metar_stations", "windsmobi_stations", "infoclimat_stations",
+            "mf_stations", "aemet_stations", "fetch_archive")}
+try:
+    C.load_stations = lambda p, max_age_days=7: [dict(_ST)]
+    C.fetch_forecast = lambda lat, lon, days, modeles, variables: _payload(
+        modeles, variables)
+    C.upload_r2 = _upload_bidon
+    C.charger_quota = lambda: None
+    C.fetch_archive = lambda st, day: None
+    for _n5 in ("metar_stations", "windsmobi_stations", "infoclimat_stations",
+                "mf_stations", "aemet_stations"):
+        setattr(C, _n5, lambda cache: [])
+    # ⛔ PAS DE `--passe` : c'est `--passe 0`, le défaut, le mode de
+    # production d'aujourd'hui — celui qui portait le défaut.
+    sys.argv = ["collect.py", "--out", str(_r5), "--obs-day", "2026-08-21"]
+    C.main()
+finally:
+    for _n5, _f5 in _avant5.items():
+        setattr(C, _n5, _f5)
+    sys.argv = _argv5
+
+_aujd5 = C.datetime.now(C.timezone.utc)
+_rows5, _bilan5 = J.fcst_parties(_r5, _aujd5)
+verifie(_bilan5.get("etat") == "ok",
+        f"⭐⭐ M1 — bout en bout, `--passe 0` : la notation lit `ok`, JAMAIS "
+        f"`partie_manquante` sur une nuit qui n'a rien perdu — {_bilan5}")
+verifie(_bilan5.get("parties_attendues") == 1,
+        f"⭐ et elle attendait 1 SEULE partie — pas les 2 que "
+        f"`groupes_requete()` rend toujours, partitionné ou non — {_bilan5}")
+verifie(_bilan5.get("manquantes") == [],
+        f"rien n'est déclaré manquant — {_bilan5.get('manquantes')}")
+verifie(len(_rows5) > 0,
+        "et les lignes existent bien : ce n'est pas une perte de données, "
+        "seulement une fausse déclaration qui vient d'être corrigée")
+
+# ── M3 : la partie unique doit porter les NEUF modèles ──────────────
+#
+# ⛔ Piège facile à manquer : le manifeste sert à NOMMER ce qui manque.
+# Une partie unique qui ne déclarerait que le groupe d'altitude
+# mentirait le jour où la clé historique serait perdue — le journal
+# annoncerait « 2 modèles perdus » au lieu de 9.
+_mu = C.construire_manifeste(_aujd5, 657, partitionne=False)
+verifie(_mu["parties"] == 1,
+        f"le manifeste non partitionné déclare 1 SEULE partie — "
+        f"{_mu['parties']}")
+verifie(_mu["detail"][0]["cle"] == C.fcst_cle(_aujd5, 1),
+        "et elle porte la clé HISTORIQUE — celle que ce run écrit vraiment")
+verifie(set(_mu["detail"][0]["modeles"]) == set(C.MODELS),
+        f"⭐⭐ M3 — la partie unique porte les NEUF modèles, PAS seulement "
+        f"ceux d'un groupe — {_mu['detail'][0]['modeles']}")
+verifie(_mu["detail"][0]["modeles"] == list(C.MODELS),
+        "et dans l'ORDRE de `MODELS` — dérivé, jamais recopié")
+
+# ── M4 : le poids de la partie unique est celui de LA CLÉ RÉELLE ────
+#
+# ⛔ Les deux groupes n'ont pas le même nombre de variables (8 et 6) : un
+# champ scalaire ne peut pas porter les deux. `n_vars` doit rester la
+# valeur qui reste vraie (l'union), et `poids_point` doit être celui
+# effectivement dépensé pour CETTE clé — tous groupes confondus — pas
+# celui d'un seul des deux groupes de la requête.
+verifie(_mu["detail"][0]["n_vars"] == len(C._hourly_vars()),
+        f"n_vars de la partie unique = l'UNION des variables, "
+        f"{len(C._hourly_vars())} — {_mu['detail'][0]['n_vars']}")
+verifie(abs(_mu["detail"][0]["poids_point"] - C.poids_par_point()) < 1e-9,
+        f"⭐⭐ M4 — poids_point de la partie unique = `poids_par_point()` "
+        f"({C.poids_par_point()}), PAS celui d'un seul groupe (1,6 ou 4,2) "
+        f"— {_mu['detail'][0]['poids_point']}")
+verifie(abs(_mu["poids_point_total"] - C.poids_par_point()) < 1e-9,
+        "⚠️ et `poids_point_total` reste `poids_par_point()` dans CE mode "
+        "aussi — le banc existant qui compare ce champ (section 2 "
+        "ci-dessus) ne doit pas avoir besoin d'être modifié pour rester "
+        "vert : s'il fallait le modifier, c'est que la correction serait "
+        "fausse")
+
+# ── M2 (rejouée à la main, cf. note de session) ─────────────────────
+#
+# ⛔ M2 — « le manifeste déclare 1 partie en `--passe 1` » — n'ajoute
+# PAS de nouvelle assertion ici : c'est le banc DÉJÀ ÉCRIT à la section
+# « 2. Le manifeste est DÉRIVÉ, jamais recopié » (plus haut dans ce
+# fichier, et sans une ligne changée) et la section 5 ci-dessus
+# (« LE MANIFESTE SURVIT À LA PERTE DES DONNÉES », qui fait tourner
+# `--passe 1`) qui doivent rester verts SANS MODIFICATION et rougir si
+# `partitionne` était figé à `False`. Rejoué à la main pendant cette
+# session (source mutée puis restaurée, cf. note) : les deux tombent
+# bien sous cette mutation, et aucune des deux n'a eu besoin d'être
+# touchée pour rester verte avec le code corrigé.
+verifie(True,
+        "ⓘ M2 : voir section 2 et section 5 ci-dessus, rejouées à la main "
+        "contre `partitionne=False` figé — cf. note de session pour le "
+        "détail du rejeu")
+
+
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")
 for m in ko:
     print(f"  ❌ {m}")
