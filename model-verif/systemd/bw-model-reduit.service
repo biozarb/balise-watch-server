@@ -1,0 +1,99 @@
+[Unit]
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-reduit — le GROUPE RÉDUIT sur les CANDIDATES
+#                                       (lot S0.11, 23/08/2026)
+#
+#  Une SECONDE population, pas une seconde passe. ⛔ Ce n'est PAS la
+#  partition du S0.6 : `bw-model-collect-p2` découpe la nuit Pioupiou
+#  par groupe de modèles ; celle-ci collecte 2 942 AUTRES balises (les
+#  cinq réseaux d'observation, hors Pioupiou et hors METAR) avec cinq
+#  modèles en vent seul. Les deux unités sont indépendantes et peuvent
+#  coexister — mais aujourd'hui `bw-model-collect-p2` n'est PAS
+#  installée, et rien ici ne l'exige.
+#
+#  ⛔ CE QUI N'EST PAS COLLECTÉ UNE NUIT N'EXISTERA JAMAIS. Open-Meteo
+#  n'a AUCUN historique de runs passés (mesuré le 08/08 : 0/384 sur
+#  `_previous_day1`). Chaque nuit sans ce timer est une nuit perdue pour
+#  toujours — c'est la seule urgence de ce lot, et elle n'a pas de date
+#  butoir, juste un coût quotidien.
+#
+#  ═══ POURQUOI 05:00 UTC, ET PAS 04:35 ═══
+#
+#  Le S0.6 avait mesuré que 04:35 est l'heure juste DU POINT DE VUE DU
+#  BUDGET : la fenêtre horaire de la passe Pioupiou est rendue à 04:28
+#  au pire cas mesuré sur 14 nuits, et `backfill_packs` occupe
+#  04:30-04:34. Ce raisonnement reste vrai, et il est INSUFFISANT — il
+#  ignorait la fraîcheur des runs, qui n'était pas mesurée.
+#
+#  Mesuré le 23/08/2026 sur les `meta.json` d'Open-Meteo (S0.10 §2), un
+#  appel par domaine, dix domaines, tous HTTP 200 :
+#
+#    02:52  meteoswiss_icon_ch2  00 Z
+#    04:26  icon_d2              03 Z   ⛔
+#    05:35  gfs_global           00 Z   ⛔
+#    05:54  icon_eu              03 Z
+#    07:16  ecmwf_ifs025         00 Z
+#
+#  À 04:35, la passe partirait NEUF MINUTES après la publication du run
+#  03 Z d'`icon_d2`. L'écart de fraîcheur avec la passe Pioupiou de
+#  03:19 serait donc INTERMITTENT — un retard de publication de 95 min
+#  au lieu des 86 mesurés, soit 10 % de variation sur un chiffre relevé
+#  UNE FOIS, et l'écart tombe à zéro cette nuit-là. ⛔ Un écart
+#  intermittent est le seul qu'on ne puisse ni corriger ni déclarer : la
+#  fenêtre glissante de 15 jours mélangerait deux régimes SANS DATE DE
+#  BASCULE.
+#
+#  ⇒ 05:00 UTC est le point qui MAXIMISE LA PLUS PETITE DES DEUX MARGES :
+#  34 min après `icon_d2` (04:26), 35 min avant `gfs_global` (05:35).
+#  L'écart devient STABLE — trois heures sur `icon_d2`, zéro sur les
+#  quatre autres — donc déclarable, donc neutralisable par le tau du S3.
+#  Et la sonde de fraîcheur de `collect_reduit.py` l'ÉCRIT dans chaque
+#  ligne (`run_init`, `run_avail`), pour qu'il cesse d'être une
+#  hypothèse à n = 1 dans une archive irremplaçable.
+#
+#  ⓘ La paire inversée (candidates 03:00 / Pioupiou 04:15) rendrait
+#  l'écart NUL sur les cinq. Elle a été écartée : 4 minutes de marge, sur
+#  une seule nuit mesurée, et il faudrait déplacer `bw-model-collect` ET
+#  ses six passes d'observation. Elle se rejugera sur cinq nuits
+#  mesurées, quand la sonde aura écrit cinq nuits.
+#
+#  ═══ LES AUTRES VOISINS, VÉRIFIÉS LE 23/08 ═══
+#
+#   · 03:15→03:28  bw-model-collect (3 811 pondérés) — son heure est
+#     rendue à 04:28 au pire ⇒ 32 min de marge à 05:00 ;
+#   · 03:56  bw-model-score — note LA VEILLE, aucune interaction ;
+#   · 04:30→04:34  balise-entretien ⇒ backfill_packs (252,0 pondérés)
+#     ⇒ 26 min de marge, et il sort de la fenêtre horaire à 05:34 ;
+#   · 06:00  bw-model-arome — zéro pondéré Open-Meteo, 60 min après.
+#
+#  ⚠️ ET LE PIRE CAS RESTE COUVERT. Si la passe Pioupiou débordait
+#  jusqu'à son chien de garde (40 min), son heure ne serait rendue qu'à
+#  05:00. `collect.attendre_la_place`, importée telle quelle, le DEMANDE
+#  au budget partagé au lieu de le supposer, et DORT UNE FOIS, de façon
+#  bornée (`ATTENTE_PASSE_MAX_S` = 25 min), au lieu de se faire refuser
+#  point par point. Au-delà, la passe est sautée avec un refus ARGUMENTÉ
+#  et le run sort en erreur — `SEUIL_ALERTE=1`.
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — groupe réduit sur les candidates (2e population)
+Documentation=file:///home/debian/balise-watch/balise-watch-server/model-verif/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+# ⚠️ AUCUN DRAPEAU ICI, et il n'y en a pas à dériver non plus :
+# `collect_reduit.py` n'a pas de `--passe`. Sa population et son cap se
+# recalculent à chaque nuit depuis les référentiels et le budget mesuré
+# — c'est justement ce qui fait que la passe qui cède est toujours la
+# bonne, sans que personne n'ait à y penser.
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh collect-reduit
+# 50 min > les 40 du chien de garde de `run.sh` : on veut que ce soit
+# `run.sh` qui constate l'échec et alerte, pas systemd qui tue tout sans
+# que personne ne l'apprenne. ⛔ Et c'est le COUPLE qui tient : 25 min
+# d'attente bornée + ~7,6 min de collecte = 32,6 min au pire, 40 de
+# garde, 50 de timeout.
+TimeoutStartSec=50min
+
+[Install]
+WantedBy=multi-user.target

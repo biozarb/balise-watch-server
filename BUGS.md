@@ -6,6 +6,44 @@
 
 ---
 
+## 23/08/2026 — supprimer un objet sur R2 ne le supprime pas pour un lecteur qui lit le LOCAL d'abord
+
+Le lot S0.9 avait trouvé un manifeste qui déclarait deux parties là où
+la nuit n'en avait écrit qu'une, et chiffré le dégât : **513 cases**
+basculées en `rank_reason = 'partie_manquante'` sur une nuit complète.
+L'arbitrage retenu était « supprimer l'objet ». Il a été exécuté le
+23/08 vers 10 h 05 UTC — **sur R2**, et vérifié absent du bucket.
+
+⛔ **Et il ne servait à rien.** `score.read_json` (comme
+`score.read_ndjson`) lit **le disque local D'ABORD, R2 ensuite** — son
+propre pavé le dit en toutes lettres : *« ⓘ LE LOCAL D'ABORD, ET ÇA
+COMPTE POUR LE MANIFESTE. `score.py` tourne sur la même machine que
+`collect.py` : si l'envoi R2 du manifeste a échoué, le fichier est quand
+même là »*. Or `collect.py` écrit **toujours** en local **puis** monte
+sur R2 : tout objet qu'il produit existe en **deux** exemplaires. Le
+manifeste local du 23/08 était donc encore là, avec son témoin `.r2ok`,
+à quinze heures de la notation — qui l'aurait lu, et aurait fait
+exactement le dégât que la suppression R2 croyait avoir évité.
+
+⚠️ **Piège réutilisable** : *avant de « supprimer » un objet d'archive,
+énumérer TOUS les endroits d'où il peut être relu, et les supprimer dans
+l'ordre inverse de la chaîne de lecture.* Ici : le local d'abord (c'est
+lui qui gagne), R2 ensuite. Une suppression qui ne couvre que le
+stockage distant est une suppression **qui se croit faite** — la pire
+forme, parce qu'elle referme le dossier.
+
+ⓘ Concerne les **trois** producteurs du dépôt (`collect.py`,
+`agrume_fcst.py`, `arome_fcst.py`) et leurs quatre flux (`fcst/`,
+`fcstagrume/`, `fcstarome/`, `fcstreduit/`), plus les six flux
+d'observation : tous écrivent local → R2.
+ⓘ Vérification qui clôt le dossier, jouée le 23/08 à 13 h 40 UTC :
+`score.fcst_parties()` rejoué **avec un `Storage` R2 réel** rend
+`avant_partition` (1 partie sur 1) pour les 21, 22 et 23/08 — pas
+`fichier absent`, pas `partie_manquante`. On lit l'état voulu par le
+chemin exact de la notation, pas par un `ls`.
+
+---
+
 ## 22/08/2026 — un garde-fou dont la fenêtre dépasse ce que l'élagage retient est MUET, pas absent
 
 Le lot S0.3 affirmait deux fois que « ajouter le plafond mensuel

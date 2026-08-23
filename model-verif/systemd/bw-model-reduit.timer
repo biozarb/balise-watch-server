@@ -1,0 +1,55 @@
+[Unit]
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ INSTALLER CE TIMER EST LE GESTE QUI ENGAGE LA PREMIÈRE DÉPENSE
+#  OPEN-METEO DU GROUPE RÉDUIT. Avant lui, `collect_reduit.py` est
+#  déployé et INERTE : rien ne l'appelle, et son `--dry-run` chiffre
+#  tout sur des URL construites et jamais envoyées.
+#
+#  ⚠️ Et c'est aussi le geste qui ARRÊTE l'hémorragie : chaque nuit sans
+#  ce timer est une nuit de 2 942 balises qui n'existera jamais —
+#  Open-Meteo n'a aucun historique de runs passés. Il n'y a pas de date
+#  butoir, seulement un coût quotidien.
+#
+#  Le raisonnement complet sur l'heure, les mesures de publication des
+#  runs et les marges sont dans `bw-model-reduit.service`, et la note du
+#  lot est `claude/lot-s11-groupe-reduit-23-08.md`.
+#
+#  ⛔ L'ACTIVATION EST UN GESTE SÉPARÉ DU DÉPLOIEMENT, et systemd ne lit
+#  JAMAIS un répertoire de projet :
+#
+#      sudo cp /tmp/bw-model-reduit.{service,timer} /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now bw-model-reduit.timer
+#      systemctl list-timers bw-model-reduit.timer --no-pager
+#
+#  ⚠️ `--now` démarre le TIMER, pas le service : aucun run parasite.
+#  (L'oubli du `sudo cp` est ce qui a produit
+#  « Unit bw-model-arome.timer does not exist » le 22/08.)
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — groupe réduit sur les candidates, 05:00 UTC
+
+[Timer]
+# ⚠️ `UTC` EXPLICITE, comme les cinq autres timers du projet. Sans lui,
+# `OnCalendar` suit l'heure LOCALE du VPS (Europe/Paris) et la passe se
+# décalerait d'une heure au changement d'heure — donc retomberait dans
+# la fenêtre glissante de la passe Pioupiou chaque automne, et
+# changerait de créneau de fraîcheur de run deux fois par an.
+OnCalendar=*-*-* 05:00:00 UTC
+# ⚠️ 60 s ET PAS 300. La fenêtre de 05:00 est choisie au quart d'heure
+# près entre deux publications de run (`icon_d2` 03 Z à 04:26,
+# `gfs_global` 00 Z à 05:35) : une gigue de 5 minutes la rendrait floue
+# des deux côtés, et c'est exactement la stabilité de l'écart qu'on
+# achète en prenant 05:00 plutôt que 04:35.
+RandomizedDelaySec=60
+# Une nuit de prévisions manquée ne se rattrape jamais : si le VPS était
+# éteint à 05:00, on part dès qu'il revient. `attendre_la_place`
+# demandera de toute façon au budget si l'heure est libre, et le cap
+# budgétaire recalculera ce qui reste.
+# ⚠️ Un rattrapage tardif écrit une archive dont le run sera plus frais
+# que d'habitude — d'où la sonde de fraîcheur, qui écrit `run_init` dans
+# chaque ligne : la nuit décalée se lira comme telle au lieu de se
+# fondre dans les autres.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

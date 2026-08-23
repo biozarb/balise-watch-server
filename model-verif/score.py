@@ -570,17 +570,55 @@ def obsaemet_key(day: datetime) -> str:
     return f"obsaemet/{day:%Y/%m}/obsaemet_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def obsmetar_key(day: datetime) -> str:
+    """L'archive METAR (278 aérodromes Iowa State, depuis le 08/08).
+
+    ⭐ **ELLE EST ENTRÉE DANS `OBS_KEY_FUNCS` LE 23/08/2026 (lot S0.11),
+    ET LA RAISON QUI L'EN TENAIT ÉCARTÉE EST TOMBÉE.** Le pavé d'avant
+    disait : « le vent d'un aérodrome n'a aucun point de prévision à sa
+    propre coordonnée : l'y ajouter produirait zéro ligne aujourd'hui,
+    et la première personne à voir ce zéro serait tentée de le réparer
+    avec `geopair` ». C'était vrai jusqu'au 22/08. Depuis,
+    `arome_fcst.py` écrit **278 lignes METAR par nuit, gratuitement**,
+    À LA COORDONNÉE DE CHAQUE AÉRODROME (215/215 dans l'emprise,
+    mesuré) : la prévision existe, le zéro n'existe plus, et la
+    tentation de `geopair` non plus.
+
+    ⛔ **ET CETTE LIGNE-CI NE COÛTE PAS UN PONDÉRÉ.** Elle n'ajoute AUCUN
+    appel Open-Meteo : elle ouvre à la NOTATION une archive déjà écrite
+    et déjà payée. C'est l'arbitrage n°8 du S0.3, tranché par Yann le
+    23/08 : METAR entre au tau, il n'entre PAS dans le groupe réduit
+    (+278 points y porterait la passe à 107,4 % de la fenêtre horaire,
+    c'est-à-dire à une passe de plus, et il n'y a pas de créneau pour
+    une troisième).
+
+    ⚠️ Ce qu'elle apporte, et ce qu'elle n'apporte pas : une QUATRIÈME
+    population pour le tau (aemet/infoclimat/mf/windsmobi + metar), pas
+    de paires supplémentaires — sur METAR, `k` reste 1 tant que le
+    groupe réduit n'y va pas.
+    ⓘ Mesuré le 23/08 sur `obsmetar_2026-08-22.ndjson.gz` : 214 lignes,
+    dont **212 portent au moins un relevé de vent**, au format
+    `t`/`speed`/`dir` que `to_obs_samples` lit — le même que les cinq
+    autres flux, vérifié champ par champ avant d'ajouter la ligne.
+    """
+    return f"obsmetar/{day:%Y/%m}/obsmetar_{day:%Y-%m-%d}.ndjson.gz"
+
+
 #: Toutes les clés d'observations de VENT à fusionner pour noter une
 #: journée. `obs_key` (Pioupiou) est la seule d'origine ; chaque session
 #: du S0.2 y ajoute la sienne au fil de l'eau — windsmobi, infoclimat,
-#: mf et aemet faits : S0.2 est clos. ⚠️ `score.py` NE CONNAÎT AUCUN
-#: RÉSEAU PAR SON NOM au-delà de cette liste : `daily_rows`,
-#: `climatology_by_station` et le reste de la notation lisent des lignes
-#: génériques (`source`, `station_id`, `t`, `speed`…) sans jamais tester
-#: `row["source"] == "windsmobi"`. Ajouter un réseau, c'est ajouter sa
-#: fonction de clé ici — rien d'autre à toucher dans ce fichier pour
-#: qu'il entre dans le score.
-OBS_KEY_FUNCS = [obs_key, obswindsmobi_key, obsinfoclimat_key, obsmf_key, obsaemet_key]
+#: mf et aemet faits : S0.2 est clos. ⭐ `obsmetar_key` s'y est ajoutée
+#: le 23/08/2026 (lot S0.11) : cf. son pavé — la raison qui l'écartait
+#: est tombée le jour où `arome_fcst.py` s'est mis à écrire une
+#: prévision à la coordonnée de chaque aérodrome, gratuitement.
+#: ⚠️ `score.py` NE CONNAÎT AUCUN RÉSEAU PAR SON NOM au-delà de cette
+#: liste : `daily_rows`, `climatology_by_station` et le reste de la
+#: notation lisent des lignes génériques (`source`, `station_id`, `t`,
+#: `speed`…) sans jamais tester `row["source"] == "windsmobi"`. Ajouter
+#: un réseau, c'est ajouter sa fonction de clé ici — rien d'autre à
+#: toucher dans ce fichier pour qu'il entre dans le score.
+OBS_KEY_FUNCS = [obs_key, obswindsmobi_key, obsinfoclimat_key, obsmf_key,
+                 obsaemet_key, obsmetar_key]
 
 
 def all_obs_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
@@ -640,6 +678,43 @@ def fcst_arome_key(day: datetime) -> str:
     `arome_fcst.py` qui l'importe d'ici, pas l'inverse.
     """
     return f"fcstarome/{day:%Y/%m}/fcstarome_{day:%Y-%m-%d}.ndjson.gz"
+
+
+def fcst_reduit_key(day: datetime) -> str:
+    """Le flux du GROUPE RÉDUIT sur les candidates (lot S0.11, 23/08) —
+    un préfixe à part, et cette fois ce n'est pas pour la même raison
+    que `fcstagrume` et `fcstarome`.
+
+    ⛔ **CE FLUX N'EST PAS UNE PARTIE DE `fcst/`, ET LES CONFONDRE
+    COÛTERAIT DES CENTAINES DE CASES.** `collect.FLUX_PARTITIONNE` vaut
+    `"fcst"` et reste vrai : la partition du S0.6 découpe UNE population
+    par groupe de modèles, et `fcst_parties()` compte ses parties dans
+    le manifeste de `fcst/`. Ici, ce n'est pas un découpage : c'est UNE
+    AUTRE POPULATION (les balises des cinq réseaux d'observation, hors
+    Pioupiou et hors METAR), collectée par un autre job, à une autre
+    heure, avec un autre groupe de modèles. Écrire dans `fcst_*` ferait
+    compter cette passe comme une partie manquante de la nuit Pioupiou
+    — exactement l'incident que le S0.9 vient d'éteindre.
+
+    ⚠️ **ET IL PORTE LES MÊMES NOMS DE MODÈLES QUE `fcst/`**, à dessein :
+    `icon_d2`, `meteoswiss_icon_ch2`, `icon_eu`, `ecmwf_ifs025`,
+    `gfs_global`. C'est ce qui donne au contrôle n°3 du lot S3 ses
+    `k = 6` modèles partagés (les cinq + `arome_r2`) et ses 15 paires.
+    Les suffixer rendrait `k = 1`, donc zéro paire, donc rien.
+    ⓘ La clé d'upsert de `model_verif_daily` est
+    `(day, source, station_id, model, lead_h, fcst_src)` : les mêmes
+    noms de modèles ne peuvent pas créer de collision, parce que
+    `source`/`station_id` sont disjoints par construction — la
+    population de ce flux exclut `pioupiou` PAR SOURCE, jamais « celles
+    qui n'ont pas de ligne Open-Meteo ».
+
+    ⓘ Ce préfixe est le seul endroit du dépôt où il est écrit. C'est
+    `collect_reduit.py` qui a le sien (`FLUX`), et le banc
+    `test_cles_caractere_pour_caractere` vérifie que les deux chaînes
+    coïncident — deux noms pour une seule notion, c'est ainsi qu'on
+    écrit dans le mauvais préfixe sans s'en apercevoir.
+    """
+    return f"fcstreduit/{day:%Y/%m}/fcstreduit_{day:%Y-%m-%d}.ndjson.gz"
 
 
 def snapshot_rows(root: pathlib.Path, day: datetime, storage=None) -> list[dict]:
@@ -776,7 +851,18 @@ def snapshot_rows_et_bilan(root: pathlib.Path, day: datetime,
     rows, bilan = fcst_parties(root, day, storage)
     return (rows
             + read_ndjson(root, fcst_agrume_key(day), storage)
-            + read_ndjson(root, fcst_arome_key(day), storage)), bilan
+            + read_ndjson(root, fcst_arome_key(day), storage)
+            # ⛔ LE FLUX DU GROUPE RÉDUIT EST LU EN DERNIER, ET IL PORTE
+            # UN VRAI `aloft_speed` (ECMWF à 850 hPa). `daily_rows`
+            # établit le régime avec « le dernier qui porte la clé
+            # gagne » : si une balise Pioupiou entrait dans sa
+            # population, son régime serait volé à `ecmwf_ifs025` de
+            # `fcst/` — en silence, sur 13 795 lignes par nuit. La
+            # garantie n'est PAS ici, elle est dans
+            # `collect_reduit.SOURCES_EXCLUES`, qui exclut `pioupiou`
+            # PAR SOURCE ; le banc `test_regime_pioupiou_inchange` la
+            # tient, et il teste LE RÉGIME, pas le nom du champ.
+            + read_ndjson(root, fcst_reduit_key(day), storage)), bilan
 
 
 def dire_bilan_parties(bilan: dict, offset: int) -> str:
@@ -1398,19 +1484,6 @@ PRES_FIELDS = {
 #: n'est plus une intuition : `pres_err_med` sur les calibrés,
 #: `ptend_err_med` sur tout le monde.
 PRES_CALIBRATED = frozenset({"metar", "mf", "aemet", "smn"})
-
-
-def obsmetar_key(day: datetime) -> str:
-    """L'archive METAR (225 aérodromes Iowa State, depuis le 08/08).
-
-    ⛔ ELLE N'EST PAS DANS `OBS_KEY_FUNCS`, ET ELLE N'Y ENTRE PAS ICI.
-    `OBS_KEY_FUNCS` alimente la notation du VENT, et le vent d'un
-    aérodrome n'a aucun point de prévision à sa propre coordonnée :
-    l'y ajouter produirait zéro ligne aujourd'hui, et la première
-    personne à voir ce zéro serait tentée de « le réparer » avec
-    `geopair`. Le S1 lit `obsmetar/` pour la PRESSION seulement.
-    """
-    return f"obsmetar/{day:%Y/%m}/obsmetar_{day:%Y-%m-%d}.ndjson.gz"
 
 
 #: Toutes les clés d'archive susceptibles de porter une PRESSION.

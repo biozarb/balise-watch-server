@@ -4,7 +4,13 @@
 #           3e mode « garde-fou-r2 » ajouté le 10/08/2026)
 #
 #  Usage :  run.sh collect | run.sh score | run.sh garde-fou-r2
-#           run.sh agrume   (4e mode, lot I du 13/08/2026)
+#           run.sh agrume         (4e mode, lot I  du 13/08/2026)
+#           run.sh arome          (5e mode, lot S0.5 du 22/08/2026)
+#           run.sh collect-p2     (6e mode, lot S0.6 du 22/08/2026 —
+#                                  INERTE tant que son timer n'est pas
+#                                  installé, et il ne l'est pas)
+#           run.sh collect-reduit (7e mode, lot S0.11 du 23/08/2026 —
+#                                  le groupe réduit sur les candidates)
 #
 #  ═══ POURQUOI UNE ENVELOPPE, ET PAS UN EnvironmentFile ═══
 #
@@ -51,8 +57,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|collect-p2|score|garde-fou-r2|agrume|arome) ;;
-  *) echo "usage: run.sh collect|collect-p2|score|garde-fou-r2|agrume|arome" >&2
+  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome) ;;
+  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome" >&2
      exit 2 ;;
 esac
 
@@ -93,6 +99,17 @@ case "$MODE" in
   # Une nuit à une passe sur deux doit se voir, pas se taire.
   collect-p2)     SCRIPT="$ICI/collect.py"; EXTRA=(--passe 2)
                   LIBELLE="score modeles (passe 2 - surface)" ;;
+  # ⭐ LE GROUPE RÉDUIT SUR LES CANDIDATES (lot S0.11, 23/08/2026).
+  # ⚠️ UN SCRIPT NEUF, DONC UN VERROU, UN COMPTEUR D'ÉCHECS ET UN PING
+  # À PART — même raison que `collect-p2` : la nuit où la passe de
+  # 03:19 déborde, celle de 05:00 doit échouer SOUS SON PROPRE NOM,
+  # avec sa propre alerte et sa propre ligne de journal. Un verrou
+  # partagé la ferait sortir sur « run déjà en cours », en silence.
+  # ⛔ Et il n'a AUCUN drapeau `EXTRA` : `collect_reduit.py` n'a pas de
+  # `--passe`. Sa population et son cap se calculent tout seuls, à
+  # chaque nuit, depuis les référentiels et le budget mesuré.
+  collect-reduit) SCRIPT="$ICI/collect_reduit.py"
+                  LIBELLE="score modeles (groupe reduit - candidates)" ;;
   garde-fou-r2)   SCRIPT="$ICI/../tools/audit_r2.py";   LIBELLE="garde-fou R2" ;;
   agrume)         SCRIPT="$ICI/agrume_fcst.py";         LIBELLE="flux AGRUME" ;;
   # ⚠️ CE MODE-CI N'ARCHIVE PAS HIER, IL ARCHIVE AUJOURD'HUI, et c'est
@@ -135,6 +152,25 @@ if [[ "$MODE" == "collect-p2" ]]; then
   MAX_MINUTES="${BW_MODEL_VERIF_P2_MAX_MINUTES:-40}"
   # Même nature de perte que `collect` : une nuit de prévisions non
   # collectée ne se rattrape jamais. Alerte au PREMIER échec.
+  SEUIL_ALERTE=1
+elif [[ "$MODE" == "collect-reduit" ]]; then
+  # ⚠️ 40 MIN, ET IL FAUT SAVOIR CE QU'ELLES COUVRENT — c'est le COUPLE
+  # (attente bornée, chien de garde) qui tient, jamais l'un des deux :
+  # jusqu'à `collect.ATTENTE_PASSE_MAX_S` = 25 min d'attente de quota au
+  # démarrage (si la passe Pioupiou de 03:19 a débordé sur son heure),
+  # puis ~7,6 min de collecte à 2 905 points (4 067 pondérés ÷ 534,5
+  # pondérés/min, la cadence mesurée le 22/08). 32,6 min au pire, 40 de
+  # garde, et le `TimeoutStartSec` de l'unité est à 50.
+  # ⛔ Relever la borne d'attente sans relever ce chien de garde ferait
+  # tuer la passe PENDANT qu'elle attend — et l'attente serait alors
+  # pire que le refus (S0.6 §5).
+  MAX_MINUTES="${BW_MODEL_VERIF_REDUIT_MAX_MINUTES:-40}"
+  # ⛔ SEUIL_ALERTE=1, COMME `collect`. CE FLUX NE SE REJOUE PAS :
+  # Open-Meteo n'a AUCUN historique de runs passés (mesuré le 08/08 :
+  # 0/384). Une nuit manquée est perdue pour toujours — il n'y a pas de
+  # `--day AAAA-MM-JJ` qui la ramène, et la fenêtre est étroite (05:00
+  # UTC, entre la publication d'`icon_d2` 03 Z à 04:26 et celle de
+  # `gfs_global` à 05:35).
   SEUIL_ALERTE=1
 elif [[ "$MODE" == "collect" ]]; then
   MAX_MINUTES="${BW_MODEL_VERIF_MAX_MINUTES:-40}"

@@ -1474,6 +1474,98 @@ def test_partition_parties_manquantes():
           len(J.snapshot_rows(d, DAY)), 4)
 
 
+def test_flux_reduit_lu_et_pas_compte_comme_partie():
+    """⭐ LE FLUX DU GROUPE RÉDUIT (lot S0.11, 23/08/2026).
+
+    Deux propriétés, et elles ne disent pas la même chose :
+
+      (a) ⭐ `snapshot_rows` LIT le flux `fcstreduit/` — sans cette
+          ligne, la nuit est collectée, payée en quota, écrite sur R2…
+          et jamais notée. Le run passerait au vert et les 2 942
+          candidates resteraient en `regime = "unknown"` ;
+      (b) ⛔ et il n'est PAS compté comme une partie de `fcst/`. La
+          partition du S0.6 découpe UNE population par groupe de
+          modèles ; ici c'est une AUTRE population. Les confondre ferait
+          basculer la nuit Pioupiou en `partie_manquante` — l'incident
+          que le S0.9 vient d'éteindre.
+    """
+    import pathlib
+    import tempfile
+
+    ALT = ["ecmwf_ifs025", "gfs_global"]
+    k1 = J.fcst_key(DAY)
+
+    check("la clé du flux réduit, au caractère près",
+          J.fcst_reduit_key(DAY),
+          "fcstreduit/2026/08/fcstreduit_2026-08-05.ndjson.gz")
+
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s11-lecture-"))
+    _ecrire_gz(d, k1, [_ligne(m) for m in ALT])
+    rows_avant, b_avant = J.snapshot_rows_et_bilan(d, DAY)
+
+    # La même nuit, plus le flux réduit — sur une AUTRE population.
+    reduit = []
+    for m in ["ecmwf_ifs025", "gfs_global", "icon_d2",
+              "meteoswiss_icon_ch2", "icon_eu"]:
+        r = _ligne(m)
+        r["source"], r["station_id"] = "windsmobi", "holfuy-918"
+        reduit.append(r)
+    _ecrire_gz(d, J.fcst_reduit_key(DAY), reduit)
+    rows, b = J.snapshot_rows_et_bilan(d, DAY)
+
+    check("⭐ (a) le flux réduit EST lu par `snapshot_rows`",
+          len(rows) - len(rows_avant), 5)
+    check("⭐ (a) et ses cinq modèles sont là, sous LEURS noms (pas de "
+          "suffixe `_reduit` : c'est ce qui donne k = 6 au tau du S3)",
+          sorted({r["model"] for r in rows if r["source"] == "windsmobi"}),
+          ["ecmwf_ifs025", "gfs_global", "icon_d2", "icon_eu",
+           "meteoswiss_icon_ch2"])
+    check("⛔ (b) le bilan de `fcst/` est INCHANGÉ — le flux réduit n'est "
+          "pas une partie",
+          (b["flux"], b["parties_lues"], b["parties_attendues"], b["etat"]),
+          (b_avant["flux"], b_avant["parties_lues"],
+           b_avant["parties_attendues"], b_avant["etat"]))
+    check("⛔ (b) … et il reste « avant_partition », pas "
+          "« partie_manquante »", b["etat"], "avant_partition")
+
+    # ⚠️ Et son ABSENCE ne fabrique pas non plus une partie manquante :
+    # une nuit où le timer de 05:00 n'a pas tourné est une nuit sans ce
+    # flux, pas une nuit trouée de `fcst/`.
+    d2 = pathlib.Path(tempfile.mkdtemp(prefix="s11-absent-"))
+    _ecrire_gz(d2, k1, [_ligne(m) for m in ALT])
+    _, b2 = J.snapshot_rows_et_bilan(d2, DAY)
+    check("⚠️ l'ABSENCE du flux réduit ne trouble pas le bilan de `fcst/`",
+          b2["etat"], "avant_partition")
+
+
+def test_metar_entre_dans_la_notation_du_vent():
+    """⭐ ARBITRAGE N°8 DU S0.3, TRANCHÉ LE 23/08 : `obsmetar_key` entre
+    dans `OBS_KEY_FUNCS`.
+
+    ⛔ Et cette ligne ne coûte pas un pondéré : `arome_fcst.py` écrit
+    déjà 278 lignes METAR par nuit, gratuitement, À LA COORDONNÉE de
+    chaque aérodrome. La raison qui écartait METAR du vent — « aucun
+    point de prévision à sa propre coordonnée » — est tombée le 22/08.
+    """
+    import pathlib
+    import tempfile
+
+    check("⭐ `obsmetar_key` est dans `OBS_KEY_FUNCS`",
+          J.obsmetar_key in J.OBS_KEY_FUNCS, True)
+    check("… et elle y est UNE fois", J.OBS_KEY_FUNCS.count(J.obsmetar_key), 1)
+    check("les six archives d'observation de vent", len(J.OBS_KEY_FUNCS), 6)
+    check("⛔ `PRES_OBS_KEY_FUNCS` est INCHANGÉE (4 flux de pression)",
+          len(J.PRES_OBS_KEY_FUNCS), 4)
+
+    d = pathlib.Path(tempfile.mkdtemp(prefix="s11-metar-"))
+    _ecrire_gz(d, J.obsmetar_key(DAY),
+               [{"source": "metar", "station_id": "LFLB",
+                 "t": [DAY_MS // 1000], "speed": [20.4], "dir": [90.0]}])
+    rows = J.all_obs_rows(d, DAY)
+    check("⭐ et `all_obs_rows` les lit désormais",
+          [(r["source"], r["station_id"]) for r in rows], [("metar", "LFLB")])
+
+
 def test_rang_sur_journee_incomplete():
     """⛔ Un rang publié sur une journée incomplète doit le DIRE."""
     trou = {0: {"flux": "fcst", "etat": "partie_manquante",
@@ -1960,6 +2052,9 @@ def main() -> int:
                test_partition_parties_manquantes,
                test_rang_sur_journee_incomplete,
                test_les_deux_cles_fcst_sont_la_meme_chaine,
+               # ── lot S0.11 : le groupe réduit sur les candidates ──
+               test_flux_reduit_lu_et_pas_compte_comme_partie,
+               test_metar_entre_dans_la_notation_du_vent,
                # ── lot S2 ──
                test_s2_correction_du_biais_de_site,
                test_s2_estimateur_sans_selection,
