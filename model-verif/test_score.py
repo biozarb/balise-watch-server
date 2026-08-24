@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import math
 import os
+import pathlib
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -2200,6 +2202,196 @@ def test_s3_self_test_injection():
               sorted(appels & interdits), [])
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LOT S13.0 — le fichier léger et le résumé des manches
+# ══════════════════════════════════════════════════════════════════
+
+def test_light_scores_sous_ensemble_exact():
+    print("── S13.0 : le léger est un sous-ensemble exact du gros ──")
+    plein = {
+        "as_of": "2026-08-24", "zone_id": "b1:valley", "model": "icon_d2",
+        "lead_h": 6, "window_kind": "rolling15", "regime": "all",
+        "agg_level": "basin_landform", "n_stations": 4, "n_hours": 48,
+        "occurrences": 40, "typical_err_kmh": 3.5, "worst_decile_kmh": 6.1,
+        "beats_persist": True, "skill": 0.4, "beats_clim": True,
+        "skill_clim": 0.3, "typical_err_kmh_corr": None,
+        "beats_clim_corr": None, "skill_clim_corr": None, "n_corr": 0,
+        "bias_n_days": None, "ci_low": 2.9, "ci_high": 4.1, "rank": 1,
+        "rank_reason": "ok", "err_sd": 1.2, "n_days": 15,
+        "ci_kind": "block_day", "ci_reason": "ok", "block_days": 15,
+        "pooled_err_kmh": None, "borrowed_weight": 0.0, "variable": "wind",
+    }
+    regime = {**plein, "window_kind": "regime", "regime": "fluxN"}
+    scores = [plein, regime]
+    light = J.light_score_rows(scores)
+    check("seule la ligne `rolling15` sort", len(light), 1)
+    check("les champs sont EXACTEMENT ceux du prompt S13.0 (zone_id, "
+          "agg_level, lead_h, model, typical_err_kmh ± IC, n_days, "
+          "n_hours, rank, rank_reason, borrowed_weight)",
+          sorted(light[0]), sorted(J.LIGHT_SCORE_FIELDS))
+    for champ in J.LIGHT_SCORE_FIELDS:
+        check(f"… `{champ}` recopié tel quel, jamais recalculé",
+              light[0][champ], plein[champ])
+
+    pres = {**plein, "variable": "pres"}
+    check("⛔ une ligne `pres` ne doit JAMAIS entrer, même seule",
+          J.light_score_rows([pres]), [])
+    check("une ligne `window_kind='regime'` seule ne publie rien non plus",
+          J.light_score_rows([regime]), [])
+
+
+def test_light_scores_bout_en_bout_ne_recalcule_rien():
+    print("── S13.0 : bout en bout, depuis `rolling_scores` réel ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(830, 836):
+            for model, err in (("icon_d2", 4.0), ("gfs_global", 9.0)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": 24, "regime": "fluxN",
+                    "n_hours": 12, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+    full = J.rolling_scores(daily, zone_of, DAY)
+    for r in full:
+        r.setdefault("variable", "wind")
+    light = J.light_score_rows(full)
+    check("aucune ligne perdue à fenêtre rolling15/wind égale",
+          len(light), len(full))
+    by_key = {(r["zone_id"], r["lead_h"], r["model"]): r for r in full}
+    for lr in light:
+        fr = by_key[(lr["zone_id"], lr["lead_h"], lr["model"])]
+        for champ in J.LIGHT_SCORE_FIELDS:
+            check(f"léger == gros sur `{champ}` "
+                  f"({lr['zone_id']}/{lr['model']})", lr[champ], fr[champ])
+
+
+def test_light_bascules_resume():
+    print("── S13.0 : le résumé bascules fusionne montées et chutes ──")
+    ev = [
+        {"zone_id": "b1:valley", "agg_level": "basin_landform",
+         "model": "icon_d2", "lead_h": 6, "event_type": "onset",
+         "threshold_kmh": 12, "hits": 5, "misses": 2, "false_alarms": 1,
+         "n": 7, "pod": 0.714, "far": 0.167, "csi": None,
+         "frequency_bias": None, "timing_err_med_min": 12,
+         "timing_iqr_min": 8},
+        {"zone_id": "b1:valley", "agg_level": "basin_landform",
+         "model": "icon_d2", "lead_h": 6, "event_type": "drop",
+         "threshold_kmh": 12, "hits": 0, "misses": 4, "false_alarms": 0,
+         "n": 4, "pod": 0.0, "far": None, "csi": None,
+         "frequency_bias": None, "timing_err_med_min": None,
+         "timing_iqr_min": None},
+        # famille hors périmètre (même que `BasculeColumn.tsx` au S4) :
+        # ne doit jamais entrer dans le résumé.
+        {"zone_id": "b1:valley", "agg_level": "basin_landform",
+         "model": "icon_d2", "lead_h": 6, "event_type": "ramp",
+         "threshold_kmh": 20, "hits": 1, "misses": 0, "false_alarms": 0,
+         "n": 1, "pod": 1.0, "far": None, "csi": None,
+         "frequency_bias": None, "timing_err_med_min": None,
+         "timing_iqr_min": None},
+    ]
+    rows = J.light_bascule_rows(ev)
+    check("une seule ligne par zone×modèle×lead, montées ET chutes ensemble",
+          len(rows), 1)
+    r = rows[0]
+    check("… POD montée", r["pod_onset"], 0.714)
+    check("… POD chute", r["pod_drop"], 0.0)
+    check("… far chute nul ⟺ 0 hit + 0 fausse alerte → « jamais annoncée »",
+          r["far_drop_etat"], "jamais_annoncee")
+    check("… far montée (0,167, une vraie question posée) n'est PAS "
+          "« jamais annoncée »", r["far_onset_etat"], None)
+    check("`ramp` n'entre pas dans le résumé", "pod_ramp" in r, False)
+
+
+def test_manches_demarre_au_deploiement_et_est_idempotent():
+    print("── S13.0 : le compteur de « manches » ──")
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    j1 = [
+        {"zone_id": "b1:valley", "lead_h": 6, "model": "icon_d2",
+         "window_kind": "rolling15", "rank": 1, "rank_reason": "ok"},
+        {"zone_id": "b1:valley", "lead_h": 6, "model": "gfs_global",
+         "window_kind": "rolling15", "rank": 2, "rank_reason": "ok"},
+        # une ligne régime au rang 1/ok : ne doit JAMAIS compter — seul
+        # `rolling15` alimente le compteur (prompt S13.0).
+        {"zone_id": "b1:valley", "lead_h": 6, "model": "icon_d2",
+         "window_kind": "regime", "rank": 1, "rank_reason": "ok"},
+    ]
+    etat1 = J.update_rounds(tmp, DAY, j1)
+    check("1ʳᵉ nuit : le compteur de nuits démarre à 1", etat1["nights"], 1)
+    check("… `since` porte la date de CE premier run", etat1["since"],
+          DAY.strftime("%Y-%m-%d"))
+    check("… seul le rang 1/ok de `rolling15` gagne une manche",
+          etat1["wins"], {"b1:valley\x1f6\x1ficon_d2": 1})
+
+    # Idempotence : rejouer la même journée ne fait rien avancer — même
+    # règle que le reste du job (cf. l'en-tête de `score.py`).
+    etat1_bis = J.update_rounds(tmp, DAY, j1)
+    check("rejouer la même journée n'avance ni les nuits ni les manches",
+          (etat1_bis["nights"], etat1_bis["wins"]),
+          (1, {"b1:valley\x1f6\x1ficon_d2": 1}))
+
+    # `--dry-run` ne doit RIEN écrire sur le disque.
+    etat_dry = J.update_rounds(tmp, DAY + timedelta(days=1), j1,
+                               dry_run=True)
+    check("`--dry-run` lit l'état mais ne l'avance pas", etat_dry["nights"], 1)
+    etat_apres_dry = J.update_rounds(tmp, DAY, j1)
+    check("… et n'a rien persisté : rejouer J1 reste à 1 nuit",
+          etat_apres_dry["nights"], 1)
+
+    # Le lendemain, un autre modèle gagne : les compteurs s'ADDITIONNENT,
+    # ils ne se remplacent pas.
+    j2 = [
+        {"zone_id": "b1:valley", "lead_h": 6, "model": "icon_d2",
+         "window_kind": "rolling15", "rank": 1, "rank_reason": "ok"},
+        {"zone_id": "b1:valley", "lead_h": 6, "model": "gfs_global",
+         "window_kind": "rolling15", "rank": None, "rank_reason": "tied"},
+    ]
+    etat2 = J.update_rounds(tmp, DAY + timedelta(days=1), j2)
+    check("2ᵉ nuit : le compteur de nuits avance à 2", etat2["nights"], 2)
+    check("… icon_d2 gagne une deuxième manche : le total est 2",
+          etat2["wins"]["b1:valley\x1f6\x1ficon_d2"], 2)
+    check("… gfs_global, `tied`, ne gagne toujours rien",
+          "b1:valley\x1f6\x1fgfs_global" in etat2["wins"], False)
+
+    check("`rounds_rows` rend zone_id/lead_h/model/wins",
+          J.rounds_rows(etat2),
+          [{"zone_id": "b1:valley", "lead_h": 6, "model": "icon_d2",
+            "wins": 2}])
+
+
+def test_manches_pas_de_rejeu_historique_sous_min_block_days():
+    """Preuve, pas affirmation : sur UNE seule journée du passé, le test
+    apparié ne peut jamais rendre `ok` — c'est ce qui a fait renoncer
+    S13.0 au rejeu historique plutôt qu'à un compteur qui démarre au
+    déploiement (cf. `update_rounds`, en-tête)."""
+    print("── S13.0 : un seul jour ne peut jamais trancher — vérifié, "
+          "pas supposé ──")
+    check("`inference.MIN_BLOCK_DAYS` exige au moins 3 blocs de journées "
+          "pour que le test apparié tranche", J.INF.MIN_BLOCK_DAYS >= 3, True)
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    un_seul_jour = []
+    d = DAY.strftime("%Y-%m-%d")
+    for i in range(830, 836):
+        for model, err in (("icon_d2", 4.0), ("gfs_global", 9.0)):
+            un_seul_jour.append({
+                "day": d, "source": "pioupiou", "station_id": str(i),
+                "model": model, "lead_h": 24, "regime": "fluxN",
+                "n_hours": 12, "err_vec_med": err,
+                "mse_model": err * err, "mse_persist": 100.0})
+    rows = J.rolling_scores(un_seul_jour, zone_of, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    check("un seul jour de données, même avec un écart net (4 contre "
+          "9 km/h) → JAMAIS `ok`",
+          all(r["rank_reason"] != "ok" for r in fine), True)
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -2226,7 +2418,13 @@ def main() -> int:
                test_s2_gardes_fous_et_temoin,
                test_s2_colonnes_de_zone,
                # ── lot S3 : le scoring doit savoir échouer ──
-               test_s3_self_test_injection):
+               test_s3_self_test_injection,
+               # ── lot S13.0 : le fichier léger + le résumé des manches ──
+               test_light_scores_sous_ensemble_exact,
+               test_light_scores_bout_en_bout_ne_recalcule_rien,
+               test_light_bascules_resume,
+               test_manches_demarre_au_deploiement_et_est_idempotent,
+               test_manches_pas_de_rejeu_historique_sous_min_block_days):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0

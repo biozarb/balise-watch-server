@@ -3149,6 +3149,194 @@ def _within_var(row: dict) -> float | None:
     sd = row.get("err_sd")
     return None if sd is None else float(sd) * float(sd)
 
+
+# ══════════════════════════════════════════════════════════════════
+#  S13.0 — LE FICHIER LÉGER ET LE RÉSUMÉ DES MANCHES (24/08/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ PRÉALABLE À LA PASTILLE CÔTÉ CARTE (S13.1+). `model_scores.json`
+# pèse 26,9 Mo (mesuré le 23/08, lot S5 §3) — hors de question à
+# l'ouverture d'un écran léger. `model_scores_light.json` publie le
+# SOUS-ENSEMBLE exact dont une pastille a besoin : rien n'y est
+# recalculé, chaque valeur est recopiée depuis la ligne du gros fichier
+# (banc `test_score.py::test_light_est_un_sous_ensemble_exact`).
+
+#: Les champs du verdict, et RIEN d'autre (prompt S13.0). L'ordre est
+#: celui de la spec, pour qu'un diff de ce tuple se voie.
+LIGHT_SCORE_FIELDS = (
+    "zone_id", "agg_level", "lead_h", "model", "typical_err_kmh",
+    "ci_low", "ci_high", "n_days", "n_hours", "rank", "rank_reason",
+    "borrowed_weight",
+)
+
+
+def light_score_rows(scores: list[dict]) -> list[dict]:
+    """Le sous-ensemble EXACT de `scores` pour le fichier léger.
+
+    Filtré à `window_kind == 'rolling15'` — la seule fenêtre qu'une
+    pastille consulte (prompt S13 : « fenêtre rolling15 seule ») — et
+    `variable == 'wind'` : aucune ligne `pres` n'y entre, même le jour
+    où le S1 publiera la pression par zone (elle porte déjà `variable`
+    explicitement sur chaque ligne, cf. plus bas dans `main()`).
+    """
+    out = []
+    for r in scores:
+        if r.get("window_kind") != "rolling15":
+            continue
+        if r.get("variable", "wind") != "wind":
+            continue
+        out.append({k: r.get(k) for k in LIGHT_SCORE_FIELDS})
+    return out
+
+
+def light_bascule_rows(ev_scores: list[dict]) -> list[dict]:
+    """Résumé bascules par zone×modèle×lead, montées ET chutes ensemble.
+
+    ⚠️ MÊME PÉRIMÈTRE QUE `BasculeColumn.tsx` (S4) : seuls `onset`
+    (montée) et `drop` (chute) entrent ici. `ramp` et `breeze_yield`
+    restent dans le gros fichier, pas dans le léger.
+
+    ⚠️ `far` NUL ⟺ `hits + false_alarms == 0`, PAR CONSTRUCTION
+    (`EV.score_events` divise par ce total pour rendre `far`) — ce
+    n'est pas une coïncidence mesurée au S4 sur un fichier particulier,
+    c'est la définition même du FAR. L'état « jamais annoncée » se
+    dérive donc de `far is None`, et on revérifie quand même
+    hits/false_alarms ici pour que le banc prouve l'équivalence plutôt
+    que de la supposer.
+    """
+    by_key: dict[tuple, dict] = {}
+    for r in ev_scores:
+        if r["event_type"] not in ("onset", "drop"):
+            continue
+        key = (r["zone_id"], r["agg_level"], r["model"], r["lead_h"])
+        row = by_key.setdefault(key, {
+            "zone_id": r["zone_id"], "agg_level": r["agg_level"],
+            "model": r["model"], "lead_h": r["lead_h"],
+        })
+        suffix = r["event_type"]  # "onset" | "drop"
+        far_jamais_annoncee = (r["far"] is None
+                               and r["hits"] + r["false_alarms"] == 0)
+        row[f"pod_{suffix}"] = r["pod"]
+        row[f"far_{suffix}"] = r["far"]
+        row[f"far_{suffix}_etat"] = ("jamais_annoncee"
+                                     if far_jamais_annoncee else None)
+        row[f"n_{suffix}"] = r["n"]
+    return list(by_key.values())
+
+
+#: Où le compteur de « manches » range son état, sous `--out`. Un objet
+#: JSON minuscule, relu et réécrit chaque nuit — même patron que
+#: `tools/quota_openmeteo.py` (état local, pas une table Supabase : ce
+#: sous-lot n'a aucun SQL à faire jouer par Yann).
+ROUNDS_STATE_FILE = "rounds_wind_rolling15.json"
+
+
+def update_rounds(root: pathlib.Path, day: datetime, scores: list[dict],
+                  dry_run: bool = False) -> dict:
+    """Fait avancer le compteur de « manches » (S13.0), et dit sa limite.
+
+    ⛔⛔ CE N'EST PAS UN REJEU HISTORIQUE, ET C'EST UNE DÉCISION MESURÉE,
+    PAS UN OUBLI. Le prompt demandait de vérifier CE QUE LE CACHE DE
+    REJEU PERMET avant de promettre l'historique. Vérifié dans
+    `inference.py` : `rank`/`rank_reason` viennent du test apparié par
+    bloc, dont `MIN_BLOCK_DAYS = 3` — en dessous, il rend
+    `window_too_short`, JAMAIS `ok`. Rejouer ce test sur la matière
+    d'UNE SEULE journée du passé ne peut donc jamais produire de
+    « manche gagnée » : ce n'est pas une limite du cache de rejeu
+    (`REPLAY_SUBDIR`, qui ne sert de toute façon QUE le chemin régime,
+    et ne porte aucune journée `wind`/`rolling15`), c'est une propriété
+    du test statistique lui-même. Une vraie réponse rétroactive
+    demanderait de rejouer une fenêtre glissante de 15 jours PAR JOUR
+    du passé — environ 15× le coût d'une nuit de notation — hors
+    périmètre de ce sous-lot.
+
+    ⇒ **Le compteur démarre au déploiement, et le fichier publié le
+    dit** (`rounds_since`) : chaque nuit où ce code tourne ajoute une
+    observation par (zone, lead, modèle), à partir de son premier run.
+    """
+    path = root / ROUNDS_STATE_FILE
+    state = {"since": day.strftime("%Y-%m-%d"), "nights": 0,
+            "last_day": None, "wins": {}}
+    if path.exists():
+        try:
+            lu = json.loads(path.read_text())
+            if isinstance(lu, dict):
+                state.update(lu)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if dry_run:
+        # Lu, jamais écrit : un `--dry-run` sur le Mac ne doit pas faire
+        # avancer le compteur de production.
+        return state
+    day_str = day.strftime("%Y-%m-%d")
+    if state.get("last_day") == day_str:
+        # Idempotent, même règle que le reste du job (cf. l'en-tête du
+        # fichier) : rejouer la même journée ne compte pas deux fois.
+        return state
+    state["nights"] = state.get("nights", 0) + 1
+    state["last_day"] = day_str
+    wins = state.setdefault("wins", {})
+    for r in scores:
+        if r.get("window_kind") != "rolling15":
+            continue
+        if r.get("rank") == 1 and r.get("rank_reason") == "ok":
+            key = f"{r['zone_id']}\x1f{r['lead_h']}\x1f{r['model']}"
+            wins[key] = wins.get(key, 0) + 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, separators=(",", ":")))
+    return state
+
+
+def rounds_rows(state: dict) -> list[dict]:
+    """Les lignes `rounds` du fichier léger, depuis l'état persisté."""
+    out = []
+    for key, wins in sorted(state.get("wins", {}).items()):
+        zone_id, lead_h, model = key.split("\x1f")
+        out.append({"zone_id": zone_id, "lead_h": int(lead_h),
+                    "model": model, "wins": wins})
+    return out
+
+
+def _publish_light(st, scores: list[dict], ev_scores: list[dict],
+                   rounds_state: dict, as_of: datetime, dry_run: bool):
+    """Publie `model_scores_light.json` — le sous-ensemble pour la pastille.
+
+    Même bucket, même clé stable, même cache court que
+    `model_scores.json` (cf. `_publish`).
+
+    ⚠️ AUCUNE RÈGLE CORS NEUVE À POSER — VÉRIFIÉ EN DIRECT LE 24/08, PAS
+    SEULEMENT RAISONNÉ. Une règle CORS Cloudflare R2 se pose PAR BUCKET,
+    jamais par objet : mesuré en interrogeant `pub-d8b18f1cf34c470dbb838
+    ac4566311ba.r2.dev/model_scores_light.json` (la clé N'EXISTE PAS
+    ENCORE) avec `Origin: https://balise-watch.vercel.app` — le bucket
+    répond `404` ET porte quand même
+    `Access-Control-Allow-Origin: https://balise-watch.vercel.app`,
+    exactement comme `model_events.json`, qui existe. La règle mesurée
+    au S4 (cette seule origine autorisée) couvre donc déjà toute clé
+    future du bucket, y compris celle-ci, sans le moindre geste
+    supplémentaire.
+    """
+    if st is None or dry_run:
+        print("  ⓘ publication R2 (léger) sautée (pas de storage, ou dry-run)")
+        return
+    from storage import CACHE_REECRIT             # type: ignore
+    body = json.dumps({
+        "as_of": as_of.strftime("%Y-%m-%d"),
+        "audience": "beta",
+        "window_kind": "rolling15",
+        "variable": "wind",
+        "rounds_since": rounds_state.get("since"),
+        "rounds_nights": rounds_state.get("nights"),
+        "scores": light_score_rows(scores),
+        "bascules": light_bascule_rows(ev_scores),
+        "rounds": rounds_rows(rounds_state),
+    }, separators=(",", ":")).encode("utf-8")
+    st.put("model_scores_light.json", body, cache_control=CACHE_REECRIT)
+    st.bilan()
+    print(f"  → model_scores_light.json publié ({len(body) / 1024:.0f} Ko, "
+          f"{len(gzip.compress(body)) / 1024:.0f} Ko gzippé)")
+
+
 # ══════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
@@ -4052,6 +4240,15 @@ def main() -> int:
                            "climatology_stations": len(clim),
                            "events_calibrated": EVENTS_CALIBRATED,
                            "audience": "beta"})
+
+            # ── S13.0 : le fichier léger + le résumé des manches ──
+            rounds_state = update_rounds(root, day, scores, args.dry_run)
+            _publish_light(st, scores, ev_scores, rounds_state, as_of,
+                           args.dry_run)
+            print(f"  → manches : {rounds_state.get('nights', 0)} nuit(s) "
+                  f"suivie(s) depuis le {rounds_state.get('since')}, "
+                  f"{len(rounds_state.get('wins', {}))} case(s) "
+                  f"zone×lead×modèle avec au moins une manche gagnée")
 
     # ── 6. purge ─────────────────────────────────────────────────
     if not args.no_purge:
