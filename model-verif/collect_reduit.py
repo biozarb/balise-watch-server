@@ -706,8 +706,12 @@ def cap_budgetaire(qm, budget, cout_point: float,
     deux processus lui sont invisibles. Il n'est pas trop serré, il NE
     REGARDE PAS. Ici, la passe candidates lit ce qui RESTE :
 
-        cap = ⌊ (plafond_jour_effectif − conso_des_AUTRES − RÉSERVE)
-                / coût_point ⌋
+        cap = min( ⌊ (plafond_jour_effectif − conso_des_AUTRES − RÉSERVE)
+                     / coût_point ⌋ ,
+                   ⌊ (plafond_HEURE_effectif − sonde) / coût_point ⌋ )
+
+    ⛔ Le second terme date de la revue du 24/08 : le jour seul ne
+    protège pas de l'heure — cf. le pavé dans le corps de la fonction.
 
     ⭐ TROIS PROPRIÉTÉS QUE « 60 % D'UN PLAFOND » N'A PAS :
 
@@ -736,7 +740,9 @@ def cap_budgetaire(qm, budget, cout_point: float,
     """
     jrn: dict = {"source": None, "plafond_jour": None, "autres": None,
                  "reserve": RESERVE_NON_COMPTEE, "cout_point": cout_point,
-                 "cap": 0, "par_consommateur": {}}
+                 "cap": 0, "par_consommateur": {},
+                 "cap_jour": 0, "cap_heure": 0, "plafond_heure": None,
+                 "reserve_heure": 0.0, "fenetre_qui_borne": None}
 
     if qm is None or budget is None:
         if conso_repli is None:
@@ -761,8 +767,47 @@ def cap_budgetaire(qm, budget, cout_point: float,
     jrn["plafond_jour"] = plafond
     jrn["autres"] = autres
     reste = plafond - autres - RESERVE_NON_COMPTEE
-    cap = int(reste // cout_point) if reste > 0 else 0
-    jrn["cap"] = max(0, cap)
+    cap_jour = max(0, int(reste // cout_point) if reste > 0 else 0)
+
+    # ⛔⛔ ET LA FENÊTRE HORAIRE BORNE AUSSI — STRUCTURELLEMENT (revue du
+    # 24/08/2026). C'est L'HEURE qui a tué la nuit du 23/08, pas le
+    # jour ; or ce calcul-ci ne regardait QUE le jour. Ça tenait par
+    # COÏNCIDENCE ARITHMÉTIQUE : le cap ne passait sous l'heure que
+    # parce que Pioupiou avait déjà consommé sa part de la fenêtre jour.
+    # La nuit où `bw-model-collect` échoue ou est reverté (le retour
+    # arrière du 22/08 ; l'échéance à 2 points près du 21/08), `autres`
+    # tombe vers ~252 ⇒ cap_jour ≈ 3 939 points = 7 878 pondérés à
+    # dépenser dans l'heure, contre 4 750 : `attendre_la_place` refuse
+    # ou les points sont refusés par milliers — la nuit qui perd
+    # Pioupiou emportait AUSSI la nuit candidates. Deux archives pour
+    # une panne.
+    #
+    # ⚠️ La borne est STRUCTURELLE (le plafond de l'heure, sonde
+    # déduite), PAS la consommation horaire du moment. Deux raisons :
+    # 1. la congestion TRANSITOIRE de l'heure est le travail
+    #    d'`attendre_la_place` et de `Budget.demander` — une attente se
+    #    rattrape dans le même run, une ÉVICTION est définitive pour la
+    #    nuit. Évincer sur un état qui se vide tout seul jetterait des
+    #    points qu'un quart d'heure aurait ramenés ;
+    # 2. à 05:00 UTC l'heure est vide par CONSTRUCTION du planning
+    #    (Pioupiou finit vers 03:45) — la seule chose qui ne se vide
+    #    jamais, c'est le plafond lui-même.
+    # La sonde (9 appels, réservés AVANT la collecte, dans la même
+    # heure) est déduite pour que cap × coût + sonde tienne sous le
+    # plafond effectif — sans elle, les ~5 derniers points seraient
+    # refusés à chaque nuit pleine.
+    plafond_h = (qm.plafond_effectif("heure") if qm is not None
+                 else 4_750.0)  # cf. `quota_openmeteo.plafond_effectif`
+    reserve_h = POIDS_SONDE * (len(DOMAINE_PAR_MODELE)
+                               + len(DOMAINES_TEMOINS))
+    cap_heure = max(0, int((plafond_h - reserve_h) // cout_point))
+
+    jrn["cap_jour"] = cap_jour
+    jrn["cap_heure"] = cap_heure
+    jrn["plafond_heure"] = plafond_h
+    jrn["reserve_heure"] = reserve_h
+    jrn["fenetre_qui_borne"] = "heure" if cap_heure < cap_jour else "jour"
+    jrn["cap"] = min(cap_jour, cap_heure)
     return jrn["cap"], jrn
 
 
@@ -1175,15 +1220,26 @@ def dire_budget(population: int, jrn_cap: dict, evincees: int,
           f"fenêtre glissante de 24 h)")
     crier(f"│ réserve nommée         : {jrn_cap['reserve']:.0f}  "
           f"(870 croissance Pioupiou + 500 scripts manuels, sonde comprise)")
+    crier(f"│ plafond heure effectif : {jrn_cap['plafond_heure']:.0f}  "
+          f"(− {jrn_cap['reserve_heure']:.0f} de sonde ⇒ "
+          f"{jrn_cap['cap_heure']} points au plus, quel que soit le jour)")
     crier(f"│ coût / point           : {cout:.2f} pondérés")
-    crier(f"│ ⇒ CAP                  : {cap} points")
+    crier(f"│ ⇒ CAP                  : {cap} points  "
+          f"(jour {jrn_cap['cap_jour']} · heure {jrn_cap['cap_heure']} — "
+          f"c'est la fenêtre {jrn_cap['fenetre_qui_borne'].upper()} "
+          f"qui borne)")
     crier(f"│ population du jour     : {population} points")
     crier(f"│ ⇒ ÉVINCÉES             : {evincees}")
     n = min(cap, population)
     crier(f"│ poids projeté du run   : {n * cout:.0f} pondérés "
           f"({n} points × {cout:.2f})")
-    qui = ("la RÉSERVE BUDGÉTAIRE" if evincees else
-           "aucun — la population tient sous le cap")
+    # ⛔ Le garde-fou qui mord est NOMMÉ, et depuis la revue du 24/08 il
+    # peut être la fenêtre HORAIRE — celle qui a tué la nuit du 23/08.
+    qui = ("aucun — la population tient sous le cap" if not evincees else
+           ("la fenêtre HORAIRE (5 000 appels/h : jamais plus de "
+            f"{jrn_cap['cap_heure']} points par run)"
+            if jrn_cap["fenetre_qui_borne"] == "heure"
+            else "la RÉSERVE BUDGÉTAIRE (fenêtre jour)"))
     crier(f"│ GARDE-FOU QUI MORD     : {qui}")
     crier("└──────────────────────────────────────────────────────────────")
 

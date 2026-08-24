@@ -446,6 +446,76 @@ def test_cap_lit_le_budget_mesure():
             f"le journal DIT d'où vient le budget ({jrn['source']})")
 
 
+def test_cap_borne_par_la_fenetre_horaire():
+    """⛔⛔ LE JOUR SEUL NE PROTÈGE PAS DE L'HEURE (revue du 24/08).
+
+    Le cap du 23/08 tenait sous le plafond du JOUR et a tué le run sur
+    l'HEURE. Après le débug, `cap_budgetaire` ne regardait TOUJOURS que
+    le jour — et ça tenait par coïncidence arithmétique : c'est la
+    consommation de Pioupiou dans la fenêtre jour qui faisait tomber le
+    cap sous l'heure.
+
+    ⛔ Le scénario qui casse est DÉJÀ ARRIVÉ à deux reprises près : une
+    nuit où `bw-model-collect` échoue ou est reverté (retour arrière du
+    22/08, échéance à 2 points du 21/08), la fenêtre jour ne porte plus
+    que `backfill_packs` (252) ⇒ cap_jour = ⌊(9 500 − 252 − 1 370) /
+    2,00⌋ = 3 939 points = **7 878 pondérés à dépenser dans l'heure,
+    contre 4 750** : `attendre_la_place` refuse (nuit candidates perdue
+    ENTIÈRE) ou les points sont refusés par milliers. La nuit qui perd
+    Pioupiou emportait aussi la nuit candidates.
+
+    ⭐ La borne attendue est STRUCTURELLE : ⌊(plafond_effectif("heure")
+    − la réserve de la sonde, 9 appels⌋) / coût⌋ — pas la consommation
+    horaire du moment, qui est le travail d'`attendre_la_place` (une
+    attente se rattrape dans le run, une éviction est définitive).
+
+    ⚠️ Toutes les lectures passent par `.get()` : contre le code
+    d'avant, ce banc doit ÉCHOUER, pas PLANTER (leçon du S3 — un banc
+    qui plante se compte comme un mutant tué).
+    """
+    print("\n▶ 3 bis. le cap est borné par la fenêtre HORAIRE aussi")
+    root = pathlib.Path(tempfile.mkdtemp(prefix="s13-quota-h-"))
+    chemin = root / "openmeteo.json"
+    t = 1_787_000_000.0
+    # La nuit où Pioupiou est tombée : seul backfill_packs (à 2 h d'ici,
+    # DANS la fenêtre jour, HORS de la fenêtre heure) reste au seau.
+    seau(chemin, [(t - 7200, 252.0, "backfill_packs")])
+    b = Q.Budget(R.ETIQUETTE_BUDGET, chemin=chemin, horloge=lambda: t)
+    cout = R.poids_par_point_reduit()
+    cap, jrn = R.cap_budgetaire(Q, b, cout)
+
+    sonde = R.POIDS_SONDE * (len(R.DOMAINE_PAR_MODELE)
+                             + len(R.DOMAINES_TEMOINS))
+    attendu = int((Q.plafond_effectif("heure") - sonde) // cout)
+    verifie(jrn.get("cap_jour") == 3939,
+            f"le jour, seul, aurait laissé 3 939 points "
+            f"({jrn.get('cap_jour')}) — soit 7 878 pondérés dans l'heure, "
+            f"le mur du 23/08 en plus haut")
+    verifie(cap == attendu == 2370,
+            f"⭐⭐ le cap est borné par l'HEURE : {cap} points, soit "
+            f"⌊(4 750 − {sonde:.0f} de sonde) / {cout:.2f}⌋ = {attendu}")
+    verifie(cap * cout + sonde <= Q.plafond_effectif("heure"),
+            f"cap × coût + sonde tient sous le plafond horaire effectif "
+            f"({cap} × {cout:.2f} + {sonde:.0f} = "
+            f"{cap * cout + sonde:.0f} ≤ "
+            f"{Q.plafond_effectif('heure'):.0f})")
+    verifie(jrn.get("fenetre_qui_borne") == "heure",
+            f"le journal NOMME la fenêtre qui borne "
+            f"({jrn.get('fenetre_qui_borne')}) — un garde-fou qui mord "
+            f"sans se nommer fait accuser l'autre")
+
+    # Et la nuit NORMALE ne bouge pas d'un point : avec Pioupiou au
+    # seau, c'est toujours le jour qui borne, cap 2 033 inchangé.
+    seau(chemin, [(t - 3600, 3810.6, "collect"),
+                  (t - 1800, 252.0, "backfill_packs")])
+    b2 = Q.Budget(R.ETIQUETTE_BUDGET, chemin=chemin, horloge=lambda: t)
+    cap2, jrn2 = R.cap_budgetaire(Q, b2, cout)
+    verifie(cap2 == 2033 and jrn2.get("fenetre_qui_borne") == "jour",
+            f"⭐ la nuit normale est INCHANGÉE : cap {cap2}, borné par "
+            f"{jrn2.get('fenetre_qui_borne')} — le correctif ne coûte "
+            f"rien tant que Pioupiou tourne")
+
+
 def test_cap_ignore_sa_propre_consommation_de_la_veille():
     """⛔⛔ LE PIÈGE LE PLUS VICIEUX DU LOT, ET IL EST INVISIBLE.
 
@@ -1181,6 +1251,7 @@ def main() -> int:
     test_suffixe_de_modele()
     test_cap_lit_le_budget_mesure()
     test_cap_ignore_sa_propre_consommation_de_la_veille()
+    test_cap_borne_par_la_fenetre_horaire()
     test_cap_repli_derive()
     test_cles_caractere_pour_caractere()
     test_manifeste_declare_ce_que_le_run_ecrit()
