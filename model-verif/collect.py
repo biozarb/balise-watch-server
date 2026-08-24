@@ -280,7 +280,23 @@ def _get_json(url: str, timeout: int = TIMEOUT_S):
     return payload
 
 
-def _get_json_retry(url: str, label: str):
+class FenetreHoraireFermee(RuntimeError):
+    """Un 429 a survécu à la pause de 65 s — ce n'est plus la MINUTE.
+
+    ⚠️ N'EST PAS UNE ERREUR TECHNIQUE, et ce n'est pas non plus un
+    `BudgetRefuse` : le budget est notre compteur À NOUS, celle-ci est
+    la réponse du SERVEUR. Quand les deux divergent, c'est le serveur
+    qui a raison, et c'est le signe que notre compteur ment — le 24/08,
+    il mentait de 43 %.
+
+    L'appelant doit en faire un TROU DÉCLARÉ et SORTIR. Continuer coûte
+    `PAUSE_429_S` par point pour des abandons garantis : 40 minutes de
+    chien de garde, et une archive tuée en pleine écriture.
+    """
+
+
+def _get_json_retry(url: str, label: str,
+                    arret_si_429_persistant: bool = False):
     """GET avec réessais, et un traitement À PART du 429.
 
     ⚠️ POURQUOI LE 429 N'EST PAS UNE ERREUR COMME LES AUTRES. Les autres
@@ -295,12 +311,38 @@ def _get_json_retry(url: str, label: str):
     fenêtre est repartie, et ce sont les points SUIVANTS qui en
     profitent. Le point qui a payé l'attente est celui qui la rend aux
     autres.
+
+    ⛔⛔ **ET UN 429 QUI SURVIT À LA PAUSE N'EST PAS LE MÊME 429**
+    (débug du 24/08/2026). Ce fichier le disait déjà, mot pour mot,
+    quelques lignes plus haut — « contrairement à la minute, une fenêtre
+    horaire pleine ne se vide pas en attendant 65 s » — et il ne
+    l'implémentait pas : le second 429 retombait dans le réessai
+    ordinaire, le point mourait au bout de 65 s, et le suivant repayait
+    65 s. Mesuré la nuit du 23 au 24/08 : 75 × 429, **40 minutes** à
+    brûler deux abandons garantis par point, jusqu'à ce que le chien de
+    garde de `run.sh` envoie `TERM` en pleine écriture — d'où l'archive
+    tronquée.
+
+    ⇒ `arret_si_429_persistant=True` fait lever `FenetreHoraireFermee`
+    au SECOND 429. L'appelant en fait un TROU DÉCLARÉ et sort ; il ne
+    rame pas. ⚠️ Le défaut reste `False` : la passe Pioupiou n'a jamais
+    vu ce cas, et un changement de comportement sur la chaîne
+    irremplaçable se demande, il ne se subit pas.
     """
     pause_429_deja_prise = False
     for attempt in range(MAX_RETRIES):
         try:
             return _get_json(url)
         except urllib.error.HTTPError as exc:
+            if exc.code == 429 and pause_429_deja_prise \
+                    and arret_si_429_persistant:
+                raise FenetreHoraireFermee(
+                    f"429 sur {label} APRÈS une pause de {PAUSE_429_S:.0f}s : "
+                    f"ce n'est pas la fenêtre MINUTE, c'est l'HEURE — et une "
+                    f"fenêtre horaire pleine ne se vide pas en attendant. "
+                    f"Continuer coûterait {PAUSE_429_S:.0f}s par point pour "
+                    f"des abandons garantis, jusqu'au chien de garde. On "
+                    f"sort avec un trou DÉCLARÉ.") from exc
             if exc.code == 429 and not pause_429_deja_prise:
                 pause_429_deja_prise = True
                 # `Retry-After` s'il existe — Open-Meteo n'en envoie pas
@@ -513,8 +555,30 @@ def poids_par_point() -> float:
     `quota_openmeteo.poids()` — répétés ici seulement pour que
     `quota_projete` reste lisible sans le module de budget, qui peut
     être absent du VPS (cf. `charger_quota`).
+
+    ⛔⛔ **ET LE PLANCHER À 1,0 PAR GROUPE EN FAIT PARTIE** (débug du
+    24/08/2026). Un appel HTTP ne coûte jamais moins d'un appel :
+    Open-Meteo facture au minimum une requête. Sommer les produits PUIS
+    diviser ferait disparaître le plancher exactement là où il mord —
+    c'est la forme qui a tué `collect_reduit` à sa première nuit
+    (0,8 + 0,6 = 1,40 annoncé, 2,00 facturé, mur horaire à l'unité
+    près). On applique donc `max(1.0, …)` **par groupe**, comme le
+    serveur.
+
+    ⓘ **Sur la passe Pioupiou d'aujourd'hui, le plancher ne change
+    RIEN, et c'est mesuré** : ses deux groupes pèsent 1,6 (2 modèles ×
+    8 vars) et 4,2 (7 × 6), tous deux bien au-dessus de 1 ; le total
+    reste 5,80. C'est précisément pourquoi le défaut a pu vivre des
+    semaines sans se voir — il fallait une passe dont un groupe soit
+    SOUS 1, et il n'y en avait pas avant le 23/08.
+    ⚠️ Le jour où quelqu'un allège un groupe (moins de modèles, moins
+    de variables) au point de passer sous 1, ce `max` est la seule
+    ligne qui empêchera le budget de mentir. Le chiffre monte, il ne
+    descend jamais — un garde-fou qui se trompe doit se tromper du
+    côté qui protège.
     """
-    return sum(len(v) * len(m) for m, v in groupes_requete()) / 10
+    return sum(max(1.0, len(v) * len(m) / 10)
+               for m, v in groupes_requete())
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -991,7 +1055,8 @@ def quota_projete(n_points: int, forecast_days: int,
 
 def fetch_forecast(lat: float, lon: float, forecast_days: int,
                    models: list[str] | None = None,
-                   variables: list[str] | None = None):
+                   variables: list[str] | None = None,
+                   arret_si_429_persistant: bool = False):
     """Une requête de prévision, pour UN groupe de modèles.
 
     ⚠️ `models` et `variables` ne sont plus facultatifs en pratique :
@@ -1010,7 +1075,8 @@ def fetch_forecast(lat: float, lon: float, forecast_days: int,
     }
     return _get_json_retry(f"{FORECAST_API}?{urllib.parse.urlencode(params)}",
                            f"prévision {lat:.3f},{lon:.3f} "
-                           f"[{len(models)} modèles]")
+                           f"[{len(models)} modèles]",
+                           arret_si_429_persistant=arret_si_429_persistant)
 
 
 def forecast_rows(station: dict, payload: dict, fetched_at: str,
@@ -2306,6 +2372,32 @@ def write_ndjson_gz(path: pathlib.Path, rows_iter) -> int:
 R2OK_SUFFIXE = ".r2ok"
 
 
+def gz_lisible(path: pathlib.Path) -> bool:
+    """Le flux gzip est-il COMPLET — pied compris ?
+
+    ⛔ C'EST `gunzip -t`, PAS « le fichier existe et pèse 2,7 Mo »
+    (débug du 24/08/2026). Un processus tué en pleine écriture laisse un
+    fichier de taille parfaitement crédible dont le flux gzip n'a jamais
+    été terminé : ni CRC, ni taille finale. `ls` n'y voit rien, `du` non
+    plus, et l'envoi R2 réussit — c'est APRÈS, à la relecture, que
+    l'archive n'existe plus.
+
+    ⚠️ ON LIT TOUT, on ne se contente pas d'ouvrir. L'en-tête gzip fait
+    dix octets et il est écrit à la première ligne : un fichier tronqué
+    s'ouvre sans broncher. La seule question qui compte est « est-ce
+    qu'on arrive au bout ? », et elle se paye en décompressant.
+    ⓘ Coût mesuré : ~0,2 s pour 2,7 Mo. C'est le prix d'une nuit
+    d'archive, une fois par run.
+    """
+    try:
+        with gzip.open(path, "rb") as fh:
+            while fh.read(1 << 20):
+                pass
+        return True
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
 def temoin(path: pathlib.Path) -> pathlib.Path:
     """Le témoin d'envoi, posé à côté de l'objet qu'il décrit.
 
@@ -2418,6 +2510,42 @@ def rattraper(out: pathlib.Path, plafond: int = 30) -> None:
     if not retard:
         return
     print(f"▶ rattrapage : {len(retard)} archive(s) locale(s) jamais montée(s)")
+
+    # ⛔⛔ AUCUNE ARCHIVE ILLISIBLE NE MONTE SUR R2 (débug du 24/08/2026).
+    # C'est le garde-fou qui manquait, et son absence allait publier une
+    # archive corrompue comme si de rien n'était.
+    #
+    # Le 24/08 au matin, `fcstreduit_2026-08-24.ndjson.gz` était sur le
+    # disque, 2,7 Mo, SANS témoin — le processus avait reçu `TERM` en
+    # pleine écriture et le flux gzip n'avait jamais été fermé
+    # (`gunzip -t` en erreur). Cette fonction tourne AVANT la collecte :
+    # la première chose que le run du lendemain aurait faite, c'est
+    # monter ce fichier-là et poser son témoin. L'archive « officielle »
+    # du 24/08 serait devenue un objet que personne ne peut décompresser
+    # — et le témoin aurait affirmé le contraire pour toujours.
+    #
+    # ⚠️ ON NE RÉPARE PAS ICI, ON REFUSE ET ON NOMME. Réparer d'office
+    # ferait disparaître l'incident dans un journal que personne ne lit ;
+    # `reparer_archive.py` existe pour ça, il se lance à la main, et il
+    # conserve l'original. Le fichier reste SANS témoin, donc
+    # `en_retard()` continue de le voir, donc le run reste rouge tant
+    # que quelqu'un n'a pas tranché. C'est le comportement voulu.
+    sains, casses = [], []
+    for p in retard:
+        (sains if (not p.name.endswith(".ndjson.gz") or gz_lisible(p))
+         else casses).append(p)
+    for p in casses:
+        print(f"  ⛔ {p.name} : flux gzip ILLISIBLE (tronqué ou corrompu) — "
+              f"REFUSÉ à l'envoi. Une archive qu'on ne peut pas "
+              f"décompresser ne devient pas vraie parce qu'elle est sur "
+              f"R2. Sauver ce qui est lisible : "
+              f"`python3 reparer_archive.py {p} --manifeste <le manifeste "
+              f"du jour>`", file=sys.stderr)
+    retard = sains
+    if not retard:
+        print("  aucune archive SAINE à rattraper")
+        return
+
     # Un plafond, parce qu'un an de panne ferait mille envois d'un coup —
     # mais un plafond qui se TAIT ferait croire à une reprise complète.
     lot, reste = retard[:plafond], retard[plafond:]

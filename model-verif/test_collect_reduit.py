@@ -390,19 +390,24 @@ def test_suffixe_de_modele():
 # ══════════════════════════════════════════════════════════════════
 
 def test_cap_lit_le_budget_mesure():
-    """⛔ 2 905 POINTS, PAS 4 071 — ET LA DIFFÉRENCE EST LA NUIT
-    PIOUPIOU.
+    """⛔ 2 033 POINTS — ET LA DIFFÉRENCE EST LA NUIT PIOUPIOU.
 
     Le seuil de 60 % de `collect.quota_projete` (6 000 pondérés) est
     AVEUGLE à cette passe : il juge `n_points × par_point_jour` de SA
-    population. Une passe candidates à 2 942 points × 1,40 projette
-    4 119 pondérés — 69 % de 6 000 — et passerait sans avoir jamais vu
-    les 3 810,6 de Pioupiou.
+    population, sans jamais voir les 3 810,6 de Pioupiou.
 
     ⇒ Le cap se calcule sur le budget MESURÉ. Avec 3 810,6 (`collect`)
     + 252,0 (`backfill_packs`) dans la fenêtre du jour, et la réserve
-    nommée de 1 370, il ne reste que 4 067,4 pondérés, soit **2 905
-    points**.
+    nommée de 1 370, il ne reste que 4 067,4 pondérés.
+
+    ⛔⛔ **CE CHIFFRE ÉTAIT 2 905, ET C'ÉTAIT FAUX** (débug du
+    24/08/2026). Il divisait 4 067,4 par **1,40**, le coût que le code
+    se croyait ; Open-Meteo facturait 2,00, parce qu'un appel HTTP ne
+    coûte jamais moins d'un appel et que les deux requêtes du point
+    pesaient 0,8 et 0,6. Le cap juste est **⌊4 067,4 / 2,00⌋ = 2 033**,
+    et la passe évince donc ~900 candidates par nuit — nommées et
+    journalisées, ce qui vaut infiniment mieux qu'un run tué au point
+    2 500 sur une archive tronquée.
     """
     print("\n▶ 3. le cap vient du budget MESURÉ, pas de 60 % d'un plafond")
     root = pathlib.Path(tempfile.mkdtemp(prefix="s11-quota-"))
@@ -416,13 +421,27 @@ def test_cap_lit_le_budget_mesure():
     verifie(abs(jrn["autres"] - 4062.6) < 0.05,
             f"la consommation des AUTRES est lue, pas supposée "
             f"({jrn['autres']:.1f} pondérés)")
-    verifie(cap == 2905,
-            f"⭐ le cap vaut 2 905 points ({cap}) — soit "
-            f"⌊(9 500 − 4 062,6 − 1 370) / 1,40⌋")
-    verifie(cap <= 2905,
-            f"⭐ … et il est ≤ 2 905 : un cap calculé sur « 9 500 × 0,6 » "
-            f"en rendrait {int((9500 * 0.6 - 4062.6 - 1370) // 1.4)} ou "
-            f"{int(9500 * 0.6 // 1.4)} selon la faute, jamais 2 905")
+    verifie(cap == 2033,
+            f"⭐ le cap vaut 2 033 points ({cap}) — soit "
+            f"⌊(9 500 − 4 062,6 − 1 370) / 2,00⌋")
+    verifie(cap <= 2033,
+            f"⭐ … et il est ≤ 2 033 : un cap calculé sur « 9 500 × 0,6 » "
+            f"en rendrait {int((9500 * 0.6 - 4062.6 - 1370) // 2.0)} ou "
+            f"{int(9500 * 0.6 // 2.0)} selon la faute, jamais 2 033")
+    # ⛔⛔ ET LE CAP DOIT TENIR DANS LA FENÊTRE HORAIRE, PAS SEULEMENT
+    # DANS LA JOURNALIÈRE (débug du 24/08). C'est l'assertion qui
+    # manquait : le 23/08, le cap de 2 905 points tenait sous le
+    # plafond du JOUR et débordait l'HEURE de 810 appels — et c'est
+    # l'heure qui a tué le run, pas le jour. Un cap qui ne se compare
+    # qu'à une fenêtre ne protège que de celle-là.
+    verifie(cap * R.poids_par_point_reduit() <= Q.plafond_effectif("heure"),
+            f"⭐⭐ le cap tient dans la fenêtre HORAIRE : "
+            f"{cap} × {R.poids_par_point_reduit():.2f} = "
+            f"{cap * R.poids_par_point_reduit():.0f} ≤ "
+            f"{Q.plafond_effectif('heure'):.0f}. Le 23/08, le cap annoncé "
+            f"(2 905 × 1,40 = 4 067 « pondérés ») valait en vérité "
+            f"2 905 × 2,00 = 5 810 appels contre 4 750 — le mur est tombé "
+            f"au point ~2 500")
     verifie(jrn["source"] == "budget-mesure",
             f"le journal DIT d'où vient le budget ({jrn['source']})")
 
@@ -461,10 +480,10 @@ def test_cap_ignore_sa_propre_consommation_de_la_veille():
     verifie(R.ETIQUETTE_BUDGET in jrn["par_consommateur"],
             "sa propre consommation de la veille EST bien dans la "
             "fenêtre glissante (sinon le test ne testerait rien)")
-    verifie(cap_avec == cap_sans == 2905,
+    verifie(cap_avec == cap_sans == 2033,
             f"⭐ le cap est INCHANGÉ ({cap_sans} → {cap_avec}) : sa propre "
             f"étiquette est exclue. Sans l'exclusion, il tomberait à "
-            f"{max(0, int((9500 - 4062.6 - 4067.0 - 1370) // 1.4))} point(s) "
+            f"{max(0, int((9500 - 4062.6 - 4067.0 - 1370) // 2.0))} point(s) "
             f"— et la nuit serait perdue en silence")
 
 
@@ -478,7 +497,7 @@ def test_cap_repli_derive():
                                 conso_repli=repli)
     verifie(jrn["source"] == "repli-derive",
             f"le journal DIT que le budget est un repli ({jrn['source']})")
-    verifie(cap == 2905,
+    verifie(cap == 2033,
             f"le repli dérivé du référentiel réel rend le même cap "
             f"({cap}) — 657 × {C.poids_par_point():.2f} + 252,0 = "
             f"{repli:.1f}")
@@ -562,9 +581,11 @@ def test_manifeste_declare_ce_que_le_run_ecrit():
     verifie(m["flux"] == R.FLUX,
             f"le bilan NOMME son flux ({m['flux']}) — sans ça, "
             f"« 1 partie » se lirait « il manque des flux »")
-    verifie(abs(m["poids_point_total"] - 1.4) < 1e-9,
+    verifie(abs(m["poids_point_total"] - 2.0) < 1e-9,
             f"le poids par point est celui de la clé réelle "
-            f"({m['poids_point_total']})")
+            f"({m['poids_point_total']}) — 2,00 depuis le débug du "
+            f"24/08, et non 1,40 : un appel HTTP ne coûte jamais moins "
+            f"d'un appel")
     # La preuve que le discriminant n'est pas `len(groupes)` : deux clés
     # déclarées ⇒ deux parties, même groupes.
     m2 = R.construire_manifeste(JOUR, 2942, cles + ["x/y.ndjson.gz"])
@@ -914,8 +935,17 @@ def test_cout_par_point():
         import urllib.parse                                  # noqa: PLC0415
         url = f"{C.FORECAST_API}?{urllib.parse.urlencode(params)}"
         total += Q.poids_url(url)
-    verifie(abs(total - 1.40) < 1e-9,
-            f"⭐ 1,40 pondéré par point, mesuré sur l'URL RÉELLE ({total})")
+    verifie(len(R.groupes_reduit()) == 1,
+            f"⭐⭐ UNE SEULE requête par point ({len(R.groupes_reduit())}) — "
+            f"le découpage en deux ne coûtait pas moins (1 + 1 = 2 appels "
+            f"facturés, comme la requête fusionnée) et il privait les "
+            f"Pyrénées et l'Espagne de tout modèle mondial : 375 groupes "
+            f"perdus en silence la nuit du 23 au 24/08")
+    verifie(abs(total - 2.00) < 1e-9,
+            f"⭐ 2,00 pondéré par point, mesuré sur l'URL RÉELLE ({total}). "
+            f"⛔ Cette assertion disait 1,40 le 23/08, elle était VERTE, et "
+            f"elle validait le chiffre qui a tué le run : elle mesurait "
+            f"l'accord du code avec lui-même, jamais avec l'API")
     verifie(abs(R.poids_par_point_reduit() - total) < 1e-9,
             f"… et `poids_par_point_reduit()` rend le même chiffre "
             f"({R.poids_par_point_reduit()}) — dérivé, jamais recopié")
@@ -923,6 +953,224 @@ def test_cout_par_point():
             f"⚠️ et la passe Pioupiou est INCHANGÉE à "
             f"{C.poids_par_point():.2f} pondéré/point — ce lot ne la "
             f"touche pas")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  15. LES QUATRE GARDE-FOUS NÉS DE LA NUIT DU 23 AU 24/08
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ CES QUATRE ÉPREUVES N'EXISTAIENT PAS, ET C'EST POURQUOI LA NUIT A
+#  ÉTÉ PERDUE. Le banc du 23/08 était intégralement vert — il vérifiait
+#  que le code faisait ce que le code disait. Aucune de ses assertions
+#  ne portait sur ce qu'Open-Meteo FAIT (le plancher d'un appel), ni sur
+#  ce qui arrive quand une réponse est bien formée mais vide, ni sur ce
+#  qu'un `SIGTERM` laisse sur le disque. Un banc qui ne teste que le
+#  chemin heureux mesure la cohérence, pas la vérité.
+
+
+class _Faux429(Exception):
+    """Une `HTTPError` 429 crédible, sans réseau."""
+
+
+def _http_error_429():
+    import urllib.error                                      # noqa: PLC0415
+    return urllib.error.HTTPError("http://x", 429, "Too Many Requests",
+                                  None, None)
+
+
+def test_429_horaire_arrete_la_passe():
+    """⛔ n°4 — UN 429 QUI SURVIT À LA PAUSE DOIT ARRÊTER, PAS RAMER.
+
+    La nuit du 23/08 : 75 × 429, et chaque point brûlait deux fois 65 s
+    pour deux abandons GARANTIS, jusqu'à ce que le chien de garde de
+    40 min envoie `TERM` en pleine écriture. Le fichier disait pourtant,
+    mot pour mot, « contrairement à la minute, une fenêtre horaire
+    pleine ne se vide pas en attendant 65 s » : le code connaissait la
+    distinction et ne l'implémentait pas.
+    """
+    print("\n▶ 15. le 429 horaire arrête la passe (n°4)")
+    appels = {"n": 0, "dormi": 0.0}
+
+    def _faux_get(_url, _timeout=None):
+        appels["n"] += 1
+        raise _http_error_429()
+
+    vrai_get, vrai_sleep = C._get_json, C.time.sleep
+    C._get_json = _faux_get
+    C.time.sleep = lambda s: appels.__setitem__("dormi", appels["dormi"] + s)
+    try:
+        # Sans le drapeau : comportement HISTORIQUE, inchangé.
+        appels.update({"n": 0, "dormi": 0.0})
+        r = C._get_json_retry("http://x", "essai")
+        verifie(r is None and appels["n"] > 2,
+                f"⚠️ sans le drapeau, la passe Pioupiou est INCHANGÉE : "
+                f"{appels['n']} tentatives puis abandon du point — ce lot "
+                f"ne touche pas la chaîne irremplaçable")
+
+        # Avec le drapeau : arrêt au SECOND 429, après UNE seule pause.
+        appels.update({"n": 0, "dormi": 0.0})
+        try:
+            C._get_json_retry("http://x", "essai",
+                              arret_si_429_persistant=True)
+        except C.FenetreHoraireFermee as exc:
+            verifie(appels["n"] == 2,
+                    f"⭐ arrêt au SECOND 429 ({appels['n']} appels) — pas au "
+                    f"cinquième, pas au chien de garde")
+            verifie(abs(appels["dormi"] - C.PAUSE_429_S) < 1e-9,
+                    f"⭐ UNE seule pause de {C.PAUSE_429_S:.0f}s a été payée "
+                    f"({appels['dormi']:.0f}s), et pas une par point "
+                    f"jusqu'aux 40 min du chien de garde")
+            verifie("HEURE" in str(exc) and "trou" in str(exc).lower(),
+                    "le message NOMME la fenêtre horaire et le trou "
+                    "déclaré, il ne dit pas « erreur réseau »")
+        else:
+            verifie(False, "⛔ un 429 persistant DOIT lever "
+                           "`FenetreHoraireFermee`, pas rendre None")
+    finally:
+        C._get_json, C.time.sleep = vrai_get, vrai_sleep
+
+
+def test_groupe_vide_est_compte_comme_une_perte():
+    """⛔⛔ n°5 — LE DÉFAUT LE PLUS GRAVE, ET LE PLUS SILENCIEUX.
+
+    Open-Meteo rend un HTTP 200 parfaitement formé, sans suffixe de
+    modèle, quand UN SEUL des modèles demandés sert le point.
+    `forecast_rows` a raison d'abandonner le groupe — attribuer la série
+    au hasard serait pire. Mais `collecter` ne comptait la perte que si
+    la réponse valait `None` : le 23/08, **375 groupes** ont disparu et
+    le journal affichait « 2500/2905 (0 points entamés) ». ZÉRO.
+
+    ⇒ Sans le 429, ce run serait sorti AU VERT avec 13 % des candidates
+    amputées de trois modèles sur cinq, sur une archive irremplaçable.
+    """
+    print("\n▶ 15 bis. un groupe VIDE est une perte (n°5)")
+    st = {"id": "9988B", "source": "aemet", "lat": 42.7, "lon": -0.5}
+    modeles, variables = R.groupes_reduit()[0]
+
+    # La réponse du 23/08 : 200, bien formée, SANS suffixe de modèle.
+    sans_suffixe = {"hourly": {
+        "time": [1_787_000_000, 1_787_003_600],
+        "wind_speed_10m": [12.0, 14.0],          # ⛔ pas de `_icon_eu`
+        "wind_direction_10m": [270, 280]}}
+
+    vrai_fetch = C.fetch_forecast
+    C.fetch_forecast = lambda *a, **k: sans_suffixe
+    R.fetch_forecast = C.fetch_forecast
+    try:
+        jrn: dict = {}
+        lignes = list(R.collecter([st], R.groupes_reduit(), None, None,
+                                  "2026-08-24T05:00:00Z", {}, 3, jrn,
+                                  crier=lambda *_: None))
+        verifie(lignes == [],
+                f"la réponse sans suffixe ne produit AUCUNE ligne "
+                f"({len(lignes)}) — `forecast_rows` a raison de refuser "
+                f"d'attribuer la série au hasard")
+        verifie(jrn["vides"] == 1,
+                f"⭐⭐ … et elle est COMPTÉE comme un groupe vide "
+                f"({jrn['vides']}) — c'est le compteur qui affichait 0 "
+                f"après 375 pertes")
+        verifie(jrn["failed"] == 1,
+                f"⭐⭐ … et elle entre dans `failed` ({jrn['failed']}), donc "
+                f"dans la garde « plus d'un point sur cinq ». Une garde "
+                f"qui ne voit pas la panne qu'elle existe pour attraper "
+                f"n'est pas une garde")
+    finally:
+        C.fetch_forecast = vrai_fetch
+        R.fetch_forecast = vrai_fetch
+
+
+def test_la_requete_porte_deux_mondiaux():
+    """⛔ n°3 — « AU MOINS DEUX MODÈLES » NE SUFFIT PAS.
+
+    Le groupe de surface du 23/08 en avait trois : `icon_d2`,
+    `meteoswiss_icon_ch2`, `icon_eu`. Tous RÉGIONAUX. Le garde-fou était
+    vert, et là où seul `icon_eu` sert — l'Espagne, les Pyrénées — un
+    seul modèle répondait, donc pas de suffixe, donc groupe entier jeté.
+    375 points, en silence.
+    """
+    print("\n▶ 15 ter. la requête porte DEUX mondiaux (n°3)")
+    for modeles, _v in R.groupes_reduit():
+        mondiaux = [m for m in modeles if m in R.MONDIAUX]
+        verifie(len(mondiaux) >= 2,
+                f"⭐ la requête porte {len(mondiaux)} modèles MONDIAUX "
+                f"({', '.join(mondiaux)}) — deux mondiaux servent TOUS les "
+                f"points de la BBOX, donc le suffixe est toujours écrit")
+
+    # Et le garde-fou MORD : trois régionaux doivent lever `Abort`.
+    vrais = R.MODELS_REDUIT
+    R.MODELS_REDUIT = list(R.MODELS_REDUIT_SURFACE)
+    try:
+        R.groupes_reduit()
+    except R.Abort as exc:
+        verifie("MONDIAL" in str(exc) and "375" in str(exc),
+                "⭐ un groupe de trois RÉGIONAUX lève `Abort`, et le "
+                "message dit combien de points cela a coûté")
+    else:
+        verifie(False, "⛔ trois modèles régionaux DOIVENT lever `Abort` — "
+                       "c'est exactement la composition du 23/08")
+    finally:
+        R.MODELS_REDUIT = vrais
+
+
+def test_sigterm_ferme_l_archive_et_rattraper_refuse_l_illisible():
+    """⛔ n°6 — UNE ARCHIVE COURTE VAUT INFINIMENT MIEUX QU'UNE
+    ARCHIVE CORROMPUE, et une archive corrompue ne monte JAMAIS sur R2.
+
+    Le 24/08 à 05:40:48, `TERM` est tombé en pleine écriture : le flux
+    gzip n'a jamais été fermé, `gunzip -t` sortait en erreur, et
+    `rattraper()` — qui tourne AVANT la collecte et ne contrôlait rien —
+    s'apprêtait à publier ça le lendemain à 05:00 en posant le témoin.
+    """
+    print("\n▶ 15 quater. SIGTERM ferme l'archive, rattraper refuse "
+          "l'illisible (n°6)")
+    root = pathlib.Path(tempfile.mkdtemp(prefix="s11-gz-"))
+    bon = root / "fcstreduit" / "2026" / "08" / "bon.ndjson.gz"
+    C.write_ndjson_gz(bon, ({"i": i} for i in range(50)))
+    verifie(C.gz_lisible(bon), "une archive fermée est LISIBLE")
+
+    # Un flux tronqué : on coupe le pied (CRC + taille finale).
+    casse = root / "fcstreduit" / "2026" / "08" / "casse.ndjson.gz"
+    casse.write_bytes(bon.read_bytes()[:-8])
+    verifie(not C.gz_lisible(casse),
+            "⭐ une archive TRONQUÉE est vue comme illisible — c'est "
+            "`gunzip -t`, pas « le fichier existe et pèse 2,7 Mo »")
+
+    envoyes: list[str] = []
+    vrai_up = C.upload_r2
+    C.upload_r2 = lambda p, k: (envoyes.append(k), True)[1]
+    try:
+        C.rattraper(root)
+    finally:
+        C.upload_r2 = vrai_up
+    verifie(any("bon" in k for k in envoyes),
+            f"l'archive saine est bien montée ({envoyes})")
+    verifie(not any("casse" in k for k in envoyes),
+            "⭐⭐ l'archive TRONQUÉE est REFUSÉE à l'envoi — sans ce "
+            "contrôle, le run du 25/08 publiait l'archive corrompue du "
+            "24/08 et posait le témoin qui l'aurait déclarée bonne pour "
+            "toujours")
+
+    # Et le SIGTERM ferme le flux : l'archive est courte mais LISIBLE.
+    R.armer_arret_propre(crier=lambda *_: None)
+    court = root / "fcstreduit" / "2026" / "08" / "court.ndjson.gz"
+
+    def _lignes_puis_term():
+        for i in range(20):
+            if i == 10:
+                os.kill(os.getpid(), 15)         # SIGTERM sur soi-même
+            yield {"i": i}
+    try:
+        C.write_ndjson_gz(court, _lignes_puis_term())
+    except R.ArretDemande:
+        pass
+    verifie(C.gz_lisible(court),
+            "⭐⭐ l'archive écrite jusqu'au `SIGTERM` est FERMÉE et "
+            "LISIBLE — « corrompue » est devenu « courte »")
+    with gzip.open(court, "rt") as fh:
+        n = sum(1 for _ in fh)
+    verifie(n == 10,
+            f"… et elle porte les {n} lignes écrites avant le signal, "
+            f"aucune coupée en deux")
 
 
 def main() -> int:
@@ -946,6 +1194,11 @@ def main() -> int:
     test_regle_derive_des_obs_de_la_notation()
     test_sonde_echec_ne_tue_pas_la_passe()
     test_cout_par_point()
+    # ── les quatre garde-fous nés du débug du 24/08 ──────────────────
+    test_429_horaire_arrete_la_passe()
+    test_groupe_vide_est_compte_comme_une_perte()
+    test_la_requete_porte_deux_mondiaux()
+    test_sigterm_ferme_l_archive_et_rattraper_refuse_l_illisible()
     print("\n" + "═" * 68)
     if ECHECS:
         print(f"❌ {len(ECHECS)} assertion(s) en échec :")

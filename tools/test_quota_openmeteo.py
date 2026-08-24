@@ -106,6 +106,69 @@ class TestPoids(BaseBudget):
             poids(0, 10)
 
 
+class TestPlancher(BaseBudget):
+    """⭐⭐ LE PLANCHER D'UN APPEL — LE BANC QUI MANQUAIT LE 23/08.
+
+    Le lot S0.11 avait un banc VERT qui affirmait « 1,40 pondéré par
+    point, mesuré sur l'URL RÉELLE ». Il mesurait l'accord du code avec
+    lui-même. Open-Meteo, lui, facture AU MINIMUM UN APPEL par requête :
+    les deux requêtes de la passe candidates pesaient 0,8 et 0,6, le
+    compteur disait 1,40, le serveur comptait 2,00, et le run a heurté
+    le plafond horaire au point ~2 500 — à l'unité près.
+
+    Ces épreuves-ci ne peuvent pas être vertes par construction : elles
+    disent ce que le SERVEUR fait, et elles auraient été rouges le
+    23/08.
+    """
+
+    def test_une_requete_minuscule_coute_un_appel(self):
+        """0,8 et 0,6 pondérés — les deux requêtes qui ont tué le run."""
+        self.assertAlmostEqual(poids(4, 2), 1.0)     # 2 modèles × 4 vars
+        self.assertAlmostEqual(poids(2, 3), 1.0)     # 3 modèles × 2 vars
+
+    def test_la_plus_petite_requete_possible_coute_un_appel(self):
+        self.assertAlmostEqual(poids(1, 1), 1.0)
+
+    def test_au_dessus_du_plancher_la_formule_est_intacte(self):
+        """⚠️ Le plancher ne doit RIEN changer au-dessus de 1.
+
+        C'est ce qui garantit que la passe Pioupiou (1,6 et 4,2) n'a pas
+        bougé d'un pondéré, et que les chiffres des lots précédents
+        restent lisibles.
+        """
+        self.assertAlmostEqual(poids(8, 2), 1.6)
+        self.assertAlmostEqual(poids(6, 7), 4.2)
+        self.assertAlmostEqual(poids(8, 10), 8.0)
+
+    def test_deux_requetes_sous_le_plancher_coutent_deux_appels(self):
+        """⛔ LE CHIFFRE EXACT DE LA NUIT DU 23 AU 24/08.
+
+        Découper une requête en deux ne divise pas son coût quand les
+        deux moitiés tombent sous le plancher : 0,8 + 0,6 = 1,4 en
+        arithmétique, 1 + 1 = 2 en appels facturés. C'est la ligne qui
+        rend le découpage visiblement inutile.
+        """
+        decoupe = poids(4, 2) + poids(2, 3)
+        fusionne = poids(4, 5)                       # 5 modèles × 4 vars
+        self.assertAlmostEqual(decoupe, 2.0)
+        self.assertAlmostEqual(fusionne, 2.0)
+        self.assertAlmostEqual(decoupe, fusionne)
+
+    def test_le_plancher_se_dissout_dans_un_lot_de_lieux(self):
+        """⭐ La propriété qui ouvrira la porte aux lots de points.
+
+        Open-Meteo compte les LIEUX comme un multiplicateur. Cent points
+        envoyés un par un coûtent 100 × max(1 ; 0,2) = 100 appels ; les
+        mêmes cent dans une seule requête pèsent 100 × 0,2 = 20. Le
+        plancher ne disparaît pas — il cesse simplement de mordre.
+        """
+        un_par_un = 100 * poids(2, 1)
+        en_lot = poids(2, 100)                       # 100 lieux, 2 vars
+        self.assertAlmostEqual(un_par_un, 100.0)
+        self.assertAlmostEqual(en_lot, 20.0)
+        self.assertLess(en_lot, un_par_un)
+
+
 class TestPoidsUrl(BaseBudget):
     """Le poids lu sur l'URL — la forme qui ne peut pas dériver."""
 
@@ -128,22 +191,41 @@ class TestPoidsUrl(BaseBudget):
         apres = poids_url(self.URL_COLLECT.replace(
             "&models=", ",cape&models=", 1))       # une variable de plus
         self.assertGreater(apres, avant)
-        self.assertAlmostEqual(apres - avant, poids(1, 9))
+        # ⚠️ L'écart est 1 × 9 / 10 = 0,9, PAS `poids(1, 9)` — qui vaut
+        # 1,0 depuis que le plancher existe (24/08). Un plancher se
+        # compare à un TOTAL de requête, jamais à un écart entre deux
+        # totaux : les deux requêtes ici pèsent 7,2 et 8,1, toutes deux
+        # bien au-dessus, donc aucune des deux n'est planchée et la
+        # différence est purement arithmétique.
+        self.assertAlmostEqual(apres - avant, 0.9)
 
     def test_les_lieux_multiples_comptent(self):
         """⚠️ Le facteur qu'on oublie. `backfill_packs.py` envoie des
         lots de points dans UNE requête ; sans ce facteur, son poids
         serait sous-estimé d'un ordre de grandeur — et le budget
         mentirait du côté qui ne protège pas.
+
+        ⚠️ **LA PROPORTIONNALITÉ SE MESURE AU-DESSUS DU PLANCHER**
+        (24/08). Avec deux variables, une requête à un lieu pèse 0,2 et
+        se fait plancher à 1,0 : comparer 10 lieux (2,0) à 10 fois un
+        lieu (10,0) ne mesurerait plus le facteur `lieux`, mais le
+        plancher. On prend donc une requête déjà au-dessus de 1.
         """
-        un = "https://x/v1/forecast?latitude=45.0&longitude=6.0&hourly=a,b"
+        vars_ = ",".join(f"v{i}" for i in range(12))    # 12 vars → 1,2
+        un = f"https://x/v1/forecast?latitude=45.0&longitude=6.0&hourly={vars_}"
         dix = ("https://x/v1/forecast?latitude=" + ",".join(["45.0"] * 10) +
-               "&longitude=" + ",".join(["6.0"] * 10) + "&hourly=a,b")
+               "&longitude=" + ",".join(["6.0"] * 10) + f"&hourly={vars_}")
+        self.assertAlmostEqual(poids_url(un), 1.2)
         self.assertAlmostEqual(poids_url(dix), poids_url(un) * 10)
 
     def test_sans_modele_explicite_compte_pour_un(self):
+        """5 variables, 1 modèle implicite, 1 lieu = 0,5 pondéré —
+        **et 1,0 facturé**, parce qu'un appel HTTP ne coûte jamais moins
+        d'un appel (débug du 24/08). L'ancienne attente, 0,5, décrivait
+        l'arithmétique et non le serveur.
+        """
         url = "https://x/v1/archive?latitude=45.0&longitude=6.0&hourly=a,b,c,d,e"
-        self.assertAlmostEqual(poids_url(url), 0.5)
+        self.assertAlmostEqual(poids_url(url), 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -504,7 +586,12 @@ class TestNommage(BaseBudget):
         vue = collect.etat()
         heure = vue["fenetres"]["heure"]["par_consommateur"]
         self.assertAlmostEqual(heure["collect"], 80.0)
-        self.assertAlmostEqual(heure["day_features"], 2.0)
+        # ⚠️ 5 × poids(4, 1) = 5 × **1,0** = 5,0, et non 5 × 0,4 = 2,0
+        # (débug du 24/08) : `day_features` envoie de petites requêtes,
+        # et une petite requête coûte quand même un appel. C'est
+        # exactement la classe de consommateur que l'ancien compteur
+        # sous-estimait — et il y en a trois qui partagent cette IP.
+        self.assertAlmostEqual(heure["day_features"], 5.0)
 
     def test_resume_lisible(self):
         b = self.budget("collect")

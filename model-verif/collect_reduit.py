@@ -108,8 +108,8 @@
 #  3. ⛔ **Le cap vient du budget MESURÉ, et il exclut sa propre
 #     étiquette.** Notre seuil interne de 60 % (`collect.quota_projete`)
 #     ne mord pas le premier sur cette passe : il est AVEUGLE. Il juge
-#     `n_points × par_point_jour` de SA population — 2 942 × 1,40 =
-#     4 119 < 6 000 — sans jamais voir les 3 810,6 pondérés de Pioupiou.
+#     `n_points × par_point_jour` de SA population — 2 942 × 2,00 =
+#     5 884 — sans jamais voir les 3 810,6 pondérés de Pioupiou.
 #     ⇒ La passe candidates ne se compare pas à un plafond : elle
 #     calcule CE QUE LE BUDGET LUI LAISSE (cf. `cap_budgetaire`).
 #     ⛔⛔ Et l'exclusion de sa propre étiquette n'est PAS un détail :
@@ -155,9 +155,10 @@
 #
 #  7. ⭐ **La sonde de fraîcheur écrit le run servi DANS CHAQUE LIGNE.**
 #     Neuf appels `meta.json` par nuit, par `Budget.demander()`, depuis
-#     le VPS, **1 pondéré réservé par appel au pire cas** (`poids_url`
-#     rendrait son plancher, 0,1, et ce que facture réellement cet
-#     endpoint N'EST PAS ÉTABLI — on réserve le pire, jamais l'espéré).
+#     le VPS, **1 pondéré réservé par appel** — ce qui est, depuis le
+#     débug du 24/08, EXACTEMENT ce que `poids_url` rend : le plancher
+#     d'un appel HTTP vaut 1, pas 0,1. Ce que facture réellement cet
+#     endpoint n'est toujours pas établi ; 1 est le minimum facturable.
 #     Sans elle, l'écart de 3 h sur `icon_d2` reste une hypothèse à
 #     n = 1 dans une archive irremplaçable.
 #     ⚠️ **Un échec de la sonde NE TUE PAS LA PASSE** : elle écrit ce
@@ -193,6 +194,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import signal
 import sys
 import time
 import urllib.parse
@@ -210,8 +212,8 @@ for _p in (_ICI.parent / "tools",):
 # matin le 22/08.
 from collect import (                                        # noqa: E402
     ALOFT_VARS, COMPAGNON_ALTITUDE, FORECAST_API, REGIME_REF_MODEL, Abort,
-    _get_json_retry, attendre_la_place, charger_quota, en_retard,
-    fetch_forecast, forecast_rows, rattraper, temoin, upload_r2,
+    FenetreHoraireFermee, _get_json_retry, attendre_la_place, charger_quota,
+    en_retard, fetch_forecast, forecast_rows, rattraper, temoin, upload_r2,
     write_ndjson_gz,
 )
 # ⓘ `en_retard` n'est pas appelé ici — `rattraper()` s'en sert — mais il
@@ -254,13 +256,41 @@ MODELS_REDUIT_SURFACE = ["icon_d2", "meteoswiss_icon_ch2", "icon_eu"]
 #: référentiels ajouteront demain.
 MODELS_REDUIT_ALTITUDE = [REGIME_REF_MODEL, COMPAGNON_ALTITUDE]
 
-#: L'union, DANS L'ORDRE DÉCLARÉ (altitude d'abord, comme
+#: L'union, DANS L'ORDRE DÉCLARÉ (les mondiaux d'abord, comme
 #: `collect.groupes_requete`). Dérivée, jamais recopiée.
+#: ⚠️ Depuis le débug du 24/08, ces cinq modèles partent dans UNE SEULE
+#: requête — cf. `groupes_reduit()`. Les deux listes ci-dessus restent
+#: séparées parce qu'elles disent deux choses différentes : qui est
+#: mondial et qui ne l'est pas.
 MODELS_REDUIT = [*MODELS_REDUIT_ALTITUDE, *MODELS_REDUIT_SURFACE]
 
-#: ⛔ VENT SEUL. Deux variables, pas trois : ajouter `wind_gusts_10m`
-#: porte la composition de 1,40 à 1,90 pondéré par point, soit 101 % de
-#: ce que le budget laisse (mesuré le 23/08). Ce n'est pas un dosage.
+#: ⭐⭐ LES MODÈLES MONDIAUX DE CE FLUX — LA LISTE QUI TIENT LE DÉFAUT
+#: DES 375 GROUPES PERDUS (débug du 24/08/2026).
+#:
+#: Un modèle MONDIAL sert tous les points de la BBOX ; un modèle
+#: RÉGIONAL ne sert que son domaine, et ce domaine n'est écrit nulle
+#: part dans ce dépôt. Or `collect.forecast_rows` abandonne un groupe
+#: dès qu'UN SEUL modèle a servi le point (Open-Meteo n'écrit alors
+#: aucun suffixe et rien ne dit qui a répondu) : il faut donc DEUX
+#: mondiaux dans chaque requête pour que le suffixe soit toujours là.
+#:
+#: ⛔ Le 23/08, le groupe de surface portait trois modèles — tous
+#: régionaux. Le garde-fou « au moins deux modèles » était vert, et
+#: 375 points d'Espagne et des Pyrénées ont perdu TOUS leurs modèles de
+#: surface, en silence, sur une archive irremplaçable. « Deux modèles »
+#: ne veut pas dire « deux modèles qui servent ce point ».
+#:
+#: ⚠️ DÉRIVÉE DE `collect.py`, jamais recopiée : `REGIME_REF_MODEL`
+#: (ECMWF) et `COMPAGNON_ALTITUDE` (GFS) sont mondiaux, et c'est
+#: précisément à quoi sert le second dans `collect.groupes_requete`.
+MONDIAUX = (REGIME_REF_MODEL, COMPAGNON_ALTITUDE)
+
+#: ⛔ VENT SEUL. Deux variables, pas trois. ⚠️ Le chiffre a changé au
+#: débug du 24/08 avec la requête unique : la composition d'aujourd'hui
+#: (5 modèles × 4 variables) pèse **2,00** pondéré par point ; ajouter
+#: `wind_gusts_10m` la porterait à 5 × 5 / 10 = **2,50**, soit un cap
+#: qui tomberait de ~2 030 à ~1 620 points, c'est-à-dire 400 candidates
+#: de plus évincées chaque nuit. Ce n'est toujours pas un dosage.
 VENT = ["wind_speed_10m", "wind_direction_10m"]
 
 #: Les six référentiels que `collect.py` tient à jour chaque nuit vers
@@ -337,13 +367,16 @@ BACKFILL_PACKS_MESURE = 252.0
 #: même façon selon le modèle. La route gratuite n'existe pas.
 META_API = "https://api.open-meteo.com/data/{domaine}/static/meta.json"
 
-#: ⛔ POIDS RÉSERVÉ PAR APPEL DE SONDE — LE PIRE CAS, PAS L'ESPÉRÉ.
+#: ⛔ POIDS RÉSERVÉ PAR APPEL DE SONDE — LE MINIMUM FACTURABLE.
 #: `quota_openmeteo.poids_url()` calcule le poids depuis les paramètres
-#: de l'URL ; celle-ci n'en a AUCUN, donc elle rendrait son plancher
-#: (0,1). Ce que cet endpoint facture réellement N'EST PAS ÉTABLI. On
-#: réserve donc 1 pondéré par appel, soit 9 par nuit — 0,19 % de la
-#: fenêtre horaire effective. C'est ce chiffre-là qui est budgété,
-#: jamais 0,9.
+#: de l'URL ; celle-ci n'en a AUCUN, donc elle rend son plancher — qui
+#: vaut **1,0 depuis le débug du 24/08**, et non plus 0,1. Ce que cet
+#: endpoint facture réellement N'EST PAS ÉTABLI, mais un appel HTTP ne
+#: coûte jamais moins d'un appel : 1 pondéré par appel, 9 par nuit,
+#: 0,19 % de la fenêtre horaire effective.
+#: ⓘ Cette constante et `poids_url` disent désormais la même chose. On
+#: la garde quand même : elle DÉCLARE le choix, là où l'égalité avec
+#: `poids_url` n'est qu'une coïncidence d'aujourd'hui.
 POIDS_SONDE = 1.0
 
 #: Les domaines Open-Meteo des cinq modèles du groupe réduit. ⚠️ Ce sont
@@ -371,29 +404,132 @@ DOMAINES_TEMOINS = ("meteofrance_arome_france_hd", "meteofrance_arpege_europe",
 
 
 # ══════════════════════════════════════════════════════════════════
+#  L'ARRÊT DEMANDÉ — fermer l'archive plutôt que la laisser corrompue
+# ══════════════════════════════════════════════════════════════════
+
+class ArretDemande(Exception):
+    """`SIGTERM` (ou `SIGINT`) reçu : on s'arrête, on ne meurt pas.
+
+    ⛔⛔ **LA DIFFÉRENCE VAUT UNE ARCHIVE** (débug du 24/08/2026).
+    Sans gestionnaire, `SIGTERM` tue le processus là où il est. S'il est
+    dans `gzip.write`, le flux gzip n'est jamais fermé : il lui manque
+    son pied (CRC + taille), `gunzip -t` sort en erreur, et le fichier
+    n'est plus une archive — c'est 2,7 Mo d'octets que seul un outil
+    spécialisé peut relire. C'est exactement ce qui est arrivé la nuit
+    du 23 au 24/08, quand le chien de garde de 40 min de `run.sh` a
+    envoyé `TERM` à 05:40:48.
+
+    Avec le gestionnaire, le signal devient une exception ordinaire :
+    le `with gzip.open(...)` de `write_ndjson_gz` se referme comme il
+    doit, et « archive corrompue » devient « archive COURTE mais
+    LISIBLE ». La différence entre les deux, c'est 10 985 lignes
+    irremplaçables.
+
+    ⚠️ ET IL Y A LARGEMENT LE TEMPS : `run.sh` lance
+    `timeout --signal=TERM --kill-after=60s`, donc soixante secondes
+    séparent le `TERM` du `KILL`. Fermer un flux gzip et monter 2,7 Mo
+    sur R2 en prend deux ou trois.
+
+    ⚠️ **UNE LIGNE N'EST JAMAIS COUPÉE EN DEUX.** Un gestionnaire de
+    signal Python ne s'exécute qu'entre deux instructions de code
+    intermédiaire, et `write_ndjson_gz` écrit chaque ligne d'un SEUL
+    `fh.write(...)` : l'exception tombe entre deux lignes, jamais au
+    milieu de l'une d'elles.
+    """
+
+
+def armer_arret_propre(crier=print) -> None:
+    """Faire de `SIGTERM`/`SIGINT` une exception, pas une mort subite.
+
+    ⚠️ On arme AVANT d'ouvrir l'archive, et pas avant : plus tôt, un
+    signal reçu pendant le calcul de la population lèverait une
+    exception dans du code qui n'a rien à fermer, pour rien.
+    """
+    def _sur_signal(signum, _frame):                         # noqa: ANN001
+        nom = signal.Signals(signum).name
+        raise ArretDemande(
+            f"{nom} reçu — arrêt DEMANDÉ, pas subi : on ferme l'archive "
+            f"sur ce qui est collecté (une archive courte et lisible vaut "
+            f"infiniment mieux qu'une archive longue et corrompue)")
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _sur_signal)
+        except (ValueError, OSError) as exc:                 # noqa: BLE001
+            # Un fil secondaire ne peut pas armer de signal. On le DIT :
+            # un garde-fou silencieusement absent est pire qu'absent.
+            crier(f"  ⚠️ {sig.name} non armé ({exc}) — une interruption "
+                  f"laisserait l'archive corrompue")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  LE GROUPE RÉDUIT
 # ══════════════════════════════════════════════════════════════════
 
 def groupes_reduit() -> list[tuple[list[str], list[str]]]:
-    """La requête d'un point, découpée en `(modèles, variables)`.
+    """La requête d'un point, en `(modèles, variables)`.
 
-    Même forme et même discipline que `collect.groupes_requete()` :
-    DÉRIVÉ, jamais recopié. Deux groupes, parce que le couple 850 hPa ne
-    sert qu'à `REGIME_REF_MODEL` et qu'Open-Meteo prend UNE liste
-    `hourly` pour tous les modèles d'une requête — le demander aux cinq
-    coûterait 2 × 5 / 10 = 1,0 pondéré par point pour quatre modèles
-    dont on jetterait la réponse.
+    ⭐⭐ **UNE SEULE REQUÊTE PAR POINT DEPUIS LE DÉBUG DU 24/08/2026**,
+    et le découpage en deux groupes qui était ici avant a été retiré
+    pour deux raisons mesurées, pas par goût.
 
-    ⛔ ET CHAQUE GROUPE PORTE AU MOINS DEUX MODÈLES, sous peine
-    d'`Abort`. C'est la règle du suffixe de `collect.forecast_rows` :
-    Open-Meteo ne suffixe les clés par le nom du modèle que si PLUSIEURS
-    modèles SERVENT le point. Un groupe à un seul modèle produirait donc
-    ZÉRO ligne partout, avec des HTTP 200 parfaitement formés — la panne
-    ERA5 du 06/08, sur une archive non rejouable.
+    **1. Il ne coûtait rien de moins — il coûtait exactement pareil.**
+    L'argument d'origine était : « demander les 850 hPa aux cinq
+    modèles coûterait 2 × 5 / 10 = 1,0 pondéré pour quatre modèles dont
+    on jetterait la réponse ». Il oubliait le plancher : Open-Meteo
+    facture **au minimum un appel par requête**. Les deux groupes
+    pesaient 0,8 et 0,6, donc **1 + 1 = 2,00 facturés** ; la requête
+    unique pèse 5 × 4 / 10 = **2,00** tout rond. Le découpage
+    n'économisait rien, il DOUBLAIT le nombre d'appels HTTP. C'est ce
+    qui a fait heurter le plafond HORAIRE (5 000) au point ~2 500, la
+    nuit du 23 au 24/08, sur une passe qui se croyait à 1,40/point.
+
+    **2. ⛔⛔ Il ne pouvait pas servir les Pyrénées ni l'Espagne.** Le
+    groupe de surface portait `icon_d2`, `meteoswiss_icon_ch2` et
+    `icon_eu` — **trois modèles régionaux, aucun mondial**. Là où seul
+    `icon_eu` sert, un seul modèle répond, Open-Meteo n'écrit AUCUN
+    suffixe de modèle, et le garde-fou de `collect.forecast_rows` — qui
+    a raison de refuser d'attribuer une série au hasard — jette le
+    groupe ENTIER, y compris la série `icon_eu` parfaitement valide.
+    Mesuré la même nuit : **375 points** ont ainsi perdu tous leurs
+    modèles de surface EN SILENCE (aemet 229 · mf 58 · windsmobi 49 ·
+    infoclimat 39 — l'Espagne et les Pyrénées, le trou de couverture du
+    S0.8). Avec une requête unique, `ecmwf_ifs025` ET `gfs_global` sont
+    dedans : deux mondiaux servent partout, le suffixe est TOUJOURS
+    écrit, et les 375 groupes reviennent.
+
+    ⓘ Ce que la fusion coûte, et il faut le dire : `gfs_global` reçoit
+    les deux variables de 850 hPa et n'en écrit rien
+    (`collect.forecast_rows` ne pose `aloft_*` que sur
+    `REGIME_REF_MODEL`). Ce n'est pas un gaspillage de quota — 2,00,
+    c'est ce que les deux groupes coûtaient déjà — c'est une variable
+    demandée pour rien à un modèle. Le jour où Open-Meteo facturera
+    autrement, c'est ce chiffre-là qu'il faudra reprendre.
+
+    ⛔ **DEUX GARDE-FOUS, ET LE SECOND EST NOUVEAU.**
+    · Au moins DEUX modèles par groupe : règle du suffixe de
+      `collect.forecast_rows`. Un groupe à un seul modèle produirait
+      ZÉRO ligne partout, avec des HTTP 200 parfaitement formés — la
+      panne ERA5 du 06/08, sur une archive non rejouable.
+    · ⭐ Au moins DEUX MODÈLES MONDIAUX par groupe. « Au moins deux
+      modèles » ne suffit PAS : trois modèles régionaux en sont trois,
+      et c'est exactement ce qui a coûté les 375 groupes. Un modèle
+      mondial sert toute la BBOX, y compris les points que les
+      référentiels ajouteront demain ; un régional ne sert que son
+      domaine, et un domaine ne se devine pas depuis le code.
     """
-    groupes = [(list(MODELS_REDUIT_ALTITUDE), [*VENT, *ALOFT_VARS]),
-               (list(MODELS_REDUIT_SURFACE), list(VENT))]
+    groupes = [(list(MODELS_REDUIT), [*VENT, *ALOFT_VARS])]
     for modeles, _variables in groupes:
+        mondiaux = [m for m in modeles if m in MONDIAUX]
+        if len(mondiaux) < 2:
+            raise Abort(
+                f"groupe ({', '.join(modeles)}) : {len(mondiaux)} modèle(s) "
+                f"MONDIAL/AUX ({', '.join(mondiaux) or 'aucun'}) sur les "
+                f"{len(MONDIAUX)} connus ({', '.join(MONDIAUX)}). Il en faut "
+                f"DEUX. Là où un seul modèle sert un point, Open-Meteo "
+                f"n'écrit pas de suffixe de modèle et `forecast_rows` "
+                f"abandonne le groupe ENTIER — mesuré le 24/08 : 375 points "
+                f"d'Espagne et des Pyrénées perdus en silence, parce que le "
+                f"groupe de surface n'avait que des régionaux.")
         if len(modeles) < 2:
             raise Abort(
                 f"groupe à {len(modeles)} modèle(s) ({', '.join(modeles)}) : "
@@ -403,9 +539,9 @@ def groupes_reduit() -> list[tuple[list[str], list[str]]]:
                 f"a répondu, et `forecast_rows` abandonnerait TOUS les points "
                 f"— zéro ligne, HTTP 200, aucune erreur. Il faut au moins un "
                 f"compagnon MONDIAL (cf. `collect.COMPAGNON_ALTITUDE`).")
-    if REGIME_REF_MODEL not in MODELS_REDUIT_ALTITUDE:
+    if REGIME_REF_MODEL not in MODELS_REDUIT:
         raise Abort(
-            f"{REGIME_REF_MODEL} absent du groupe d'altitude : c'est le seul "
+            f"{REGIME_REF_MODEL} absent de la requête : c'est le seul "
             f"modèle dont `collect.forecast_rows` écrit `aloft_speed`, et "
             f"sans lui les {len(MODELS_REDUIT)} modèles de ce flux "
             f"laisseraient toute leur population en `regime = \"unknown\"` — "
@@ -417,11 +553,36 @@ def poids_par_point_reduit() -> float:
     """Poids Open-Meteo d'UN point, tous groupes confondus.
 
     ⚠️ Même dérivation que `collect.poids_par_point()` : variables ×
-    modèles / 10. Mesuré le 23/08 par `quota_openmeteo.poids_url()` sur
-    des URL CONSTRUITES ET NON ENVOYÉES : 0,8000 (altitude) + 0,6000
-    (surface) = **1,4000**.
+    modèles / 10, **avec le plancher à 1,0 PAR REQUÊTE**.
+
+    ⛔⛔ **CE CHIFFRE A TUÉ UNE NUIT D'ARCHIVE, ET C'EST ICI QUE LE
+    MENSONGE VIVAIT** (débug du 24/08/2026). L'ancienne forme,
+    `sum(len(v) * len(m)) / 10`, sommait les produits PUIS divisait :
+    elle rendait **1,4000** là où Open-Meteo facturait **2,00**, parce
+    qu'elle faisait disparaître le plancher exactement là où il mord —
+    les deux requêtes pesaient 0,8 et 0,6, toutes deux SOUS 1, et un
+    appel HTTP ne coûte jamais moins d'un appel. Le run a heurté le
+    plafond horaire (5 000) au point ~2 500, à l'unité près, en
+    annonçant 1 000 pondérés de marge.
+
+    ⚠️ **ET LE BANC LE VALIDAIT.** Le S0.11 affirmait « ⭐ 1,40 pondéré
+    par point, mesuré sur l'URL RÉELLE » — vert, et faux : il mesurait
+    l'accord du code avec lui-même. Le `--dry-run` de pré-vol disait la
+    même chose fausse avec la même assurance. C'est pourquoi on passe
+    désormais par `quota_openmeteo.poids()` quand le module est là, au
+    lieu de recopier sa formule : une formule recopiée ne se corrige
+    qu'une fois sur deux.
+
+    ⓘ Valeur d'aujourd'hui : une requête, 5 modèles × 4 variables =
+    **2,0000**.
     """
-    return sum(len(v) * len(m) for m, v in groupes_reduit()) / 10
+    qm = charger_quota()
+    if qm is not None:
+        return sum(qm.poids(len(v), len(m)) for m, v in groupes_reduit())
+    # Repli SANS le module de budget (rsync partiel — cf.
+    # `collect.charger_quota`) : la MÊME arithmétique, plancher compris.
+    return sum(max(1.0, len(v) * len(m) / 10)
+               for m, v in groupes_reduit())
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -852,13 +1013,19 @@ def collecter(stations: list[dict], groupes: list, budget, qm,
                     if qm else [None] * len(groupes))
     jrn.setdefault("collectes_g", [0] * len(groupes))
     jrn.setdefault("refuses_g", [0] * len(groupes))
+    jrn.setdefault("vides_g", [0] * len(groupes))
     jrn.setdefault("failed", 0)
     jrn.setdefault("partiels", 0)
     jrn.setdefault("refuses", 0)
+    jrn.setdefault("vides", 0)
+    jrn.setdefault("lignes", 0)
+    jrn.setdefault("interrompu", None)
+    jrn.setdefault("points_vus", 0)
     jrn.setdefault("lignes_par_modele", {})
 
     for i, st in enumerate(stations, 1):
         perdus = 0
+        jrn["points_vus"] = i
         for gi, ((modeles, variables), p) in enumerate(
                 zip(groupes, poids_groupe)):
             if budget is not None:
@@ -877,12 +1044,52 @@ def collecter(stations: list[dict], groupes: list, budget, qm,
                 # tenu le 08/08, divisée par le nombre de groupes.
                 time.sleep(0.70 / len(groupes))
 
-            payload = fetch_forecast(st["lat"], st["lon"], forecast_days,
-                                     modeles, variables)
+            # ⛔ `arret_si_429_persistant=True` — CE FLUX NE RAME PAS
+            # (débug du 24/08). Un 429 qui survit à la pause de 65 s dit
+            # que la fenêtre HORAIRE est fermée, et une fenêtre horaire
+            # ne se vide pas en attendant : continuer coûterait 65 s par
+            # point pour des abandons garantis, jusqu'au chien de garde
+            # de 40 min. On sort, on DÉCLARE le trou, et l'archive est
+            # fermée proprement sur ce qu'on a.
+            try:
+                payload = fetch_forecast(st["lat"], st["lon"], forecast_days,
+                                         modeles, variables,
+                                         arret_si_429_persistant=True)
+            except FenetreHoraireFermee as exc:
+                jrn["interrompu"] = f"fenêtre horaire fermée : {exc}"
+                crier(f"  ⛔ {exc}")
+                crier(f"  ⛔ ARRÊT au point {i}/{len(stations)} — "
+                      f"{jrn['lignes']} lignes déjà écrites sont GARDÉES, "
+                      f"le reste de la population est un TROU DÉCLARÉ.")
+                return
+            except ArretDemande as exc:
+                jrn["interrompu"] = str(exc)
+                crier(f"  ⛔ {exc} — arrêt au point {i}/{len(stations)}, "
+                      f"{jrn['lignes']} lignes gardées")
+                return
             if payload is None:
                 perdus += 1
                 continue
             jrn["collectes_g"][gi] += 1
+            # ⛔⛔ CE COMPTEUR EST LE DÉFAUT LE PLUS GRAVE DU 24/08, ET
+            # IL EST ICI (n°5 de la passe de débug).
+            #
+            # `forecast_rows` est un GÉNÉRATEUR : quand Open-Meteo rend
+            # un HTTP 200 parfaitement formé mais sans suffixe de modèle
+            # (un seul modèle sert le point), il abandonne le groupe et
+            # ne produit RIEN. `payload` n'est pas `None`, donc l'ancien
+            # code ne comptait aucune perte : 375 groupes ont disparu, et
+            # le journal affichait « 2500/2905 (0 points entamés) ».
+            # ZÉRO. La garde de fin de run — « plus d'un point sur cinq
+            # → sortie en erreur » — ne POUVAIT PAS voir cette classe de
+            # perte : sans le 429, le run serait sorti AU VERT avec 13 %
+            # des candidates amputées de trois modèles sur cinq.
+            #
+            # ⇒ Un groupe qui rend ZÉRO ligne est une perte, exactement
+            # comme une réponse `None`. La différence entre les deux
+            # (réseau vs couverture) est une information de journal, pas
+            # une raison de ne compter que l'une des deux.
+            avant = jrn["lignes"]
             for row in forecast_rows(st, payload, fetched_at, modeles):
                 # ⭐ LA COLONNE QUI REND L'ÉCART MESURABLE, écrite DANS
                 # CHAQUE LIGNE et non dans un fichier à côté : une
@@ -896,13 +1103,20 @@ def collecter(stations: list[dict], groupes: list, budget, qm,
                     row["run_avail"] = info["avail"]
                 jrn["lignes_par_modele"][row["model"]] = \
                     jrn["lignes_par_modele"].get(row["model"], 0) + 1
+                jrn["lignes"] += 1
                 yield row
+            if jrn["lignes"] == avant:
+                jrn["vides"] += 1
+                jrn["vides_g"][gi] += 1
+                perdus += 1
         if perdus:
             jrn["failed"] += 1
             if perdus < len(groupes):
                 jrn["partiels"] += 1
         if i % 250 == 0:
-            crier(f"  … {i}/{len(stations)} ({jrn['failed']} points entamés)")
+            crier(f"  … {i}/{len(stations)} ({jrn['failed']} points entamés, "
+                  f"dont {jrn['vides']} groupe(s) rendus VIDES par un "
+                  f"HTTP 200 sans suffixe de modèle)")
 
 
 def dire_journal(jrn_pop: dict, crier=print) -> None:
@@ -1145,10 +1359,23 @@ def main() -> int:
           + f" → {path}")
     jrn_col: dict = {}
     debut = time.time()
-    n = write_ndjson_gz(path, collecter(stations, groupes, budget, qm,
-                                        fetched_at, fraicheur,
-                                        args.forecast_days, jrn_col))
+    # ⛔ ARMÉ ICI, JUSTE AVANT D'OUVRIR L'ARCHIVE — cf. `ArretDemande`.
+    armer_arret_propre()
+    try:
+        n = write_ndjson_gz(path, collecter(stations, groupes, budget, qm,
+                                            fetched_at, fraicheur,
+                                            args.forecast_days, jrn_col))
+    except ArretDemande as exc:
+        # Le signal est tombé HORS du générateur (dans `write_ndjson_gz`
+        # lui-même). Le `with` de `write_ndjson_gz` a fermé le flux
+        # gzip : l'archive est courte mais LISIBLE. Le compte vient du
+        # journal, que le générateur tient ligne à ligne.
+        jrn_col["interrompu"] = str(exc)
+        n = jrn_col.get("lignes", 0)
+        print(f"⛔ {exc} — {n} lignes gardées, archive fermée proprement",
+              file=sys.stderr)
     duree = time.time() - debut
+    interrompu = jrn_col.get("interrompu")
 
     if not n:
         print("❌ zéro ligne écrite alors que la population n'est pas vide — "
@@ -1157,19 +1384,29 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    print(f"✅ {n} lignes, {jrn_col['failed']} point(s) ayant perdu au moins "
-          f"un groupe (dont {jrn_col['partiels']} partiel(s), "
-          f"{jrn_col['refuses']} refus de quota), "
+    print(f"{'⛔' if interrompu else '✅'} {n} lignes, {jrn_col['failed']} "
+          f"point(s) ayant perdu au moins un groupe (dont "
+          f"{jrn_col['partiels']} partiel(s), {jrn_col['refuses']} refus de "
+          f"quota, ⭐ {jrn_col['vides']} groupe(s) rendus VIDES par un "
+          f"HTTP 200 sans suffixe de modèle), "
           f"{path.stat().st_size / 1024:.0f} Ko, {duree / 60:.1f} min"
           + (f", après {attendu:.0f}s d'attente de quota au démarrage"
              if attendu else ""))
     for gi, (modeles, variables) in enumerate(groupes):
-        pds = jrn_col["collectes_g"][gi] * len(modeles) * len(variables) / 10
+        # ⛔ LE POIDS D'UNE REQUÊTE, PLANCHER COMPRIS — pas le produit
+        # brut. C'est la ligne de journal qui a menti toute la nuit du
+        # 23/08 : elle annonçait 0,8 et 0,6 là où le serveur comptait
+        # 1 et 1. Un journal qui recopie une formule au lieu de
+        # l'appeler se corrige un jour sur deux.
+        unite = (qm.poids(len(variables), len(modeles)) if qm
+                 else max(1.0, len(modeles) * len(variables) / 10))
+        pds = jrn_col["collectes_g"][gi] * unite
         print(f"   groupe {gi + 1}/{len(groupes)} ({len(modeles)} modèles × "
-              f"{len(variables)} vars, {len(modeles) * len(variables) / 10:.1f} "
+              f"{len(variables)} vars, {unite:.2f} "
               f"pondéré/point) : {jrn_col['collectes_g'][gi]}/{len(stations)} "
               f"points collectés, {jrn_col['refuses_g'][gi]} refusés faute de "
-              f"budget — {pds:.1f} pondérés")
+              f"budget, {jrn_col['vides_g'][gi]} rendus VIDES "
+              f"(HTTP 200 sans suffixe de modèle) — {pds:.1f} pondérés")
     print("   lignes par modèle : "
           + " · ".join(f"{k} {v}" for k, v
                        in sorted(jrn_col["lignes_par_modele"].items())))
@@ -1196,16 +1433,57 @@ def main() -> int:
         return 2
     print(f"  témoin posé : {temoin(path).name}")
 
+    # ⛔ UN ARRÊT EN COURS DE ROUTE EST UN ÉCHEC, MÊME AVEC UNE ARCHIVE
+    # PROPRE (débug du 24/08). L'archive est fermée, lisible, montée —
+    # et elle ne porte qu'une partie de la population. C'est exactement
+    # le cas où un code de sortie 0 ferait passer Healthchecks au vert
+    # sur une nuit trouée.
+    if interrompu:
+        print(f"❌ RUN INTERROMPU au point {jrn_col.get('points_vus', 0)}/"
+              f"{len(stations)} — {interrompu}\n"
+              f"   L'archive est COURTE mais LISIBLE, et elle est sur R2 : "
+              f"{n} lignes, {len(jrn_col['lignes_par_modele'])} modèle(s). "
+              f"Les {len(stations) - jrn_col.get('points_vus', 0)} points "
+              f"restants sont un trou DÉFINITIF — Open-Meteo n'a aucun "
+              f"historique de runs passés.\n"
+              f"   ⚠️ Le manifeste déclare {len(stations)} points et "
+              f"l'archive en porte moins : `reparer_archive.py "
+              f"{path} --manifeste {m_path}` remet les deux d'accord.",
+              file=sys.stderr)
+        return 1
+
     # ⚠️ Sortie en erreur si plus d'un point sur cinq a échoué : une
     # nuit à moitié collectée doit réveiller quelqu'un, pas passer au
     # vert. `run.sh collect-reduit` a `SEUIL_ALERTE=1` — ce flux ne se
     # rejoue pas.
+    #
+    # ⛔⛔ ET `failed` COMPTE DÉSORMAIS LES GROUPES VIDES (n°5 du débug
+    # du 24/08). Avant, il ne s'incrémentait que sur une réponse `None` :
+    # un HTTP 200 parfaitement formé qui ne produit aucune ligne — la
+    # règle du suffixe de modèle — passait à travers. Le 23/08, 375
+    # points ont perdu tous leurs modèles de surface et cette garde a
+    # affiché « 0 points entamés ». Sans le 429, le run serait sorti AU
+    # VERT sur 13 % de la population amputée. Une garde qui ne voit pas
+    # la panne qu'elle existe pour attraper n'est pas une garde.
     if jrn_col["failed"] > len(stations) // 5:
         print(f"❌ {jrn_col['failed']}/{len(stations)} points ont perdu au "
-              f"moins un groupe — plus d'un sur cinq. La nuit est écrite "
-              f"mais elle est TROUÉE, et ces trous ne se rattrapent pas.",
-              file=sys.stderr)
+              f"moins un groupe — plus d'un sur cinq (dont "
+              f"{jrn_col['vides']} groupe(s) rendus VIDES par un HTTP 200 "
+              f"sans suffixe de modèle, {jrn_col['refuses']} refusés faute "
+              f"de budget). La nuit est écrite mais elle est TROUÉE, et ces "
+              f"trous ne se rattrapent pas.", file=sys.stderr)
         return 1
+
+    # ⚠️ Et un seul groupe vide se DIT, même sous le seuil : c'est le
+    # symptôme d'un défaut de COUVERTURE (un point qu'un seul modèle
+    # sert), pas d'un accident réseau. Il ne doit pas attendre d'être
+    # majoritaire pour être visible.
+    if jrn_col["vides"]:
+        print(f"⚠️ {jrn_col['vides']} groupe(s) rendus VIDES par un HTTP 200 "
+              f"sans suffixe de modèle — sous le seuil d'un sur cinq, donc "
+              f"le run sort au vert, mais ce sont des points qu'UN SEUL "
+              f"modèle sert. Vérifier que la requête porte bien deux "
+              f"MONDIAUX ({', '.join(MONDIAUX)}).", file=sys.stderr)
     return 0
 
 

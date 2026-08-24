@@ -272,10 +272,46 @@ def poids(n_variables: int, n_modeles: int = 1) -> float:
     La division par 10 vient d'Open-Meteo : une requête « coûte » le
     nombre de variables rapporté à 10. La remise `jours/14` a été
     retirée le 07/08 et ne revient pas — cf. le pavé de `quota_projete`.
+
+    ⛔⛔ **LE PLANCHER À 1,0 — ET IL A COÛTÉ UNE NUIT D'ARCHIVE
+    (débug du 24/08/2026).** Un appel HTTP ne coûte JAMAIS moins d'un
+    appel. Open-Meteo facture **au minimum une requête**, si petite
+    soit-elle ; la formule variables × modèles / 10 ne décrit le
+    serveur QU'AU-DESSUS de 1.
+
+    Mesuré, pas déduit : `collect_reduit` envoyait deux requêtes par
+    point, de 0,8 (2 modèles × 4 vars) et 0,6 (3 × 2) pondérés. Le
+    compteur les additionnait à **1,40** ; le serveur les comptait
+    **2,00**. À 2 518 points, cela fait 5 037 requêtes contre un
+    plafond HORAIRE de 5 000 : le run a heurté le mur au point ~2 500,
+    **à l'unité près**, alors que son propre budget lui annonçait
+    1 000 pondérés de marge. Facteur d'erreur : 1,43.
+
+    ⚠️ **ET LE DÉFAUT NE POUVAIT SE VOIR QUE LÀ.** Il ne mord QUE sur
+    une requête dont le poids est sous 1. Mesuré le 24/08 : la passe
+    Pioupiou pèse 1,6 (2 modèles × 8 vars) et 4,2 (7 × 6) — les deux
+    au-dessus, donc le plancher ne la change pas d'un pondéré et n'a
+    jamais eu l'occasion de se manifester. Il fallait une passe dont
+    **les DEUX** requêtes soient sous 1 : c'était celle du 23/08, à sa
+    première nuit.
+
+    ⚠️ **ET AUCUN BANC NE POUVAIT L'ATTRAPER.** Le banc du S0.11
+    affirmait « 1,40 pondéré par point, mesuré sur l'URL RÉELLE », et
+    il était VERT : il mesurait l'accord du code avec lui-même, jamais
+    avec l'API. Un `--dry-run` bâti sur la même formule disait la même
+    chose fausse avec la même assurance. Le plancher est la seule
+    partie de cette fonction qui vienne d'une mesure faite CONTRE le
+    serveur, et non contre nous-mêmes.
+
+    ⓘ Le plancher s'applique PAR REQUÊTE. Les appelants qui somment
+    plusieurs groupes doivent donc appeler `poids()` une fois PAR
+    GROUPE et additionner ensuite — jamais sommer les produits puis
+    diviser, ce qui ferait disparaître le plancher exactement là où il
+    mord (`collect.poids_par_point`, `collect_reduit`).
     """
     if n_variables < 1 or n_modeles < 1:
         raise ValueError("poids : au moins une variable et un modèle")
-    return n_variables * n_modeles / 10.0
+    return max(1.0, n_variables * n_modeles / 10.0)
 
 
 def poids_url(url: str) -> float:
