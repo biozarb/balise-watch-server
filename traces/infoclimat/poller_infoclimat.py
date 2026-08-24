@@ -54,12 +54,31 @@ R2 (03/08/2026).
    l'échantillon de 8 stations sondé ce matin-là. Mesuré le soir sur
    `history.json` en prod : **25 stations sur 865 publient de vraies
    rafales**, souvent 140 à 178 points sur 30 h, facteur rafale/moyenne
-   de 1,1 à 4,1. Les 840 autres n'en mesurent pas — anémomètres amateur.
+   de 1,1 à 4,1.
    Le format colonnaire rendait l'erreur invisible : il OMET les séries
-   entièrement nulles, donc `raf` disparaît chez les 840 au lieu
+   entièrement nulles, donc `raf` disparaît chez les autres au lieu
    d'apparaître pleine de null. Ne jamais en déduire que le champ est
    inutile, et ne jamais reconstituer une rafale à partir de la moyenne
    pour combler le trou : le facteur va de 1,1 à 4,1 selon la station.
+
+⚠️ ET SURTOUT (24/08/2026) — IL ÉTAIT ÉCRIT ICI que « les 840 autres
+   n'en mesurent pas — anémomètres amateur ». C'EST FAUX, et c'était la
+   phrase qui interdisait de chercher plus loin. Mesuré ce jour-là par
+   `traces/sonde_rafale_infoclimat.py`, un appel, deux stations :
+     · 00003 Besse sur Issole → `vent_rafales: null` sur les 225 relevés
+       de la journée, alors que SA PROPRE PAGE infoclimat.fr affiche
+       « raf. 30.6 » à 15h30 pour le relevé dont l'API nous rend le
+       `vent_moyen` 12.9 — même station, même horodatage, une rafale
+       d'un côté, `null` de l'autre ;
+     · ses métadonnées déclarent un **Davis Vantage Pro 2** depuis 2003,
+       qui mesure la rafale par construction ;
+     · 00047 Plabennec, témoin, rend bien `vent_rafales` 226/226.
+   L'anémomètre existe, la mesure existe, le site l'affiche — c'est
+   l'ENDPOINT OPENDATA qui la met à null pour ~97 % des StatIC. La
+   réponse porte pourtant `vent_rafales` dans `hourly._params` et
+   « wind gust,km/h » dans `metadata` : le champ est bien prévu, il
+   arrive vide. Rien à corriger ICI : le poller lit la bonne clé, il
+   n'y a rien dedans. Le seul chemin de correction passe par Infoclimat.
 
 ⚠️ LA LICENCE VARIE D'UNE STATION À L'AUTRE, dans un rayon de 20 km :
    `CC BY`, `NON-COMMERCIAL ONLY: CC BY NC`, `Etalab`. Elle voyage donc
@@ -506,6 +525,10 @@ def parse_point(raw):
         # jusqu'au 03/08 : 25 stations sur 865 publient de vraies
         # rafales (mesuré sur history.json en prod). L'erreur venait de
         # l'échantillon de 8 stations du matin. Ne pas retirer ce champ.
+        # ⚠️ 24/08 — et ne pas non plus aller chercher une AUTRE clé : la
+        # réponse ne contient que celle-ci (`hourly._params` la liste,
+        # `metadata` la décrit « wind gust,km/h »). Quand elle est nulle,
+        # c'est l'opendata qui est amputée, pas la lecture d'ici.
         "raf": arrondi(num(raw.get("vent_rafales")), 1),
         "dir": arrondi(num(raw.get("vent_direction")), 0),
         "pres": arrondi(num(raw.get("pression")), 1),

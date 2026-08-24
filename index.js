@@ -2799,6 +2799,19 @@ async function refreshInfoclimatHistory() {
         // autres au lieu d'apparaître pleine de null.
         // Le code ci-dessous était juste — c'est la seule raison pour
         // laquelle ces 25 stations n'ont jamais rien perdu.
+        //
+        // ⚠️ 24/08/2026 — le corollaire qui était écrit à côté (« les
+        // 840 autres n'en mesurent pas, anémomètres amateur ») est FAUX
+        // à son tour, et c'était lui qui fermait le dossier. Sondé ce
+        // jour-là (traces/sonde_rafale_infoclimat.py) : la station 00003
+        // rend `vent_rafales: null` sur ses 225 relevés du jour, pendant
+        // que SA PAGE infoclimat.fr affiche « raf. 30.6 » sur le relevé
+        // dont l'API nous donne le `vent_moyen` 12.9 — et ses
+        // métadonnées déclarent un Davis Vantage Pro 2 depuis 2003. La
+        // rafale est mesurée et publiée par Infoclimat ; c'est leur
+        // ENDPOINT OPENDATA qui la met à null pour ~97 % des StatIC.
+        // Rien à corriger de ce côté-ci du fil : le `max` reste la
+        // rafale native quand elle arrive, null sinon.
         pts.push({
           t: ts[i] * 1000, min: null,
           avg: moy ? moy[i] ?? null : null,
@@ -5174,6 +5187,12 @@ app.get('/infoclimat-stations', (req, res) => {
 // ⚠️ 03/08/2026 — il était écrit ici que `vent_rafales` était null sur
 // tout le réseau : FAUX, 25 stations sur 865 en publient. Détail et
 // mesure dans le commentaire du dépliage colonnaire (~ligne 2394).
+// ⚠️ 24/08/2026 — et le `max` null des ~848 autres n'est PAS « une
+// station sans anémomètre » : c'est l'opendata d'Infoclimat qui rend
+// null une rafale que leur propre site affiche (mesuré station 00003,
+// cf. le même commentaire). Le distinguo compte pour l'UI : « pas de
+// capteur » et « source amputée » ne se disent pas au pilote de la
+// même façon le jour où on décidera de le dire.
 app.get('/infoclimat-history/:id', (req, res) => {
   const pts = infoclimatHistory.get(req.params.id);
   if (!pts) return res.json({ points: [], fetchedAt: infoclimatHistoryFetchedAt });

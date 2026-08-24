@@ -6,6 +6,56 @@
 
 ---
 
+## 24/08/2026 — une phrase d'explication est ce qui ferme un dossier, et celle-ci était fausse
+
+Retour Yann : *« sur les balises Infoclimat, on n'a ni le vent max ni le
+vent min ! Pourtant on le retrouve sur leur site ! »*
+
+Le code disait déjà pourquoi, à trois endroits (`poller_infoclimat.py`,
+`index.js` ×2) : **« Les 840 autres n'en mesurent pas — anémomètres
+amateur. »** C'était net, ça avait l'air mesuré (ça suivait la
+correction du 03/08, elle-même une vraie mesure), et c'est **faux**.
+
+Mesuré le 24/08 par `traces/sonde_rafale_infoclimat.py` — **un** appel
+opendata, deux stations :
+
+| | `vent_rafales` (opendata) | leur page infoclimat.fr | matériel déclaré |
+|---|---|---|---|
+| **00003** Besse sur Issole | `null` × 225 relevés | « raf. 30.6 » à 15h30 | Davis Vantage Pro 2 (2003) |
+| **00047** Plabennec (témoin) | 226/226 renseignés | idem | — |
+
+Le relevé de 15h30 est le MÊME des deux côtés : l'API en rend le
+`vent_moyen` 12.9, leur page affiche 13 km/h **et** une rafale. La
+station mesure la rafale, Infoclimat la stocke et l'affiche — c'est
+**l'endpoint opendata** qui la met à `null` pour ~97 % des StatIC (27
+séries `raf` sur 875 stations d'historique, relevé le même jour). La
+réponse annonce pourtant le champ : `hourly._params` le liste,
+`metadata` le décrit « wind gust,km/h ». Il arrive vide, c'est tout.
+
+⚠️ **Piège réutilisable — le vrai n'est pas technique.** Une donnée
+absente ne coûte qu'une recherche ; une donnée absente **avec une
+explication plausible à côté** coûte des mois, parce que plus personne
+ne cherche. La phrase de 03/08 était une INFÉRENCE (« pas de valeur
+donc pas de capteur ») écrite dans le même paragraphe qu'une mesure, et
+elle en a hérité l'autorité. *Quand un commentaire explique une absence,
+vérifier qu'il MESURE l'explication et pas seulement l'absence* — sinon
+l'écrire au conditionnel, ou pas du tout.
+
+ⓘ La distinction n'est pas cosmétique côté UI : « cette station n'a pas
+d'anémomètre à rafale » et « notre source nous ampute la rafale » ne se
+disent pas au pilote de la même façon (le rendu `noGust` du 03/08 dit
+aujourd'hui le premier).
+
+ⓘ Rien à corriger dans le code : le poller lit la bonne clé, la seule
+qui existe. Le seul chemin de correction passe par Infoclimat.
+
+ⓘ Le « vent **min** », lui, n'existe nulle part chez eux — leur propre
+tableau n'a que « vent moyen » et « rafales ». Cf. l'entrée
+« non-bug » du 22/07 dans `PWA/web/BUGS.md` : aucune source sauf
+Pioupiou n'a de minimum natif.
+
+---
+
 ## 23/08/2026 — supprimer un objet sur R2 ne le supprime pas pour un lecteur qui lit le LOCAL d'abord
 
 Le lot S0.9 avait trouvé un manifeste qui déclarait deux parties là où

@@ -218,8 +218,11 @@ def etape_3_cle(stations, cle):
               f"vent {vent} raf {raf} dir {dirv} · {pres} hPa · {temp} °C "
               f"({len(pts)} relevés)")
     print(f"\n   {utiles}/{len(stations)} stations avec du VENT exploitable.")
-    print("   ⚠️ `vent_rafales` souvent null : limitation connue et signalée")
-    print("      à Infoclimat par d'autres réutilisateurs, pas un bug d'ici.")
+    print("   ⚠️ `vent_rafales` souvent null : limitation de l'OPENDATA,")
+    print("      pas de la station. Mesuré le 24/08 (sonde_rafale_infoclimat)")
+    print("      sur 00003 : null sur 225 relevés, alors que sa page")
+    print("      infoclimat.fr affiche les rafales et que ses métadonnées")
+    print("      déclarent un Davis Vantage Pro 2. Rien à corriger ici.")
     return True
 
 
