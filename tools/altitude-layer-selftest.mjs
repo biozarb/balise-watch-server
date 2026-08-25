@@ -1214,6 +1214,20 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
   {
     const A = await import(process.env.BW_AGRUME_MODULE
       || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeProfile.ts'));
+    // ⛔ 25/08 — `agrumeCache.ts` A RENDU CE BANC DÉPENDANT DE SON ORDRE.
+    // Depuis le lot perf, l'index (TTL 30 s), les manifestes (clé = URL
+    // jetonnée) et les `zsol` vivent dans des caches de MODULE, donc
+    // PARTAGÉS par tous les scénarios de ce fichier — chacun étant censé
+    // décrire un monde à lui, avec son faux serveur et ses compteurs de
+    // requêtes. Un scénario qui hérite du cache du précédent ne compte
+    // plus ce qu'il croit compter : ci-dessous, le second sous-cas lisait
+    // ZÉRO manifeste (le bon était encore en mémoire) au lieu des deux
+    // qu'il exige, et plus bas le §12 recevait un 404 en allant chercher
+    // le run du §11. On purge donc AVANT chaque scénario, jamais après :
+    // un banc ne doit pas dépendre de ce que le précédent a laissé.
+    const C = await import(process.env.BW_CACHE_MODULE
+      || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeCache.ts'));
+    C.viderCacheAgrume();
     let reloads = 0, passes = 0, urlMan = null;
     const cache = async (url, init) => {
       const frais = init?.cache === 'reload';
@@ -1243,6 +1257,7 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
     verifier('⚠️ et UN SEUL rejeu : une incohérence qui persiste doit rester '
       + 'visible, pas devenir lente',
       await (async () => {
+        C.viderCacheAgrume();
         let n = 0;
         const toujours = async (url, init) => {
           if (url.includes('manifest.json')) { n++; return Response.json(MAN_VIEUX); }
@@ -1275,6 +1290,13 @@ console.log('\n── 12. ⛔ LE RECOLLEMENT DU RUN PRÉCÉDENT (A25) ──');
 {
   const A = await import(process.env.BW_AGRUME_MODULE
     || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeProfile.ts'));
+  // ⛔ Voir la note du §11 g : les caches d'`agrumeCache.ts` sont des
+  // caches de MODULE. Le §11 s'est déroulé dans un autre monde (run du
+  // 13/08) et son index a un TTL de 30 s — sans cette purge, le premier
+  // scénario ci-dessous allait chercher les colonnes du run du §11 et
+  // tombait sur un 404, dans une section qui ne parle pas de rétention.
+  const C = await import(process.env.BW_CACHE_MODULE
+    || join(ici, '..', '..', 'web', 'src', 'lib', 'agrumeCache.ts'));
 
   const H = 3_600_000;
   const DOM = 'nord-alpes';
@@ -1518,6 +1540,7 @@ console.log('\n── 12. ⛔ LE RECOLLEMENT DU RUN PRÉCÉDENT (A25) ──');
 
   // ── f. LE CHEMIN COMPLET, de l'index au profil ────────────────────
   {
+    C.viderCacheAgrume();
     const r = await A.chargerProfilAgrume('', 45.5, 6.5, serveur(),
       { maintenant: MAINTENANT, heureDebut: 7 });
     verifier('⛔ la journée commence à 07:00 locales, pas à l\'heure du run',
@@ -1549,6 +1572,7 @@ console.log('\n── 12. ⛔ LE RECOLLEMENT DU RUN PRÉCÉDENT (A25) ──');
     const seul = { runs: [{ run: R_COURANT, domaine: DOM }], ecrit_le: IDX.ecrit_le };
     const srv = async (url, init) => (String(url).includes('index.json')
       ? Response.json(seul) : serveur()(url, init));
+    C.viderCacheAgrume();
     const r = await A.chargerProfilAgrume('', 45.5, 6.5, srv,
       { maintenant: MAINTENANT, heureDebut: 7 });
     verifier('⛔ aucun run antérieur en ligne : la coupe reste servie, et la '
@@ -1561,6 +1585,7 @@ console.log('\n── 12. ⛔ LE RECOLLEMENT DU RUN PRÉCÉDENT (A25) ──');
     // Le run précédent a changé de découpe : on l'écarte, on le DIT, et
     // le plus ancien prend le relais sur les heures qu'il sait dire.
     const mans = { ...MAN, [R_PREC]: manifeste(R_PREC, 7, { decPrecip: -1000 }) };
+    C.viderCacheAgrume();
     const r = await A.chargerProfilAgrume('', 45.5, 6.5, serveur(mans),
       { maintenant: MAINTENANT, heureDebut: 7 });
     verifier('⛔ un run d\'une autre génération est ÉCARTÉ NOMMÉMENT, et le '
@@ -1587,6 +1612,11 @@ console.log('\n── 12. ⛔ LE RECOLLEMENT DU RUN PRÉCÉDENT (A25) ──');
       if (String(url).includes('manifest.json')) lus++;
       return serveur()(url, init);
     };
+    // ⛔ Purge OBLIGATOIRE ici : ce scénario COMPTE les manifestes lus, et
+    // un manifeste hérité du scénario précédent ferait passer ce test
+    // pour la mauvaise raison — « aucune requête de plus » serait vrai
+    // parce que le cache a répondu, pas parce que le code s'est abstenu.
+    C.viderCacheAgrume();
     const r = await A.chargerProfilAgrume('', 45.5, 6.5, compte,
       { maintenant: MAINTENANT, heureDebut: 12 });
     verifier('⚠️ « rien à recoller » ne coûte AUCUNE requête de plus — un '

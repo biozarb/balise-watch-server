@@ -213,6 +213,7 @@ jobs:
             PWA/web/src/lib/agrumeProfile.ts
             PWA/web/src/lib/rafraichissement.ts
             PWA/web/src/lib/piaf.ts
+            PWA/web/src/lib/agrumeCache.ts
           sparse-checkout-cone-mode: false
 
       # ══════════════════════════════════════════════════════════════
@@ -229,13 +230,14 @@ jobs:
       #  Cette étape existe pour que ce silence-là ne se reproduise pas :
       #  le motif se prouve, à l'endroit où il est écrit.
       # ══════════════════════════════════════════════════════════════
-      - name: Le sparse-checkout a bien ramené les quatre fichiers
+      - name: Le sparse-checkout a bien ramené les cinq fichiers
         run: |
           manque=0
           for f in _web-repo-parite/PWA/web/src/lib/altitudeLayer.ts \
                    _web-repo-parite/PWA/web/src/lib/agrumeProfile.ts \
                    _web-repo-parite/PWA/web/src/lib/rafraichissement.ts \
-                   _web-repo-parite/PWA/web/src/lib/piaf.ts; do
+                   _web-repo-parite/PWA/web/src/lib/piaf.ts \
+                   _web-repo-parite/PWA/web/src/lib/agrumeCache.ts; do
             if [ -s "$f" ]; then
               echo "✓ $f ($(wc -c < "$f") o)"
             else
@@ -253,6 +255,58 @@ jobs:
             find _web-repo-parite -type f | head -40
             exit 1
           fi
+
+      # ══════════════════════════════════════════════════════════════
+      #  ⛔ 25/08 — LA LISTE ÉTAIT JUSTE, ELLE EST DEVENUE INCOMPLÈTE.
+      #
+      #  Le contrôle ci-dessus prouve que les fichiers DEMANDÉS sont là.
+      #  Il ne peut pas savoir qu'`agrumeProfile.ts` s'est mis, côté web,
+      #  à importer un cinquième module (`agrumeCache.ts`, lot perf du
+      #  25/08) : la liste sparse est écrite ICI et le graphe d'imports
+      #  vit LÀ-BAS. Trois runs de suite (#346-#348) sont morts en
+      #  `ERR_MODULE_NOT_FOUND`, et comme la parité passe AVANT
+      #  l'ingestion, aucun n'a écrit un octet d'archive.
+      #
+      #  Cette étape ferme la boucle : elle relit le graphe RÉELLEMENT
+      #  ramené et exige que chaque import de valeur relatif tombe sur un
+      #  fichier présent. La prochaine fois, le rouge tombe ici — à
+      #  l'endroit où la liste s'écrit, avec le nom du fichier à ajouter.
+      #
+      #  ⚠️ Les imports `import type … from './x.ts'` sont RETIRÉS avant
+      #  l'examen : `--experimental-strip-types` les efface, ils
+      #  n'exigent aucun fichier à l'exécution. Les exiger quand même
+      #  ferait rougir la CI pour un fichier dont personne n'a besoin.
+      # ══════════════════════════════════════════════════════════════
+      - name: Aucun import relatif ne pointe hors du sparse-checkout
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys
+
+          racine = pathlib.Path('_web-repo-parite/PWA/web/src/lib')
+          fichiers = sorted(racine.glob('*.ts'))
+          manque = []
+          for f in fichiers:
+              src = f.read_text(encoding='utf-8')
+              src = re.sub(r"import\s+type\s[\s\S]*?from\s*['\"][^'\"]+['\"]",
+                           '', src)
+              for spec in re.findall(r"from\s*['\"](\.[^'\"]+)['\"]", src):
+                  cible = (f.parent / spec)
+                  etat = 'ok' if cible.is_file() else 'ABSENT'
+                  print(f"  {f.name} → {spec} : {etat}")
+                  if etat == 'ABSENT':
+                      manque.append((f.name, spec))
+
+          if manque:
+              print('─' * 54)
+              print("Un module ramené en importe un qui ne l'a pas été.")
+              print("Le graphe d'imports du dépôt web a bougé ; la liste")
+              print("`sparse-checkout` de CE fichier ne l'a pas suivi.")
+              print("À ajouter sous `PWA/web/src/lib/` :")
+              for nom, spec in manque:
+                  print(f"  {spec.lstrip('./')}   (importé par {nom})")
+              sys.exit(1)
+          print(f"{len(fichiers)} fichier(s) examiné(s), graphe complet.")
+          PY
 
       - uses: actions/setup-node@v4
         with:
@@ -273,6 +327,13 @@ jobs:
         env:
           BW_LAYER_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/altitudeLayer.ts
           BW_AGRUME_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/agrumeProfile.ts
+          # ⚠️ Le banc charge `agrumeCache.ts` LUI-MÊME, pour purger entre
+          # deux scénarios des caches qui vivent au niveau du MODULE.
+          # Sans ce chemin il retomberait sur son défaut
+          # `../../web/src/lib/…` — l'arborescence du Mac de Yann, qui
+          # n'existe pas sur le runner : `ERR_MODULE_NOT_FOUND`, cette
+          # fois levé par le banc lui-même.
+          BW_CACHE_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/agrumeCache.ts
 
       # ⛔ LE BANC DU RAFRAÎCHISSEMENT CÔTÉ CLIENT (Lot L3a, 17/08).
       # Hors ligne, sans clé : il vérifie que le client cherche l'échéance
