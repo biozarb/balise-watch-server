@@ -123,6 +123,22 @@ RETENTION_DAILY_D = 30
 RETENTION_EVENT_D = 90
 RETENTION_SCORE_D = 7
 
+#: Silence au-delà duquel un accumulateur de caractère ne pèse plus rien.
+#:
+#: ⚠️ CE N'EST PAS UNE RÉTENTION DE FENÊTRE, et la nuance décide de tout :
+#: un accumulateur ne se périme pas par son ÂGE, il se périme par son
+#: SILENCE. La demi-vie est de 30 jours, donc une case muette depuis
+#: 180 jours pèse `2^(-180/30)` = 1,6 % d'une journée fraîche. La jeter
+#: ne change aucun chiffre affiché.
+#:
+#: ⛔ ET ELLE NE REND RIEN AUJOURD'HUI — le dire plutôt que de le vendre.
+#: Mesuré le 25/08 : `last_day < 2026-02-26` = **0 ligne**. La plus
+#: vieille ligne de la table a 18 jours. Même en descendant le seuil à
+#: 16 jours, on ne récupérerait que 36 581 lignes sur 739 916 (4,9 %).
+#: Cette constante est écrite pour le régime permanent, pas pour
+#: maintenant. Cf. `claude/lot-s14-croissance-model-character-25-08.md`.
+RETENTION_CHARACTER_D = 180
+
 # ══════════════════════════════════════════════════════════════════
 #  LOT G — LES TROIS ARBITRAGES, TRANCHÉS LE 09/08/2026
 # ══════════════════════════════════════════════════════════════════
@@ -519,6 +535,115 @@ class Supabase:
                 detail = e.read()[:400].decode("utf-8", "replace")
                 raise Abort(f"upsert {table} : HTTP {e.code} — {detail}") from e
             n += len(rows[i:i + chunk])
+        self.ecritures += n
+        return n
+
+    #: Lignes par appel de `bw_character_avance`.
+    #:
+    #: ⛔ MESURÉ SUR LA PRODUCTION LE 25/08, PAS CHOISI. Le délai de
+    #: requête de Supabase (8 s) s'applique aussi aux RPC, et il tue le
+    #: run exactement comme il l'a tué le 25/08 au matin. Mesuré contre
+    #: la table de 739 916 lignes, insertion puis mise à jour :
+    #:
+    #:        500 lignes → 0,20 / 0,21 s        5 000 → 2,57 / 1,54 s
+    #:      1 000 lignes → 0,37 / 0,44 s       10 000 → 3,29 / 3,87 s
+    #:      2 000 lignes → 0,78 / 0,97 s
+    #:     20 000 lignes → ⛔ `57014` à 10,5 s … PUIS UNE RÉUSSITE À 10,7 s
+    #:
+    #: ⛔ C'EST CE DERNIER POINT QUI FIXE LA VALEUR, pas la vitesse. Une
+    #: taille qui échoue UNE FOIS SUR DEUX est bien pire qu'une taille
+    #: qui échoue toujours : elle passe en banc et elle tombe une nuit
+    #: d'octobre. À 5 000 la marge sous les 8 s est de ×3, et la table
+    #: va grandir. 10 000 irait à peine plus vite en divisant la marge
+    #: par 1,5.
+    #:
+    #: ⛔ NE PAS AUGMENTER POUR ALLER PLUS VITE — même défaut que `PAGE`
+    #: contre `PLAFOND_SERVEUR`, et même conséquence : une écriture
+    #: coupée au milieu, un soir où personne ne regarde.
+    RPC_LOT = 5000
+
+    def rpc(self, fonction: str, corps: dict):
+        """Appelle une fonction SQL par PostgREST (`/rpc/…`).
+
+        ⚠️ REPRISE SUR 5xx, ALORS QUE `upsert` NE L'A PAS — et ce n'est
+        pas une incohérence, c'est une propriété du chemin. Un appel de
+        RPC est UNE seule instruction : ou elle s'applique en entier, ou
+        elle ne s'applique pas du tout. Et `bw_character_avance` porte
+        son propre garde d'idempotence (`p_day > mc.last_day`), donc
+        rejouer un lot déjà passé n'a aucun effet. **Atomicité et
+        idempotence : ce sont ces deux propriétés-là qui rendent la
+        reprise sûre**, pas l'envie de robustesse. Sans elles, reprendre
+        doublerait une journée.
+
+        ⛔ Un 4xx n'est JAMAIS repris : c'est une faute du client
+        (doublon de clé dans le corps, corps mal formé) et elle se
+        répéterait à l'identique.
+
+        ⓘ Le corps de l'erreur est journalisé. Sans lui, « HTTP Error
+        500 » ne dit rien — et la matinée du 25/08 est passée à deviner
+        que c'était un `57014`.
+        """
+        if self.dry_run:
+            return None
+        derniere: Exception | None = None
+        for essai in range(self.RELECTURES + 1):
+            try:
+                req = self._req(f"rpc/{fonction}", "POST",
+                                json.dumps(corps).encode("utf-8"))
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    brut = r.read().decode("utf-8")
+                    return json.loads(brut) if brut.strip() else None
+            except urllib.error.HTTPError as exc:
+                try:
+                    motif = exc.read().decode("utf-8", "replace")[:400]
+                except Exception:                      # noqa: BLE001
+                    motif = ""
+                if exc.code < 500:
+                    raise Abort(f"rpc {fonction} : HTTP {exc.code} — {motif}")
+                derniere = exc
+                print(f"     ⚠️ rpc/{fonction} : HTTP {exc.code} {motif} — "
+                      f"reprise {essai + 1}/{self.RELECTURES}", file=sys.stderr)
+            except urllib.error.URLError as exc:
+                derniere = exc
+                print(f"     ⚠️ rpc/{fonction} : {type(exc).__name__} — "
+                      f"reprise {essai + 1}/{self.RELECTURES}", file=sys.stderr)
+            if essai < self.RELECTURES:
+                time.sleep(self.RELECTURE_PAUSE_S[
+                    min(essai, len(self.RELECTURE_PAUSE_S) - 1)])
+        raise Abort(f"rpc {fonction} : échec après {self.RELECTURES} "
+                    f"reprises — {derniere}")
+
+    def avance_caractere(self, rows: list[dict], jour: str,
+                         lot: int | None = None) -> int:
+        """Fait avancer les accumulateurs par `bw_character_avance`.
+
+        ⭐ REND LE NOMBRE DE LIGNES RÉELLEMENT APPLIQUÉES, PAS ENVOYÉES.
+        C'est la fonction SQL qui les compte (`get diagnostics`), et
+        c'est une différence de nature avec `upsert`, qui rend
+        `len(rows)`. L'écart entre envoyé et appliqué n'est pas du
+        bruit : il vaut les valeurs non finies écartées par la RPC, plus
+        les clés dont la journée était déjà intégrée. ⛔ C'est
+        précisément parce que `upsert` comptait ce qu'il ENVOYAIT qu'il
+        a été impossible, le 25/08, de réconcilier les 3 615 845
+        « avancées » du journal avec les 3 270 977 `days` de la table.
+        """
+        if not rows:
+            return 0
+        lot = lot or self.RPC_LOT
+        if lot > self.RPC_LOT:
+            raise Abort(
+                f"avance_caractere : lot de {lot} lignes, au-dessus de "
+                f"RPC_LOT={self.RPC_LOT} — mesuré le 25/08 contre le délai "
+                f"de 8 s de Supabase. Au-dessus, la fonction rend `57014` EN "
+                f"PLEINE ÉCRITURE, et à 20 000 elle ne le fait qu'une fois "
+                f"sur deux.")
+        if self.dry_run:
+            print(f"  (dry-run) {len(rows)} lignes vers model_character (RPC)")
+            return len(rows)
+        n = 0
+        for i in range(0, len(rows), lot):
+            n += int(self.rpc("bw_character_avance",
+                              {"p_rows": rows[i:i + lot], "p_day": jour}))
         self.ecritures += n
         return n
 
@@ -2722,17 +2847,35 @@ def _iso(ms) -> str | None:
 METRICS = ("errKmh", "speedRatio", "dirOffset", "mseModel", "msePersist")
 
 
-def accumulator_updates(banded: list[dict], zone_of: dict[str, dict],
-                        day: datetime, current: dict[tuple, S.Accumulator]):
-    """Fait avancer les accumulateurs d'une journée.
+def accumulator_updates(banded: list[dict], zone_of: dict[str, dict]):
+    """Les MÉDIANES DU JOUR à envoyer à `bw_character_avance`.
 
     ⚠️ LA VALEUR INTÉGRÉE EST UNE MÉDIANE SUR LES BALISES DE LA ZONE,
     pas une valeur de balise. Une moyenne exponentielle de médianes
     reste robuste ; une moyenne exponentielle de valeurs brutes ne l'est
     pas, et une seule balise déréglée suffirait à écrire un caractère
     faux dans une mémoire de trois mois.
+
+    ⛔ CE QUE CETTE FONCTION NE FAIT PLUS DEPUIS LE LOT S15, ET C'EST LE
+    POINT DU LOT. Elle recevait l'état courant des 739 916
+    accumulateurs, appliquait `scoring.accumulate` et rendait l'état
+    ABSOLU. Pour ça il fallait relire la table entière chaque nuit :
+    142–157 s le 25/08, et ce coût grandissait avec l'histoire, sans
+    plafond. La récurrence vit maintenant dans `bw_accumulate`
+    (step51) ; ici on ne calcule plus que la médiane du jour.
+
+    ⚠️ L'IDEMPOTENCE A CHANGÉ DE CAMP AVEC ELLE. Cette fonction écartait
+    les clés dont la journée était déjà intégrée (`day_ms <=
+    acc.last_day`) ; elle ne le peut plus, puisqu'elle ne connaît plus
+    l'état. C'est le `where … p_day > mc.last_day` de la RPC qui tient
+    désormais cette propriété, et c'est le banc de double rejeu qui
+    tient le `where`. **Un rejeu de nuit n'est plus neutre par
+    construction ici : il l'est par construction là-bas.**
+
+    ⓘ `scoring.accumulate` N'EST PAS SUPPRIMÉE pour autant : elle reste
+    la référence du banc de parité, la seule chose qui puisse dire que
+    le SQL calcule bien la même chose.
     """
-    day_ms = int(day.replace(tzinfo=timezone.utc).timestamp()) * 1000
     # (zone_id, model, lead, regime, band, metric) → valeurs des balises
     buckets: dict[tuple, list[float]] = defaultdict(list)
     for b in banded:
@@ -2756,14 +2899,34 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict],
                 v = b.get(metric)
                 if v is None or not S._finite(v):
                     continue
+                # ⛔ LA CASE « TOUS RÉGIMES » D'ABORD, ET SANS CONDITION.
+                # Une journée qu'on n'a pas su classer reste une journée
+                # de vent MESURÉE : elle doit peser dans le score
+                # général même si son régime est inconnu. Couper
+                # l'entrée `banded` entière deux lignes plus bas ferait
+                # perdre 10 647 journées par nuit (mesuré le 25/08) —
+                # sans erreur, sans rouge, exactement le genre de défaut
+                # qui coûte cher ici.
+                buckets[(zid, b["model"], b["lead_h"], "all",
+                         "all", metric)].append(float(v))
+                # ⛔ LOT S15 — ON N'ACCUMULE PLUS `regime = 'unknown'`.
+                # 45 569 lignes (6,2 % de la table) et 10 647 écritures
+                # par nuit, mesurées le 25/08, que RIEN ne peut lire —
+                # pour deux raisons indépendantes :
+                #   · `_case_rows` le refuse explicitement (« unknown
+                #     n'est pas un régime », plus bas dans ce fichier) ;
+                #   · côté web, `CharacterTrait.regime` est typé
+                #     `Regime`, soit les SIX valeurs de classification.
+                # Un constat de régime inconnu n'est donc pas seulement
+                # inutile : il est INEXPRIMABLE.
+                if b["regime"] == "unknown":
+                    continue
                 buckets[(zid, b["model"], b["lead_h"], b["regime"],
                          b["band"], metric)].append(float(v))
                 # La case « toutes tranches » vit à côté des tranches,
                 # pas à leur place : c'est elle qui porte le score
                 # général, elles qui portent le caractère.
                 buckets[(zid, b["model"], b["lead_h"], b["regime"],
-                         "all", metric)].append(float(v))
-                buckets[(zid, b["model"], b["lead_h"], "all",
                          "all", metric)].append(float(v))
 
     out: list[dict] = []
@@ -2773,18 +2936,22 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict],
         med = S.median(values)
         if med is None:
             continue
-        acc = current.get(key, S.Accumulator())
-        acc2 = S.accumulate(acc, med, day_ms)
-        if acc2 is acc or acc2.last_day != day_ms:
-            continue                        # journée déjà intégrée
         zid, model, lead, regime, band, metric = key
         out.append({
             "zone_id": zid, "model": model, "lead_h": lead,
             "regime": regime, "band": band, "metric": metric,
-            "event_type": "none",
-            "sum_w": acc2.sum_w, "sum_wx": acc2.sum_wx, "sum_wx2": acc2.sum_wx2,
-            "days": acc2.days, "last_day": day.strftime("%Y-%m-%d"),
+            "x": med,
         })
+    # ⓘ TRIÉ PAR LA CLÉ PRIMAIRE, et ce n'est pas de la cosmétique. Les
+    # clés sortent d'un `dict`, donc dans un ordre arbitraire : chaque
+    # ligne tomberait au hasard dans un index de 739 916 entrées. Triées,
+    # les lignes d'un même lot attaquent une plage contiguë. Le tri coûte
+    # moins d'une seconde sur 372 530 lignes.
+    # ⬜ LE GAIN N'EST PAS MESURÉ — c'est une hypothèse de localité (le
+    # banc de `RPC_LOT` du 25/08 ne portait qu'UNE zone). À vérifier au
+    # premier run réel, et à retirer si elle ne rend rien.
+    out.sort(key=lambda r: (r["zone_id"], r["model"], r["lead_h"],
+                            r["regime"], r["band"], r["metric"]))
     return out
 
 
@@ -4343,29 +4510,45 @@ def main() -> int:
         if needed:
             sb.upsert("model_zone", needed, "zone_id")
 
-        # ⛔ `select_par_cle`, PAS `select`. Au 25/08 la table porte
-        # 739 916 lignes et toute page au-delà de l'offset ~600 000
-        # meurt sur le délai de 8 s de Supabase (`57014`) : la lecture
-        # par OFFSET ne peut plus aller au bout, quel que soit l'état du
-        # réseau. Cf. la docstring de `select_par_cle` pour les mesures.
-        current_raw = sb.select_par_cle(
-            "model_character", "zone_id",
-            order="zone_id,model,lead_h,regime,band,metric,event_type")
-        current = {}
-        for a in current_raw:
-            last = a.get("last_day")
-            current[(a["zone_id"], a["model"], a["lead_h"], a["regime"],
-                     a["band"], a["metric"])] = S.Accumulator(
-                sum_w=a["sum_w"], sum_wx=a["sum_wx"], sum_wx2=a["sum_wx2"],
-                days=a["days"],
-                last_day=int(datetime.strptime(last, "%Y-%m-%d")
-                             .replace(tzinfo=timezone.utc).timestamp()) * 1000
-                if last else None)
-        updates = accumulator_updates(banded, zone_of, day, current)
+        # ⛔ LOT S15 — LA RELECTURE DES ACCUMULATEURS A DISPARU D'ICI, ET
+        # C'ÉTAIT TOUT L'OBJET DU LOT. Le job lisait la table ENTIÈRE
+        # chaque nuit (739 916 lignes, 142–157 s le 25/08) pour n'en
+        # faire qu'une chose : appliquer une récurrence pure. Cette
+        # récurrence vit maintenant dans `bw_accumulate` (step51), et le
+        # job n'envoie plus que la MÉDIANE DU JOUR. Le seul des quatre
+        # coûts de cette étape qui grandissait sans plafond — parce
+        # qu'il grandissait avec l'HISTOIRE et non avec le travail du
+        # jour — n'existe plus.
+        #
+        # ⚠️ ET L'IDEMPOTENCE A CHANGÉ DE CAMP AVEC LUI. Avant, elle
+        # était ici : `accumulate` rendait l'accumulateur inchangé si la
+        # journée était déjà intégrée, et le job envoyait un état
+        # ABSOLU — rejouer une nuit réécrivait les mêmes valeurs.
+        # Maintenant le job envoie un DELTA, et c'est le
+        # `where … p_day > mc.last_day` de la RPC qui empêche une nuit
+        # rejouée de compter DEUX FOIS. Le banc de double rejeu
+        # (`test_score`) est ce qui tient cette propriété : qui retire
+        # ce `where` fait rougir ce banc-là, et lui seul.
+        #
+        # ⓘ `select_par_cle` reste dans `Supabase` : elle sert encore
+        # ailleurs, et elle est le chemin de repli si ce lot était
+        # annulé.
+        updates = accumulator_updates(banded, zone_of)
         if updates:
-            n = sb.upsert("model_character", updates,
-                          "zone_id,model,lead_h,regime,band,metric,event_type")
-            print(f"  → model_character : {n} accumulateurs avancés")
+            n = sb.avance_caractere(updates, f"{day:%Y-%m-%d}")
+            print(f"  → model_character : {n} accumulateurs avancés "
+                  f"sur {len(updates)} envoyés")
+            if n != len(updates):
+                # ⓘ L'ÉCART N'EST PAS DU BRUIT, et il est normal : ce
+                # sont les valeurs non finies écartées par la RPC, plus
+                # les clés dont la journée était déjà intégrée (un
+                # rejeu). Le dire à voix haute, parce que `sb.upsert`
+                # comptait jusqu'ici ce qu'il ENVOYAIT — et c'est
+                # exactement ce qui a rendu impossible, le 25/08, de
+                # réconcilier les 3 615 845 « avancées » du journal avec
+                # les 3 270 977 `days` de la table.
+                print(f"     ⓘ {len(updates) - n} ligne(s) non appliquée(s) "
+                      f"(valeur non finie, ou journée déjà intégrée)")
 
         # ── 4 bis. événements (lot F) ────────────────────────────
         # ⚠️ Après les zones, jamais avant : `model_verif_event.zone_id`
@@ -4522,9 +4705,32 @@ def main() -> int:
                   f"?day=lt.{(today - timedelta(days=RETENTION_EVENT_D)):%Y-%m-%d}")
         sb.delete("model_score_zone",
                   f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}")
-        # ⚠️ `model_character` ne se purge JAMAIS : c'est son intérêt.
-        # L'archive R2 non plus — ~544 Mo/an mesurés, et c'est ce qui
-        # rend chaque amélioration de la formule rejouable.
+        # ⛔ CETTE LIGNE A DIT LE CONTRAIRE DU 08/08 AU 25/08 : «
+        # `model_character` ne se purge JAMAIS : c'est son intérêt ».
+        # Elle était fausse, et pas seulement en principe — la table A
+        # DÉJÀ ÉTÉ PURGÉE en vrai, le 22/08, par le `step50` (métrique
+        # `speedRatio`, ~118 000 lignes). Le compte des `days` en porte
+        # encore la trace : `speedRatio` plafonne à 3 quand les quatre
+        # autres métriques sont à 18.
+        #
+        # ⚠️ CE QUI EST VRAI, C'EST AUTRE CHOSE, et c'est plus utile :
+        # un accumulateur ne se périme pas par son ÂGE — il n'a pas
+        # d'âge, il est mis à jour sur place — il se périme par son
+        # SILENCE. À `RETENTION_CHARACTER_D` jours sans nouvelle, il
+        # pèse 1,6 % d'une journée fraîche, et le jeter ne change aucun
+        # chiffre affiché.
+        #
+        # ⓘ Mesuré le 25/08 : CETTE LIGNE NE SUPPRIME RIEN AUJOURD'HUI
+        # (0 ligne concernée, la table a 18 jours). Elle est écrite pour
+        # le régime permanent, et elle est ici pour que la question ne
+        # se repose pas dans six mois.
+        #
+        # ⓘ L'archive R2, elle, ne se purge toujours pas — ~544 Mo/an
+        # mesurés, et c'est ce qui rend chaque amélioration de la
+        # formule rejouable.
+        sb.delete("model_character",
+                  f"?last_day=lt."
+                  f"{(today - timedelta(days=RETENTION_CHARACTER_D)):%Y-%m-%d}")
 
     print(f"✅ terminé ({sb.ecritures} lignes écrites en base)")
     return 0

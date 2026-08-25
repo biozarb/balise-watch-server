@@ -417,48 +417,235 @@ def test_accumulateurs():
          "regime": "fluxN", "band": "strong", "errKmh": 88.0,
          "speedRatio": 8.8, "dirOffset": 88.0,
          "mseModel": 88.0, "msePersist": 1.0},
+        # ⛔ LOT S15 — UNE JOURNÉE DONT LE RÉGIME N'A PAS ÉTÉ CLASSÉ.
+        # Posée sur un AUTRE modèle EXPRÈS : sur `icon_d2` elle
+        # changerait les médianes des cas ci-dessus, et le banc
+        # mesurerait deux choses à la fois sans le dire.
+        {"key": "pioupiou:835", "model": "icon_eu", "lead_h": 24,
+         "regime": "unknown", "band": "moderate", "errKmh": 7.0,
+         "speedRatio": 1.1, "dirOffset": 5.0,
+         "mseModel": 12.0, "msePersist": 15.0},
     ]
-    up = J.accumulator_updates(banded, zone_of, DAY, {})
-    par_cle = {(u["zone_id"], u["metric"], u["band"]): u for u in up}
+    up = J.accumulator_updates(banded, zone_of)
+    par_cle = {(u["zone_id"], u["model"], u["regime"], u["band"], u["metric"]): u
+               for u in up}
 
-    fine = par_cle[("b1:valley", "errKmh", "strong")]
-    check("la valeur intégrée est la MÉDIANE des balises de la zone (4 et 6 → 5)",
-          fine["sum_wx"], 5.0)
-    check("… avec un poids de 1 pour la première journée", fine["sum_w"], 1.0)
+    fine = par_cle[("b1:valley", "icon_d2", "fluxN", "strong", "errKmh")]
+    check("la valeur envoyée est la MÉDIANE des balises de la zone (4 et 6 → 5)",
+          fine["x"], 5.0)
+    # ⛔ LOT S15 — LA FORME DE LA LIGNE A CHANGÉ, et c'est le cœur du
+    # lot : on n'envoie plus un ÉTAT (`sum_w`, `days`, `last_day`), on
+    # envoie la valeur du jour. Si quelqu'un remet une de ces clés, la
+    # RPC l'ignorera en silence et l'accumulateur repartira du mauvais
+    # pied — d'où cette assertion sur ce qui NE DOIT PAS être là.
+    check("… et rien d'autre : pas d'état absolu dans le corps envoyé",
+          sorted(fine.keys()),
+          ["band", "lead_h", "metric", "model", "regime", "x", "zone_id"])
 
     check("un bassin indéterminé n'entre dans AUCUNE case",
           any(u["zone_id"].startswith("b2") for u in up), False)
     check("une position suspecte n'entre dans AUCUNE case",
           any(u["zone_id"].startswith("b3") for u in up), False)
     check("… et sa valeur aberrante ne contamine pas le réseau entier",
-          par_cle[("*:*", "errKmh", "strong")]["sum_wx"], 5.0)
+          par_cle[("*:*", "icon_d2", "fluxN", "strong", "errKmh")]["x"], 5.0)
 
     check("les cinq échelons de repli sont alimentés d'un coup",
           sorted({u["zone_id"] for u in up}),
           ["*:*", "*:valley", "alpes-nord:*", "alpes-nord:valley", "b1:valley"])
     check("la case « toutes tranches » existe à côté des tranches",
-          ("b1:valley", "errKmh", "all") in par_cle, True)
+          ("b1:valley", "icon_d2", "fluxN", "all", "errKmh") in par_cle, True)
     check("… et la case « tous régimes » aussi",
           any(u["regime"] == "all" for u in up), True)
 
-    # Idempotence : rejouer la même journée ne fait rien avancer.
-    current = {}
-    for u in up:
-        current[(u["zone_id"], u["model"], u["lead_h"], u["regime"],
-                 u["band"], u["metric"])] = S.Accumulator(
-            sum_w=u["sum_w"], sum_wx=u["sum_wx"], sum_wx2=u["sum_wx2"],
-            days=u["days"], last_day=DAY_MS)
-    check("relancer le job sur la même journée n'avance aucun accumulateur",
-          J.accumulator_updates(banded, zone_of, DAY, current), [])
+    # ── LOT S15 : la coupe de `regime = 'unknown'` ─────────────────
+    check("aucun accumulateur n'est plus écrit pour un régime inconnu",
+          [u for u in up if u["regime"] == "unknown"], [])
+    # ⛔ ET C'EST L'AUTRE MOITIÉ DE LA COUPE, celle qu'on rate en
+    # sautant l'entrée `banded` entière : une journée qu'on n'a pas su
+    # classer reste une journée de vent MESURÉE, et elle doit continuer
+    # de peser dans la case générale. 10 647 journées par nuit
+    # dépendent de cette ligne (mesuré le 25/08).
+    # ⚠️ `.get(…, {})` PLUTÔT QU'UN ACCÈS DIRECT : si la case disparaît,
+    # on veut un ROUGE qui nomme la case, pas un `KeyError` qui arrête
+    # le banc et cache les assertions suivantes.
+    check("… mais sa journée pèse quand même dans la case « tous régimes »",
+          par_cle.get(("b1:valley", "icon_eu", "all", "all", "errKmh"),
+                      {}).get("x"), 7.0)
+    check("… à tous les échelons de repli, pas seulement la case fine",
+          par_cle.get(("*:*", "icon_eu", "all", "all", "dirOffset"),
+                      {}).get("x"), 5.0)
 
-    # Le lendemain, en revanche, avance bien.
-    demain = DAY + timedelta(days=1)
-    up2 = J.accumulator_updates(banded, zone_of, demain, current)
-    f2 = {(u["zone_id"], u["metric"], u["band"]): u for u in up2}[
-        ("b1:valley", "errKmh", "strong")]
-    check("le lendemain, l'acquis décroît de 2^(-1/30) puis s'ajoute",
-          round(f2["sum_w"], 6), round(2 ** (-1 / 30) + 1, 6))
-    check("… et le compteur de journées avance de un", f2["days"], 2)
+    # ── LOT S15 : l'ordre d'envoi ─────────────────────────────────
+    cles = [(u["zone_id"], u["model"], u["lead_h"], u["regime"], u["band"],
+             u["metric"]) for u in up]
+    check("les lignes partent triées par la clé primaire (localité d'index)",
+          cles, sorted(cles))
+
+    # ⚠️ CE QUI N'EST PLUS TESTÉ ICI, ET OÙ ÇA L'EST : l'idempotence.
+    # `accumulator_updates` ne connaît plus l'état, donc elle ne peut
+    # plus écarter une journée déjà intégrée — c'est le
+    # `where … p_day > mc.last_day` de `bw_character_avance` qui le
+    # fait. Voir `test_s15_contrat_de_la_rpc` juste en dessous pour le
+    # contrat, et la note `claude/lot-s15-rpc-caractere-etat-25-08.md`
+    # pour le banc joué contre la VRAIE base (17 assertions vertes).
+    check("la fonction est désormais SANS ÉTAT : deux appels identiques "
+          "rendent la même chose",
+          J.accumulator_updates(banded, zone_of), up)
+
+
+def test_s15_contrat_de_la_rpc():
+    """Le contrat que `bw_character_avance` doit tenir, modélisé ici.
+
+    ⚠️ CE QUE CE BANC PROUVE, ET CE QU'IL NE PROUVE PAS. Il ne peut pas
+    exécuter du SQL : il rejoue la sémantique de la RPC en Python et
+    vérifie que, SOUS CE CONTRAT, la mémoire longue se comporte comme
+    `scoring.accumulate`. Ce qui prouve que le SQL RÉEL tient ce
+    contrat, c'est le banc joué contre la production le 25/08 (parité
+    bit à bit sur 400 n-uplets tirés de la vraie table, double rejeu,
+    doublons, NaN — 17 assertions vertes), consigné dans
+    `claude/lot-s15-rpc-caractere-etat-25-08.md`.
+
+    ⛔ Les deux sont nécessaires. Celui-ci rougit si quelqu'un change la
+    forme du corps envoyé ou l'ordre des opérations côté Python ; celui
+    de production rougit si quelqu'un touche au SQL. Aucun des deux ne
+    couvre l'autre.
+    """
+    print("── S15 : le contrat de la RPC d'accumulation ──")
+
+    def rpc(base, rows, jour_ms):
+        """`bw_character_avance` en Python : le garde, et rien de plus."""
+        applique = 0
+        for r in rows:
+            if not S._finite(r["x"]):
+                continue                      # garde de finitude (SQL)
+            cle = (r["zone_id"], r["model"], r["lead_h"], r["regime"],
+                   r["band"], r["metric"])
+            acc = base.get(cle, S.Accumulator())
+            if acc.last_day is not None and jour_ms <= acc.last_day:
+                continue                      # ⛔ LE GARDE D'IDEMPOTENCE
+            base[cle] = S.accumulate(acc, r["x"], jour_ms)
+            applique += 1
+        return applique
+
+    zone_of = {"pioupiou:835": {"zone_id": "b1:valley", "landform": "valley",
+                               "basin_id": "b1", "massif_id": "alpes-nord",
+                               "basin_uncertain": False}}
+    banded = [{"key": "pioupiou:835", "model": "icon_d2", "lead_h": 24,
+               "regime": "fluxN", "band": "strong", "errKmh": 4.0,
+               "speedRatio": 1.2, "dirOffset": 10.0,
+               "mseModel": 20.0, "msePersist": 30.0}]
+    rows = J.accumulator_updates(banded, zone_of)
+    cle = ("b1:valley", "icon_d2", 24, "fluxN", "strong", "errKmh")
+
+    base = {}
+    n1 = rpc(base, rows, DAY_MS)
+    check("la première nuit applique toutes les lignes", n1, len(rows))
+    check("… et pose un poids de 1", base[cle].sum_w, 1.0)
+    check("… avec la médiane du jour", base[cle].sum_wx, 4.0)
+
+    # ⛔ LE POINT : rejouer la MÊME journée n'applique RIEN.
+    fige = dict(base)
+    n2 = rpc(base, rows, DAY_MS)
+    check("rejouer la même journée n'applique aucune ligne", n2, 0)
+    check("… et ne bouge aucun accumulateur", base, fige)
+
+    # Le lendemain, en revanche, avance — et exactement comme la
+    # version Python d'avant le lot S15.
+    n3 = rpc(base, rows, DAY_MS + 86_400_000)
+    check("le lendemain, toutes les lignes s'appliquent", n3, len(rows))
+    check("… l'acquis décroît de 2^(-1/30) puis s'ajoute",
+          round(base[cle].sum_w, 12), round(2 ** (-1 / 30) + 1, 12))
+    check("… et le compteur de journées avance de un", base[cle].days, 2)
+
+    # ⛔ LE MUTANT, ÉCRIT DANS LE BANC : sans le garde, la nuit compte
+    # deux fois. C'est ce que la RPC empêche, et c'est la seule chose
+    # qui a vraiment changé de camp dans ce lot.
+    sans_garde = {}
+    for _ in range(2):
+        for r in rows:
+            c = (r["zone_id"], r["model"], r["lead_h"], r["regime"],
+                 r["band"], r["metric"])
+            sans_garde[c] = S.accumulate(
+                S.Accumulator(sans_garde[c].sum_w, sans_garde[c].sum_wx,
+                              sans_garde[c].sum_wx2, sans_garde[c].days, None)
+                if c in sans_garde else S.Accumulator(), r["x"], DAY_MS)
+    check("sans le garde, la même nuit compterait DEUX fois",
+          sans_garde[cle].days, 2)
+
+
+def test_s15_garde_du_lot_rpc():
+    """`RPC_LOT` refuse de dépasser ce qui a été mesuré.
+
+    ⛔ MÊME DÉFAUT QUE `PAGE` CONTRE `PLAFOND_SERVEUR`, MÊME GARDE. À
+    20 000 lignes, la RPC rend `57014` EN PLEINE ÉCRITURE — et mesuré le
+    25/08 sur la production, elle ne le fait qu'UNE FOIS SUR DEUX. Une
+    taille qui échoue une fois sur deux passe en banc et tombe une nuit
+    d'octobre : c'est pour ça que le garde refuse au lieu d'essayer.
+    """
+    print("── S15 : le garde de `RPC_LOT` ──")
+    sb = _sb_de_banc()
+    check("le plafond est celui mesuré le 25/08", J.Supabase.RPC_LOT, 5000)
+
+    # ⛔ UN ESPION, PAS UN `try` NU. Sans lui, le banc ne distingue pas
+    # « refusé AVANT de partir » de « parti, puis tombé sur le réseau » —
+    # et c'est toute la différence : le second aurait déjà pu écrire.
+    appels = []
+    sb.rpc = lambda f, c: appels.append((f, len(c["p_rows"]))) or 0
+
+    motif = None
+    try:
+        sb.avance_caractere([{"zone_id": "b1:valley", "model": "icon_d2",
+                              "lead_h": 24, "regime": "fluxN",
+                              "band": "strong", "metric": "errKmh", "x": 1.0}],
+                            "2026-08-24", lot=20000)
+    except J.Abort as exc:
+        motif = str(exc)
+    check("un lot au-dessus de RPC_LOT est refusé", motif is not None, True)
+    check("… AVANT le moindre appel réseau", appels, [])
+    check("… et le message dit pourquoi, pas seulement que",
+          "57014" in (motif or ""), True)
+
+    check("un envoi vide ne fait aucun appel",
+          sb.avance_caractere([], "2026-08-24"), 0)
+    check("… vraiment aucun", appels, [])
+
+
+def test_s15_compte_ce_qui_est_applique():
+    """⭐ `avance_caractere` rend l'APPLIQUÉ, pas l'ENVOYÉ.
+
+    ⛔ C'EST UNE DIFFÉRENCE DE NATURE AVEC `upsert`, ET ELLE A UN COÛT
+    HISTORIQUE. `sb.upsert` rend `len(rows)` : le journal a donc écrit
+    « N accumulateurs avancés » pendant dix-huit nuits en comptant ce
+    qu'il ENVOYAIT. Résultat, le 25/08 : impossible de réconcilier les
+    3 615 845 « avancées » du journal avec les 3 270 977 `days` de la
+    table sans relire les 739 916 lignes pour comprendre (c'était la
+    purge du `step50`, mais rien ne le disait). Ce banc empêche que la
+    régression revienne.
+    """
+    print("── S15 : le compte rendu est celui du serveur ──")
+    sb = _sb_de_banc()
+    envoyes = []
+
+    def faux_rpc(fonction, corps):
+        envoyes.append((fonction, len(corps["p_rows"]), corps["p_day"]))
+        # Le serveur en applique moins que reçu : c'est le cas NORMAL
+        # (valeurs non finies écartées, journées déjà intégrées).
+        return len(corps["p_rows"]) - 1
+
+    sb.rpc = faux_rpc
+    rows = [{"zone_id": "b1:valley", "model": "icon_d2", "lead_h": 24,
+             "regime": "fluxN", "band": "strong", "metric": "errKmh",
+             "x": float(i)} for i in range(12_000)]
+    n = sb.avance_caractere(rows, "2026-08-24")
+
+    check("le découpage suit RPC_LOT", [e[1] for e in envoyes],
+          [5000, 5000, 2000])
+    check("toutes les journées envoyées sont la même",
+          {e[2] for e in envoyes}, {"2026-08-24"})
+    check("le compte rendu est celui du SERVEUR, pas la taille envoyée",
+          n, 12_000 - 3)
+    check("… et c'est lui qui alimente le compteur d'écritures",
+          sb.ecritures, 12_000 - 3)
 
 
 def test_scores_de_zone():
@@ -2716,6 +2903,10 @@ def test_manches_pas_de_rejeu_historique_sous_min_block_days():
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
+               # ── lot S15 : l'accumulation du caractère passe en SQL ──
+               test_s15_contrat_de_la_rpc,
+               test_s15_garde_du_lot_rpc,
+               test_s15_compte_ce_qui_est_applique,
                test_scores_de_zone, test_score_par_regime,
                test_rétrécissement_vers_le_parent,
                test_rejeu_darchive,
