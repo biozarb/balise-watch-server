@@ -230,6 +230,166 @@ class Supabase:
     #: limite du client — demander plus n'y change rien.
     PAGE = 1000
 
+    #: Le plafond RÉEL du serveur, re-mesuré le 25/08 sur la base de
+    #: production : `Range: 0-9999` sur `model_character` (739 916
+    #: lignes) en rend 1 000, pas 10 000.
+    #:
+    #: ⛔ NE PAS AUGMENTER `PAGE` POUR ALLER PLUS VITE. La boucle de
+    #: `select` s'arrête sur `len(page) < PAGE` : avec `PAGE = 10_000`
+    #: contre un serveur qui plafonne à 1 000, la PREMIÈRE page paraît
+    #: incomplète et la lecture s'arrête là. C'est exactement la
+    #: troncature silencieuse du 08/08 — rien ne plante, rien n'est
+    #: rouge, et 739 000 accumulateurs repartent de zéro. D'où
+    #: l'assertion ci-dessous, qui refuse de lire plutôt que de mentir.
+    PLAFOND_SERVEUR = 1000
+
+    #: Une lecture ratée ne coûte pas qu'une requête : elle coûte le run
+    #: entier, et tout ce qu'il a déjà écrit en base. Deux reprises,
+    #: espacées, uniquement sur les 5xx et les coupures réseau — jamais
+    #: sur un 4xx, qui est une faute du client et se répéterait à
+    #: l'identique.
+    RELECTURES = 2
+    RELECTURE_PAUSE_S = (2.0, 6.0)
+
+    def _page(self, base: str, deb: int, fin: int) -> list[dict]:
+        """Une page, avec reprise sur 5xx. Le seul endroit qui lit le réseau."""
+        if self.PAGE > self.PLAFOND_SERVEUR:
+            raise Abort(
+                f"PAGE={self.PAGE} dépasse le plafond serveur mesuré "
+                f"({self.PLAFOND_SERVEUR}) : la boucle de pagination "
+                f"prendrait la première page plafonnée pour la fin de la "
+                f"table et tronquerait en silence (défaut du 08/08).")
+        derniere: Exception | None = None
+        for essai in range(self.RELECTURES + 1):
+            try:
+                req = self._req(base, "GET", None,
+                                {"Range-Unit": "items",
+                                 "Range": f"{deb}-{fin}"})
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    return json.loads(r.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500:
+                    raise
+                # Le corps porte le VRAI motif — `57014` = délai de
+                # requête dépassé. Sans le lire, le journal ne dit que
+                # « HTTP Error 500 » et la nuit du 25/08 a été perdue à
+                # le deviner.
+                try:
+                    motif = exc.read().decode("utf-8")[:200]
+                except Exception:                      # noqa: BLE001
+                    motif = ""
+                derniere = exc
+                print(f"     ⚠️ {base.split('?')[0]} [{deb}-{fin}] : "
+                      f"HTTP {exc.code} {motif} — reprise "
+                      f"{essai + 1}/{self.RELECTURES}", file=sys.stderr)
+            except urllib.error.URLError as exc:
+                derniere = exc
+                print(f"     ⚠️ {base.split('?')[0]} [{deb}-{fin}] : "
+                      f"{type(exc).__name__} — reprise "
+                      f"{essai + 1}/{self.RELECTURES}", file=sys.stderr)
+            if essai < self.RELECTURES:
+                time.sleep(self.RELECTURE_PAUSE_S[
+                    min(essai, len(self.RELECTURE_PAUSE_S) - 1)])
+        raise derniere if derniere else Abort("lecture impossible")
+
+    def select_par_cle(self, table: str, cle: str, order: str,
+                       query: str = "") -> list[dict]:
+        """Lit une table entière SANS `OFFSET`, en avançant sur une clé.
+
+        ⛔ POURQUOI CETTE MÉTHODE EXISTE, mesuré le 25/08 sur la base de
+        production. `select` pagine par `OFFSET` : pour rendre 1 000
+        lignes à l'offset 600 000, PostgreSQL parcourt d'abord les
+        600 000 précédentes. Le coût grandit avec la profondeur ET avec
+        la table. Sur `model_character` (739 916 lignes) :
+
+            offset       0 → 200 en 0,4 s
+            offset 400 000 → 200 en 2,4 s
+            offset 600 000 → 500 en 8,3 s   ⟵ `57014`, délai dépassé
+            offset 700 000 → 500 en 8,6 s
+
+        Supabase coupe à 8 s. **La lecture ne peut plus aller au bout**,
+        et c'est ce qui a tué le run du 25/08 à 06:02 — pas un aléa de
+        réseau, une échéance franchie. Filtrer ne sauve rien : la
+        tranche `lead_h=6 & metric=errKmh` (70 798 lignes) expire aussi
+        à son offset le plus profond, le filtre n'étant pas indexé.
+
+        Ici on repart de la dernière valeur de `cle` lue
+        (`cle=gt.<borne>`), ce qui attaque l'index de la clé primaire
+        directement, sans rien parcourir avant. Mesuré aux mêmes
+        profondeurs : **0,35 à 0,45 s par page, quelle que soit la
+        profondeur**.
+
+        ⚠️ `cle` DOIT ÊTRE LA PREMIÈRE COLONNE DE `order`, et `order`
+        doit rester la clé primaire complète — sinon deux pages peuvent
+        se recouvrir ou se sauter, exactement comme sans `ORDER BY`.
+
+        ⚠️ LA QUEUE PARTIELLE EST RENDUE, PAS GARDÉE. Une page peut
+        couper au milieu d'une valeur de `cle` : on jette toutes les
+        lignes qui portent la dernière valeur vue et on redemande à
+        partir de la précédente. Rien n'est perdu, rien n'est lu deux
+        fois — et c'est la seule façon d'être exact sans comparer un
+        n-uplet complet, que PostgREST ne sait pas exprimer.
+        """
+        if self.dry_run:
+            return []
+        sep = "&" if "?" in query else "?"
+        racine = (f"{table}{query}{sep}select=*" if "select=" not in query
+                  else f"{table}{query}")
+        racine += f"{'&' if '?' in racine else '?'}order={order}"
+        out: list[dict] = []
+        borne: str | None = None
+        while True:
+            base = racine if borne is None else (
+                f"{racine}&{cle}=gt.{urllib.parse.quote(str(borne), safe='')}")
+            page = self._page(base, 0, self.PAGE - 1)
+            if not page:
+                return out
+            if len(page) < self.PAGE:
+                out.extend(page)
+                return out
+            fin_de_page = page[-1][cle]
+            garde = [r for r in page if r[cle] != fin_de_page]
+            if not garde:
+                # ⚠️ UNE VALEUR DE CLÉ PLUS GROSSE QU'UNE PAGE, et ce
+                # n'est pas un cas d'école : mesuré le 25/08, la zone
+                # globale `*:*` porte plus de 1 000 accumulateurs à elle
+                # seule (elle croise tous les modèles × échéances ×
+                # régimes × tranches × métriques), comme `*:valley`
+                # (2 301), `alpes-nord:*` (2 654) ou `alpes-nord:ridge`
+                # (2 320). Jeter la page laisserait la boucle sur place ;
+                # la garder ferait avancer `borne` en perdant la fin de
+                # la valeur.
+                #
+                # On lit donc CETTE valeur à part, filtrée, avec des
+                # offsets qui ne dépassent jamais sa propre taille — donc
+                # peu profonds par construction. Mesuré : une page à
+                # l'offset 4 000 DANS `zone_id=eq.*:*` répond en 0,67 s,
+                # là où le même offset sur la table entière expirait.
+                out.extend(self._valeur_entiere(racine, cle, fin_de_page))
+                borne = fin_de_page
+                continue
+            out.extend(garde)
+            borne = garde[-1][cle]
+
+    def _valeur_entiere(self, racine: str, cle: str, valeur) -> list[dict]:
+        """Toutes les lignes d'UNE valeur de clé, par offsets bornés.
+
+        L'offset est ici sans danger : il ne parcourt que les lignes de
+        cette valeur, pas la table. C'est la différence entre « la
+        400 000ᵉ ligne de `model_character` » (8,3 s, puis `57014`) et
+        « la 4 000ᵉ ligne de `zone_id=*:*` » (0,67 s).
+        """
+        base = (f"{racine}&{cle}=eq."
+                f"{urllib.parse.quote(str(valeur), safe='')}")
+        out: list[dict] = []
+        offset = 0
+        while True:
+            page = self._page(base, offset, offset + self.PAGE - 1)
+            out.extend(page)
+            if len(page) < self.PAGE:
+                return out
+            offset += self.PAGE
+
     def select(self, table: str, query: str = "", order: str | None = None,
                ) -> list[dict]:
         """Lit une table ENTIÈRE, page par page.
@@ -267,11 +427,7 @@ class Supabase:
         out: list[dict] = []
         offset = 0
         while True:
-            req = self._req(base, "GET", None,
-                            {"Range-Unit": "items",
-                             "Range": f"{offset}-{offset + self.PAGE - 1}"})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                page = json.loads(r.read().decode("utf-8"))
+            page = self._page(base, offset, offset + self.PAGE - 1)
             out.extend(page)
             # Une page incomplète est la fin : c'est le seul signal fiable
             # sans demander un `count=exact`, qui coûte un balayage complet
@@ -4093,8 +4249,13 @@ def main() -> int:
         if needed:
             sb.upsert("model_zone", needed, "zone_id")
 
-        current_raw = sb.select(
-            "model_character",
+        # ⛔ `select_par_cle`, PAS `select`. Au 25/08 la table porte
+        # 739 916 lignes et toute page au-delà de l'offset ~600 000
+        # meurt sur le délai de 8 s de Supabase (`57014`) : la lecture
+        # par OFFSET ne peut plus aller au bout, quel que soit l'état du
+        # réseau. Cf. la docstring de `select_par_cle` pour les mesures.
+        current_raw = sb.select_par_cle(
+            "model_character", "zone_id",
             order="zone_id,model,lead_h,regime,band,metric,event_type")
         current = {}
         for a in current_raw:

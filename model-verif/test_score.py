@@ -1054,6 +1054,266 @@ def test_lecture_paginee():
           all("order=zone_id" in u for u, _ in vus), True)
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LECTURE PAR CLÉ (25/08) — la panne du run de 05:57
+# ══════════════════════════════════════════════════════════════════
+
+def _faux_serveur_paginant(rows: list[dict], cle: str = "zone_id"):
+    """Un PostgREST de papier : plafonne à la fenêtre demandée, honore
+    `cle=gt.`, et note chaque appel reçu.
+
+    ⚠️ Il TRIE sur la clé, comme le vrai `ORDER BY` : sans ça le banc
+    validerait une pagination qui ne marche que par chance.
+    """
+    import io
+    import json as JSON
+    import re
+    import urllib.parse as UP
+
+    vus: list[tuple[str, str]] = []
+    tout = sorted(rows, key=lambda r: (r[cle], r["i"]))
+
+    class _Rep(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def faux(req, timeout=None):
+        url = req.full_url
+        vus.append((url, req.get_header("Range")))
+        eq = re.search(rf"{cle}=eq\.([^&]*)", url)
+        gt = re.search(rf"{cle}=gt\.([^&]*)", url)
+        if eq:
+            v = UP.unquote(eq.group(1))
+            reste = [r for r in tout if r[cle] == v]
+        elif gt:
+            v = UP.unquote(gt.group(1))
+            reste = [r for r in tout if r[cle] > v]
+        else:
+            reste = tout
+        deb, fin = (int(x) for x in req.get_header("Range").split("-"))
+        return _Rep(JSON.dumps(reste[deb:fin + 1]).encode())
+
+    return faux, vus
+
+
+def _sb_de_banc():
+    sb = J.Supabase.__new__(J.Supabase)
+    sb.url, sb.key, sb.dry_run, sb.ecritures = "http://x", "k", False, 0
+    return sb
+
+
+def test_lecture_par_cle_exacte():
+    """⛔ LE BANC DE LA PANNE DU 25/08.
+
+    Le run de 05:57 est mort sur `HTTP 500` en relisant `model_character`
+    (739 916 lignes) : Supabase coupe à 8 s (`57014`), et une page de
+    1 000 lignes à l'offset 600 000 dépasse ce délai — mesuré en direct
+    aux offsets 600 000 / 660 000 / 700 000 / 730 000, tous rouges. Ce
+    n'était donc pas un aléa : la lecture par OFFSET ne pouvait PLUS
+    aller au bout, et ne le pourrait plus jamais.
+
+    On exige ici trois choses de `select_par_cle` : qu'elle lise TOUT,
+    qu'elle ne lise rien deux fois, et qu'elle ne demande JAMAIS un
+    offset — le seul point qui rende la lecture immunisée à la taille
+    de la table.
+    """
+    print("── lecture par clé (la panne du 25/08) ──")
+    import urllib.request as U
+
+    # Des zones de tailles inégales, dont une qui enjambe exactement la
+    # frontière d'une page : c'est là que la queue partielle se joue.
+    # `z003` compte 2 654 lignes : c'est la zone grasse du cas réel
+    # (`alpes-nord:*`, mesurée le 25/08), celle qui déborde d'une page.
+    rows, i = [], 0
+    tailles = [700, 400, 1, 2654, 2, 350, 640, 1000]
+    for z, n in enumerate(tailles):
+        for _ in range(n):
+            rows.append({"zone_id": f"z{z:03d}", "i": i, "v": i * 2})
+            i += 1
+    total = sum(tailles)
+
+    faux, vus = _faux_serveur_paginant(rows)
+    sb = _sb_de_banc()
+    vrai, U.urlopen = U.urlopen, faux
+    try:
+        lues = sb.select_par_cle(
+            "model_character", "zone_id",
+            order="zone_id,model,lead_h,regime,band,metric,event_type")
+    finally:
+        U.urlopen = vrai
+
+    check("toutes les lignes sont lues", len(lues), total)
+    check("aucune ligne n'est lue deux fois, aucune n'est sautée",
+          sorted(r["i"] for r in lues), list(range(total)))
+    # ⛔ LE POINT DE TOUTE LA CORRECTION, et il ne dit PAS « zéro
+    # offset » : il dit « aucun offset sur la table entière ». Les seuls
+    # offsets tolérés sont ceux d'une valeur de clé isolée
+    # (`zone_id=eq.`), bornés par la taille de cette valeur — 2 654
+    # lignes au pire dans la vraie base, contre 739 916. Un offset sur
+    # une requête NON filtrée, et la panne du 25/08 revient telle quelle
+    # dans quelques semaines.
+    balayages = [r for u, r in vus if "zone_id=eq." not in u]
+    check("aucune page de balayage ne demande d'offset",
+          sorted(set(balayages)), ["0-999"])
+    check("les seuls offsets vont à une valeur de clé isolée",
+          sorted({r for u, r in vus if "zone_id=eq." in u}),
+          ["0-999", "1000-1999", "2000-2999"])
+    check("l'ordre complet part dans chaque page",
+          all("order=zone_id%2Cmodel" in u or "order=zone_id,model" in u
+              for u, _ in vus), True)
+    scans = [u for u, _ in vus if "zone_id=eq." not in u]
+    check("la reprise se fait bien sur la clé, pas sur un rang",
+          all("zone_id=gt." in u for u in scans[1:]), True)
+
+
+def test_lecture_par_cle_valeur_plus_grosse_quune_page():
+    """Une valeur de clé qui déborde d'une page — le cas RÉEL, pas d'école.
+
+    ⛔ TROUVÉ EN LANÇANT LA SONDE SUR LA BASE DE PRODUCTION, pas en
+    raisonnant : `zone_id=*:*` porte plus de 1 000 accumulateurs à elle
+    seule, et la première version de `select_par_cle` s'arrêtait dessus.
+    Les zones grasses sont les échelons de repli, ceux qui croisent tous
+    les modèles × échéances × régimes × tranches × métriques —
+    `*:valley` 2 301, `alpes-nord:*` 2 654, `alpes-nord:ridge` 2 320.
+
+    Elles ne peuvent pas être jetées (la boucle resterait sur place) ni
+    gardées à moitié (la fin de la valeur serait perdue) : on les lit
+    entières, filtrées, et on reprend après.
+    """
+    print("── lecture par clé : une valeur plus grosse qu'une page ──")
+    import urllib.request as U
+
+    rows = ([{"zone_id": "a", "i": i} for i in range(3)]
+            + [{"zone_id": "grosse", "i": 3 + i} for i in range(2654)]
+            + [{"zone_id": "z", "i": 2657 + i} for i in range(5)])
+    faux, vus = _faux_serveur_paginant(rows)
+    sb = _sb_de_banc()
+    vrai, U.urlopen = U.urlopen, faux
+    try:
+        lues = sb.select_par_cle("model_character", "zone_id", order="zone_id")
+    finally:
+        U.urlopen = vrai
+
+    check("la valeur grasse est lue ENTIÈRE, et rien d'autre n'est perdu",
+          [len(lues), sorted(r["i"] for r in lues)],
+          [2662, list(range(2662))])
+    check("aucun doublon malgré la page jetée puis relue",
+          len({r["i"] for r in lues}), 2662)
+    check("elle a bien été lue à part, filtrée sur sa seule valeur",
+          any("zone_id=eq.grosse" in u for u, _ in vus), True)
+    check("et la lecture reprend APRÈS elle, sans repasser dessus",
+          any("zone_id=gt.grosse" in u for u, _ in vus), True)
+
+
+def test_lecture_reprise_sur_5xx():
+    """Une lecture ratée ne doit plus coûter le run entier.
+
+    ⚠️ ET UN 4xx NE SE REPREND PAS : c'est une faute du client, elle se
+    répéterait à l'identique. Le banc exige les deux comportements, pas
+    seulement le premier — une reprise aveugle transformerait une erreur
+    de requête en trois erreurs de requête, plus lentes.
+    """
+    print("── reprise de lecture sur 5xx ──")
+    import io
+    import json as JSON
+    import urllib.error as E
+    import urllib.request as U
+
+    class _Rep(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    appels = {"n": 0}
+
+    def faux_500_puis_ok(req, timeout=None):
+        appels["n"] += 1
+        if appels["n"] == 1:
+            raise E.HTTPError(
+                req.full_url, 500, "Internal Server Error", {},
+                io.BytesIO(b'{"code":"57014","message":"statement timeout"}'))
+        return _Rep(JSON.dumps([{"zone_id": "a", "i": 0}]).encode())
+
+    def faux_400(req, timeout=None):
+        appels["n"] += 1
+        raise E.HTTPError(req.full_url, 400, "Bad Request", {},
+                          io.BytesIO(b'{"code":"42703"}'))
+
+    sb = _sb_de_banc()
+    vraie_pause, J.time.sleep = J.time.sleep, lambda _s: None
+    vrai, U.urlopen = U.urlopen, faux_500_puis_ok
+    try:
+        lues = sb.select_par_cle("model_character", "zone_id", order="zone_id")
+    finally:
+        U.urlopen = vrai
+    check("un 500 est repris, et la lecture aboutit",
+          [len(lues), appels["n"]], [1, 2])
+
+    appels["n"] = 0
+    U.urlopen = faux_400
+    try:
+        sb.select_par_cle("model_character", "zone_id", order="zone_id")
+        recu = 400_000
+    except E.HTTPError as exc:
+        recu = exc.code
+    finally:
+        U.urlopen = vrai
+        J.time.sleep = vraie_pause
+    check("un 400 n'est PAS repris (une seule requête, erreur remontée)",
+          [recu, appels["n"]], [400, 1])
+
+
+def test_page_ne_depasse_pas_le_plafond_serveur():
+    """⛔ LE PIÈGE DU 08/08, REFERMÉ POUR DE BON.
+
+    `select` s'arrête sur `len(page) < PAGE`. Le serveur, lui, plafonne
+    à 1 000 quoi qu'on demande — re-mesuré le 25/08 : `Range: 0-9999`
+    sur `model_character` rend 1 000 lignes. Donc quiconque augmente
+    `PAGE` pour « aller plus vite » obtient une première page qui a
+    l'air incomplète, une lecture qui s'arrête là, et 739 000
+    accumulateurs qui repartent de zéro — sans une seule erreur.
+
+    On exige donc un refus BRUYANT, pas une lecture qui ment.
+    """
+    print("── PAGE contre le plafond serveur ──")
+    import urllib.request as U
+
+    rows = [{"zone_id": f"z{i:05d}", "i": i} for i in range(3000)]
+    faux, vus = _faux_serveur_paginant(rows)
+    sb = _sb_de_banc()
+    sb.PAGE = 10_000                       # le geste tentant, et fatal
+    vrai, U.urlopen = U.urlopen, faux
+    try:
+        sb.select_par_cle("model_character", "zone_id", order="zone_id")
+        recu = "lecture silencieuse"
+    except J.Abort as exc:
+        recu = "abort" if "plafond serveur" in str(exc) else str(exc)
+    finally:
+        U.urlopen = vrai
+    check("PAGE au-dessus du plafond serveur refuse de lire",
+          recu, "abort")
+    check("et rien n'est parti sur le réseau", len(vus), 0)
+
+    # Le même garde protège l'ancien chemin par offset.
+    sb2 = _sb_de_banc()
+    sb2.PAGE = 10_000
+    U.urlopen = faux
+    try:
+        sb2.select("model_character", order="zone_id")
+        recu2 = "lecture silencieuse"
+    except J.Abort:
+        recu2 = "abort"
+    finally:
+        U.urlopen = vrai
+    check("le garde couvre aussi `select` (pagination par offset)",
+          recu2, "abort")
+
+
 def test_plancher_de_skill():
     """⛔ LE BANC DE LA PANNE DES 12-14/08, ET IL SAIT ÉCHOUER.
 
@@ -2401,6 +2661,11 @@ def main() -> int:
                test_fenetre_de_maintien_adaptative,
                test_stabilite_des_rangs,
                test_familles_publiees, test_lecture_paginee,
+               # ── 25/08 : la panne du run de 05:57 (délai 8 s, `57014`) ──
+               test_lecture_par_cle_exacte,
+               test_lecture_par_cle_valeur_plus_grosse_quune_page,
+               test_lecture_reprise_sur_5xx,
+               test_page_ne_depasse_pas_le_plafond_serveur,
                test_plancher_de_skill,
                test_pression_appariement, test_pression_refus,
                test_pression_appariement_stable_entre_echeances,
