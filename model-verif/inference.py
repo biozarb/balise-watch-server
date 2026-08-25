@@ -393,8 +393,17 @@ def compare_pair(model_a: str, model_b: str,
         k: v for k, v in kw.items()
         if k in ("iterations", "seed", "min_days")})
 
-    med_a = S.median([r.get("err_vec_med") for r in rows_a])
-    med_b = S.median([r.get("err_vec_med") for r in rows_b])
+    # ⚠️ LA MÊME CLÉ QUE LE TEST, PAS `err_vec_med` EN DUR (25/08/2026).
+    # L'écart relatif et l'intervalle de la différence appariée doivent
+    # porter sur la MÊME grandeur : mesurer l'IC sur l'erreur corrigée
+    # puis l'écart pratique sur l'erreur brute donnerait un verdict
+    # composite — réel sur une colonne, utile sur l'autre — dont
+    # personne ne pourrait dire ce qu'il compare. Le défaut par défaut
+    # reste `err_vec_med`, donc tous les appels existants sont
+    # inchangés au bit près.
+    value_key = kw.get("value_key", "err_vec_med")
+    med_a = S.median([r.get(value_key) for r in rows_a])
+    med_b = S.median([r.get(value_key) for r in rows_b])
     gap = None
     if med_a is not None and med_b is not None:
         worse = max(med_a, med_b)
@@ -413,6 +422,7 @@ def compare_pair(model_a: str, model_b: str,
 def rank_models(cases: Sequence[Mapping],
                 rows_by_model: Mapping[str, Sequence[Mapping]],
                 min_occurrences: int = S.REGIME_MIN_OCCURRENCES,
+                err_key: str = "typical_err_kmh",
                 **kw):
     """Classe les modèles d'une case, ou refuse — par tests appariés.
 
@@ -426,8 +436,15 @@ def rank_models(cases: Sequence[Mapping],
     eux « pour faire joli » donnerait un rang à des écarts qu'on vient
     de déclarer indiscernables.
     """
+    # ⚠️ `err_key` — la colonne sur laquelle on ORDONNE (25/08/2026).
+    # `typical_err_kmh` par défaut, `typical_err_kmh_corr` pour le
+    # classement corrigé du biais de site. ⛔ Il doit désigner la MÊME
+    # grandeur que le `value_key` passé plus bas à `compare_pair` :
+    # ordonner sur une colonne et tester sur l'autre départagerait le
+    # premier et le deuxième d'un classement qui n'est pas celui qu'on
+    # publie. C'est l'appelant qui tient les deux ensemble.
     usable = [c for c in cases
-              if c.get("typical_err_kmh") is not None
+              if c.get(err_key) is not None
               and c.get("occurrences", 0) >= min_occurrences]
     if not usable:
         return {}, "insufficient", None
@@ -456,7 +473,7 @@ def rank_models(cases: Sequence[Mapping],
         # que ces lignes-là ont le droit de dire.
         return {}, "single_model", None
 
-    ordered = sorted(usable, key=lambda c: c["typical_err_kmh"])
+    ordered = sorted(usable, key=lambda c: c[err_key])
     best, second = ordered[0]["model"], ordered[1]["model"]
     v = compare_pair(best, second,
                      rows_by_model.get(best, ()), rows_by_model.get(second, ()),

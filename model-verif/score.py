@@ -3102,6 +3102,71 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
         for r in rows:
             r["rank_reason"] = reason
             r["rank"] = ranks.get(r["model"])
+        _apply_rank_corr(rows, rows_by_case_model.get(key, {}))
+
+
+#: Le motif de refus PROPRE au classement corrigé : la case mélange des
+#: modèles corrigés et des modèles qui ne le sont pas.
+#: ⛔ IL NE VOYAGE JAMAIS DANS `rank_reason` — seulement dans
+#: `rank_reason_corr`, une colonne à part. Le CHECK de
+#: `supabase_step40_lot_g.sql` porte sur la première, et lui ajouter une
+#: valeur qu'il ne connaît pas ferait tomber une nuit entière
+#: (cf. `_verifier_rank_reason`).
+RANK_REASON_POPULATION_MIXTE = "mixed_population"
+
+
+def _apply_rank_corr(rows: list[dict],
+                     rows_by_model: dict[str, list[dict]]) -> None:
+    """Le MÊME test apparié, sur l'erreur corrigée du biais de site.
+
+    ⭐ POURQUOI CETTE FONCTION EXISTE (25/08/2026). Depuis le S2 la
+    colonne corrigée est publiée, et depuis le 25/08 l'écran sait s'en
+    servir pour TRIER — mais pas pour AFFIRMER : `rank`/`rank_reason`
+    sortaient du test joué sur le brut, et sur lui seul. Un classement
+    corrigé restait donc muet, alors même qu'il change le premier dans
+    70,6 % des cases (mesuré sur le fichier du 25/08). Cette fonction
+    lui donne son propre verdict, avec le même appareil : différence
+    appariée sur les mêmes balise-jours, bootstrap par blocs de jours,
+    et les deux conditions « réel » ET « utile ».
+
+    ⛔ LA POPULATION MIXTE EST REFUSÉE, ET C'EST LA RÈGLE CENTRALE. Si
+    une seule ligne chiffrée de la case n'a pas de corrigé, on ne classe
+    pas : ordonner un modèle rétréci contre un modèle qui ne l'est pas
+    fabriquerait l'écart — l'interdit que le S2 s'impose mot pour mot
+    (« seules les balise-jours qui portent LES DEUX colonnes sont
+    comparées »). Mesuré le 25/08 : la moitié des cases sont dans ce
+    cas, `arome_r2` n'ayant pas encore d'antécédent de biais.
+
+    ⚠️ LE QUORUM SE COMPTE EN `n_corr`, PAS EN `occurrences`. Une case
+    peut avoir 40 balise-jours notés et 6 corrigés ; passer le quorum
+    sur les premiers pour tester les seconds classerait sur presque
+    rien, en le disant nulle part.
+
+    ⚠️ ET LE COÛT. Ce second passage ne tourne QUE sur les cases
+    entièrement corrigées — 7,9 % d'entre elles le 25/08. Il croîtra
+    avec la couverture du cache de rejeu, jusqu'à doubler au plus
+    l'étape de classement (jamais la collecte, jamais le bootstrap des
+    IC unaires, qui ne sont pas recalculés ici).
+    """
+    chiffrees = [r for r in rows if r.get("typical_err_kmh") is not None]
+    avec = [r for r in chiffrees if r.get("typical_err_kmh_corr") is not None]
+    if not chiffrees or len(avec) != len(chiffrees):
+        for r in rows:
+            r["rank_corr"] = None
+            r["rank_reason_corr"] = RANK_REASON_POPULATION_MIXTE
+        return
+    cases = [{"model": r["model"],
+              "typical_err_kmh_corr": r["typical_err_kmh_corr"],
+              # `n_corr` peut manquer sur une ligne d'avant le S2 : son
+              # absence vaut zéro, donc sous le quorum, donc écartée —
+              # jamais un repli sur `occurrences`, qui compte autre chose.
+              "occurrences": r.get("n_corr") or 0} for r in chiffrees]
+    ranks, reason, _ = INF.rank_models(
+        cases, rows_by_model,
+        err_key="typical_err_kmh_corr", value_key="err_vec_med_corr")
+    for r in rows:
+        r["rank_reason_corr"] = reason
+        r["rank_corr"] = ranks.get(r["model"])
 
 
 #: La valeur que porte un rang publié sur une journée à laquelle il
@@ -3319,10 +3384,39 @@ def _within_var(row: dict) -> float | None:
 
 #: Les champs du verdict, et RIEN d'autre (prompt S13.0). L'ordre est
 #: celui de la spec, pour qu'un diff de ce tuple se voie.
+#: ⭐ LES TROIS CHAMPS DU S2 AJOUTÉS LE 25/08 — et ce qu'ils autorisent
+#: EXACTEMENT, qui est moins que ce qu'on croit.
+#:
+#: L'écran léger (pastille, feuille « ici », Podium, Duels) ne portait
+#: que `typical_err_kmh`, la colonne BRUTE. C'est elle qui fait remonter
+#: les mailles larges — le S2 l'a mesuré (ECMWF 1ᵉʳ en brut, 5ᵉ en
+#: corrigé au global), et l'écran n'avait pas de quoi le dire.
+#:
+#: ⛔ MAIS `rank`/`rank_reason` RESTENT CALCULÉS SUR LE BRUT. Le test
+#: apparié (bootstrap par blocs de jours, `inference.py`) ne s'est jamais
+#: rejoué sur `err_vec_med_corr`. Publier la colonne corrigée permet donc
+#: de TRIER dessus, jamais d'AFFIRMER dessus : côté client, un classement
+#: corrigé doit dire que le verdict, lui, porte sur le brut. Le jour où
+#: le rang sera calculé sur la colonne corrigée, c'est ici qu'un
+#: `rank_corr` viendra — et l'écran cessera d'avoir à le préciser.
+#:
+#: ⚠️ `bias_n_days` ET `n_corr` VOYAGENT AVEC, PAS DÉCORATIVEMENT : sans
+#: eux, une case ne peut pas dire si son corrigé est mûr, et le lecteur
+#: reprendrait à zéro le raisonnement du 25/08 (`arome_r2` : 1 008 lignes
+#: notées, ZÉRO antécédent — donc des cases où la moitié des modèles est
+#: corrigée et l'autre pas, où trier sur le corrigé comparerait deux
+#: populations).
 LIGHT_SCORE_FIELDS = (
     "zone_id", "agg_level", "lead_h", "model", "typical_err_kmh",
     "ci_low", "ci_high", "n_days", "n_hours", "rank", "rank_reason",
     "borrowed_weight",
+    # ── lot S2, publiés dans le léger le 25/08 ──
+    "typical_err_kmh_corr", "bias_n_days", "n_corr",
+    # ── le verdict PROPRE à la colonne corrigée (25/08, `_apply_rank_corr`) ──
+    # ⛔ Deux champs séparés, jamais fondus avec `rank`/`rank_reason` :
+    # ce sont deux tests, sur deux grandeurs, et une case peut très bien
+    # trancher sur l'une et pas sur l'autre.
+    "rank_corr", "rank_reason_corr",
 )
 
 

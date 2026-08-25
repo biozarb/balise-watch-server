@@ -2466,6 +2466,66 @@ def test_s3_self_test_injection():
 #  LOT S13.0 — le fichier léger et le résumé des manches
 # ══════════════════════════════════════════════════════════════════
 
+def test_rank_corr_le_meme_test_sur_la_colonne_corrigee():
+    """Le classement corrigé : même appareil, autre grandeur (25/08)."""
+    print("── 25/08 : `rank_corr`, le test apparié sur l'erreur corrigée ──")
+
+    # ⭐ LA FIXTURE EST CONSTRUITE POUR QUE LES DEUX COLONNES SE
+    # CONTREDISENT — c'est le seul cas qui prouve quelque chose. `a` est
+    # PIRE en brut (6 contre 5) et MEILLEUR en corrigé (3 contre 5) :
+    # si le classement corrigé se contentait de recopier le brut, ou
+    # s'il testait `err_vec_med` en ordonnant sur le corrigé, il
+    # nommerait `b` ou ne nommerait personne.
+    jours = [f"2026-08-{d:02d}" for d in range(1, 16)]
+    par_modele = {"a": [], "b": []}
+    for j in jours:
+        for u in range(6):
+            par_modele["a"].append({"day": j, "unit": f"p:{u}",
+                                    "err_vec_med": 6.0, "err_vec_med_corr": 3.0})
+            par_modele["b"].append({"day": j, "unit": f"p:{u}",
+                                    "err_vec_med": 5.0, "err_vec_med_corr": 5.0})
+    rows = [{"model": "a", "typical_err_kmh": 6.0, "typical_err_kmh_corr": 3.0,
+             "occurrences": 90, "n_corr": 90},
+            {"model": "b", "typical_err_kmh": 5.0, "typical_err_kmh_corr": 5.0,
+             "occurrences": 90, "n_corr": 90}]
+    J._apply_rank_corr(rows, par_modele)
+    check("le corrigé tranche, et pour `a`", 
+          (rows[0]["rank_reason_corr"], rows[0]["rank_corr"]), ("ok", 1))
+    check("… `b` est second sur la colonne corrigée",
+          rows[1]["rank_corr"], 2)
+
+    # ⛔ Le test du brut, sur les MÊMES lignes, doit désigner `b` :
+    # c'est la preuve que les deux verdicts sont bien indépendants.
+    cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],
+              "occurrences": r["occurrences"]} for r in rows]
+    ranks_brut, raison_brut, _ = J.INF.rank_models(cases, par_modele)
+    check("⭐ et le BRUT, lui, désigne `b` — deux colonnes, deux verdicts",
+          (raison_brut, ranks_brut.get("b")), ("ok", 1))
+
+    # ⛔ POPULATION MIXTE : une seule ligne sans corrigé et on refuse.
+    mixte = [dict(rows[0]), dict(rows[1]),
+             {"model": "c", "typical_err_kmh": 7.0, "typical_err_kmh_corr": None,
+              "occurrences": 90, "n_corr": 0}]
+    J._apply_rank_corr(mixte, par_modele)
+    check("une case mixte ne se classe pas sur le corrigé",
+          [r["rank_reason_corr"] for r in mixte],
+          [J.RANK_REASON_POPULATION_MIXTE] * 3)
+    check("… et aucun rang corrigé n'est publié",
+          [r["rank_corr"] for r in mixte], [None] * 3)
+
+    # ⚠️ Le quorum se compte en `n_corr` : à `n_corr` nul, la case
+    # tombe sous le quorum même si `occurrences` est confortable.
+    maigre = [{**dict(rows[0]), "n_corr": 0}, {**dict(rows[1]), "n_corr": 0}]
+    J._apply_rank_corr(maigre, par_modele)
+    check("⚠️ quorum compté en `n_corr`, pas en `occurrences`",
+          maigre[0]["rank_reason_corr"], "insufficient")
+
+    # ⛔ Et le motif de refus du mixte ne doit JAMAIS toucher
+    # `rank_reason`, dont le CHECK SQL ne connaît pas cette valeur.
+    check("`rank_reason` n'est pas touché par le passage corrigé",
+          [r.get("rank_reason") for r in mixte], [None] * 3)
+
+
 def test_light_scores_sous_ensemble_exact():
     print("── S13.0 : le léger est un sous-ensemble exact du gros ──")
     plein = {
@@ -2477,7 +2537,8 @@ def test_light_scores_sous_ensemble_exact():
         "skill_clim": 0.3, "typical_err_kmh_corr": None,
         "beats_clim_corr": None, "skill_clim_corr": None, "n_corr": 0,
         "bias_n_days": None, "ci_low": 2.9, "ci_high": 4.1, "rank": 1,
-        "rank_reason": "ok", "err_sd": 1.2, "n_days": 15,
+        "rank_reason": "ok", "rank_corr": None,
+        "rank_reason_corr": "mixed_population", "err_sd": 1.2, "n_days": 15,
         "ci_kind": "block_day", "ci_reason": "ok", "block_days": 15,
         "pooled_err_kmh": None, "borrowed_weight": 0.0, "variable": "wind",
     }
@@ -2684,6 +2745,8 @@ def main() -> int:
                test_s2_colonnes_de_zone,
                # ── lot S3 : le scoring doit savoir échouer ──
                test_s3_self_test_injection,
+               # ── 25/08 : le classement sur la colonne corrigée ──
+               test_rank_corr_le_meme_test_sur_la_colonne_corrigee,
                # ── lot S13.0 : le fichier léger + le résumé des manches ──
                test_light_scores_sous_ensemble_exact,
                test_light_scores_bout_en_bout_ne_recalcule_rien,
