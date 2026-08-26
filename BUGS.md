@@ -6,6 +6,63 @@
 
 ---
 
+## 26/08/2026 (clôture) — le composite remplaçait au lieu de mélanger
+
+**Piège nº 1 — UN SEUL NOMBRE POUR DEUX QUESTIONS.** `poids_pi(τ)`
+portait à la fois « combien de PI EXISTE à cette échéance » (une
+propriété du produit) et « quelle CONFIANCE on lui accorde » (un choix).
+Confondues, la rampe « 1 jusqu'à 4 h » disait en réalité *PI seul
+maître* — parce que `AROME + 1·(PI − AROME)` **EST** `PI`. Personne
+n'avait décidé de remplacer AROME par PI ; c'est l'algèbre qui l'a fait,
+en silence, pendant deux semaines. *Quand une constante répond à deux
+questions, elle finit par répondre faux à l'une des deux — et il n'y a
+aucun endroit où le lire.*
+
+**Piège nº 2 — LE PIÈGE DES DEUX CONSOMMATEURS, LE JOUR MÊME OÙ ON
+L'AVAIT ÉCRIT.** Le facteur de cisaillement a d'abord été câblé dans
+`composite.etendre_delta` seul. L'écran l'a reçu ; `agrume_fcst.py`
+NON — il étend Δ au 10 m par son propre chemin, sans passer par
+`etendre_delta`. Deux « AGRUME » se remettaient à diverger, exactement
+comme le matin (entrée du 26/08, piège nº 1). *Le commentaire d'import
+qui dit « ceci s'importe, ça ne se recopie pas » ne protège que les
+symboles qu'on a pensé à importer.* C'est un banc qui l'a dit.
+
+**Piège nº 3 — LE PIÈGE Nº 1 DE LA PHASE B, REPRODUIT DEUX FOIS DANS LA
+MÊME JOURNÉE.** Deux bancs neufs comparaient la sortie du code à la
+CONSTANTE du code (`abs(sortie − CO.CISAILLEMENT_10_20) < 1e-9`). La
+mutation « cisaillement = 1,0 » déplaçait les deux côtés de l'égalité et
+le banc restait vert. *Une valeur attendue s'écrit en toutes lettres, ou
+elle ne vérifie rien.* Trouvé par la mutation, jamais par la relecture.
+
+**Piège nº 4 — UNE CONDITION DE VALIDITÉ QUI DEVIENT INATTEIGNABLE.**
+Le serveur renvoyait le client à « la table `niveaux` vaut à
+`poids_pi = 1` ». Depuis que le poids plafonne à α, cette condition
+n'est JAMAIS remplie : le client n'avait plus jamais le droit de lire
+cette table, et rien ne le disait. *Une condition de validité doit
+porter sur une grandeur qui peut l'atteindre* — et changer une échelle,
+c'est réviser toutes les phrases qui la citaient.
+
+**Piège nº 5 — UN QUANTILE D'AFFICHAGE PROMU RÈGLE DE CONDUITE.**
+`int(0,9 × n)` rend le DERNIER indice tant que n ≤ 10 : le « d9 » était
+le MAXIMUM. Inoffensif dans un rapport ; dans une décision de cadence de
+guet, un seul run pathologique (207 min contre une médiane de 19) aurait
+commandé trois heures de guet fin par jour. *Une convention d'affichage
+qui devient une règle de conduite se revérifie sur les petits
+échantillons.* Attrapé par un banc écrit avant de regarder le résultat.
+
+**Piège nº 6 — UNE MUTATION QUI NE MUTE RIEN SE LIT COMME UN BANC
+FAIBLE.** `z > haut` au lieu de `z >= haut` : la formule linéaire rendant
+exactement 1 à `z = haut`, les deux branches coïncidaient. Le banc
+restait vert À RAISON. *Avant d'accuser un banc, vérifier que la
+mutation change vraiment le comportement.*
+
+ⓘ **Et ce qui a marché, encore** : sur 14 mutations écrites ce soir-là
+(8 sur le composite, 6 sur le poller), **trois** ont révélé un défaut
+réel — deux bancs qui ne tenaient rien et un trou de couverture complet
+sur `guetter_plusieurs`. Aucune relecture ne les avait vus.
+
+---
+
 ## 26/08/2026 (phase C) — un document de conception qui concluait faux
 
 Aucun code en cause : la phase C est une CONCEPTION, et son livrable est
