@@ -579,6 +579,42 @@ def section_8_resolution():
              "que le poids servi n'atteint jamais depuis que le "
              "composite mélange au lieu de remplacer",
              "poids_pi = 1" not in man["niveaux_valables_si"])
+    # ⛔⛔ SUR LE MANIFESTE, PAS SUR LE DIAGNOSTIC. `composer()` mettait
+    # bien `alpha_melange` dans son diagnostic, un banc le vérifiait LÀ,
+    # et le champ n'arrivait pourtant JAMAIS dans l'objet publié : ce
+    # manifeste recopie des champs nommés, et personne n'avait ajouté
+    # celui-là. Trouvé en lisant l'objet réel sur R2.
+    # *Vérifier le producteur ne vérifie pas le publié.*
+    verifier("⛔ le manifeste PUBLIE α — sans lui, un lecteur ne peut pas "
+             "savoir que `poids_pi` est un MÉLANGE et non la rampe",
+             man.get("alpha_melange") == 0.5,
+             f"alpha_melange = {man.get('alpha_melange')}")
+    # ⛔ 0.5 EN DUR, pas `CO.ALPHA_MELANGE` : cf. le piège nº 3 du 26/08.
+    # ⛔ ÉCRIT EN POSITIF, ET LA PREMIÈRE VERSION NE L'ÉTAIT PAS : elle
+    # exigeait l'ABSENCE du mot « ATTÉNUÉE » — un mot que la correction
+    # venait de supprimer du fichier. Le banc ne pouvait donc plus
+    # échouer, et la mutation « relire le poids au lieu de la rampe »
+    # restait verte. *Un banc qui vérifie l'absence d'un mot disparu ne
+    # vérifie rien.* Trouvé par la mutation, une fois de plus.
+    r0 = man["provenance"]["par_echeance"][0]["blocs"][RA.BLOC]
+    verifier("⛔ le régime se lit sur la RAMPE, pas sur le poids servi — "
+             "à τ = 0 la rampe est PLEINE, et le régime doit le DIRE, "
+             "même si le poids ne vaut que 0,5",
+             "pleinement disponible" in r0["regime_temporel"].lower()
+             and "rampe d'horizon" not in r0["regime_temporel"],
+             r0["regime_temporel"])
+    verifier("…et le poids servi y vaut bien α, pas 1",
+             r0["poids_pi"] == 0.5, f"{r0['poids_pi']}")
+    verifier("…et la branche « rampe d'horizon » existe TOUJOURS, sur "
+             "une échéance où la rampe décroît vraiment (τ = 5 h)",
+             "rampe d'horizon" in man["provenance"]["par_echeance"][20]
+             ["blocs"][RA.BLOC]["regime_temporel"],
+             man["provenance"]["par_echeance"][20]["blocs"][RA.BLOC]
+             ["regime_temporel"])
+    verifier("⛔ et plus AUCUNE échéance ne dit « PI seul maître » — le "
+             "composite ne remplace plus AROME",
+             not any("seul maître" in e["blocs"][RA.BLOC]["regime_temporel"]
+                     for e in man["provenance"]["par_echeance"]))
     verifier("les conventions et les deux mesures qui légitiment le "
              "composite survivent aussi (Δ vaut 2,5 fois le bruit)",
              man["mesures"]["rapport"].startswith("Δ vaut")

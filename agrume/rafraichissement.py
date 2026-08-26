@@ -80,9 +80,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 os.pardir, "tools"))
 
-from composite import (ERREUR_INTERP_PAR_NIVEAU,  # noqa: E402
+from composite import (ALPHA_MELANGE, ERREUR_INTERP_PAR_NIVEAU,  # noqa: E402
                        Z_EXTINCTION_DEBUT, Z_EXTINCTION_FIN, composer,
-                       resolution_temporelle)
+                       rampe_pi, resolution_temporelle)
 from domaine import (DOMAINES_PI, NIVEAUX_H_0025,  # noqa: E402
                      POURQUOI_PAS_DE_PI, pi_couvre)
 from grille import (CLE_INDEX as CLE_INDEX_PRODUIT_B,  # noqa: E402
@@ -482,19 +482,38 @@ class Rafraichissement:
         par_echeance = []
         for k, minute in enumerate(ECHEANCES_MIN):
             w = float(poids[k])
-            if w >= 1.0:
+            # ⛔⛔ LE RÉGIME SE LIT SUR LA RAMPE, PAS SUR LE POIDS SERVI —
+            # CORRIGÉ LE 26/08/2026, ET VU SUR L'ÉCRAN DE PRODUCTION.
+            # Ces trois branches testaient `w`, le poids TOTAL. Tant que
+            # α valait 1, `w` et la rampe étaient le même nombre. Depuis
+            # que le composite MÉLANGE (α = 0,5), `w` ne vaut plus jamais
+            # 1 : la branche « PI seul maître » est devenue INATTEIGNABLE
+            # et la branche « rampe d'horizon : ATTÉNUÉE » s'affichait à
+            # TOUTES les échéances — y compris à +1 h, où la rampe est
+            # pleine et où rien n'est atténué par l'horizon.
+            # C'est le troisième exemplaire du même piège en une journée
+            # (`niveaux_valables_si`, le commentaire du type web, et
+            # ici) : *changer une échelle, c'est réviser toutes les
+            # phrases qui la citaient.* Celui-ci n'a été trouvé ni par un
+            # banc ni par une relecture, mais en LISANT L'ÉCRAN.
+            r = rampe_pi(minute)
+            if r >= 1.0:
                 bloc = dict(
                     modele="arome+pi", run=self.run_b, run_pi=self.run_pi,
-                    poids_pi=w,
-                    regime_temporel="PI seul maître sous 500 m/sol")
-            elif w > 0.0:
-                bloc = dict(
-                    modele="arome+pi", run=self.run_b, run_pi=self.run_pi,
-                    poids_pi=round(w, 4),
+                    poids_pi=round(w, 4), alpha_melange=ALPHA_MELANGE,
                     regime_temporel=(
-                        "rampe d'horizon : la correction PI est ATTÉNUÉE, "
-                        "l'erreur d'interpolation résiduelle vaut "
-                        "(1 − poids_pi) × erreurInterpolationMs"))
+                        f"PI pleinement disponible sous 500 m/sol, mélangé "
+                        f"à AROME à parts {ALPHA_MELANGE:.0%} / "
+                        f"{1 - ALPHA_MELANGE:.0%}"))
+            elif r > 0.0:
+                bloc = dict(
+                    modele="arome+pi", run=self.run_b, run_pi=self.run_pi,
+                    poids_pi=round(w, 4), alpha_melange=ALPHA_MELANGE,
+                    regime_temporel=(
+                        "rampe d'horizon : la DISPONIBILITÉ de PI décroît "
+                        "vers son horizon de 6 h, l'erreur d'interpolation "
+                        "résiduelle vaut (1 − poids_pi) × "
+                        "erreurInterpolationMs"))
             else:
                 bloc = dict(
                     modele="arome", run=self.run_b, poids_pi=0.0,
@@ -618,6 +637,14 @@ class Rafraichissement:
                 "et ne vaut donc jamais 1 : le composite MÉLANGE AROME et "
                 "AROME-PI, il ne remplace pas l'un par l'autre."),
             poids_pi=list(self.diagnostic["poids_pi"]),
+            # ⛔ IL MANQUAIT AU MANIFESTE. `composer()` le mettait bien
+            # dans son diagnostic et un banc le vérifiait LÀ — mais ce
+            # manifeste recopie des champs NOMMÉS, et celui-ci n'y était
+            # pas. Le client déclarait donc `alpha_melange?` dans son
+            # type pour un champ que le serveur n'envoyait jamais.
+            # Trouvé en lisant l'objet RÉELLEMENT publié sur R2, pas au
+            # banc : *vérifier le producteur ne vérifie pas le publié.*
+            alpha_melange=self.diagnostic["alpha_melange"],
             conventions=dict(self.diagnostic["conventions"]),
             mesures=dict(self.diagnostic["mesures"]),
             provenance=self.provenance(),
