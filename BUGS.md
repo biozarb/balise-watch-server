@@ -56,10 +56,45 @@ exactement 1 à `z = haut`, les deux branches coïncidaient. Le banc
 restait vert À RAISON. *Avant d'accuser un banc, vérifier que la
 mutation change vraiment le comportement.*
 
-ⓘ **Et ce qui a marché, encore** : sur 14 mutations écrites ce soir-là
-(8 sur le composite, 6 sur le poller), **trois** ont révélé un défaut
-réel — deux bancs qui ne tenaient rien et un trou de couverture complet
-sur `guetter_plusieurs`. Aucune relecture ne les avait vus.
+**Piège nº 7 — VÉRIFIER LE PRODUCTEUR NE VÉRIFIE PAS LE PUBLIÉ.**
+`composer()` mettait `alpha_melange` dans son diagnostic, et un banc le
+vérifiait LÀ. Mais le manifeste du rafraîchissement recopie des champs
+NOMMÉS : personne n'avait ajouté celui-ci, et le champ n'arrivait jamais
+au client — qui le déclarait pourtant dans son type. *Un banc sur
+l'objet intermédiaire ne dit rien de l'objet servi.* Trouvé en lisant
+l'objet réel sur R2, pas au banc.
+
+**Piège nº 8 — LE MÊME PIÈGE QUE LE Nº 4, DEUX SECTIONS PLUS LOIN.**
+Le régime temporel publié se lisait sur le POIDS (`w >= 1` → « PI seul
+maître », `0 < w < 1` → « rampe d'horizon : ATTÉNUÉE »). Tant que α
+valait 1, `w` et la rampe étaient le même nombre. Après le mélange, la
+première branche est devenue inatteignable et la seconde s'affichait à
+TOUTES les échéances — y compris à +1 h, rampe pleine, où rien n'est
+atténué par l'horizon. **Vu sur la carte de production**, pas au banc :
+« poids PI 50 % · rampe d'horizon : la correction PI est ATTÉNUÉE ».
+Le poids était juste, la phrase qui l'accompagnait était fausse.
+*Changer une échelle, c'est réviser toutes les phrases qui la citaient —
+et il y en a toujours une de plus qu'on ne croit.* Trois exemplaires en
+une journée : `niveaux_valables_si`, le commentaire du type web, celui-ci.
+
+**Piège nº 9 — UN BANC QUI VÉRIFIE L'ABSENCE D'UN MOT QU'ON VIENT DE
+SUPPRIMER.** Le premier banc écrit pour le piège nº 8 exigeait que
+« ATTÉNUÉE » n'apparaisse plus — or la correction venait de retirer ce
+mot du fichier. Le banc ne pouvait donc plus échouer, et la mutation
+« relire le poids au lieu de la rampe » restait verte. Réécrit en
+POSITIF : le régime DOIT dire « pleinement disponible » à τ = 0.
+*Une assertion négative sur un vocabulaire qu'on contrôle ne teste rien.*
+
+ⓘ **Et ce qui a marché, encore** : sur 17 mutations écrites ce soir-là
+(8 sur le composite, 6 sur le poller, 3 sur le rafraîchissement),
+**cinq** ont révélé un défaut réel — trois bancs qui ne tenaient rien et
+un trou de couverture complet sur `guetter_plusieurs`. Aucune relecture
+ne les avait vus.
+
+⚠️ **Mais les pièges nº 7 et nº 8, aucune mutation ne les a trouvés
+non plus** : ils ont été vus en OUVRANT L'APPLICATION et en LISANT
+L'OBJET SERVI. *Le dernier contrôle d'un changement d'échelle est de
+regarder ce que l'utilisateur lit.*
 
 ---
 
