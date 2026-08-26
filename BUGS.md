@@ -59,6 +59,45 @@ propriété arithmétique. Ce sont les colonnes MOYENNÉES (`err_vec_rms`,
 
 ---
 
+## 26/08/2026 (soir) — le déploiement annonçait «tout est vert» sur un tiers du lot manquant
+
+Après le lot AROME-PI (entrée du matin, ci-dessus), Yann a demandé de
+pousser et déployer. `tools/deploy-agrume-vps.sh` a tourné, propre :
+rsync des trois dossiers, sha256 identique, **18/18 bancs verts sur le
+VPS**, services redémarrés. Message final : « déploiement terminé ».
+
+**Et pourtant `agrume_fcst.py` sur le VPS datait du 22/08.** Aucune
+trace de `MODEL_PI`, et `test_agrume_pi_fcst.py` n'existait même pas
+là-bas. Le script ne synchronise que `agrume/`, `verif/` et `tools/` —
+**il n'a jamais touché `model-verif/`**, là où vit tout le code du
+scoring (`agrume_fcst.py`, `score.py`, les bancs `test_*`). Le timer de
+la nuit aurait tourné sur l'ancien code, sans une ligne de log pour le
+dire — le script aurait continué à annoncer un déploiement réussi
+indéfiniment, puisqu'il n'a jamais su que `model-verif/` existait.
+
+**Piège réutilisable** : *un script de déploiement qui rend « tout
+vert » ne garantit que ce qu'il a réellement couvert — jamais ce qu'il
+a oublié.* Vérifier qu'il n'oublie rien exige de lister à la main les
+dossiers dont le code chargé au runtime dépend, pas de faire confiance
+au silence d'un script qui ne sait pas qu'il en manque un.
+
+Fix : `model-verif/` ajouté au rsync (§1) et au contrôle sha256 (§2) de
+`deploy-agrume-vps.sh`, avec `-t` au lieu de `-av` — certains fichiers
+y sont en 600 sur le VPS (`score.py`…), `-av` aurait embarqué `-p` et
+écrasé ces permissions avec le 644 par défaut d'un checkout Mac. Pas de
+bancs-puis-redémarrage ajoutés pour `model-verif/` : ses jobs sont des
+timers *oneshot* (`bw-model-agrume`…), qui relisent déjà le script à
+froid à chaque déclenchement — rien à redémarrer, contrairement aux
+daemons persistants que le script redémarre déjà en §4.
+
+Rattrapé le jour même : `agrume_fcst.py`, `score.py` et
+`test_agrume_pi_fcst.py` copiés à la main (sha256 vérifié des deux
+côtés), bancs rejoués sur le VPS (14 + 1 + 584 assertions, tout vert),
+puis premier run réel déclenché à la main — trois lignes de journal
+lues, RAS (voir la note du projet Claude « balise watch » du 26/08).
+
+---
+
 ## 24/08/2026 — une phrase d'explication est ce qui ferme un dossier, et celle-ci était fausse
 
 Retour Yann : *« sur les balises Infoclimat, on n'a ni le vent max ni le

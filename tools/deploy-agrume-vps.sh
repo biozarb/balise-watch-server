@@ -44,6 +44,24 @@ for D in agrume verif tools; do
         "$D/" "$VPS:$DISTANT/$D/" || echec "rsync de $D/ a échoué"
 done
 
+# ⛔⛔ MODEL-VERIF, À PART, ET C'EST VOULU. Trouvé le 26/08 : ce script
+# n'a JAMAIS synchronisé `model-verif/` — le lot AROME-PI y a dormi
+# poussé sur GitHub mais absent du VPS pendant que ce script annonçait
+# un déploiement réussi (rsync + bancs + restart, tous verts, sur les
+# trois AUTRES dossiers). Une nouvelle entrée `agrume_pi` sans elle
+# aurait tourné toute une nuit avec le vieux code, silencieusement.
+#
+# ⚠️ PAS de `-av` ici : certains fichiers de `model-verif/` sont en
+# 600 sur le VPS (`score.py`, `collect.py`…), délibérément plus
+# restreints que le 644 par défaut d'un checkout local. `-av` embarque
+# `-p` et écraserait ces permissions avec celles du Mac. `-t` seul
+# laisse les permissions déjà en place sur les fichiers existants — un
+# fichier tout neuf hérite du umask distant, pas du nôtre.
+dire "rsync model-verif/ → $VPS:$DISTANT/model-verif/ (permissions distantes préservées)"
+rsync -tv --exclude '__pycache__' --exclude '*.pyc' --exclude '*.bak' \
+      --include '*.py' --include '*.sh' --include '*/' --exclude '*' \
+      model-verif/ "$VPS:$DISTANT/model-verif/" || echec "rsync de model-verif/ a échoué"
+
 # ══════════════════════════════════════════════════════════════════════
 # 2. SHA256 DES DEUX CÔTÉS — le md5/sha256 « avant d'appliquer » de la
 #    roadmap, ici après l'envoi : rsync affirme avoir copié, ce qui n'est
@@ -52,10 +70,10 @@ done
 dire "sha256 local vs distant, fichier par fichier"
 # ⚠️ macOS n'a que `shasum -a 256` ; le VPS (Debian) n'a que `sha256sum`
 # (coreutils GNU) — même sortie « hash  chemin », deux commandes.
-LOCAL_SUM=$(find agrume verif tools -type f \( -name '*.py' -o -name '*.sh' \) \
+LOCAL_SUM=$(find agrume verif tools model-verif -type f \( -name '*.py' -o -name '*.sh' \) \
             ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 shasum -a 256)
 DISTANT_SUM=$(ssh "$VPS" \
-  "cd $DISTANT && find agrume verif tools -type f \( -name '*.py' -o -name '*.sh' \) \
+  "cd $DISTANT && find agrume verif tools model-verif -type f \( -name '*.py' -o -name '*.sh' \) \
    ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum")
 
 if [ "$LOCAL_SUM" != "$DISTANT_SUM" ]; then
