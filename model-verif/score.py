@@ -82,6 +82,17 @@ LEAD_BY_OFFSET = {0: 6, 1: 24, 2: 48}
 #: ce lot court.
 AGRUME_MODEL = "agrume"
 
+#: La série composite AROME + AROME-PI (26/08/2026), écrite par
+#: `agrume_fcst.py` dans le MÊME flux et sous un SECOND nom.
+#: ⛔ Un second nom et non une correction d'`agrume` : muter la série en
+#: place aurait mélangé deux définitions dans une même fenêtre glissante
+#: de 14 et 30 jours, sans qu'une seule ligne ne le dise. La raison
+#: complète est dans `agrume_fcst.MODEL_PI`.
+#: ⓘ Comme `AGRUME_MODEL`, il ne sert ICI qu'à compter des lignes dans
+#: le journal — `daily_rows` ne connaît toujours aucun modèle par son
+#: nom, et c'est ce qui rend ce branchement court.
+AGRUME_PI_MODEL = "agrume_pi"
+
 #: Heures minimales appariées pour qu'une journée-balise-modèle compte.
 #: En dessous, l'agrégat est du bruit : une balise qui n'a émis que
 #: trois heures ne dit rien de la qualité d'un modèle sur la journée.
@@ -4365,6 +4376,13 @@ def main() -> int:
         snapshots[offset] = rows
         bilans_parties[offset] = bilan
         n_ag = sum(1 for r in rows if r.get("model") == AGRUME_MODEL)
+        # ⛔ LA SÉRIE COMPOSITE SE COMPTE À PART (26/08). `agrume_pi`
+        # arrive dans le MÊME flux qu'`agrume` et sa population est un
+        # SOUS-ENSEMBLE de la sienne (les balises couvertes par PI).
+        # Sans son propre compte, une chute de couverture PI — un
+        # domaine perdu, une ingestion muette — se lirait comme un
+        # simple flottement du total, ou ne se lirait pas du tout.
+        n_pi = sum(1 for r in rows if r.get("model") == AGRUME_PI_MODEL)
         # ⚠️ Le compte AGRUME se dit à chaque offset, y compris quand il
         # est destiné à ne rien produire. Une ligne « 0 » qui n'apparaît
         # jamais et une ligne qui manque se lisent pareil dans un
@@ -4372,6 +4390,8 @@ def main() -> int:
         print(f"  prévisions émises J-{offset} : {len(rows)} lignes "
               f"(classe +{LEAD_BY_OFFSET[offset]} h)"
               + (f" — dont {n_ag} AGRUME" if n_ag else "")
+              + (f" et {n_pi} AGRUME+PI" if n_pi else
+                 " et AUCUNE ligne AGRUME+PI" if n_ag else "")
               + (f", qui ne donneront AUCUNE ligne : horizon 24 h, moins de "
                  f"{MIN_HOURS_DAILY} heures appariables à cet offset"
                  if n_ag and offset else ""))

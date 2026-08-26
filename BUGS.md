@@ -6,6 +6,59 @@
 
 ---
 
+## 26/08/2026 — le score notait un produit que personne ne sert
+
+Question de Yann : *« je pensais qu'on aurait de meilleurs scores grâce
+à AROME-PI »*. Vérifié dans le code : **PI n'était pas dans le score du
+tout.** `agrume_fcst.py` lisait le vent 10 m BRUT du produit A et
+court-circuitait `composite.py` entièrement — alors que l'écran, lui,
+sert le composite (AROME + Δ AROME-PI). On mesurait donc une chose et on
+en servait une autre, sans qu'une ligne ne le dise.
+
+⚠️ Et la première explication écrite était fausse à son tour : « à 10 m
+le composite vaut AROME à l'identique ». **Non** — `etendre_delta`
+corrige bien le 10 m, avec Δ(20 m) étendu constant (0,489 m/s d'écart
+médian mesuré le 10/08). C'est le SCORE qui ne passait pas par là.
+
+**Piège réutilisable nº 1** : *quand un produit a deux consommateurs
+(un écran, un score), vérifier qu'ils lisent la MÊME fonction, pas deux
+chemins qui se ressemblent.* Ici les deux lisaient bien « AGRUME », mais
+l'un via `composite.py` et l'autre via le produit A brut.
+
+**Piège réutilisable nº 2 — celui qui a failli passer.** Corriger la
+série `agrume` en place aurait introduit une rupture de DÉFINITION au
+milieu d'une fenêtre glissante de 14 et 30 jours : le classement aurait
+moyenné de l'AROME brut d'avant-hier avec du composite d'aujourd'hui,
+sous un seul nom. *Un changement de définition d'une série notée sur
+fenêtre glissante se publie sous un NOUVEAU nom, jamais en place.* Fix :
+`agrume_pi` s'ajoute à `agrume` au lieu de le remplacer — et donne au
+passage un contrôle apparié (mêmes balises, mêmes heures, même run).
+
+**Piège réutilisable nº 3 — trouvé par la mutation, pas par la
+relecture.** Prendre l'index d'une maille (`col.i_niveau_001[20]`) et
+les valeurs de l'autre (`col.c0025`) **ne lève rien** : les deux index
+valent 1 aujourd'hui. La mutation « Δ pris en 0,01° » restait donc
+VERTE — non pas parce que le banc était faible, mais parce que la faute
+n'en était pas encore une. Elle le deviendrait au premier niveau ajouté
+à l'une des deux listes. Fix : `_bloc_maille()` rend le tableau ET ses
+deux index ensemble, on ne peut plus les dissocier.
+
+**Piège réutilisable nº 4** : *l'entrée `if __name__ == "__main__"` reste
+la DERNIÈRE chose d'un fichier de banc.* Trois bancs ajoutés après elle
+n'ont jamais tourné — et un banc qui ne tourne pas se lit exactement
+comme un banc qui passe.
+
+**⚠️ Et le résultat qui n'est pas un succès** (pinné par
+`test_bout_a_bout_la_mediane_est_structurellement_aveugle`) :
+`err_vec_med` est une MÉDIANE sur 24 heures, PI n'en corrige que 6.
+Les 18 autres décident seules du rang médian — **la médiane ne peut PAS
+bouger, quelle que soit la qualité de Δ.** Juger AROME-PI sur cette
+colonne conduirait à conclure « il n'apporte rien » à partir d'une
+propriété arithmétique. Ce sont les colonnes MOYENNÉES (`err_vec_rms`,
+`mse_model`) qu'il faut lire.
+
+---
+
 ## 24/08/2026 — une phrase d'explication est ce qui ferme un dossier, et celle-ci était fausse
 
 Retour Yann : *« sur les balises Infoclimat, on n'a ni le vent max ni le
