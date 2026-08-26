@@ -10,7 +10,7 @@
 
 Aucun code en cause : la phase C est une CONCEPTION, et son livrable est
 un raisonnement. Le raisonnement était faux, et une relecture
-adversariale l'a trouvé. Trois pièges, tous réutilisables.
+adversariale et Yann les ont trouvées. Cinq pièges, tous réutilisables.
 
 **Piège nº 1 — appliquer une médiane GLOBALE à une population qu'on
 vient soi-même de montrer BIMODALE.** Le document mesurait la latence
@@ -36,11 +36,38 @@ porte un `LastModified` par objet, et `tools/audit_r2.py` le lit déjà
 chercher s'il existe » : avant de déclarer une mesure impossible,
 chercher si elle est déjà là.*
 
+**Piège nº 4 — prouver une ABSENCE en demandant les noms qu'on a
+imaginés.** Pour établir qu'AROME-PI ne sert pas le vent moyen en 0,01°,
+la sonde interrogeait **quatre identifiants écrits à la main**, tous en
+`SPECIFIC_HEIGHT_LEVEL_ABOVE_GROUND`. Or `Portail.existe` le dit
+lui-même : le portail rend le même `NoSuchCoverage` pour un champ absent
+et pour un nom mal orthographié. Quatre `False` ne prouvaient donc rien.
+Il a fallu énumérer `GetCapabilities` en entier (33 familles en 001, 52
+en 0025) pour que la réponse devienne une mesure. *Une absence se
+prouve en lisant le catalogue, jamais en interrogeant une liste qu'on a
+composée soi-même.* ⓘ La conclusion était juste — c'est la PREUVE qui
+n'existait pas.
+
+**Piège nº 5 — poser un problème que l'architecture avait déjà résolu, en
+ayant cité la solution deux pages plus haut.** Le document concluait
+qu'une classe à échéance courte demandait « deux séries neuves à maille
+égale », parce que PI vit en 0,025° et la base du score en 0,01°. Faux :
+l'architecture ne fait pas entrer PI comme une série RIVALE mais comme un
+**Δ**, et `agrume_fcst.MAILLE_DELTA` écrit noir sur blanc que Δ se mesure
+en 0,025° contre 0,025° avant de s'appliquer à la base fine — un Δ à
+maille constante ne transporte aucun écart de résolution. Le document
+CITAIT ce commentaire à l'appui du problème sans voir qu'il en était la
+réponse. *Quand on croit découvrir un obstacle structurel, chercher
+d'abord si un commentaire du code le nomme déjà — et lire jusqu'au bout
+celui qu'on vient de citer.*
+
 ⓘ **Et ce qui a marché** : faire relire le document par un agent dont la
 consigne était de TROUVER des fautes, sources en main, avec obligation de
 recalculer les statistiques lui-même plutôt que de faire confiance aux
-scripts fournis. Il a trouvé les trois. *Un raisonnement se mute comme
-un banc.*
+scripts fournis. Il a trouvé les trois premiers. *Un raisonnement se mute
+comme un banc.* ⚠️ Les pièges nº 4 et nº 5, eux, ont été trouvés par
+Yann, et l'agent ne pouvait pas les voir : ils demandaient de connaître
+le MODÈLE et l'INTENTION du produit, pas le code.
 
 ---
 

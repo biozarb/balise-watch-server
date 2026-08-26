@@ -5,8 +5,10 @@ document et les sept questions du §7.
 
 > **En une phrase** : le cadre 1 n'est pas impossible, il est **vide
 > sous +4 h par le plancher `MIN_HOURS_DAILY`, et sans intérêt
-> au-dessus** ; le cadre 2 est constructible, et sa difficulté n'est pas
-> la latence — c'est **la maille** et **le produit qu'on y met**.
+> au-dessus** ; le cadre 2 est constructible, et **il ne demande aucune
+> série neuve** — seulement de changer QUELS RUNS alimentent la
+> construction `agrume` / `agrume_pi` existante, et de trancher le poids
+> de Δ.
 >
 > ✅ **Et un dossier se ferme au passage** : les « 3 heures perdues »
 > entre AROME et notre archive n'existent pas. Deux d'entre elles sont
@@ -258,69 +260,103 @@ n'arrive que 2 fois sur 144, via les runs 00 et 03 Z.
 run 03 Z (**+9 h**, âge 6 h 30). Les deux sont ce qu'un pilote pouvait
 réellement avoir.
 
-### 3.3 ⛔ QUEL produit compare-t-on ? La vraie difficulté est là
+### 3.3 ⛔ QUEL produit compare-t-on ? — section RÉÉCRITE le 26/08 au soir
 
-Le §3.1 dit « la prévision issue du run PI ». **Ce n'est pas assez
-précis, et les séries qui existent aujourd'hui ne conviennent ni l'une
-ni l'autre.**
+> ⛔⛔ **La première version de cette section inventait un problème que
+> le projet avait déjà résolu**, et Yann l'a vu tout de suite. Elle
+> concluait qu'il fallait « deux séries neuves à maille égale » à cause
+> de l'écart 0,01° / 0,025°. **Faux.** L'architecture n'a jamais fait
+> entrer PI comme une série RIVALE d'AROME : elle le fait entrer comme
+> un **Δ**, et un Δ mesuré à maille constante ne transporte aucun écart
+> de maille. C'est écrit noir sur blanc dans `agrume_fcst.MAILLE_DELTA`
+> depuis le 26/08 au matin — je l'avais cité deux sections plus haut
+> sans en tirer la conséquence.
 
-Ce qui existe dans `model_verif_daily` :
+#### La maille : ce que dit le catalogue, énuméré et non deviné
 
-| série | ce que c'est | maille |
+⚠️ Ma première sonde interrogeait **quatre identifiants écrits à la
+main**, tous en `SPECIFIC_HEIGHT_LEVEL_ABOVE_GROUND`. Or le portail rend
+le même `NoSuchCoverage` pour un champ absent et pour un nom mal écrit —
+`Portail.existe` le dit lui-même. **Une absence ne se prouve pas en
+demandant les noms qu'on a imaginés.** `GetCapabilities` a donc été
+énuméré en entier (`model-verif/latence/catalogue_pi.py`) :
+
+| | `aromepi/001` | `aromepi/0025` |
 |---|---|---|
-| `agrume` | AROME 10 m **BRUT** | **0,01°** |
-| `agrume_pi` | le **COMPOSITE** AROME + Δ(AROME-PI) | base 0,01°, Δ en 0,025° |
+| taille du catalogue | 2,24 Mo | 3,49 Mo |
+| couvertures | 7 056 | 10 976 |
+| **familles distinctes** | **33** | **52** |
+| familles WIND/GUST | 7 | 10 |
+| `U_/V_COMPONENT_OF_WIND` (vent moyen) | ⛔ **absent** | ✅ |
+| `WIND_SPEED` | ⛔ **absent** | ✅ |
+| `*_GUST`, `*_GUST_15MIN`, `MAXIMUM_GUST` | ✅ | ✅ |
+| `TKE` | ⛔ absent | ✅ |
 
-⛔ **`agrume_pi` n'est pas « PI ».** C'est AROME corrigé par PI. Le
-noter à échéance courte reviendrait à noter en même temps la fraîcheur
-ET le réglage `α` que la phase B vient de remettre en cause (optimum
-hors échantillon ≈ 0,5, alors que `poids_pi` plafonne à 1) — sans
-pouvoir séparer les deux.
+✅ **Confirmé sur les 33 familles, pas sur quatre noms.** Le 0,01° de
+PI est un catalogue de nowcasting du DANGER — `HAIL`, `DIAG_GRELE`,
+`CONVECTIVE_AVAILABLE_POTENTIAL_ENERGY`, `REFLECTIVITY_MAX_DBZ`,
+`VISIBILITY_MINI_15MIN`, `PRECIPITATION_TYPE_15_MIN`,
+`BRIGHTNESS_TEMPERATURE`, `WETB_TEMPERATURE` — plus les rafales, la
+température, l'humidité et le point de rosée. **Le vent moyen n'y est
+pas**, et ce n'est pas une question de type de niveau : `TEMPERATURE` et
+`DEW_POINT_TEMPERATURE` y sont bien sur niveaux hauteur.
 
-⛔ **Et la rampe n'a aucun sens dans ce cadre.** `poids_pi` descend à 0 à
-6 h parce qu'au-delà PI n'existe plus et qu'il faut rejoindre AROME en
-douceur. À échéance courte, PI existe partout : à +6 h la rampe servirait
-`w = 0`, c'est-à-dire **AROME pur sous une étiquette PI**.
+ⓘ La doc Météo-France annonce les deux résolutions pour AROME-PI mais ne
+détaille aucune liste de paramètres par résolution — elle ne pouvait pas
+trancher. Le catalogue, si.
 
-⛔⛔ **Et si l'on crée une série « PI brut », elle bute sur la MAILLE.**
+#### ✅ Et c'est sans conséquence, parce que Δ ne traverse jamais les mailles
 
-⚠️ **Attention à la formulation, elle a été contestée à raison.**
-AROME-PI **est** un modèle à maille fine — c'est son objet même, et le
-service `MF-NWP-HIGHRES-AROMEPI-**001**-FRANCE-WCS` existe bel et bien.
-**Ce qui manque, c'est la DIFFUSION du vent moyen à cette maille.**
-Re-sondé le 26/08 (`model-verif/latence/sonde_maille_pi.py`,
-`DescribeCoverage` sur le run 13 Z), et non pas cité d'une note :
+```
+Δ = PI(0,025°) − AROME(0,025°)          ← même maille des deux côtés
+composite = AROME(0,01°) + w · Δ        ← appliqué à la base fine
+```
 
-| champ | `aromepi/001` | `aromepi/0025` |
+`agrume_fcst.MAILLE_DELTA` porte déjà l'arbitrage, mot pour mot :
+
+> *« Calculer `PI(0,025°) − AROME(0,01°)` ferait entrer l'écart de
+> RÉSOLUTION dans Δ — deux orographies différentes, deux plus proches
+> voisins différents — et on créditerait AROME-PI d'une différence de
+> maille. Δ se mesure donc en 0,025° contre 0,025°, puis s'applique à la
+> base 0,01° du score. »*
+
+⛔ **Les 0,122 km/h de « coût de la maille » mesurés en phase B ne
+s'appliquent donc PAS ici.** Ils décrivent AROME₁₀ 0,025° contre
+AROME₁₀ 0,01° servis tels quels. Dans le composite, la maille grossière
+n'apparaît que dans une DIFFÉRENCE, où elle se retranche.
+
+#### La conception qui en découle — et elle est bien plus courte
+
+La classe à échéance courte **n'a pas besoin de séries neuves**. Elle
+réutilise la construction existante et ne change qu'**une seule chose :
+quels runs l'alimentent**.
+
+| | aujourd'hui (classe +6 h) | classe à échéance courte |
 |---|---|---|
-| `U_COMPONENT_OF_WIND` | ⛔ **absent** | ✅ présent |
-| `V_COMPONENT_OF_WIND` | ⛔ **absent** | ✅ présent |
-| `WIND_SPEED` | ⛔ **absent** | ✅ présent |
-| `WIND_SPEED_GUST` | ✅ présent | ✅ présent |
+| base 0,01° | AROME run 00 ou 03 Z | AROME **le plus frais publié à T** |
+| Δ(0,025°) | PI et AROME du **même run** | PI **le plus frais publié à T** − AROME du run de base |
+| poids | `poids_pi(τ)`, rampe 1 → 0 sur 4→6 h | **à trancher** (§7 Q7) |
 
-**Le 0,01° de PI ne publie que la RAFALE.** Pour `u`/`v`, c'est 0,025°
-ou rien — la sonde du 10/08 disait déjà exactement cela, et seize jours
-plus tard c'est toujours vrai.
+⚠️ **Et il faut nommer ce que Δ devient.** Aujourd'hui, PI et AROME
+viennent du même run : Δ est *la correction de PI*. Dans la classe
+courte, Δ = PI(09 Z) − AROME(03 Z) : il porte **la correction ET les six
+heures de fraîcheur**, mélangées. C'est exactement ce qu'on veut mesurer
+— mais l'étiquette doit le dire, sinon on republie l'« avantage
+silencieux » refusé le 13/08 sous un autre habit.
 
-Donc : PI(vent moyen) n'est disponible qu'en **0,025°**, quand la base
-d'`agrume` est en **0,01°** (décision 2 du lot I). La phase B a chiffré
-ce que coûte cette différence : **AROME₁₀ en 0,025° perd 0,122 km/h
-contre le 0,01°** — soit **plus** que les 0,08 km/h qui séparent PI
-d'AROME à maille égale. ⓘ Le code nomme déjà ce piège :
-`agrume_fcst.MAILLE_DELTA` porte le commentaire *« on créditerait
-AROME-PI d'une différence de maille »*.
+⛔ **La rampe, en revanche, n'a aucun sens dans ce cadre.** `poids_pi`
+descend à 0 à 6 h parce qu'au-delà PI n'existe plus et qu'il faut
+rejoindre AROME en douceur. À échéance courte, PI existe partout : à
++6 h la rampe servirait `w = 0`, c'est-à-dire **AROME pur sous une
+étiquette PI**. Et la phase B a montré que `w = 1` n'est pas non plus le
+bon choix (optimum hors échantillon ≈ 0,5). **C'est le seul paramètre
+qui reste vraiment ouvert.**
 
-ⓘ **Et une piste qui dort depuis le 10/08** : les familles rafale de
-`aromepi/001` — dont `WIND_SPEED_GUST_15MIN` sur niveaux hauteur —
-**n'ont aucun équivalent dans AROME classique**. C'est de la rafale à
-maille fine, au pas de 15 min, avec 19 min de latence. Hors périmètre de
-la phase C, mais c'est le seul endroit du portail où « maille fine +
-forte fraîcheur » existe vraiment ensemble.
-
-> **Conséquence : une classe à échéance courte doit opposer PI(0,025°) à
-> AROME(0,025°), pas à `agrume`(0,01°).** Sinon PI part avec ~0,20 km/h
-> de handicap qui n'est pas de la fraîcheur. **Cela veut dire DEUX
-> séries neuves, pas une.**
+ⓘ **Et une piste qui dort depuis le 10/08** : `WIND_SPEED_GUST_15MIN`
+en 0,01° sur niveaux hauteur **n'a aucun équivalent dans AROME
+classique**. Rafale à maille fine, pas de 15 min, 19 min de latence.
+Hors périmètre de la phase C, mais c'est le seul endroit du portail où
+« maille fine + forte fraîcheur » existe vraiment ensemble.
 
 ### 3.4 ⚠️ Ce que la phase B a déjà tranché, et qui cadre l'attente
 
@@ -332,11 +368,18 @@ d'AROME(10 m)** — comparable, très légèrement moins bon, pas meilleur.
 > cadre où il peut gagner du tout, et il ne peut y gagner que par la
 > fraîcheur.**
 
-✅ **La phase B est le témoin de la phase C** — *à condition que le §3.3
-soit respecté*. Si les deux séries sont à maille égale et que PI gagne,
-on saura que c'est la fraîcheur, parce que la qualité à échéance égale
-est déjà mesurée. Si les mailles diffèrent, cette séparation est perdue
-et la phase C ne conclura rien.
+✅ **La phase B est le témoin de la phase C**, et la condition de maille
+est satisfaite d'office par la construction en Δ (§3.3). Si la classe
+courte donne `agrume_pi` gagnant, on saura que c'est la fraîcheur — la
+qualité à échéance égale est déjà mesurée, et elle est nulle.
+
+⚠️ **Un seul confondant demeure, et il est réel** : `w`. La phase B dit
+que `w = 1` dégrade et que `w ≈ 0,5` améliore, *à fraîcheur constante*.
+Si la classe courte change à la fois la fraîcheur ET `w`, elle mesurera
+les deux ensemble. **D'où la Q7** : garder `w = 1` (le même défaut
+qu'aujourd'hui, donc comparable) coûte de la performance mais préserve
+la lisibilité du verdict ; publier les deux `w` la préserve aussi et
+coûte des lignes.
 
 ---
 
@@ -444,15 +487,16 @@ déjà presque tout perdu de son avance.
 I : *« AGRUME serait ~10 h plus frais que les autres sous le même
 intitulé +24 h — un avantage silencieux »*). **Recommandation : (a).**
 
-**Q3 · Quelles séries entrent dans cette classe ?**
-⛔ **Ni `agrume` ni `agrume_pi` ne conviennent** (§3.3) : le premier est
-en 0,01°, le second est le composite avec sa rampe. La classe demande
-**deux séries neuves à maille égale** — PI(0,025°) contre AROME(0,025°).
-Est-ce un coût que tu acceptes, ou préfères-tu accepter le biais de
-maille en l'ÉCRIVANT ?
-ⓘ Les modèles Open-Meteo ne peuvent de toute façon pas entrer : leur
-instant de publication n'est pas mesuré, et leur `fetched_at` est
-l'heure de NOTRE appel de 03:15.
+**Q3 · ~~Deux séries neuves à maille égale ?~~ — QUESTION RETIRÉE**
+✅ Elle reposait sur une erreur (§3.3). La classe réutilise la
+construction `agrume` / `agrume_pi` telle quelle et ne change que les
+runs qui l'alimentent. **Aucune série neuve, aucun problème de maille** :
+Δ se mesure en 0,025° contre 0,025° et ne transporte pas la résolution.
+ⓘ Reste vrai : les modèles Open-Meteo ne peuvent pas entrer dans cette
+classe — leur instant de publication n'est pas mesuré, et leur
+`fetched_at` est l'heure de NOTRE appel de 03:15. La classe oppose donc
+`agrume` à `agrume_pi`, deux concurrents. Un classement à deux, ou un
+simple écart affiché ? **C'est ce qu'il reste à trancher ici.**
 
 **Q4 · Combien d'instants de décision T par jour ?**
 6 heures cibles par T, plancher à 6 : aucune marge (§6.2). Deux T par
@@ -472,10 +516,20 @@ Le pas de 15 min oblige à rouvrir `OBS_HALF_WINDOW_MS` (§6.1).
 **Recommandation : heures rondes pour la v1**, en écrivant que la
 réserve de la phase B reste ouverte.
 
-**Q7 · PI brut, ou le composite ?**
-Cf. §3.3. **Recommandation : PI brut à maille égale** — le composite
-mélangerait la fraîcheur avec le réglage `α`, et sa rampe servirait de
-l'AROME pur sous une étiquette PI à l'échéance +6 h.
+**Q7 · Quel poids donner à Δ dans cette classe ?** *(la vraie question,
+maintenant que Q3 est retirée)*
+⛔ La rampe `poids_pi` n'a pas de sens ici : à +6 h elle vaut 0, donc
+elle servirait de l'AROME pur sous une étiquette PI (§3.3). Et la phase
+B a montré que `w = 1` n'est pas bon non plus (optimum hors échantillon
+≈ 0,5, gain +0,08 à +0,15 km/h). Trois options :
+- **w = 1 sur les 6 heures** — « on fait confiance au plus frais ». Le
+  plus lisible, et c'est ce que la fraîcheur mérite si elle vaut ce que
+  tu penses.
+- **w = 0,5** — la moyenne des deux, ce que la phase B mesure comme
+  optimal, mais appris sur 8 journées d'août seulement.
+- **w laissé libre et NOTÉ** — publier deux sous-séries (w=1 et w=0,5)
+  et laisser le tableau de fiabilité trancher sur plusieurs semaines.
+  Plus cher en lignes, mais c'est la seule qui ne devine pas.
 
 ---
 
@@ -496,8 +550,11 @@ l'AROME pur sous une étiquette PI à l'échéance +6 h.
   passage la seule trace de la vraie disponibilité.
 - ⬜ **La cadence de report des Pioupiou**, qui décide si le pas de
   15 min est atteignable.
-- ⬜ **Une série PI(0,025°) et une série AROME(0,025°)** n'existent pas
-  et devraient être créées (§3.3, Q3).
+- ✅ **« Il faut deux séries neuves à maille égale » : ANNULÉ.** C'était
+  une erreur (§3.3) — Δ ne traverse jamais les mailles, la construction
+  existante convient telle quelle.
+- ⬜ **La rafale fine à 15 min de `aromepi/001`**, sans équivalent dans
+  AROME classique, et que rien n'utilise.
 - ⬜ **Le rendu à l'écran** — aucun navigateur connecté à cette session.
 - ✅ **Poussé** : `b39538e` (phase A), `4573e34` (phase B), `ac2f56f`
   (phase C).
