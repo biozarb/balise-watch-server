@@ -118,6 +118,29 @@ TAU_FIN_MIN = 360          # 6 h : horizon de PI, rampe = 0
 #  seulement, qui fabriquerait une marche au ras du sol ; ne rien
 #  changer, qui garderait un composite mesurément moins bon qu'AROME
 #  nu). **À rouvrir le jour où une mesure en altitude existe.**
+#
+#  ── ⚠️⚠️ LA CONSÉQUENCE VISIBLE, MESURÉE EN PRODUCTION LE 26/08 ──────
+#  Une moyenne de VECTEURS n'est pas une moyenne de vitesses. Quand
+#  AROME et PI se contredisent en DIRECTION, leur moyenne est faible :
+#  mesuré sur la journée du 25/08 rejouée (1 710 heures corrigées, 285
+#  balises), **le composite tombe sous la moitié d'AROME dans 7,8 % des
+#  cas**, et le pire va de 11,2 à 3,2 km/h. Exemple relevé : AROME
+#  5,8 km/h au 148°, PI ~6,8 au 305° — presque à l'opposé — donnent un
+#  composite de 1,6 km/h.
+#
+#  ⛔ CE N'EST PAS UN DÉFAUT DU RÉGLAGE, c'est ce qu'une moyenne FAIT.
+#  Et c'est même la lecture honnête : les deux modèles ne savent pas.
+#  Mais un pilote lit « 1,6 km/h », pas « désaccord ». Sous α = 1 il
+#  lisait « 6,8 au 305° » — un chiffre confiant et faux une fois sur
+#  deux. Aucune des deux lectures n'est bonne.
+#
+#  ⬜ CE QUI RESTE À FAIRE, ET QUI N'EST PAS FAIT : publier un indicateur
+#  de DÉSACCORD (‖PI − AROME‖ rapporté à la vitesse) à côté de
+#  `poids_pi`, pour que l'écran puisse dire « les deux modèles divergent »
+#  au lieu de servir un vecteur faible sans explication. La maxime du
+#  projet s'applique telle quelle : *on ne refuse pas de servir, on
+#  refuse de laisser croire.* Le composite sait déjà calculer Δ ; il ne
+#  le publie pas.
 ALPHA_MELANGE = 0.5
 
 # ── L'extinction verticale de Δ ───────────────────────────────────────

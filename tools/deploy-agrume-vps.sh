@@ -58,8 +58,18 @@ done
 # laisse les permissions déjà en place sur les fichiers existants — un
 # fichier tout neuf hérite du umask distant, pas du nôtre.
 dire "rsync model-verif/ → $VPS:$DISTANT/model-verif/ (permissions distantes préservées)"
-rsync -tv --exclude '__pycache__' --exclude '*.pyc' --exclude '*.bak' \
-      --include '*.py' --include '*.sh' --include '*/' --exclude '*' \
+# ⛔⛔ `-rtv`, ET LE `r` A COÛTÉ UNE JOURNÉE (26/08, le soir même).
+# La version d'origine écrivait `-tv` : en retirant `-a` pour protéger
+# les permissions 600, elle a retiré `-r` AVEC — `-a` vaut `-rlptgoD`.
+# rsync a donc répondu « skipping directory model-verif/. », copié
+# ZÉRO fichier, et **rendu 0**. Le script annonçait un rsync réussi ;
+# seul le contrôle sha256 du §2 a dit la vérité.
+# ⚠️ C'est la MÊME leçon que le matin, d'un cran plus bas : le 26/08 au
+# matin, `model-verif/` n'était pas dans le rsync du tout ; le fix qui
+# l'y a mis ne copiait rien. *Un correctif se vérifie par son EFFET, pas
+# par sa présence dans le diff.*
+rsync -rtv --exclude '__pycache__' --exclude '*.pyc' --exclude '*.bak' \
+      --include '*/' --include '*.py' --include '*.sh' --exclude '*' \
       model-verif/ "$VPS:$DISTANT/model-verif/" || echec "rsync de model-verif/ a échoué"
 
 # ══════════════════════════════════════════════════════════════════════
@@ -70,11 +80,17 @@ rsync -tv --exclude '__pycache__' --exclude '*.pyc' --exclude '*.bak' \
 dire "sha256 local vs distant, fichier par fichier"
 # ⚠️ macOS n'a que `shasum -a 256` ; le VPS (Debian) n'a que `sha256sum`
 # (coreutils GNU) — même sortie « hash  chemin », deux commandes.
+# ⚠️ `_to_delete/` est écarté des DEUX côtés. C'est la convention du
+# projet pour mettre un fichier de côté sans le supprimer ; le laisser
+# dans le contrôle ferait diverger le sha256 pour un fichier dont on a
+# justement décidé qu'il ne compte plus. Trouvé le 26/08 sur un
+# `sonde_budget.py` orphelin du 09/08, jamais suivi par git.
 LOCAL_SUM=$(find agrume verif tools model-verif -type f \( -name '*.py' -o -name '*.sh' \) \
-            ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 shasum -a 256)
+            ! -path '*/__pycache__/*' ! -path '*/_to_delete/*' -print0 \
+            | sort -z | xargs -0 shasum -a 256)
 DISTANT_SUM=$(ssh "$VPS" \
   "cd $DISTANT && find agrume verif tools model-verif -type f \( -name '*.py' -o -name '*.sh' \) \
-   ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum")
+   ! -path '*/__pycache__/*' ! -path '*/_to_delete/*' -print0 | sort -z | xargs -0 sha256sum")
 
 if [ "$LOCAL_SUM" != "$DISTANT_SUM" ]; then
   echo "$LOCAL_SUM" > /tmp/deploy-agrume-local.sha256
