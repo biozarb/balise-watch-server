@@ -82,7 +82,16 @@ JOURNAL_DEFAUT = Path(os.environ.get("BW_MODEL_VERIF_ETAT",
 PERIODE_FINE_S = 120          # ±2 min sur la latence mesurée
 PERIODE_MAX_S = 900           # plafond du back-off : 15 min
 FACTEUR_BACKOFF = 1.6
-FENETRE_FINE_MIN = 120        # au-delà, on lève le pied
+
+# ⚠️⚠️ CETTE CONSTANTE N'EST QU'UN DÉFAUT DE DÉMARRAGE — cf.
+# `fin_de_guet_fin_min()`. Elle a été écrite le 10/08, AVANT la moindre
+# mesure, et l'en-tête de ce module dit pourtant qu'aucune heure ne doit
+# être codée en dur. Dépouillé le 26/08 sur 1 973 entrées, le journal
+# montre ce qu'elle coûtait : SIX RÉSEAUX AROME SUR HUIT publient
+# APRÈS H+2 h (médianes 195 à 276 min), c'est-à-dire qu'ils tombaient
+# tous dans le back-off — jusqu'à 15 min de période — exactement à la
+# minute où ils allaient paraître.
+FENETRE_FINE_MIN = 120
 ABANDON_MIN = 360             # 6 h après l'heure du run : on renonce et on l'écrit
 
 # Marge appliquée sous la latence MINIMALE déjà observée pour décider
@@ -305,6 +314,58 @@ def debut_de_guet_min(journal, source):
     return max(0, int(min(obs) - MARGE_APPRISE_MIN))
 
 
+def fin_de_guet_fin_min(journal, source):
+    """Jusqu'à quelle minute rester à la période FINE.
+
+    ⛔ LE SYMÉTRIQUE DE `debut_de_guet_min`, ET IL MANQUAIT. Le début du
+    guet était appris depuis le 10/08 ; la FIN de la fenêtre fine, non —
+    elle restait à `FENETRE_FINE_MIN`, une constante écrite avant la
+    moindre mesure. Le module apprenait donc quand COMMENCER à regarder
+    et pas jusqu'à quand regarder ATTENTIVEMENT, ce qui n'a aucun sens :
+    c'est la même question, prise par l'autre bout.
+
+    ── CE QUE ÇA COÛTAIT, MESURÉ ────────────────────────────────────────
+    Dépouillé le 26/08 sur 1 973 entrées (10 → 26/08). Six réseaux AROME
+    sur huit publient au-delà de H+2 h — 06 Z à 276 min, 18 Z à 270,
+    09 Z à 225, 12 Z à 211, 21 Z à 210, 15 Z à 195 — donc au-delà de
+    `FENETRE_FINE_MIN`. Ils étaient guettés à 15 min de période au moment
+    précis de leur publication, quand 00 Z et 03 Z (128 et 120 min)
+    l'étaient à 2 min. L'écart se retrouve tel quel dans le temps de
+    DÉTECTION reconstruit : 58 à 88 min pour les réseaux tardifs contre
+    31 à 38 pour les deux rapides.
+
+    ── CE QUE ÇA COÛTE, ET POURQUOI C'EST LE BON ÉCHANGE ────────────────
+    Rester fin jusqu'au d9 observé ajoute au pire ~90 interrogations par
+    run et par cible, soit ~54 ko. L'en-tête de ce module le dit déjà :
+    « le back-off est là pour ne pas marteler quand un run est en retard
+    ou absent, PAS pour économiser ». Une demi-heure de fraîcheur sur la
+    seule chose qu'AGRUME apporte vaut largement 54 ko.
+
+    ⚠️ ON PREND LE d9, PAS LE MAX. Un seul run pathologique (PI a un max
+    à 207 min pour une médiane de 19) tirerait la fenêtre fine sur des
+    heures pour rien. Le d9 suit la population, pas son pire élément.
+
+    ⚠️ ET LE BACK-OFF RESTE. Au-delà de cette fenêtre, la période
+    s'élargit comme avant : un run qui ne paraîtra jamais ne doit pas
+    être martelé jusqu'à `ABANDON_MIN`.
+    """
+    obs = latences_observees(journal, source)
+    if len(obs) < MIN_OBSERVATIONS:
+        return FENETRE_FINE_MIN
+    # ⛔⛔ `int(0,9 × (n−1))`, ET PAS `int(0,9 × n)` COMME `rapport()`.
+    # La différence n'est pas cosmétique et c'est un banc qui l'a dite :
+    # à n = 10, `int(0,9 × 10)` vaut 9, c'est-à-dire le DERNIER indice —
+    # le MAXIMUM. Le « d9 » aurait donc été le max tant que la série
+    # compte dix observations ou moins, et le run pathologique de PI
+    # (207 min pour une médiane de 19) aurait fait guetter finement
+    # pendant plus de trois heures, tous les jours, pour un accident.
+    # Ici on DÉCIDE avec ce quantile ; dans `rapport()` on l'AFFICHE.
+    # Une convention d'affichage qui devient une règle de conduite doit
+    # être revérifiée sur les petits échantillons.
+    d9 = obs[int(0.9 * (len(obs) - 1))]
+    return max(FENETRE_FINE_MIN, int(d9 + MARGE_APPRISE_MIN))
+
+
 # ══════════════════════════════════════════════════════════════════════
 def guetter(source, run, journal_entrees, chemin_journal=JOURNAL_DEFAUT,
             crier=print, dormir=time.sleep, maintenant=None,
@@ -323,6 +384,7 @@ def guetter(source, run, journal_entrees, chemin_journal=JOURNAL_DEFAUT,
     now = maintenant or (lambda: datetime.now(timezone.utc))
     run_iso = run.strftime("%Y-%m-%dT%H:00:00Z")
     depart = debut_de_guet_min(journal_entrees, source.nom)
+    fin_fine = fin_de_guet_fin_min(journal_entrees, source.nom)
     periode = float(PERIODE_FINE_S)
     interrogations = 0
     t_absent = None
@@ -391,7 +453,7 @@ def guetter(source, run, journal_entrees, chemin_journal=JOURNAL_DEFAUT,
             return entree
 
         t_absent = t
-        if ecoulees > FENETRE_FINE_MIN:
+        if ecoulees > fin_fine:
             periode = min(periode * FACTEUR_BACKOFF, PERIODE_MAX_S)
         dormir(periode)
 
@@ -427,6 +489,15 @@ def guetter_plusieurs(sources, run, journal_entrees, chemin_journal=JOURNAL_DEFA
     ecrites = []
 
     depart = min(debut_de_guet_min(journal_entrees, s.nom) for s in restantes)
+    # ⚠️ MAX, là où le départ prend le MIN, et c'est la même règle vue
+    # des deux bouts : on reste fin tant qu'UNE SEULE des cibles est
+    # encore dans sa fenêtre plausible. Prendre le min ferait lever le
+    # pied sur le paquet le plus lent — or `choisir_run()` exige la
+    # couverture COMMUNE, donc c'est LUI qui décide de la fraîcheur de
+    # toute la chaîne. Guetter grossièrement le paquet qui commande,
+    # c'est perdre exactement ce qu'on cherche à mesurer.
+    fin_fine = max(fin_de_guet_fin_min(journal_entrees, s.nom)
+                   for s in restantes)
     t0 = now()
     ecoulees = (t0 - run).total_seconds() / 60.0
     if ecoulees < depart:
@@ -484,7 +555,7 @@ def guetter_plusieurs(sources, run, journal_entrees, chemin_journal=JOURNAL_DEFA
         restantes = encore
         if not restantes:
             break
-        if ecoulees > FENETRE_FINE_MIN:
+        if ecoulees > fin_fine:
             periode = min(periode * FACTEUR_BACKOFF, PERIODE_MAX_S)
         dormir(periode)
 
@@ -572,8 +643,11 @@ def rapport(chemin_journal=JOURNAL_DEFAUT, crier=print):
                   "interrogation). Ce ne sont PAS des latences.")
         if aband:
             crier(f"  ⛔ {len(aband)} runs jamais apparus dans la fenêtre")
-        crier(f"  → prochain guet à partir de H+"
-              f"{debut_de_guet_min(entrees, s)} min")
+        crier(f"  → fenêtre de guet FINE apprise : H+"
+              f"{debut_de_guet_min(entrees, s)} → H+"
+              f"{fin_de_guet_fin_min(entrees, s)} min"
+              + ("" if len(hautes) >= MIN_OBSERVATIONS else
+                 f" (défaut : moins de {MIN_OBSERVATIONS} observations)"))
     rapport_ecart_paquets(entrees, crier)
     return 0
 
@@ -591,16 +665,37 @@ def rapport_ecart_paquets(entrees, crier=print):
     cycle de guet : comparer des paquets datés par des processus
     différents mélangerait l'écart de publication avec l'écart des guets.
     """
+    # ⛔⛔ DEUX POPULATIONS, DEUX RAPPORTS — CORRIGÉ LE 26/08/2026.
+    # Le filtre était `":" in source`, c'est-à-dire « tout ce qui n'est
+    # pas `aromepi` ». Il ramassait donc AUSSI les paquets de rallonge
+    # `@51` (médiane 256 min) à côté des paquets 0–24 h (médiane 211), et
+    # les mélangeait dans un seul « écart premier/dernier paquet ». Le
+    # chiffre annoncé était **60 min** ; sur les paquets 0–24 h SEULS il
+    # vaut **14 min**. Un lecteur en concluait que le produit A attendait
+    # une heure son paquet le plus lent — alors que les huit sortent
+    # quasi ensemble et que l'heure perdue est ailleurs (le guet, cf.
+    # `fin_de_guet_fin_min`).
+    # *Un test sur le NOM d'une source ne définit pas une population.*
+    for etiquette, garde in (
+            ("produit A, échéances 0–24 h",
+             lambda s: ":" in s and "@" not in s),
+            ("rallonge du produit B, échéance 51 h",
+             lambda s: ":" in s and "@" in s)):
+        _rapport_une_famille(entrees, garde, etiquette, crier)
+
+
+def _rapport_une_famille(entrees, garde, etiquette, crier):
     par_run = {}
     for e in entrees:
         s = e.get("source", "")
-        if e.get("etat") != "publie" or ":" not in s:
+        if e.get("etat") != "publie" or not garde(s):
             continue
         par_run.setdefault(e["run"], {})[s] = e["latence_max_min"]
     complets = {r: d for r, d in par_run.items() if len(d) > 1}
     if not complets:
         return
-    crier(f"\n── ÉCART DE PUBLICATION ENTRE PAQUETS ({len(complets)} runs) ──")
+    crier(f"\n── ÉCART DE PUBLICATION ENTRE PAQUETS — {etiquette} "
+          f"({len(complets)} runs) ──")
     noms = sorted({s for d in complets.values() for s in d})
     for nom in noms:
         vals = sorted(d[nom] for d in complets.values() if nom in d)

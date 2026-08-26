@@ -318,6 +318,118 @@ def main():
     verifier("jamais de départ négatif",
              P.debut_de_guet_min(tot, "aromepi") == 0)
 
+    print("\n── ⛔ …et la FIN de la fenêtre fine aussi (26/08/2026) ─────")
+    # ⛔ CE QUI MANQUAIT : le début du guet était appris depuis le 10/08,
+    # la fin non — elle restait à `FENETRE_FINE_MIN`, écrite avant la
+    # moindre mesure. Six réseaux AROME sur huit publient au-delà, donc
+    # au moment précis de leur publication ils étaient guettés à 15 min
+    # de période au lieu de 2.
+    verifier("sans observations, on garde le défaut de 120 min",
+             P.fin_de_guet_fin_min([], "arome:0025/HP1") == 120,
+             f"{P.fin_de_guet_fin_min([], 'arome:0025/HP1')}")
+    verifier("3 observations, c'est encore trop peu — défaut",
+             P.fin_de_guet_fin_min(peu, "aromepi") == 120)
+    # d9 de dix valeurs 200…290 : l'indice int(0,9 × 9) = 8 → 280.
+    tardif = [dict(source="arome:0025/HP1", etat="publie",
+                   latence_max_min=v)
+              for v in (200, 210, 220, 230, 240, 250, 260, 270, 280, 290)]
+    verifier("⛔ un réseau qui publie APRÈS H+2 h étire la fenêtre fine "
+             "jusqu'au d9 + marge — sinon on lève le pied à la minute "
+             "où il paraît",
+             P.fin_de_guet_fin_min(tardif, "arome:0025/HP1") == 295,
+             f"d9 = 280 → fin H+"
+             f"{P.fin_de_guet_fin_min(tardif, 'arome:0025/HP1')}")
+    # ⛔ 295 EN DUR, pas `280 + P.MARGE_APPRISE_MIN` : lire la marge
+    # depuis le module ferait bouger les deux côtés de l'égalité et une
+    # mutation de la marge resterait invisible. Le piège nº 1 de la
+    # phase B, qui s'est reproduit deux fois le 26/08.
+    verifier("⚠️ un réseau RAPIDE ne raccourcit PAS la fenêtre sous le "
+             "défaut — le back-off ne doit pas démarrer avant l'heure "
+             "sous prétexte qu'on a eu de la chance",
+             P.fin_de_guet_fin_min(tot, "aromepi") == 120,
+             f"latences 5–10 min → fin H+"
+             f"{P.fin_de_guet_fin_min(tot, 'aromepi')}")
+    # ⚠️ UN SEUL run pathologique ne doit pas tirer la fenêtre : PI a un
+    # max à 207 min pour une médiane de 19. Le d9 suit la population.
+    pi_reel = [dict(source="aromepi", etat="publie", latence_max_min=v)
+               for v in (16, 17, 18, 19, 19, 20, 21, 22, 23, 207)]
+    verifier("⛔ le d9 protège d'un run pathologique isolé — un max à "
+             "207 min ne doit pas faire guetter finement pendant 3 h",
+             P.fin_de_guet_fin_min(pi_reel, "aromepi") == 120,
+             f"max 207 mais d9 = 207 ? → fin H+"
+             f"{P.fin_de_guet_fin_min(pi_reel, 'aromepi')}")
+    verifier("ⓘ la fenêtre apprise commence toujours APRÈS son début — "
+             "une fenêtre inversée ne guetterait jamais finement",
+             all(P.fin_de_guet_fin_min(j, s) > P.debut_de_guet_min(j, s)
+                 for j, s in ((tardif, "arome:0025/HP1"), (tot, "aromepi"),
+                              (assez, "aromepi"), ([], "aromepi"))))
+    lignes = []
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        for e in tardif:
+            P.ecrire_journal(dict(e, run=f"R{e['latence_max_min']}"), j)
+        P.rapport(j, crier=lignes.append)
+    verifier("et le rapport PUBLIE la fenêtre apprise — une fenêtre qui "
+             "ne se voit pas ne se conteste pas",
+             any("fenêtre de guet FINE apprise" in x and "H+295" in x
+                 for x in lignes),
+             next((x.strip() for x in lignes if "FINE apprise" in x), "—"))
+
+    # ⛔⛔ ET LE GUET MULTIPLE PREND LE MAX, PAS LE MIN. Sans ce banc, la
+    # mutation « min au lieu de max » restait invisible — trouvée par
+    # `mutations_poller.py`, pas par une relecture. `choisir_run()` exige
+    # la couverture COMMUNE : c'est le paquet le PLUS LENT qui décide de
+    # la fraîcheur de toute la chaîne. Lever le pied sur lui, c'est
+    # perdre exactement ce qu'on cherche à gagner.
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        run2 = datetime(2026, 8, 10, 0, 0, tzinfo=timezone.utc)
+        # « rapide » a appris une fenêtre courte (défaut 120), « lent »
+        # une fenêtre longue (d9 280 + 15 = 295).
+        hist = ([dict(source="rapide", etat="publie", latence_max_min=v)
+                 for v in (10, 11, 12, 13, 14, 15)]
+                + [dict(source="lent", etat="publie", latence_max_min=v)
+                   for v in (200, 210, 220, 230, 240, 250, 260, 270, 280, 290)])
+        h = Horloge(run2)
+        cibles = [SourceFactice(h, run2 + timedelta(minutes=250),
+                                nom="rapide"),
+                  SourceFactice(h, run2 + timedelta(minutes=250),
+                                nom="lent")]
+        P.guetter_plusieurs(cibles, run2, hist, j, crier=lambda *a: None,
+                            dormir=h.dormir, maintenant=h.maintenant)
+        # À période fine (120 s) sur 250 min, il faut ~125 interrogations.
+        # Avec le back-off démarré à H+120, il en faut nettement moins.
+        n = cibles[1].interrogations
+        verifier("⛔ le guet multiple reste FIN tant que la cible la plus "
+                 "LENTE est dans sa fenêtre — prendre le min lèverait le "
+                 "pied sur le paquet qui commande la chaîne",
+                 n > 100, f"{n} interrogations jusqu'à H+250 "
+                          f"(au back-off dès H+120 il y en aurait ~40)")
+
+    print("\n── ⛔ Le rapport ne mélange plus deux populations ──────────")
+    # ⛔ Le filtre était `":" in source` : il ramassait la rallonge `@51`
+    # avec les paquets 0–24 h et annonçait 60 min d'écart là où il y en a
+    # 14. *Un test sur le NOM d'une source ne définit pas une population.*
+    lignes = []
+    with tempfile.TemporaryDirectory() as d:
+        j = Path(d) / "l.ndjson"
+        for src, lat in (("arome:0025/HP1", 100), ("arome:0025/SP1", 110),
+                         ("arome:0025/HP1@51", 400),
+                         ("arome:0025/SP1@51", 402)):
+            P.ecrire_journal(dict(source=src, run="R1", etat="publie",
+                                  latence_max_min=lat), j)
+        P.rapport(j, crier=lignes.append)
+    plat = "\n".join(lignes)
+    verifier("⛔ les paquets 0–24 h et la rallonge @51 sont rapportés "
+             "SÉPARÉMENT",
+             "produit A, échéances 0–24 h" in plat
+             and "rallonge du produit B" in plat)
+    verifier("⛔ et l'écart du produit A vaut 10 min (110 − 100), pas 302 "
+             "— le mélange donnait le second",
+             "médiane 10 min" in plat and "médiane 302 min" not in plat,
+             next((x.strip() for x in lignes
+                   if "écart premier/dernier" in x), "—"))
+
     print("\n── ⚠️ La latence est un INTERVALLE, jamais un nombre ──────")
     run = datetime(2026, 8, 10, 8, 0, tzinfo=timezone.utc)
     with tempfile.TemporaryDirectory() as d:
