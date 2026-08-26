@@ -17,6 +17,18 @@ python3 dispo3.py        # §1.2 et §3.2 — écart des 8 paquets, modèle vs c
 python3 cadre1.py        # §2  — à l'échéance L, AROME existe-t-il ?
 ```
 
+Pour `premiere_ecriture.py` (§1.3 bis), il faut aussi l'historique des
+Actions — **dépôt public, aucun jeton** :
+
+```
+curl -s "https://api.github.com/repos/biozarb/balise-watch-server/actions/workflows/331042625/runs?per_page=100&created=%3E2026-08-22" > runs_actions.json
+python3 premiere_ecriture.py
+```
+
+`sonde_maille_pi.py` se lance **sur le VPS** (clé Météo-France) et
+répond à « AROME-PI est-il servi en 0,01° ? » — oui pour la rafale, non
+pour le vent moyen.
+
 `sonde_genere_le.py` se lance **sur le VPS**, il lit R2 :
 
 ```

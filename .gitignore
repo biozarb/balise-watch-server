@@ -39,3 +39,4 @@ traces/*.log
 # (/var/lib/bw-model-verif/), il grossit de ~120 lignes par jour, et
 # model-verif/latence/README.md dit comment le rapatrier.
 model-verif/latence/agrume_latence.ndjson
+model-verif/latence/runs_actions.json

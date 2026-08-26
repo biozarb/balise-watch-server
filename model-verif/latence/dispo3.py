@@ -11,7 +11,7 @@ from dispo import latences, dernier_dispo, q, PAS_PI_H, PAS_AROME_H, PAQUETS_A
 
 # mesurés ailleurs, réinjectés ici (cf. la note de phase C)
 LAT_ARCHIVE_PI = 40           # médiane, journal du VPS, n = 168
-LAT_ARCHIVE_A = 399           # médiane genere_le, n = 32 — BORNE SUP.
+LAT_ARCHIVE_A = 271           # 1re ecriture reconstruite, n = 25
 
 
 def main(chemin):

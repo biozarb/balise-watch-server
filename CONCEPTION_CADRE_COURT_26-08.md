@@ -7,6 +7,12 @@ document et les sept questions du §7.
 > sous +4 h par le plancher `MIN_HOURS_DAILY`, et sans intérêt
 > au-dessus** ; le cadre 2 est constructible, et sa difficulté n'est pas
 > la latence — c'est **la maille** et **le produit qu'on y met**.
+>
+> ✅ **Et un dossier se ferme au passage** : les « 3 heures perdues »
+> entre AROME et notre archive n'existent pas. Deux d'entre elles sont
+> une réécriture à l'identique par le filet de sécurité (§1.3 bis) ; la
+> vraie latence de chaîne est d'**une heure**, et c'est du temps de
+> détection, pas de calcul.
 
 ⚠️ **NOTATION.** Aux §1 et §8, `H+n` veut dire *heure du run + n
 minutes*. Aux §2 et §3, `H` est une *heure cible* et `T` un *instant de
@@ -88,20 +94,51 @@ Météo-France. Le pilote, lui, voit ce que NOS colonnes contiennent.
 | colonnes **produit A** | `manifest.json → genere_le`, 22→25/08 | 32 | **H+399 min** ⚠️ |
 
 ⚠️⚠️ **`genere_le` du produit A date la DERNIÈRE écriture, pas la
-première disponibilité — et l'écart n'est pas mesuré.** Deux séries de
-dispatch visent le même workflow (`bw-agrume-poller-paquets` dès les 8
-paquets, `bw-agrume-poller-rallonge` dès la rallonge @51), et la clé
-porte le run : la seconde passe RÉÉCRIT le manifeste de la première.
+première disponibilité.** Deux séries de dispatch visent le même
+workflow (`bw-agrume-poller-paquets` dès les 8 paquets,
+`bw-agrume-poller-rallonge` dès la rallonge @51), plus un cron de
+sécurité à H+4 h 20 — et la clé porte le run : chaque passe RÉÉCRIT le
+manifeste de la précédente, à l'identique, avec un `genere_le` neuf.
 
-Ce qu'on sait : pour le run 00 Z du 25/08, le dispatch part vers
-**H+128** et l'étape colonnes dure **15,6 min**
-(`mesures.duree_min`). L'archive a donc pu être lisible dès **~H+145**.
-`genere_le` dit **H+312**. **Entre H+145 et H+312, on ne sait pas.**
+### 1.3 bis ✅ Les « 3 h manquantes » — élucidées
 
-⛔ **Ne pas lire H+399 comme « AGRUME perd 3 heures ».** C'est une BORNE
-SUPÉRIEURE. Mais l'hypothèse mérite d'être tranchée, parce que le poller
-écrit lui-même que *« la fraîcheur est la seule chose qu'AGRUME
-apporte »*. **→ §8, dossier ouvert.**
+L'historique des GitHub Actions est **public** (aucun jeton) :
+`api.github.com/repos/biozarb/balise-watch-server/actions/workflows/
+331042625/runs`. 90 exécutions du 22 au 26/08, 84 réussies.
+
+En les croisant avec P(R) — l'instant où le dernier des 8 paquets est vu
+— on reconstruit la **première** écriture des colonnes de chaque run
+(`model-verif/latence/premiere_ecriture.py`, n = 25 runs) :
+
+| étape | médiane |
+|---|---|
+| Météo-France publie le dernier des 8 paquets | **H+211** |
+| détection (guet + back-off) puis exécution du workflow | **+60 min** |
+| ⟶ **PREMIÈRE écriture des colonnes** | **H+271** (min 140, max 350) |
+| une passe ultérieure réécrit le même manifeste | **+118 min** |
+| ⟶ `genere_le` tel qu'on le lit aujourd'hui | **H+399** |
+
+⛔ **Il n'y a donc PAS 3 heures perdues.** L'archive du produit A est
+lisible à **H+271**, et les 128 minutes suivantes ne sont qu'une
+réécriture à l'identique par le filet de sécurité. **`genere_le` est
+faux de 2 heures dans le sens pessimiste.**
+
+⚠️ **Ce qui reste vrai** : entre la publication par Météo-France
+(H+211) et notre archive (H+271), il y a **une heure**, et ce n'est
+**pas** la faute du workflow — l'exécution dure **23 min médians et
+n'attend JAMAIS en file** (file d'attente mesurée : 0,0 min sur 84
+exécutions, max 0,0). Le reste est le temps de DÉTECTION : le guet
+élargit sa période jusqu'à 15 min (`PERIODE_MAX_S`) au-delà de
+`FENETRE_FINE_MIN = 120`, et les runs qui publient tard (09, 12, 15 Z)
+paient 58 à 88 min quand ceux qui publient tôt (00, 03 Z) n'en paient
+que 31 à 38. ⓘ **Piste : c'est là qu'une demi-heure de fraîcheur est
+récupérable**, pas dans les 3 h fantômes.
+
+⚠️ **C'est une RECONSTRUCTION, pas une mesure**, et son hypothèse est
+unique : `choisir_run()` retient le run le plus récent dont les 8
+paquets sont couverts, donc un workflow démarrant dans la fenêtre
+[P(R), P(R suivant)[ traite R. L'API ne donne pas l'entrée `run` du
+dispatch ; seuls les journaux de job la porteraient.
 
 ### 1.4 ⚠️ Le manifeste PI n'a pas d'horodatage
 
@@ -188,17 +225,17 @@ chemin exact :
 | | PI | AROME | écart |
 |---|---|---|---|
 | **modèle** (publication MF, latence par heure de run) | 20 → **50** → 80 min | 125 → **295** → 455 min | 60 → **240** → 420 min |
-| **chaîne** (nos colonnes) ⚠️ | 40 → **70** → 95 min | 400 → **490** → 575 min | 360 → **420** → 480 min |
+| **chaîne** (nos colonnes) ⚠️ | 40 → **70** → 95 min | 275 → **365** → 450 min | 180 → **300** → 360 min |
 
 *(min → médiane → max)*
 
 ⚠️ **Les deux lignes ne sont pas construites pareil.** La ligne
 « modèle » utilise les **8 latences médianes par heure de run** (120 à
 276 min). La ligne « chaîne » applique une **constante unique** (PI 40,
-AROME 399) faute de mieux : sa dispersion 400→575 ne mesure donc rien
-d'autre que l'espacement de 3 h entre réseaux. Et son 399 est lui-même
-une borne supérieure (§1.3). **Cette ligne est un ordre de grandeur, pas
-une mesure.**
+AROME **271** — la première écriture reconstruite du §1.3 bis, pas le
+`genere_le` de 399) : sa dispersion ne mesure donc rien d'autre que
+l'espacement de 3 h entre réseaux. **Cette ligne est un ordre de
+grandeur, pas une mesure.**
 
 **Tableau B — les échéances appariées.** Échantillonné à T = h:30.
 
@@ -246,13 +283,39 @@ douceur. À échéance courte, PI existe partout : à +6 h la rampe servirait
 `w = 0`, c'est-à-dire **AROME pur sous une étiquette PI**.
 
 ⛔⛔ **Et si l'on crée une série « PI brut », elle bute sur la MAILLE.**
-PI n'existe qu'en **0,025°** (`domaine.GRID_3D`), quand la base
+
+⚠️ **Attention à la formulation, elle a été contestée à raison.**
+AROME-PI **est** un modèle à maille fine — c'est son objet même, et le
+service `MF-NWP-HIGHRES-AROMEPI-**001**-FRANCE-WCS` existe bel et bien.
+**Ce qui manque, c'est la DIFFUSION du vent moyen à cette maille.**
+Re-sondé le 26/08 (`model-verif/latence/sonde_maille_pi.py`,
+`DescribeCoverage` sur le run 13 Z), et non pas cité d'une note :
+
+| champ | `aromepi/001` | `aromepi/0025` |
+|---|---|---|
+| `U_COMPONENT_OF_WIND` | ⛔ **absent** | ✅ présent |
+| `V_COMPONENT_OF_WIND` | ⛔ **absent** | ✅ présent |
+| `WIND_SPEED` | ⛔ **absent** | ✅ présent |
+| `WIND_SPEED_GUST` | ✅ présent | ✅ présent |
+
+**Le 0,01° de PI ne publie que la RAFALE.** Pour `u`/`v`, c'est 0,025°
+ou rien — la sonde du 10/08 disait déjà exactement cela, et seize jours
+plus tard c'est toujours vrai.
+
+Donc : PI(vent moyen) n'est disponible qu'en **0,025°**, quand la base
 d'`agrume` est en **0,01°** (décision 2 du lot I). La phase B a chiffré
 ce que coûte cette différence : **AROME₁₀ en 0,025° perd 0,122 km/h
 contre le 0,01°** — soit **plus** que les 0,08 km/h qui séparent PI
 d'AROME à maille égale. ⓘ Le code nomme déjà ce piège :
 `agrume_fcst.MAILLE_DELTA` porte le commentaire *« on créditerait
 AROME-PI d'une différence de maille »*.
+
+ⓘ **Et une piste qui dort depuis le 10/08** : les familles rafale de
+`aromepi/001` — dont `WIND_SPEED_GUST_15MIN` sur niveaux hauteur —
+**n'ont aucun équivalent dans AROME classique**. C'est de la rafale à
+maille fine, au pas de 15 min, avec 19 min de latence. Hors périmètre de
+la phase C, mais c'est le seul endroit du portail où « maille fine +
+forte fraîcheur » existe vraiment ensemble.
 
 > **Conséquence : une classe à échéance courte doit opposer PI(0,025°) à
 > AROME(0,025°), pas à `agrume`(0,01°).** Sinon PI part avec ~0,20 km/h
@@ -397,11 +460,12 @@ jour (p. ex. 06:30 et 12:30 Z) doublent la matière, au prix de deux fois
 plus de lignes.
 
 **Q5 · Fraîcheur du MODÈLE ou fraîcheur de la CHAÎNE ?**
-Écart **médian 4 h** à la publication Météo-France ; **médian ~7 h**
-(max 8 h) à l'écriture de nos colonnes — ce second chiffre étant un
-ordre de grandeur, pas une mesure (§3.2). Le pilote vit le second. Mais
-si une partie de l'écart est notre propre chaîne, la classe créditerait
-PI d'une lenteur qui est la nôtre.
+Écart **médian 4 h** à la publication Météo-France ; **médian 5 h** à
+l'écriture de nos colonnes (§1.3 bis — et non 7 h, `genere_le`
+surestimait de 2 h). Le pilote vit le second. **L'heure d'écart entre
+les deux est notre chaîne**, et elle est presque entièrement du temps de
+DÉTECTION, pas de calcul : la classe créditerait donc PI d'une heure qui
+est la nôtre — à moins qu'on ne la récupère d'abord (§8).
 
 **Q6 · Heures rondes, ou faut-il payer le pas de 15 min ?**
 Le pas de 15 min oblige à rouvrir `OBS_HALF_WINDOW_MS` (§6.1).
@@ -417,27 +481,36 @@ l'AROME pur sous une étiquette PI à l'échéance +6 h.
 
 ## 8. Ce qui reste ouvert
 
-- ⬜ **Les ~3 h entre la publication AROME (H+211) et `genere_le`
-  (H+399).** Borne supérieure, cause non établie. Dossier propre, et
-  potentiellement plus gros que la phase C entière.
+- ✅ **Les « 3 h » entre la publication AROME et `genere_le` : ÉLUCIDÉES**
+  (§1.3 bis). Deux heures sont une réécriture à l'identique par le filet
+  de sécurité ; la vraie latence de chaîne est d'**une heure**, et elle
+  est du temps de DÉTECTION.
+- ⬜ **Récupérer cette heure de détection.** Le back-off du guet monte à
+  15 min au-delà de `FENETRE_FINE_MIN = 120`, alors que le journal sait
+  maintenant que 6 réseaux sur 8 publient APRÈS H+2 h. Une fenêtre fine
+  apprise par heure de run (le poller apprend déjà `debut_de_guet_min`,
+  mais pas `FENETRE_FINE_MIN`) rendrait ~30 min sur ces réseaux-là, pour
+  quelques centaines d'octets de requêtes en plus.
+- ⬜ **Cesser de réécrire un manifeste identique.** Le filet à H+4 h 20
+  refait 23 min de travail pour un objet déjà correct, et efface au
+  passage la seule trace de la vraie disponibilité.
 - ⬜ **La cadence de report des Pioupiou**, qui décide si le pas de
   15 min est atteignable.
 - ⬜ **Une série PI(0,025°) et une série AROME(0,025°)** n'existent pas
   et devraient être créées (§3.3, Q3).
 - ⬜ **Le rendu à l'écran** — aucun navigateur connecté à cette session.
-- ⬜ **Accord pour pousser** `b39538e` (phase A) et `4573e34` (phase B).
+- ✅ **Poussé** : `b39538e` (phase A), `4573e34` (phase B), `ac2f56f`
+  (phase C).
 
 ## 9. Ce qui n'a PAS été vérifié
 
-- ⬜ **La double écriture du manifeste produit A est une DÉDUCTION**
-  (deux séries de dispatch sur le même workflow, clé portant le run),
-  pas une observation run par run : l'historique des Actions n'est pas
-  accessible d'ici (`gh` absent du Mac).
+- ⬜ **L'attribution d'un workflow à un run AROME est une
+  RECONSTRUCTION** (§1.3 bis), fondée sur `choisir_run()` : l'API des
+  Actions ne rend pas l'entrée `run` du dispatch, seuls les journaux de
+  job la porteraient. n = 25 runs.
 - ⬜ **`H+40` pour les colonnes PI** vient de `journalctl` sur **7 jours**
   (n = 168), pas d'un champ d'archive.
-- ⬜ **`H+399` pour le produit A** repose sur **4 journées** (n = 32) ;
-  le « H+312 » et le « 15,6 min » du run 00 Z sont **une seule
-  observation**.
+- ⬜ **`H+399` pour le produit A** repose sur **4 journées** (n = 32).
 - ⬜ **Une autre route pour AROME.** `poller.fabriquer_source` connaît un
   `arome-wcs` (le portail plutôt que le miroir S3) et personne n'a
   mesuré s'il publie plus tôt. Si oui, le §2 changerait encore.
