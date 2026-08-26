@@ -6,6 +6,63 @@
 
 ---
 
+## 26/08/2026 (phase B) — quatre bancs verts qui ne tenaient rien
+
+La mesure Δ(10 m) contre Δ(20 m) étendu (`sonde_delta_10m.py`) ne sert
+personne : elle sort des chiffres qui décident d'un changement de
+produit. Une sonde fausse ne casse donc rien — elle publie un résultat
+crédible. Les 21 bancs écrits pour elle sont passés du premier coup ;
+**quatre d'entre eux ne tenaient rien**, et seule la mutation l'a dit.
+
+**Piège nº 1 — un banc qui vérifie une valeur AVEC un intermédiaire
+produit par le code testé compare la faute à elle-même.** Le banc de la
+rampe calculait `T1 = base + w·Δ` en relisant la colonne `w` du tableau.
+La mutation « `w = 1.0` partout » écrasait cette colonne AUSSI : les deux
+côtés de l'égalité bougeaient ensemble, le banc restait vert. Fix : la
+colonne est confrontée à `poids_pi`, pas reprise telle quelle. *Un
+intermédiaire du code testé n'est pas une référence.*
+
+**Piège nº 2 — un jeu d'essai trop RÉGULIER rend la mutation
+indétectable, et ça s'est produit trois fois de suite.**
+· observation à 270° comme le modèle → l'erreur vectorielle valait
+  exactement l'erreur scalaire, donc changer de masque ne changeait rien ;
+· deux journées identiques → « appris sur une moitié, évalué sur l'autre »
+  rendait le même nombre que « appris et évalué sur la même » ;
+· composantes `v` toutes nulles → un Δ de placebo fabriqué à zéro était
+  indiscernable d'un Δv légitimement nul.
+*Le jeu d'essai doit être irrégulier DANS LA DIMENSION où vit la
+propriété testée.* Trois scènes ont dû être refaites pour ça.
+
+**Piège nº 3 — deux tableaux d'un même rapport qui calculent chacun leur
+propre masque.** Le `rms` de T0 sortait à **8,2277** dans un tableau et
+**8,1476** dans le suivant : même série, même rapport, deux pages
+d'écart. Aucun des deux n'était faux — c'est la comparaison entre les
+deux qui l'aurait été, et un lecteur attribue ce genre d'écart à un effet
+physique. *Un rapport a UN masque, calculé sur toutes ses séries à la
+fois.*
+
+**Piège nº 4 — `hash()` dans quoi que ce soit qui doive être rejouable.**
+Le hachage des chaînes de Python est randomisé par processus
+(`PYTHONHASHSEED`) : la graine du témoin placebo changeait à chaque
+exécution, sans qu'une ligne ne le dise. `zlib.crc32` est spécifié.
+
+**Et le contrôle qui vaut plus que les 21 bancs réunis** : la sonde a été
+confrontée à l'archive que le job de production a réellement écrite
+(`fcstagrume_2026-08-25.ndjson.gz`, run 00 Z). **1 461 valeurs, écart
+maximal 0,0000 km/h** sur les deux séries. *Un banc prouve que l'outil
+fait ce que son auteur croit ; seule la confrontation à la production
+prouve qu'il mesure la même chose que le job qui tourne la nuit.*
+(`sonde_delta_10m_prod.py`, à lancer sur le VPS.)
+
+**⚠️ Et un fait d'archive qui périme un protocole** : le protocole de
+phase B demandait « au moins deux semaines d'archive ». **Impossible :
+`agrume/colonnes/` est purgé à 7 jours** (`verif/purge.py::
+RETENTION_JOURS`). Les colonnes PI, elles, sont définitives depuis
+mi-août. *Avant d'écrire un protocole de mesure, lire la rétention de
+CHAQUE archive dont il dépend — pas seulement de celle dont on parle.*
+
+---
+
 ## 26/08/2026 — le score notait un produit que personne ne sert
 
 Question de Yann : *« je pensais qu'on aurait de meilleurs scores grâce
