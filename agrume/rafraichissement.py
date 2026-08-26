@@ -601,11 +601,22 @@ class Rafraichissement:
             # n'a pas. Il vient de `composite.composer()` tel quel — pas
             # recopié, pas reformulé.
             niveaux=list(self.diagnostic["niveaux"]),
+            # ⛔ FORMULATION CORRIGÉE LE 26/08/2026. Elle disait « à
+            # `poids_pi = 1` » — une condition que `poids_pi` ne REMPLIT
+            # PLUS JAMAIS depuis que le composite mélange (α = 0,5) au
+            # lieu de remplacer. Le client aurait affiché une condition
+            # inatteignable, c'est-à-dire une table qu'il n'aurait plus
+            # jamais eu le droit de lire. Ce qui compte ici est la
+            # DISPONIBILITÉ de PI, pas le poids qu'on lui accorde.
             niveaux_valables_si=(
-                "⚠️ la table `niveaux` décrit le régime à `poids_pi = 1`, "
-                "c'est-à-dire jusqu'à 4 h. Au-delà, la rampe d'horizon "
-                "éteint Δ et la résolution EFFECTIVE de chaque échéance "
-                "est dans `provenance.par_echeance[*].blocs.hauteur`."),
+                "⚠️ la table `niveaux` décrit le régime tant que PI est "
+                "PLEINEMENT DISPONIBLE, c'est-à-dire jusqu'à 4 h. Au-delà, "
+                "la rampe d'horizon éteint Δ et la résolution EFFECTIVE de "
+                "chaque échéance est dans "
+                "`provenance.par_echeance[*].blocs.hauteur`. ⓘ Le poids "
+                "servi vaut α × disponibilité (voir `conventions.melange`) "
+                "et ne vaut donc jamais 1 : le composite MÉLANGE AROME et "
+                "AROME-PI, il ne remplace pas l'un par l'autre."),
             poids_pi=list(self.diagnostic["poids_pi"]),
             conventions=dict(self.diagnostic["conventions"]),
             mesures=dict(self.diagnostic["mesures"]),
@@ -643,11 +654,18 @@ class Rafraichissement:
 #  LA COMPOSITION
 # ══════════════════════════════════════════════════════════════════════
 def composer_rafraichissement(pi_uv, lats, lons, run_pi, domaine, st,
-                              journal=crier):
+                              journal=crier, alpha=None):
     """Lit le produit B, compose, et rend un `Rafraichissement`.
 
     `pi_uv` : `(2, len(NIVEAUX_PI), 25, nb_lat, nb_lon)` — `u` et `v` de
     la grille PI, dans cet ordre, sur les 6 niveaux et les 25 échéances.
+
+    ⓘ `alpha` n'existe QUE pour les bancs, et il se contente de traverser
+    jusqu'à `composite.composer()` — voir la note qui y est écrite. Il
+    permet de rejouer l'invariant historique (« le composite reproduit
+    PI ») en forçant α = 1, sans que la production serve ce réglage : la
+    phase B l'a mesuré moins bon qu'AROME seul. **Aucun appelant de
+    production ne doit le passer.**
     """
     if not pi_couvre(domaine):
         raise Abort(POURQUOI_PAS_DE_PI.format(
@@ -673,7 +691,8 @@ def composer_rafraichissement(pi_uv, lats, lons, run_pi, domaine, st,
 
     t0 = time.monotonic()
     comp, diag = composer(a.astype(np.float64), uv_b.astype(np.float64),
-                          steps, decalage_min=decalage, niveaux_cibles=NIVEAUX)
+                          steps, decalage_min=decalage, niveaux_cibles=NIVEAUX,
+                          alpha=alpha)
     journal(f"     composite calculé en {time.monotonic() - t0:.2f} s "
             f"({comp.shape})")
     return Rafraichissement(run_pi, domaine, run_b, steps, decalage,

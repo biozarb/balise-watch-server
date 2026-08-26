@@ -131,14 +131,22 @@ import numpy as np                                          # noqa: E402
 
 from collect import temoin, upload_r2, write_ndjson_gz      # noqa: E402
 from colonnes import Colonnes                               # noqa: E402
-# ⛔ LA RAMPE `w_PI(τ)` ET LE CHEMIN DES COLONNES PI S'IMPORTENT, ILS NE
-# SE RECOPIENT PAS. `poids_pi` est la MÊME fonction que celle du
-# composite servi à l'écran : si un jour la rampe change (elle a déjà
-# été corrigée une fois — elle finissait à 7 h alors que PI s'arrête à
-# 6 h), le score suivra sans qu'on ait à y penser. Une seconde copie
-# ferait exactement l'inverse : un écran et un score qui divergent
-# lentement, sans qu'une ligne ne le dise.
-from composite import poids_pi                              # noqa: E402
+# ⛔ LA RAMPE `w_PI(τ)`, LE FACTEUR DE CISAILLEMENT ET LE CHEMIN DES
+# COLONNES PI S'IMPORTENT, ILS NE SE RECOPIENT PAS. Ce sont les MÊMES
+# fonctions que celles du composite servi à l'écran : si un jour la
+# rampe change (elle a déjà été corrigée deux fois — elle finissait à
+# 7 h alors que PI s'arrête à 6 h, puis elle plafonnait à 1 alors que
+# le composite doit MÉLANGER), le score suivra sans qu'on ait à y
+# penser. Une seconde copie ferait exactement l'inverse : un écran et
+# un score qui divergent lentement, sans qu'une ligne ne le dise.
+#
+# ⚠️⚠️ ET C'EST ARRIVÉ, LE 26/08 AU SOIR, DANS CE FICHIER MÊME. Le
+# facteur de cisaillement a d'abord été câblé dans `etendre_delta`
+# seul : l'écran l'a reçu, ce flux-ci NON — il étend Δ au 10 m par son
+# propre chemin, sans passer par `etendre_delta`. Deux « AGRUME » se
+# remettaient à diverger, exactement comme le matin même. C'est un banc
+# qui l'a dit, pas une relecture.
+from composite import facteur_cisaillement, poids_pi        # noqa: E402
 from pi import cles_du_run_colonnes                         # noqa: E402
 from profil import decorer_vent                             # noqa: E402
 from score import fcst_agrume_key                           # noqa: E402
@@ -558,7 +566,20 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
             if not all(np.isfinite(x) for x in (u_pi, v_pi, u_ar, v_ar)):
                 n_repli += 1
                 continue
-            par_heure[h] = (w * (u_pi - u_ar), w * (v_pi - v_ar))
+            # ⛔ DEUX facteurs, et ils répondent à deux questions
+            # différentes — les confondre est ce qui a fait servir « PI
+            # seul maître » pendant deux semaines :
+            #   · `w`  = disponibilité × confiance (`poids_pi`) ;
+            #   · `kz` = remise à l'échelle de Δ, mesuré à 20 m et
+            #            appliqué à 10 m. Δ est une différence de vents,
+            #            son amplitude suit celle du vent : le servir
+            #            tel quel au 10 m applique une correction
+            #            calibrée pour un vent 30 % plus fort.
+            # ⚠️ `kz` est IMPORTÉ de `composite`, jamais recopié : c'est
+            # la même règle que l'écran, et la note d'import ci-dessus
+            # raconte ce qui arrive quand on l'oublie.
+            f = w * facteur_cisaillement(NIVEAU_DELTA_APPLIQUE)
+            par_heure[h] = (f * (u_pi - u_ar), f * (v_pi - v_ar))
         if par_heure:
             out[k] = par_heure
 

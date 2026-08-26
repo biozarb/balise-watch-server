@@ -168,12 +168,28 @@ def test_invariant_du_composite():
     v20 = float(col.c0025[0, col.i_param_0025["v"], j20, 0])
     du, dv = 5.0 - u20, 1.0 - v20
 
-    attendu = decorer_vent({"u": u10 + du, "v": v10 + dv})
+    # ⛔ LES DEUX FACTEURS SONT ÉCRITS EN DUR, PAS LUS DU MODULE.
+    # `0.5` est α (le composite MÉLANGE AROME et PI, il ne remplace
+    # pas) ; `0.766` est le cisaillement mesuré entre 10 et 20 m. Les
+    # lire depuis `composite` ferait bouger les deux côtés de l'égalité
+    # ensemble : une mutation « α = 1 » resterait invisible. C'est le
+    # piège nº 1 de la phase B, et il s'est reproduit le 26/08 au soir
+    # dans `test_composite.py` avant d'être attrapé par la mutation.
+    ALPHA, KAPPA = 0.5, 0.766
+    attendu = decorer_vent({"u": u10 + ALPHA * KAPPA * du,
+                            "v": v10 + ALPHA * KAPPA * dv})
     verifie(abs(r["speed"][0] - attendu["vitesseKmh"]) < 1e-9,
-            f"h=0, w=1 : le 10 m composite vaut AROME₁₀ + Δ(20 m) "
+            f"h=0, rampe=1 : le 10 m composite vaut AROME₁₀ + α·κ·Δ(20 m) "
             f"({r['speed'][0]} = {attendu['vitesseKmh']})")
     verifie(abs(r["dir"][0] - attendu["directionDeg"]) < 1e-9,
             f"h=0 : la direction suit le même calcul ({r['dir'][0]}°)")
+    # ⚠️ ET LE CONTRÔLE QUI EMPÊCHE CE BANC DE DEVENIR DÉCORATIF : le
+    # composite ne doit PAS valoir AROME₁₀ + Δ tel quel. C'est ce qu'il
+    # valait jusqu'au 26/08, et c'est mesurément moins bon qu'AROME nu.
+    nu = decorer_vent({"u": u10 + du, "v": v10 + dv})
+    verifie(abs(r["speed"][0] - nu["vitesseKmh"]) > 1.0,
+            f"⛔ et il ne vaut PLUS AROME₁₀ + Δ brut — le remplacement "
+            f"d'AROME par PI ({r['speed'][0]:.2f} ≠ {nu['vitesseKmh']:.2f})")
 
     # ⛔ LE SIGNE. Δ = PI − AROME, jamais l'inverse. Ici PI souffle plus
     # fort qu'AROME (5 contre 2) : le composite doit être PLUS VENTÉ que
@@ -243,14 +259,25 @@ def test_appariement_par_identifiant():
                             ordre=[2, 1, 0])
     d = A.delta_20m(col, d_pi, m_pi, crier=muet)
 
-    # Balise 0 du produit A = « 70 » → Δ = (10, 0) ; balise 1 = « 1377 »
-    # → Δ = (0, 10). Croisés, on lirait exactement l'inverse.
-    verifie(abs(d[0][0][0] - 10.0) < 1e-6 and abs(d[0][0][1]) < 1e-6,
-            f"« 70 » reçoit SON Δ (10, 0) malgré l'axe PI retourné "
-            f"— lu ({d[0][0][0]:.1f}, {d[0][0][1]:.1f})")
-    verifie(abs(d[1][0][0]) < 1e-6 and abs(d[1][0][1] - 10.0) < 1e-6,
-            f"« 1377 » reçoit SON Δ (0, 10) — lu "
-            f"({d[1][0][0]:.1f}, {d[1][0][1]:.1f})")
+    # Balise 0 du produit A = « 70 » → Δ porté par u ; balise 1 =
+    # « 1377 » → Δ porté par v. Croisés, on lirait exactement l'inverse.
+    #
+    # ⛔ CE BANC TESTE L'APPARIEMENT, PAS L'AMPLITUDE, et il est écrit
+    # pour rester vrai quels que soient α et κ : ce qui l'intéresse est
+    # QUEL Δ arrive à QUELLE balise. Un banc d'appariement qui tomberait
+    # à chaque changement de pondération finirait par être « corrigé »
+    # sans qu'on lise ce qu'il dit.
+    verifie(d[0][0][0] > 1e-6 and abs(d[0][0][1]) < 1e-9,
+            f"« 70 » reçoit SON Δ (porté par u) malgré l'axe PI retourné "
+            f"— lu ({d[0][0][0]:.3f}, {d[0][0][1]:.3f})")
+    verifie(abs(d[1][0][0]) < 1e-9 and d[1][0][1] > 1e-6,
+            f"« 1377 » reçoit SON Δ (porté par v) — lu "
+            f"({d[1][0][0]:.3f}, {d[1][0][1]:.3f})")
+    # ⚠️ Et l'amplitude séparément, avec les facteurs EN DUR (cf. le
+    # banc du 10 m) : Δ posé à 10, servi à 10 × 0,5 × 0,766.
+    verifie(abs(d[0][0][0] - 10.0 * 0.5 * 0.766) < 1e-6,
+            f"et il arrive à l'échelle α·κ — {d[0][0][0]:.4f} pour "
+            f"{10.0 * 0.5 * 0.766:.4f} attendu")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -291,9 +318,14 @@ def test_delta_pris_dans_la_bonne_maille():
                          base20_fine=lambda k, s: (-7.0, 0.0))  # en 0,01°
     d_pi, m_pi = archive_pi(lambda i, m: (5.0, 0.0))
     d = A.delta_20m(col, d_pi, m_pi, crier=muet)
-    verifie(abs(d[0][0][0] - 3.0) < 1e-6,
-            f"Δu = PI − AROME(0,025°) = 5 − 2 = 3 — lu {d[0][0][0]:.2f} "
-            f"(le 0,01° aurait donné 12)")
+    # ⛔ Les facteurs EN DUR (cf. le banc du 10 m) : α = 0,5, κ = 0,766.
+    # Ce qui discrimine reste ENTIER — 3 contre 12 avant pondération,
+    # donc 1,149 contre 4,596 après : les deux mailles ne peuvent pas
+    # se confondre, quelle que soit la pondération.
+    bon, mauvais = 3.0 * 0.5 * 0.766, 12.0 * 0.5 * 0.766
+    verifie(abs(d[0][0][0] - bon) < 1e-6,
+            f"Δu = α·κ·(PI − AROME(0,025°)) = α·κ·(5 − 2) = {bon:.3f} — "
+            f"lu {d[0][0][0]:.3f} (le 0,01° aurait donné {mauvais:.3f})")
 
 
 # ══════════════════════════════════════════════════════════════════

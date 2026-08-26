@@ -99,13 +99,27 @@ def main():
 
     i_pi = [NIVEAUX_PI.index(z) for z in NIVEAUX_DELTA]
     i_co = [list(NIVEAUX_H_0025).index(z) for z in NIVEAUX_DELTA]
-    pleins = [k for k, m in enumerate(ECHEANCES_MIN) if poids_pi(m) == 1.0]
-    ecart = np.abs(comp[:, i_co][:, :, pleins] - pi[:, i_pi][:, :, pleins])
-    verifier("⚠️⚠️ aux 5 niveaux communs et tant que w_PI = 1, "
-             "composite == PI À LA PRÉCISION MACHINE",
+    # ⛔ L'invariant se vérifie À α = 1 FORCÉ, et plus en production
+    # (26/08/2026). Il teste que les deux termes de l'arithmétique se
+    # compensent exactement — une propriété du RACCORD, pas un réglage.
+    # La production sert α = 0,5 : y exiger « composite == PI » serait
+    # exiger le remplacement d'AROME par PI, c'est-à-dire précisément
+    # ce que la phase B a mesuré comme moins bon qu'AROME seul.
+    comp1, _ = composer(pi, ar, steps, alpha=1.0)
+    pleins = [k for k, m in enumerate(ECHEANCES_MIN) if CO.rampe_pi(m) == 1.0]
+    ecart = np.abs(comp1[:, i_co][:, :, pleins] - pi[:, i_pi][:, :, pleins])
+    verifier("⚠️⚠️ aux 5 niveaux communs, À α = 1 FORCÉ et tant que la "
+             "rampe vaut 1, composite == PI À LA PRÉCISION MACHINE",
              float(ecart.max()) < 1e-9,
              f"écart max {float(ecart.max()):.2e} m/s sur "
              f"{ecart.size} valeurs")
+    # ⚠️ Et le contrôle qui empêche ce banc de devenir décoratif : en
+    # PRODUCTION l'invariant doit être FAUX, sinon α ne sert à rien.
+    ecart_prod = np.abs(comp[:, i_co][:, :, pleins] - pi[:, i_pi][:, :, pleins])
+    verifier("⛔ et EN PRODUCTION (α = 0,5) le composite n'est PAS PI — "
+             "sinon on aurait recâblé le remplacement sans le voir",
+             float(ecart_prod.max()) > 0.1,
+             f"écart max {float(ecart_prod.max()):.3f} m/s")
     verifier("et ça porte sur les échéances NON RONDES aussi "
              "(c'est tout l'objet du §4.3)",
              len(pleins) == 17 and 15 in [ECHEANCES_MIN[k] for k in pleins],
@@ -133,8 +147,8 @@ def main():
     # aux quarts d'heure. L'invariant ci-dessus l'exclut déjà ; on le
     # vérifie ici SÉPARÉMENT, sur une échéance non ronde isolée.
     k15 = ECHEANCES_MIN.index(15)
-    e15 = np.abs(comp[:, i_co, k15] - pi[:, i_pi, k15])
-    verifier("à τ = 15 min, le composite vaut PI exactement",
+    e15 = np.abs(comp1[:, i_co, k15] - pi[:, i_pi, k15])
+    verifier("à τ = 15 min, le composite vaut PI exactement (α = 1 forcé)",
              float(e15.max()) < 1e-9, f"{float(e15.max()):.2e}")
 
     print("\n── 3. ⚠️ Interpolation sur u et v, jamais sur l'angle ──")
@@ -150,24 +164,74 @@ def main():
              min(dir_uv, 360 - dir_uv) < 1.0, f"{dir_uv:.2f}°")
 
     print("\n── 4. ⚠️ La rampe s'arrête à l'HORIZON de PI ──")
-    verifier("w = 1 jusqu'à 4 h", poids_pi(0) == 1.0 and poids_pi(240) == 1.0)
-    verifier("w = 0,5 à 5 h (milieu de la rampe)", poids_pi(300) == 0.5)
-    verifier("⛔ w = 0 à 6 h — et PAS une valeur non nulle qui réclamerait "
-             "un PI inexistant (le §4.3 écrivait 7 h)",
-             poids_pi(360) == 0.0 and CO.TAU_FIN_MIN == 360)
-    verifier("w décroît sans jamais remonter",
-             all(poids_pi(a) >= poids_pi(b)
+    verifier("la DISPONIBILITÉ vaut 1 jusqu'à 4 h",
+             CO.rampe_pi(0) == 1.0 and CO.rampe_pi(240) == 1.0)
+    verifier("elle vaut 0,5 à 5 h (milieu de la rampe)",
+             CO.rampe_pi(300) == 0.5)
+    verifier("⛔ elle vaut 0 à 6 h — et PAS une valeur non nulle qui "
+             "réclamerait un PI inexistant (le §4.3 écrivait 7 h)",
+             CO.rampe_pi(360) == 0.0 and CO.TAU_FIN_MIN == 360)
+    verifier("elle décroît sans jamais remonter",
+             all(CO.rampe_pi(a) >= CO.rampe_pi(b)
                  for a, b in zip(ECHEANCES_MIN, ECHEANCES_MIN[1:])))
     verifier("le diagnostic publie la rampe en toutes lettres",
              "6 h" in diag["conventions"]["rampe"])
+
+    print("\n── 4 bis. ⛔ α : le composite MÉLANGE, il ne remplace pas ──")
+    verifier("⛔ α ne vaut PAS 1 — `AROME + 1·(PI − AROME)` EST `PI`, et "
+             "la phase B l'a mesuré moins bon qu'AROME seul",
+             CO.ALPHA_MELANGE < 1.0, f"α = {CO.ALPHA_MELANGE}")
+    verifier("α est dans ]0 ; 1[ — hors de là ce n'est plus un mélange",
+             0.0 < CO.ALPHA_MELANGE < 1.0)
+    verifier("le poids servi est le PRODUIT des deux, à toute échéance",
+             all(abs(poids_pi(m) - CO.ALPHA_MELANGE * CO.rampe_pi(m)) < 1e-12
+                 for m in ECHEANCES_MIN))
+    verifier("⚠️ le poids servi ne dépasse JAMAIS α, même à τ = 0",
+             max(poids_pi(m) for m in ECHEANCES_MIN) <= CO.ALPHA_MELANGE)
+    verifier("`alpha=1` force le remplacement — c'est le seul usage, et "
+             "il est réservé aux bancs",
+             poids_pi(0, alpha=1.0) == 1.0)
+    verifier("le diagnostic PUBLIE α, pas seulement le poids résultant "
+             "(sinon un lecteur ne peut pas séparer disponibilité et "
+             "confiance)",
+             diag.get("alpha_melange") == CO.ALPHA_MELANGE
+             and "moyenne" in diag["conventions"]["melange"].lower())
+    verifier("ⓘ et le poids publié à τ = 0 vaut bien α",
+             abs(diag["poids_pi"][0] - CO.ALPHA_MELANGE) < 1e-9,
+             f"{diag['poids_pi'][0]}")
 
     print("\n── 5. ⚠️ Pas de marche au ras du sol ──")
     d = np.array([[1.0, 2.0, 3.0, 4.0, 5.0]])          # (1, 5) sur 20…500
     e = etendre_delta(d)
     z = list(NIVEAUX_H_0025)
-    verifier("Δ(10 m) vaut Δ(20 m) — étendu, pas mis à zéro",
-             e[0, z.index(10)] == e[0, z.index(20)] == 1.0,
-             f"10 m → {e[0, z.index(10)]}")
+    verifier("Δ(10 m) n'est PAS mis à zéro — ce serait une marche au ras "
+             "du sol, exactement là où vit le pilote",
+             e[0, z.index(10)] > 0.0, f"10 m → {e[0, z.index(10)]:.4f}")
+    verifier("⛔ mais il ne vaut PAS Δ(20 m) non plus : il est REMIS À "
+             "L'ÉCHELLE du cisaillement mesuré (l'extension constante "
+             "appliquait au 10 m une correction calibrée pour un vent "
+             "30 % plus fort)",
+             # ⛔ 0.766 EN DUR, PAS `CO.CISAILLEMENT_10_20`. Comparer la
+             # sortie du code à la constante du code, c'est comparer la
+             # faute à elle-même : la mutation « cisaillement = 1,0 »
+             # déplaçait les DEUX côtés de l'égalité et le banc restait
+             # vert. C'est le piège nº 1 de la phase B, reproduit à
+             # l'identique le même jour. La valeur littérale vient de la
+             # mesure (‖V(10)‖/‖V(20)‖ = 0,766), pas du fichier testé.
+             abs(e[0, z.index(10)] - 0.766) < 1e-9,
+             f"10 m → {e[0, z.index(10)]:.4f}, attendu 0.766")
+    verifier("⛔ et la constante elle-même est bien une RÉDUCTION — un "
+             "cisaillement à 1,0 serait l'extension constante d'avant",
+             0.5 < CO.CISAILLEMENT_10_20 < 1.0,
+             f"κ = {CO.CISAILLEMENT_10_20}")
+    verifier("⚠️ et Δ(20 m) reste INTACT — c'est le niveau où il est "
+             "MESURÉ, le facteur y vaut exactement 1",
+             e[0, z.index(20)] == 1.0, f"20 m → {e[0, z.index(20)]}")
+    verifier("ⓘ 10 m est le SEUL niveau de l'axe AROME sous 20 m — si un "
+             "autre apparaissait, le facteur mesuré à 10 m ne vaudrait "
+             "pas pour lui et ce banc doit tomber",
+             [zz for zz in NIVEAUX_H_0025 if zz < 20] == [10],
+             str([zz for zz in NIVEAUX_H_0025 if zz < 20]))
     verifier("Δ est interpolé entre deux niveaux PI (35 m entre 20 et 50)",
              1.0 < e[0, z.index(35)] < 2.0, f"{e[0, z.index(35)]:.3f}")
     verifier("Δ s'éteint linéairement : à 750 m il vaut la moitié de "

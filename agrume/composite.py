@@ -64,8 +64,61 @@ class Abort(Exception):
 # vers 0 entre 4 et 7 h ». **Mais PI s'arrête à 6 h** (§2 du lot). Entre
 # 6 et 7 h la formule réclamait un PI qui n'existe pas — la rampe aurait
 # pondéré du vide. Elle finit donc à 6 h.
-TAU_PLEIN_MIN = 240        # 4 h : PI seul maître
-TAU_FIN_MIN = 360          # 6 h : horizon de PI, w = 0
+TAU_PLEIN_MIN = 240        # 4 h : PI pleinement disponible
+TAU_FIN_MIN = 360          # 6 h : horizon de PI, rampe = 0
+
+# ── ⛔⛔ LE POIDS DE MÉLANGE — séparé de la rampe le 26/08/2026 ────────
+#
+#  Jusqu'ici un seul nombre portait DEUX questions différentes, et c'est
+#  ce qui a caché l'erreur pendant deux semaines :
+#
+#    · la RAMPE   = quelle PART de l'information de PI existe à cette
+#                   échéance. C'est une propriété du produit (PI porte
+#                   6 h), elle ne se discute pas.
+#    · ALPHA      = quelle CONFIANCE on lui accorde là où elle existe.
+#                   C'est un choix, et il était implicitement à 1.
+#
+#  ⛔ `α = 1` NE CORRIGE PAS AROME AVEC PI : IL LE REMPLACE. L'algèbre
+#  est exacte et elle ne laisse aucune place au doute :
+#
+#      AROME + α·Δ = AROME + α·(PI − AROME) = (1−α)·AROME + α·PI
+#
+#  À α = 1 il ne reste que PI. La rampe « 1 jusqu'à 4 h » disait donc
+#  « PI seul maître », et personne ne l'avait décidé.
+#
+#  ── CE QUE LA MESURE DIT (phase B, 26/08) ────────────────────────────
+#  78 144 couples appariés, 256 balises, 8 journées, contre les balises
+#  Pioupiou, au 10 m. Réglage APPRIS, donc évalué HORS ÉCHANTILLON
+#  (appris sur une moitié des journées, évalué sur l'autre, et
+#  réciproquement) :
+#
+#      α* ≈ 0,4–0,5   ·   gain +0,08 à +0,15 km/h de rms
+#      α = 1 (l'ancien réglage) est MOINS BON qu'AROME seul.
+#
+#  ✅ Et le contrôle interne tombe juste : la seule échéance où l'ancien
+#  composite battait AROME était +5 h, c'est-à-dire la seule où la rampe
+#  valait déjà 0,5. La courbe en α et le tableau par échéance disent la
+#  même chose par deux chemins indépendants.
+#
+#  ── ⚠️ POURQUOI 0,5 EST UN PRINCIPE ET PAS UN AJUSTEMENT ─────────────
+#  0,5 n'est pas « la valeur qui minimise l'erreur sur 8 journées
+#  d'août » — ce serait un réglage appris sur une saison, et il ne
+#  survivrait pas à janvier. C'est **la moyenne de deux prévisions de
+#  qualité comparable** : la phase B a mesuré PI à +0,08 km/h d'AROME à
+#  échéance ET maille égales, c'est-à-dire à égalité. Que la moyenne de
+#  deux prévisions comparables batte chacune d'elles est le résultat le
+#  plus classique de la prévision d'ensemble. La mesure ne CHOISIT pas
+#  0,5, elle CONFIRME le principe là où on peut regarder.
+#
+#  ⛔⛔ ET IL FAUT DIRE OÙ ON PEUT REGARDER : au 10 m, contre des
+#  anémomètres. `poids_pi` multiplie Δ à TOUS les niveaux — 20, 50, 100,
+#  250, 500 m — et rien ne mesure le vent à 250 m au-dessus d'un site de
+#  vol. L'extension de α à toute la colonne est donc un PRINCIPE assumé,
+#  arbitré par Yann le 26/08 contre les deux autres options (α sous 20 m
+#  seulement, qui fabriquerait une marche au ras du sol ; ne rien
+#  changer, qui garderait un composite mesurément moins bon qu'AROME
+#  nu). **À rouvrir le jour où une mesure en altitude existe.**
+ALPHA_MELANGE = 0.5
 
 # ── L'extinction verticale de Δ ───────────────────────────────────────
 # Δ n'est mesuré qu'aux niveaux de PI, dont le plus haut est 500 m. Au
@@ -77,6 +130,42 @@ TAU_FIN_MIN = 360          # 6 h : horizon de PI, w = 0
 Z_EXTINCTION_DEBUT = 500
 Z_EXTINCTION_FIN = 1000
 
+# ── ⛔ L'AMPLITUDE DE Δ SOUS 20 m — corrigée le 26/08/2026 ────────────
+#
+#  L'extension sous 20 m servait Δ(20 m) TEL QUEL au 10 m. C'était faux,
+#  et d'un facteur mesurable : **Δ est une différence de vents, donc son
+#  amplitude suit celle du vent.** Servir Δ(20 m) au 10 m applique donc
+#  au 10 m une correction calibrée pour un vent 30 % plus fort.
+#
+#  Mesuré en phase B, et les deux chemins coïncident — ce n'est pas une
+#  coïncidence, c'est la même grandeur vue deux fois :
+#
+#      ‖Δ(20 m)‖ / ‖Δ(10 m)‖  (médianes)      = 1,330
+#      1 / cisaillement = 1 / 0,766           = 1,306
+#
+#  ✅ Et le cisaillement lui-même est le MÊME dans les deux modèles —
+#  c'est ce qui autorise à s'en servir : ‖V(10)‖/‖V(20)‖ vaut 0,766 chez
+#  AROME et 0,767 chez AROME-PI. Écart : +0,002.
+#
+#  ⓘ CE QUE ÇA REMPLACE, ET CE QUE ÇA NE REMPLACE PAS. La phase B a
+#  aussi mesuré le VRAI Δ(10 m) (`PI₁₀ − AROME 10u/10v`) : il bat
+#  l'extension constante, mais **il ne fait pas mieux que Δ(20 m) remis
+#  à l'échelle** (+0,086 contre +0,082 km/h hors échantillon — quatre
+#  millièmes). Le résidu `Δ(10) − 0,766·Δ(20)` pèse 19 % en amplitude et
+#  ne porte AUCUNE compétence mesurable. Autrement dit : le vrai Δ(10 m)
+#  n'apporte pas une information nouvelle, il apporte la même à la bonne
+#  échelle. On prend l'échelle, on ne prend pas la seconde famille de
+#  champ — elle coûterait un changement d'écran ET de score pour rien.
+#
+#  ⚠️ LE FACTEUR VARIE EN z, IL N'EST PAS CONSTANT, et ce n'est pas un
+#  raffinement : à 20 m le facteur DOIT valoir 1 (c'est le niveau où Δ
+#  est mesuré). Un facteur constant sous 20 m ferait sauter Δ de 23 %
+#  entre 20 m et 19,9 m — une marche au ras du sol, exactement ce que
+#  l'extension avait été écrite pour éviter. `test_composite.py` la
+#  refuserait (banc de continuité au pas de 0,1 m).
+CISAILLEMENT_10_20 = 0.766
+NIVEAU_CISAILLEMENT_BAS = 10
+
 # ⚠️ Erreur d'interpolation d'AROME entre deux heures, MESURÉE (médiane,
 # m/s) — sert à publier l'incertitude là où Δ ne corrige plus rien.
 # Extrapolée depuis AROME par la loi empirique en H^α (α mesuré 0,5–0,9),
@@ -87,8 +176,16 @@ ERREUR_INTERP_PAR_NIVEAU = {
 }
 
 
-def poids_pi(minute):
-    """`w_PI(τ)` — 1 jusqu'à 4 h, rampe linéaire vers 0 à 6 h.
+def rampe_pi(minute):
+    """La part de l'information de PI DISPONIBLE à cette échéance.
+
+    1 jusqu'à 4 h, rampe linéaire vers 0 à 6 h — l'horizon de PI.
+
+    ⛔ CE N'EST PAS LE POIDS APPLIQUÉ. C'est une propriété du produit :
+    « combien de PI existe ici ». Le poids réellement servi est
+    `poids_pi()`, qui y ajoute la CONFIANCE (`ALPHA_MELANGE`). Les deux
+    ont été confondus jusqu'au 26/08, et c'est ce qui a fait servir
+    « PI seul maître » sans que personne ne l'ait décidé.
 
     ⚠️ C⁰ et non C¹ : il y a un coude à 4 h et un à 6 h. C'est assumé —
     un lissage C¹ demanderait de choisir une forme, et rien ne la
@@ -99,6 +196,43 @@ def poids_pi(minute):
     if minute >= TAU_FIN_MIN:
         return 0.0
     return (TAU_FIN_MIN - minute) / (TAU_FIN_MIN - TAU_PLEIN_MIN)
+
+
+def poids_pi(minute, alpha=None):
+    """`w_PI(τ)` — le poids RÉELLEMENT appliqué à Δ, publié tel quel.
+
+        w(τ) = α · rampe(τ)
+
+    ⓘ `alpha` n'existe que pour les bancs : il permet de vérifier
+    l'invariant de `composer()` à α = 1 (les deux termes se compensent
+    exactement) sans que la production serve α = 1. **Ne pas s'en
+    servir ailleurs** — un appelant qui choisirait son propre α ferait
+    diverger l'écran et le score, ce que l'import unique de cette
+    fonction par `agrume_fcst.py` existe précisément pour empêcher.
+    """
+    a = ALPHA_MELANGE if alpha is None else float(alpha)
+    return a * rampe_pi(minute)
+
+
+def facteur_cisaillement(z):
+    """De combien Δ(20 m) doit être réduit pour être servi à l'altitude
+    `z`, sous 20 m. Vaut 1 à 20 m, `CISAILLEMENT_10_20` à 10 m, linéaire
+    entre les deux, et plafonné en dessous.
+
+    ⚠️ Sous 10 m on ne sait rien de plus qu'à 10 m — on garde donc la
+    valeur de 10 m plutôt que de prolonger une droite qui finirait par
+    passer sous zéro. Aucun niveau de l'axe AROME n'y tombe aujourd'hui
+    (le plus bas est 10 m) : c'est une garde, pas un régime.
+    """
+    z = float(z)
+    haut = float(NIVEAUX_DELTA[0])              # 20 m, où Δ est mesuré
+    bas = float(NIVEAU_CISAILLEMENT_BAS)        # 10 m, où il est mesuré
+    if z >= haut:
+        return 1.0
+    if z <= bas:
+        return CISAILLEMENT_10_20
+    f = (z - bas) / (haut - bas)
+    return CISAILLEMENT_10_20 + (1.0 - CISAILLEMENT_10_20) * f
 
 
 def arome_interpole(serie_horaire, steps_h, minute):
@@ -141,16 +275,28 @@ def etendre_delta(delta_aux_niveaux_pi, niveaux_cibles=NIVEAUX_H_0025,
 
     Trois régimes, et un seul est une mesure :
 
-      z < 20 m           Δ(20) CONSTANT — extension, pas mesure.
+      z < 20 m           Δ(20) × `facteur_cisaillement(z)`. ⛔ CORRIGÉ
+                         LE 26/08 : c'était Δ(20) CONSTANT, ce qui
+                         appliquait au 10 m une correction calibrée pour
+                         un vent 30 % plus fort (Δ suit l'amplitude du
+                         vent). Le facteur est MESURÉ, pas ajusté — voir
+                         `CISAILLEMENT_10_20`.
                          ⚠️ Le 10 m est le seul niveau concerné. Mettre
                          0 y créerait une marche au RAS DU SOL, c'est-à-
-                         dire exactement là où vit le pilote. ⓘ Δ y est
-                         calculable en principe (PI sert le 10 m,
-                         mesuré) mais côté AROME `u`/`v` n'existent qu'à
-                         partir de 20 m : le 10 m viendrait des champs
-                         dédiés `10u`/`10v`, une AUTRE famille de champ.
-                         Rien ne dit que ce soit le même diagnostic —
-                         c'est une question à mesurer, pas à trancher.
+                         dire exactement là où vit le pilote.
+                         ⓘ ET LA QUESTION LAISSÉE OUVERTE ICI EST
+                         RÉPONDUE. On lisait : « le 10 m viendrait des
+                         champs dédiés `10u`/`10v`, une AUTRE famille de
+                         champ — rien ne dit que ce soit le même
+                         diagnostic, c'est une question à mesurer ».
+                         Mesuré en phase B : les deux familles portent
+                         le MÊME cisaillement de couche de surface
+                         (0,766 contre 0,767), Δ(10) et Δ(20) sont
+                         corrélés à r = 0,980 et leurs moyennes sont
+                         nulles des deux côtés. **Elles sont
+                         commensurables**, et le vrai Δ(10 m) n'apporte
+                         rien de plus que Δ(20 m) remis à l'échelle.
+                         Le dossier est CLOS.
       20 → 500 m         interpolation linéaire entre niveaux PI. Mesure.
       500 → 1000 m       extinction linéaire vers 0. CONVENTION.
       > 1000 m           Δ = 0. Le composite y vaut AROME interpolé.
@@ -166,7 +312,10 @@ def etendre_delta(delta_aux_niveaux_pi, niveaux_cibles=NIVEAUX_H_0025,
     haut = float(src[-1])
     for k, z in enumerate(niveaux_cibles):
         if z <= src[0]:
-            v = d[..., 0]                                  # extension basse
+            # ⚠️ `facteur_cisaillement` vaut EXACTEMENT 1 à z = src[0].
+            # C'est ce qui garde le raccord continu à 20 m — un facteur
+            # constant y ferait une marche de 23 %.
+            v = d[..., 0] * facteur_cisaillement(z)        # extension basse
         elif z <= haut:
             v = _interp_lineaire(d, src, float(z))         # mesure
         elif z < Z_EXTINCTION_FIN:
@@ -215,7 +364,7 @@ def resolution_temporelle(z):
 
 
 def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
-             niveaux_cibles=NIVEAUX_H_0025):
+             niveaux_cibles=NIVEAUX_H_0025, alpha=None):
     """Le composite, sur les 25 échéances de PI et les 25 niveaux d'AROME.
 
         pi_uv        : (2, nb_niveaux_pi, 25, …)   u/v de PI
@@ -226,11 +375,18 @@ def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
     Renvoie (composite, diagnostic) où `composite` a la forme
     (2, len(niveaux_cibles), 25, …).
 
-    ── L'INVARIANT, ET C'EST LE CRITÈRE D'ACCEPTATION DE L'ÉTAPE ───────
-    ✅ Aux niveaux communs et tant que `w_PI = 1` (τ ≤ 4 h) :
-           composite(t, z) == PI(t, z)   aux 25 échéances
-    parce que les deux termes se compensent exactement :
-           AROME_interp + (PI − AROME_interp) = PI
+    ── L'INVARIANT, ET IL A CHANGÉ DE SENS LE 26/08/2026 ───────────────
+    ✅ Aux niveaux communs, l'arithmétique se compense EXACTEMENT :
+           AROME_interp + α·(PI − AROME_interp) = (1−α)·AROME_interp + α·PI
+    ⛔ Le critère d'acceptation de l'étape 9 était le cas particulier
+    α = 1, où il ne reste que PI. **Ce n'était pas seulement un test :
+    c'était la production**, et c'est justement l'erreur que la phase B
+    a chiffrée — « PI seul maître » est mesurément moins bon qu'AROME
+    seul. La production sert désormais α = `ALPHA_MELANGE` (0,5).
+    ⓘ L'invariant reste vérifiable comme propriété de l'ARITHMÉTIQUE, en
+    forçant α = 1 au banc (`poids_pi(minute, alpha=1)`) : c'est ce que
+    fait `test_composite.py`, et ça garde le garde-fou du raccord sans
+    obliger la production à servir un réglage qu'on sait faux.
     ⚠️ Appliquer le MÊME arrondi de publication des deux côtés pour le
     vérifier — c'est le piège qui a rendu un 0/125 parfaitement crédible
     à l'étape 8.
@@ -265,7 +421,7 @@ def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
         # (2, 5, …) → (2, …, 5) pour `etendre_delta`, puis retour.
         delta = np.moveaxis(delta, 1, -1)
         etendu = np.moveaxis(etendre_delta(delta, niveaux_cibles), -1, 1)
-        w = poids_pi(minute)
+        w = poids_pi(minute, alpha)
         poids.append(w)
         sortie[:, :, it] = ar + w * etendu
 
@@ -280,10 +436,20 @@ def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
             delta="calculé aux 25 échéances, jamais propagé en τ",
             extinction=(f"linéaire de {Z_EXTINCTION_DEBUT} à "
                         f"{Z_EXTINCTION_FIN} m/sol — CONVENTION, pas mesure"),
-            sous_20m="Δ(20 m) étendu constant — extension, pas mesure",
-            rampe=(f"w_PI = 1 jusqu'à {TAU_PLEIN_MIN // 60} h, 0 à "
-                   f"{TAU_FIN_MIN // 60} h (l'horizon de PI, pas 7 h)"),
+            sous_20m=(f"Δ(20 m) × {CISAILLEMENT_10_20} au 10 m — le "
+                      f"cisaillement MESURÉ de la couche de surface "
+                      f"(identique dans les deux modèles), linéaire "
+                      f"entre 10 et 20 m pour ne pas faire de marche"),
+            rampe=(f"disponibilité de PI : 1 jusqu'à "
+                   f"{TAU_PLEIN_MIN // 60} h, 0 à {TAU_FIN_MIN // 60} h "
+                   f"(l'horizon de PI, pas 7 h)"),
+            melange=(f"α = {ALPHA_MELANGE} — le composite est la MOYENNE "
+                     f"d'AROME et d'AROME-PI, pas un remplacement. "
+                     f"w_PI publié = α × disponibilité. Mesuré au 10 m "
+                     f"contre les balises ; étendu à toute la colonne "
+                     f"par principe, faute de mesure en altitude"),
         ),
+        alpha_melange=ALPHA_MELANGE,
         mesures=dict(
             delta_pi_arome_median_ms=0.76,
             delta_pi_arome_q90_ms=1.78,

@@ -231,12 +231,16 @@ def pi_bidon(lats=LATS, lons=LONS, ecart=1.3):
     return out
 
 
-def fabriquer(stock=None, domaine=DOMAINE, run_pi=RUN_PI, **kw):
+def fabriquer(stock=None, domaine=DOMAINE, run_pi=RUN_PI, alpha=None, **kw):
+    """`alpha` ne sert qu'à rejouer l'invariant historique à α = 1 —
+    cf. la note de `composer_rafraichissement`. Laissé à `None`, on
+    fabrique EXACTEMENT ce que la production fabrique."""
     stock = StockBidon() if stock is None else stock
     if not stock.objets:
         produit_b(stock, domaine=domaine, **kw)
     raf = RA.composer_rafraichissement(pi_bidon(), LATS, LONS, run_pi,
-                                       domaine, stock, journal=lambda *_: None)
+                                       domaine, stock, journal=lambda *_: None,
+                                       alpha=alpha)
     return stock, raf
 
 
@@ -355,7 +359,14 @@ def section_3_sans_pi():
 def section_4_invariant():
     print("\n── 4. ⚠️⚠️ L'INVARIANT : aux niveaux communs, τ ≤ 4 h, "
           "composite == PI ──")
-    _stock, raf = fabriquer()
+    # ⛔ L'INVARIANT SE REJOUE À α = 1 FORCÉ (26/08/2026). Il vérifie que
+    # la CHAÎNE — lecture du produit B, décalage, interpolation, Δ,
+    # extension, quantification — n'invente rien : à α = 1 les deux
+    # termes se compensent et il ne reste que PI. La production, elle,
+    # sert α = 0,5 : y exiger « composite == PI » serait exiger le
+    # remplacement d'AROME par PI, que la phase B a mesuré moins bon
+    # qu'AROME seul.
+    _stock, raf = fabriquer(alpha=1.0)
     pi = pi_bidon()
     pires = []
     for c, nom in enumerate(RA.ORDRE_TRANCHES):
@@ -374,10 +385,34 @@ def section_4_invariant():
                 a = raf.composite[c, k, it].astype(np.float32)
                 pires.append(float(np.nanmax(np.abs(a - pi_q[iz, it]))))
     pire = max(pires)
-    verifier("⚠️⚠️ le composite REPRODUIT PI aux 5 niveaux de Δ tant que "
-             "`w_PI = 1` — sinon on a inventé une valeur là où PI en "
-             "donnait une",
+    verifier("⚠️⚠️ À α = 1 FORCÉ, le composite REPRODUIT PI aux 5 niveaux "
+             "de Δ tant que la rampe vaut 1 — sinon la chaîne a inventé "
+             "une valeur là où PI en donnait une",
              pire == 0.0, f"écart max {pire:.3e} m/s sur {len(pires)} tranches")
+
+    # ⛔ LE CONTRÔLE QUI EMPÊCHE LE BANC PRÉCÉDENT DE REDEVENIR
+    # DÉCORATIF. Il tourne sur un α forcé ; sans celui-ci, on pourrait
+    # remettre α = 1 en production sans qu'une ligne ne bouge.
+    _s2, raf_prod = fabriquer()
+    pires_prod = []
+    for c, nom in enumerate(RA.ORDRE_TRANCHES):
+        pi_q = quantifier(pi[c], RA.PARAMS_UV[nom]).astype(np.float32)
+        for iz, z in enumerate(NIVEAUX_PI):
+            if z not in NIVEAUX_DELTA:
+                continue
+            k = list(RA.NIVEAUX).index(z)
+            for it, m in enumerate(ECHEANCES_MIN):
+                if m > TAU_PLEIN_MIN:
+                    continue
+                a = raf_prod.composite[c, k, it].astype(np.float32)
+                pires_prod.append(float(np.nanmax(np.abs(a - pi_q[iz, it]))))
+    verifier("⛔ …et EN PRODUCTION le composite n'est PAS PI : il MÉLANGE "
+             "AROME et AROME-PI. Si ce contrôle tombe, c'est qu'on a "
+             "recâblé le remplacement — celui que la phase B a mesuré "
+             "moins bon qu'AROME seul",
+             max(pires_prod) > 0.1,
+             f"écart max {max(pires_prod):.3f} m/s (α = "
+             f"{raf_prod.diagnostic.get('alpha_melange')})")
     verifier("…et le composite N'EST PAS l'AROME interpolé : Δ a bien été "
              "appliqué (sinon ce banc ne prouverait rien)",
              float(np.nanmax(np.abs(
@@ -529,9 +564,21 @@ def section_8_resolution():
              and par_niveau[3000]["erreurInterpolationMs"] > 0.0,
              f"3000 m → {par_niveau[3000]['erreurInterpolationMs']} m/s")
     verifier("⚠️ …et la table est RENVOYÉE à sa condition de validité "
-             "(`poids_pi = 1`), sans quoi elle affirmerait « observée » "
-             "à 6 h d'échéance où plus rien ne l'est",
-             "poids_pi = 1" in man["niveaux_valables_si"])
+             "(PI PLEINEMENT DISPONIBLE, jusqu'à 4 h), sans quoi elle "
+             "affirmerait « observée » à 6 h d'échéance où plus rien ne "
+             "l'est",
+             "PLEINEMENT DISPONIBLE" in man["niveaux_valables_si"]
+             and "4 h" in man["niveaux_valables_si"])
+    # ⛔ CE BANC A ÉTÉ ÉCRIT FAUX PENDANT DEUX SEMAINES, et c'est le
+    # changement de α qui l'a révélé : il exigeait la chaîne
+    # « poids_pi = 1 », c'est-à-dire une condition que le poids servi ne
+    # remplit PLUS JAMAIS. Le client aurait affiché au lecteur une table
+    # sous une condition inatteignable. *Une condition de validité doit
+    # porter sur une grandeur qui peut l'atteindre.*
+    verifier("⛔ et elle ne renvoie plus à `poids_pi = 1`, une condition "
+             "que le poids servi n'atteint jamais depuis que le "
+             "composite mélange au lieu de remplacer",
+             "poids_pi = 1" not in man["niveaux_valables_si"])
     verifier("les conventions et les deux mesures qui légitiment le "
              "composite survivent aussi (Δ vaut 2,5 fois le bruit)",
              man["mesures"]["rapport"].startswith("Δ vaut")
