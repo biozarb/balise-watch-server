@@ -6,6 +6,44 @@
 
 ---
 
+## 26/08/2026 (phase C) — un document de conception qui concluait faux
+
+Aucun code en cause : la phase C est une CONCEPTION, et son livrable est
+un raisonnement. Le raisonnement était faux, et une relecture
+adversariale l'a trouvé. Trois pièges, tous réutilisables.
+
+**Piège nº 1 — appliquer une médiane GLOBALE à une population qu'on
+vient soi-même de montrer BIMODALE.** Le document mesurait la latence
+AROME par heure de run (00 Z : 128 min · 03 Z : 120 · 06 Z : 276 · …),
+puis concluait, avec la médiane globale de 211 min, qu'« AROME n'existe
+pas à +3 h ». Faux : les runs 00 et 03 Z sortent en ~2 h, donc AROME
+existe bien à +3 h pour deux heures cibles par jour. *Le tableau par
+sous-population était à quinze lignes au-dessus de la conclusion qu'il
+contredisait.* La conclusion tenait quand même — mais par le plancher
+`MIN_HOURS_DAILY`, pas par l'impossibilité, et c'est un autre argument.
+
+**Piège nº 2 — transcrire la sortie d'un outil en l'arrondissant DANS LE
+SENS DE LA THÈSE.** Le script imprimait `PI +1 h vs AROME +3 h ×2` ; le
+document a écrit « AROME +4 à +13 h ». Ce « 3 → 4 » effaçait le seul
+contre-exemple à la thèse défendue deux sections plus bas. *Une
+transcription qui simplifie choisit toujours le même camp.*
+
+**Piège nº 3 — déclarer une donnée PERDUE sans avoir cherché si le
+stockage la portait déjà.** Le manifeste PI n'a pas d'horodatage : le
+document en a tiré « irrécupérable, c'est l'urgence de la phase ». Or R2
+porte un `LastModified` par objet, et `tools/audit_r2.py` le lit déjà
+(l. 886-897). *C'est le pendant de « avant d'écrire un outil de mesure,
+chercher s'il existe » : avant de déclarer une mesure impossible,
+chercher si elle est déjà là.*
+
+ⓘ **Et ce qui a marché** : faire relire le document par un agent dont la
+consigne était de TROUVER des fautes, sources en main, avec obligation de
+recalculer les statistiques lui-même plutôt que de faire confiance aux
+scripts fournis. Il a trouvé les trois. *Un raisonnement se mute comme
+un banc.*
+
+---
+
 ## 26/08/2026 (phase B) — quatre bancs verts qui ne tenaient rien
 
 La mesure Δ(10 m) contre Δ(20 m) étendu (`sonde_delta_10m.py`) ne sert
