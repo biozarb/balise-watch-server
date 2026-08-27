@@ -30,6 +30,14 @@
 #
 #      python3 agrume/freeze_balises.py --stations /var/lib/bw-model-verif/stations.json
 #      python3 agrume/freeze_balises.py --catalogue     # depuis Pioupiou
+#      python3 agrume/freeze_balises.py --referentiels /var/lib/bw-model-verif
+#                                        # LOT L7 : windsmobi/infoclimat/mf/
+#                                        # aemet/metar en plus, depuis les
+#                                        # fichiers qu'un run de collect.py
+#                                        # y a déjà écrits (dépôt de decision
+#                                        # produit : la case duplique 832
+#                                        # balises non-Pioupiou, à recompter
+#                                        # après dédoublonnage L16)
 #      python3 agrume/freeze_balises.py --verifier
 # ══════════════════════════════════════════════════════════════════════
 
@@ -50,6 +58,22 @@ from domaine import (DOMAINES, ZONES_INTERET,  # noqa: E402
 
 ARTEFACT = Path(__file__).resolve().parent / "data" / "balises-nord-alpes.json"
 PIOUPIOU_LIVE = "https://api.pioupiou.fr/v1/live-with-meta/all"
+
+#: LOT L7 (27/08) — les référentiels PAR RÉSEAU que `collect.py` écrit
+#: déjà (un fichier par réseau, `--out/<fichier>`), pour le produit A.
+#: ⛔ `metar` FIGURE dans l'axe (colonnes utiles à `obsmetar`/le tau,
+#: audit PS3) mais N'EST PAS noté par AGRUME — voir
+#: `model-verif/agrume_fcst.SOURCE_NOTEE`, qui l'exclut explicitement.
+#: L'un ne dépend pas de l'autre : cette liste dit qui a une COLONNE,
+#: `SOURCE_NOTEE` dit qui a un SCORE.
+REFERENTIELS_RESEAUX = {
+    "pioupiou": "stations.json",
+    "windsmobi": "windsmobi_stations.json",
+    "infoclimat": "infoclimat_stations.json",
+    "mf": "mf_stations.json",
+    "aemet": "aemet_stations.json",
+    "metar": "metar_stations.json",
+}
 
 # Déplacement au-delà duquel on considère que ce n'est plus la même
 # position. 200 m : au-delà, la balise change probablement de maille en
@@ -112,6 +136,58 @@ def depuis_catalogue():
                         lat=round(float(lat), 4), lon=round(float(lon), 4),
                         name=(d.get("meta") or {}).get("name") or ""))
     return out
+
+
+def depuis_referentiels(rep_dir):
+    """Combine les référentiels PAR RÉSEAU déjà écrits par `collect.py`
+    (`REFERENTIELS_RESEAUX`, un fichier par réseau dans `rep_dir`) en
+    UNE liste de candidats pour `geler()` — le pendant multi-sources de
+    `depuis_catalogue()`, qui ne lit QUE Pioupiou.
+
+    ⚠️ LOT L7 — POURQUOI PAS UN SEUL APPEL RÉSEAU DE PLUS. Chaque
+    fonction `<reseau>_stations()` de `collect.py` sait déjà interroger
+    sa source, mettre en cache, et absorber une panne (repli sur le
+    cache d'hier). Réinterroger les six APIs ICI dupliquerait cette
+    discipline pour un résultat moins sûr — ce module tournerait alors
+    SANS le filet que `collect.py` a déjà. On lit donc les fichiers que
+    `collect.py --out <rep_dir>` a DÉJÀ écrits lors du run précédent :
+    c'est aussi pourquoi ce référentiel n'est utile qu'APRÈS un run,
+    jamais à la place d'un run.
+
+    ⚠️ `name` n'existe QUE dans les référentiels windsmobi/metar (cf.
+    leurs fonctions dans `collect.py`) — infoclimat/mf/aemet n'en
+    écrivent pas. Un candidat sans `name` ferait lever `ancienne["name"]`
+    dans `fusionner()` au premier déplacement détecté sur cette balise ;
+    on synthétise donc un repli ici plutôt que de laisser la panne
+    attendre son tour.
+    """
+    rep_dir = Path(rep_dir)
+    candidats = []
+    manquants = []
+    for source, nom_fichier in REFERENTIELS_RESEAUX.items():
+        chemin_reseau = rep_dir / nom_fichier
+        if not chemin_reseau.exists():
+            manquants.append(nom_fichier)
+            continue
+        brut = json.loads(chemin_reseau.read_text(encoding="utf-8"))
+        for s in brut:
+            sid = s.get("id")
+            lat, lon = s.get("lat"), s.get("lon")
+            if sid is None or lat is None or lon is None:
+                continue
+            candidats.append(dict(
+                id=str(sid),
+                source=s.get("source") or source,
+                lat=round(float(lat), 4),
+                lon=round(float(lon), 4),
+                name=(s.get("name") or f"{source} {sid}")[:60],
+            ))
+    if manquants:
+        print(f"  ⚠️ référentiel(s) absent(s) dans {rep_dir}, ignoré(s) : "
+              f"{', '.join(manquants)} — l'axe ne portera pas encore ces "
+              f"réseaux. Lancer `python3 model-verif/collect.py` avant de "
+              f"regeler pour les inclure.")
+    return candidats
 
 
 def charger_artefact(chemin=ARTEFACT, rebornage=()):
@@ -194,6 +270,29 @@ def charger_artefact(chemin=ARTEFACT, rebornage=()):
     return man["balises"], man
 
 
+def _identite(b):
+    """La clé d'identité d'une balise dans l'axe : `(source, id)`.
+
+    ⚠️ ARBITRAGE LOT L7 (27/08) — AVANT ce lot, l'axe ne portait QUE des
+    identifiants Pioupiou, tous numériques et attribués par une seule
+    autorité : `id` seul suffisait, et `fusionner()` indexait `connues`
+    dessus directement. Depuis que l'axe accueille d'autres réseaux
+    (windsmobi, infoclimat, mf, aemet, metar — chacun sa propre
+    numérotation), DEUX candidats de réseaux différents peuvent porter
+    le MÊME `id` brut sans être la même balise. Indexer par `id` seul
+    les ferait fusionner en silence — celui qui passe en second
+    écraserait le premier dans `connues`, et l'axe perdrait une balise
+    sans avertissement : exactement le défaut que la discipline d'ajout
+    seul existe pour empêcher, introduit par la discipline elle-même.
+    `(source, id)` reprend la convention DÉJÀ en usage ailleurs dans le
+    projet — `unite()` de `sonde_representativite.py`
+    (`f"{source}:{station_id}"`, lue partout dans station_zone et
+    model_verif_daily) — ce n'est pas une invention de ce lot, c'est sa
+    règle appliquée ici pour la première fois utile.
+    """
+    return (b.get("source") or "pioupiou", str(b["id"]))
+
+
 def fusionner(existantes, candidates, crier=print):
     """Fusion À AJOUT SEUL, comme `collect.py`.
 
@@ -204,7 +303,7 @@ def fusionner(existantes, candidates, crier=print):
     l'archive et rendrait son historique orphelin — le défaut que
     `collect.py` évite depuis l'origine, pour la même raison.
     """
-    connues = {b["id"]: dict(b) for b in existantes}
+    connues = {_identite(b): dict(b) for b in existantes}
     ajouts, deplacements = 0, []
     for c in candidates:
         # ⚠️ Les points de RADIOSONDAGE sont volontairement HORS du
@@ -222,13 +321,14 @@ def fusionner(existantes, candidates, crier=print):
         if (c.get("source") != "radiosondage" and not dans_boite
                 and not dans_zone_interet(c["lat"], c["lon"])):
             continue
-        ancienne = connues.get(c["id"])
+        cle = _identite(c)
+        ancienne = connues.get(cle)
         if ancienne is None:
-            connues[c["id"]] = dict(c, position_suspecte=False,
-                                    hors_domaine=not dans_boite
-                                    and c.get("source") != "radiosondage",
-                                    vue_le=datetime.now(timezone.utc)
-                                    .strftime("%Y-%m-%d"))
+            connues[cle] = dict(c, position_suspecte=False,
+                                hors_domaine=not dans_boite
+                                and c.get("source") != "radiosondage",
+                                vue_le=datetime.now(timezone.utc)
+                                .strftime("%Y-%m-%d"))
             ajouts += 1
             continue
         d = distance_m((ancienne["lat"], ancienne["lon"]), (c["lat"], c["lon"]))
@@ -301,7 +401,7 @@ def _rang(b):
     radiosondage = 1 if b.get("source") == "radiosondage" else 0
     return (radiosondage,
             int(b["id"]) if str(b["id"]).isdigit() else 0,
-            str(b["id"]))
+            str(b["id"]), str(b.get("source") or ""))
 
 
 def points_radiosondage():
@@ -399,10 +499,17 @@ def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print,
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--stations", default=None,
-                   help="référentiel écrit par collect.py (à préférer : il "
-                        "porte déjà la discipline d'ajout seul)")
+                   help="référentiel Pioupiou écrit par collect.py (à "
+                        "préférer à --catalogue : il porte déjà la "
+                        "discipline d'ajout seul)")
     p.add_argument("--catalogue", action="store_true",
                    help="interroger le catalogue live de Pioupiou")
+    p.add_argument("--referentiels", default=None, metavar="REP",
+                   help="LOT L7 : combine TOUS les référentiels réseau "
+                        "(pioupiou + windsmobi + infoclimat + mf + aemet + "
+                        "metar) déjà écrits par `collect.py --out REP` — "
+                        "cf. REFERENTIELS_RESEAUX. Mutuellement exclusif "
+                        "avec --stations/--catalogue.")
     p.add_argument("--suspectes", default=None)
     p.add_argument("--radiosondages-seulement", action="store_true",
                    help="ajoute uniquement les points de radiosondage, sans "
@@ -466,8 +573,11 @@ def main(argv=None):
                 Path(a.stations).read_text(encoding="utf-8"))
         elif a.catalogue:
             candidates = depuis_catalogue()
+        elif a.referentiels:
+            candidates = depuis_referentiels(a.referentiels)
         else:
-            raise Abort("préciser --stations <fichier>, --catalogue ou "
+            raise Abort("préciser --stations <fichier>, --catalogue, "
+                        "--referentiels <dossier> ou "
                         "--radiosondages-seulement")
         suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                      if a.suspectes else [])

@@ -93,7 +93,14 @@ MAILLE_BASE = A.MAILLE_DEFAUT          # "001" — la base du score
 MAILLE_DELTA = A.MAILLE_DELTA          # "0025" — Δ se mesure là
 NIV_HAUT = A.NIVEAU_DELTA_MESURE       # 20 m — Δ mesuré aujourd'hui
 NIV_BAS = A.NIVEAU_DELTA_APPLIQUE      # 10 m — Δ appliqué aujourd'hui
-SOURCE = A.SOURCE_NOTEE                # "pioupiou"
+#: ⚠️ LOT L7 (27/08) — `A.SOURCE_NOTEE` est devenu un ensemble. Cette
+#: sonde (L4) restreint volontairement à Pioupiou SEUL : PI n'existe
+#: aujourd'hui que pour cette source (`ix_pi`, ci-dessous, vient de
+#: l'axe PI qui n'a pas suivi l'extension L7), donc élargir ce filtre
+#: sans étendre PI produirait `kpi = None` pour toute balise
+#: non-pioupiou — pas une erreur, mais un travail inutile qui gonfle
+#: `n_hors_pi` sans rien mesurer de plus.
+SOURCE = {"pioupiou"}
 HEURES_PI = tuple(h for h in range(0, 7) if poids_pi(h * 60) > 0.0)
 
 #: Les deux graines du placebo. ⚠️ DEUX, pas une : une permutation
@@ -339,7 +346,7 @@ def couples_du_run(run: str, obs_par_station, crier=print):
     # balise absente du tableau, et le témoin serait plus creux que le
     # candidat.
     appariables = [(k, str(b["id"])) for k, b in enumerate(col.balises)
-                   if b.get("source") == SOURCE and str(b["id"]) in ix_pi]
+                   if b.get("source") in SOURCE and str(b["id"]) in ix_pi]
     if len(appariables) < 2:
         crier(f"  {run} : {len(appariables)} balise(s) appariable(s) — écarté")
         return []

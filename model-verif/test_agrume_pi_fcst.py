@@ -281,6 +281,59 @@ def test_appariement_par_identifiant():
 
 
 # ══════════════════════════════════════════════════════════════════
+#  3bis. LOT L7 — UNE SOURCE NOUVELLEMENT NOTÉE, MAIS ABSENTE DE L'AXE PI
+# ══════════════════════════════════════════════════════════════════
+
+def test_source_elargie_sans_correction_pi():
+    """⛔ CE QUI AURAIT DÛ ROUGIR SI `not in SOURCE_NOTEE` ÉTAIT RESTÉ
+    `!= SOURCE_NOTEE` APRÈS QUE LE LOT L7 A FAIT DE `SOURCE_NOTEE` UN
+    ENSEMBLE — et qui ne rougissait dans AUCUN autre banc de ce fichier,
+    puisqu'aucun n'ajoute de balise non-pioupiou à l'axe du produit A.
+    `str != frozenset(...)` est TOUJOURS vrai en Python : le filtre
+    aurait alors exclu TOUTES les balises, pioupiou comprise, et
+    `delta_20m` aurait rendu un dict VIDE sans lever — silencieux à
+    100 %.
+
+    PI lui-même n'a pas suivi l'extension L7 (son axe vient encore de
+    `quantification.balises_du_domaine()`, pioupiou seul) : une balise
+    windsmobi doit donc ENTRER dans la boucle (elle est dans
+    SOURCE_NOTEE) mais n'avoir AUCUNE correction PI, comme un défaut de
+    correspondance ordinaire — pas un crash, pas un Δ inventé.
+    """
+    balises = BALISES + [
+        {"id": "W-9", "lat": 45.70, "lon": 6.05, "nom": "Un capteur windsmobi",
+         "source": "windsmobi", "position_suspecte": False},
+    ]
+    col, man = archive_a(lambda k, s: (3.0, 4.0), lambda k, s: (2.0, 0.0),
+                         balises=balises)
+    # L'axe PI ne connaît QUE les deux balises pioupiou d'origine — comme
+    # en production aujourd'hui.
+    d_pi, m_pi = archive_pi(lambda i, m: (5.0, 1.0))
+    d = A.delta_20m(col, d_pi, m_pi, crier=muet)
+
+    verifie(len(d) >= 1 and any(k < 2 for k in d),
+            f"les balises pioupiou reçoivent toujours leur Δ malgré la "
+            f"troisième balise (windsmobi) dans l'axe — clés {sorted(d)}")
+    k_windsmobi = next(k for k, b in enumerate(col.balises)
+                       if b["id"] == "W-9")
+    verifie(k_windsmobi not in d,
+            f"la balise windsmobi N'A PAS de Δ (absente de l'axe PI) — "
+            f"ni erreur, ni Δ inventé — clés {sorted(d)}")
+
+    ids_agrume = {r["station_id"]
+                 for r in A.lignes(col, man, model="agrume")}
+    verifie("W-9" in ids_agrume,
+            "la série agrume (NON corrigée) porte bien la balise "
+            "windsmobi — c'est `lignes()`, pas `delta_20m`, qui décide "
+            "de qui est noté")
+    ids_pi = {r["station_id"]
+             for r in A.lignes(col, man, model=A.MODEL_PI, delta=d)}
+    verifie("W-9" not in ids_pi,
+            f"…mais la série agrume_pi ne la porte PAS, faute de "
+            f"correction — {sorted(ids_pi)}")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  4. LES RADIOSONDAGES RESTENT DEHORS
 # ══════════════════════════════════════════════════════════════════
 

@@ -133,8 +133,23 @@ def main(argv=None):
     verifier("la somme des comptes par domaine retombe sur le total",
              somme == man["n"], f"{somme} contre {man['n']}")
     ids = [b.get("id") for b in balises]
-    verifier("aucun identifiant en double — un doublon décalerait tout ce "
-             "qui suit dans l'archive", len(ids) == len(set(ids)),
+    # ⚠️ LOT L7 (27/08) — l'invariant n'est PLUS « id unique » mais
+    # « (source, id) unique » : depuis que l'axe accueille d'autres
+    # réseaux, deux candidats de réseaux différents PEUVENT partager le
+    # même id brut sans être la même balise (cf. `F._identite`). Sur
+    # l'artefact commité actuel (pioupiou + radiosondage seulement), les
+    # deux invariants coïncident encore — mais c'est le second qui doit
+    # rester vrai après un `--referentiels`.
+    identites = [F._identite(b) for b in balises]
+    verifier("aucune identité (source, id) en double — un doublon "
+             "décalerait tout ce qui suit dans l'archive",
+             len(identites) == len(set(identites)),
+             f"{len(identites) - len(set(identites))} doublon(s)")
+    verifier("(héritage) aucun id brut en double sur l'artefact ACTUEL — "
+             "pioupiou + radiosondage seulement, donc encore vrai ; ce "
+             "contrôle cessera d'être significatif dès le premier "
+             "`--referentiels` et c'est attendu, pas une régression",
+             len(ids) == len(set(ids)),
              f"{len(ids) - len(set(ids))} doublon(s)")
     # ⚠️ ON COMPARE À `_rang`, PAS À UN TRI QU'ON DEVINE. Ma première
     # version de ce contrôle exigeait `sorted(ids)` — et elle échouait,
@@ -145,6 +160,78 @@ def main(argv=None):
     verifier("l'axe est trié par `_rang` — radiosondages en dernier, puis "
              "par identifiant",
              [b.get("id") for b in sorted(balises, key=F._rang)] == ids)
+
+    print("\n── 5. LOT L7 — plusieurs réseaux dans l'axe ──")
+    # Deux candidats de réseaux DIFFÉRENTS portant le MÊME id brut :
+    # exactement le cas qui aurait fusionné en silence avant le lot L7
+    # (`connues` indexé par `id` seul). Un point dans le domaine
+    # (nord-alpes) pour que `fusionner` ne les écarte pas hors-boîte.
+    lat0, lon0 = DOMAINE["latmin"] + 0.05, DOMAINE["lonmin"] + 0.05
+    candidats_collision = [
+        dict(id="999", source="pioupiou", lat=lat0, lon=lon0, name="P-999"),
+        dict(id="999", source="windsmobi", lat=lat0 + 0.01, lon=lon0,
+             name="W-999"),
+    ]
+    fusion, ajouts, _ = F.fusionner([], candidats_collision)
+    verifier("deux candidats de réseaux différents partageant le même id "
+             "brut restent DEUX balises distinctes — pas une écrasée par "
+             "l'autre", len(fusion) == 2 and ajouts == 2,
+             f"{len(fusion)} balise(s), {ajouts} ajout(s)")
+    sources_vues = sorted(b["source"] for b in fusion)
+    verifier("les deux sources sont bien représentées",
+             sources_vues == ["pioupiou", "windsmobi"], str(sources_vues))
+
+    # Rejouer la fusion une SECONDE fois (comme un regel qui reverrait
+    # les deux mêmes candidats) : ajouts doit retomber à 0, pas créer
+    # de troisième entrée — la discipline d'ajout seul doit continuer à
+    # dédupliquer PAR (source, id), pas fusionner les deux réseaux entre
+    # eux sous prétexte qu'ils partagent l'id brut.
+    fusion2, ajouts2, _ = F.fusionner(fusion, candidats_collision)
+    verifier("regeler sur les mêmes candidats ne duplique rien et n'écrase "
+             "rien", len(fusion2) == 2 and ajouts2 == 0,
+             f"{len(fusion2)} balise(s), {ajouts2} ajout(s)")
+
+    print("\n── 6. LOT L7 — `depuis_referentiels()` combine les six fichiers ──")
+    import tempfile
+    from pathlib import Path as _P
+    with tempfile.TemporaryDirectory() as d:
+        rep = _P(d)
+        # windsmobi porte un `name` ; mf n'en écrit jamais (cf. collect.py)
+        # — le repli synthétique de `depuis_referentiels` doit couvrir
+        # l'absence, pas seulement le cas confortable.
+        (rep / "stations.json").write_text(json.dumps([
+            {"id": "70", "source": "pioupiou", "lat": lat0, "lon": lon0,
+             "name": "Salève"}]), encoding="utf-8")
+        (rep / "windsmobi_stations.json").write_text(json.dumps([
+            {"id": "70", "source": "windsmobi", "lat": lat0, "lon": lon0,
+             "name": "Un homonyme windsmobi"}]), encoding="utf-8")
+        (rep / "mf_stations.json").write_text(json.dumps([
+            {"id": "07510", "source": "mf", "lat": lat0, "lon": lon0}
+            # ⚠️ pas de "name" — c'est le cas réel de mf_stations().
+        ]), encoding="utf-8")
+        # infoclimat_stations.json, aemet_stations.json, metar_stations.json
+        # : absents du dossier — simule un collect.py lancé avec
+        # --skip-infoclimat --skip-aemet --skip-metar, ou une panne.
+        candidats = F.depuis_referentiels(rep)
+    verifier("les trois référentiels présents entrent, les trois absents "
+             "sont juste signalés (pas d'erreur)", len(candidats) == 3,
+             f"{len(candidats)} candidat(s)")
+    par_source = {c["source"]: c for c in candidats}
+    verifier("les sources sont celles des fichiers, pas un défaut unique",
+             sorted(par_source) == ["mf", "pioupiou", "windsmobi"],
+             str(sorted(par_source)))
+    verifier("un candidat SANS `name` dans sa source (mf) reçoit un repli, "
+             "pas une clé absente", bool(par_source["mf"].get("name")),
+             repr(par_source["mf"].get("name")))
+    verifier("le même id brut sur deux réseaux (pioupiou/windsmobi ici) "
+             "n'est PAS aplati en un seul candidat par `depuis_referentiels`"
+             " — c'est `fusionner()` (test 5) qui décide, ce chargeur ne "
+             "doit rien trancher lui-même",
+             sum(1 for c in candidats if c["id"] == "70") == 2)
+    fusion3, ajouts3, _ = F.fusionner([], candidats)
+    verifier("et une fois passés par fusionner(), les deux `70` de réseaux "
+             "différents restent deux balises", len(fusion3) == 3
+             and ajouts3 == 3, f"{len(fusion3)} balise(s), {ajouts3} ajout(s)")
 
     print("\n  freeze_balises :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1

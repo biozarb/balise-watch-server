@@ -205,6 +205,53 @@ def test_seules_les_balises_pioupiou():
 
 
 # ══════════════════════════════════════════════════════════════════
+#  5bis. LOT L7 — PLUSIEURS SOURCES NOTÉES, ET LA BONNE SUR CHAQUE LIGNE
+# ══════════════════════════════════════════════════════════════════
+
+def test_plusieurs_sources_metar_exclu():
+    """⛔ LE PIÈGE EXACT DU LOT L7 : `"source": SOURCE_NOTEE` au lieu de
+    `"source": b.get("source")`. Tant que SOURCE_NOTEE était UNE chaîne
+    ("pioupiou"), les deux écritures rendaient le même résultat — ce
+    banc n'aurait donc RIEN vu avant que SOURCE_NOTEE devienne un
+    ensemble. Avec une balise windsmobi et une balise metar dans le même
+    axe, un code qui stamperait `SOURCE_NOTEE` (l'ensemble) au lieu de la
+    source réelle planterait ici (un `frozenset` n'est pas sérialisable
+    dans le sens attendu) ou, pire, écrirait une valeur incohérente selon
+    l'ordre d'itération — silencieux, comme d'habitude.
+    """
+    print("\n▶ 5bis. plusieurs sources notées (lot L7), metar exclu")
+    balises = BALISES + [
+        {"id": "W-42", "lat": 45.90, "lon": 6.10, "nom": "Un capteur windsmobi",
+         "source": "windsmobi", "position_suspecte": False},
+        {"id": "LFLB", "lat": 45.64, "lon": 5.88, "nom": "Aérodrome",
+         "source": "metar", "position_suspecte": False},
+    ]
+    col, man = archive([0], lambda k, i: OUEST, balises=balises)
+    rows = list(A.lignes(col, man))
+    par_id = {r["station_id"]: r for r in rows}
+
+    verifie("W-42" in par_id, "la balise windsmobi entre dans le flux")
+    verifie("LFLB" not in par_id,
+            "la balise metar N'entre PAS — colonne dans l'axe, mais hors "
+            "de SOURCE_NOTEE (audit PS3 : obsmetar sert le tau, pas ce flux)")
+    verifie("RS-06610" not in par_id,
+            "le radiosondage reste exclu, comme avant le lot L7")
+    verifie(par_id.get("70", {}).get("source") == "pioupiou",
+            f"la balise 70 est stampée `pioupiou`, sa vraie source — "
+            f"{par_id.get('70', {}).get('source')!r}")
+    verifie(par_id.get("W-42", {}).get("source") == "windsmobi",
+            f"la balise W-42 est stampée `windsmobi`, SA vraie source, "
+            f"pas une autre membre de SOURCE_NOTEE — "
+            f"{par_id.get('W-42', {}).get('source')!r}")
+    sources_ecrites = {r["source"] for r in rows}
+    verifie(sources_ecrites <= set(A.SOURCE_NOTEE),
+            f"aucune ligne ne porte une source hors de SOURCE_NOTEE — "
+            f"{sources_ecrites}")
+    verifie("metar" not in sources_ecrites,
+            "metar n'apparaît sur AUCUNE ligne du flux noté")
+
+
+# ══════════════════════════════════════════════════════════════════
 #  6. LE GARDE DE BUCKET
 # ══════════════════════════════════════════════════════════════════
 
@@ -462,6 +509,7 @@ def main() -> int:
     test_nan_reste_absence()
     test_balise_entierement_vide()
     test_seules_les_balises_pioupiou()
+    test_plusieurs_sources_metar_exclu()
     test_garde_de_bucket()
     test_lead_6_sort_avec_un_score_connu()
     test_lead_24_ne_sort_aucune_ligne()

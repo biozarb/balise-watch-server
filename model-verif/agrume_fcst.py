@@ -207,12 +207,29 @@ NIVEAU_DELTA_APPLIQUE = 10
 #: 0,01° du score (décision 2 du lot I, inchangée).
 MAILLE_DELTA = "0025"
 
-#: ⛔ On ne note QUE les balises Pioupiou. Les 2 radiosondages de l'axe
-#: (`RS-06610`, `RS-16064`) sont dans l'archive parce que le profil les
-#: confronte au ballon — ils n'ont pas d'anémomètre au sol, et une
-#: prévision de vent 10 m au-dessus d'une station de lâcher ne
-#: s'apparie à rien.
-SOURCE_NOTEE = "pioupiou"
+#: ⛔ LOT L7 (27/08) — ÉLARGI DE `"pioupiou"` (une chaîne) À UN ENSEMBLE.
+#: Avant ce lot, une seule source notait : la comparaison `== SOURCE_NOTEE`
+#: et l'écriture `"source": SOURCE_NOTEE` étaient donc équivalentes à
+#: écrire la source RÉELLE de la balise. Ce n'est plus vrai — `in` pour
+#: filtrer, et `b.get("source")` (jamais `SOURCE_NOTEE` lui-même) pour
+#: écrire la source de CHAQUE ligne : voir `lignes()`, où stamper
+#: `SOURCE_NOTEE` tel quel aurait fait écrire "un membre quelconque de
+#: l'ensemble" sur des lignes windsmobi/mf/aemet — un mensonge crédible,
+#: silencieux, et qui n'aurait rougi aucun banc écrit AVANT ce lot (ils
+#: ne connaissaient qu'une seule source, donc ne pouvaient pas distinguer
+#: « la bonne source » de « une source »).
+#:
+#: `metar` est l'absent DÉLIBÉRÉ de cet ensemble : il a bien une colonne
+#: dans l'axe (`freeze_balises.REFERENTIELS_RESEAUX`) depuis ce même lot,
+#: mais aucun score AGRUME — `obsmetar` sert le tau inter-populations
+#: (L8), pas ce flux. Les 2 radiosondages de l'axe (`RS-06610`,
+#: `RS-16064`) ne sont dans AUCUN cas notés : le profil les confronte au
+#: ballon, ils n'ont pas d'anémomètre au sol, et une prévision de vent
+#: 10 m au-dessus d'une station de lâcher ne s'apparie à rien — ils
+#: portent `source = "radiosondage"`, absent de l'ensemble par
+#: construction, pas par un filtre séparé.
+SOURCE_NOTEE = frozenset({"pioupiou", "windsmobi", "infoclimat", "mf",
+                          "aemet"})
 
 #: Maille par défaut du vent 10 m (décision 2 ci-dessus).
 MAILLE_DEFAUT = "001"
@@ -541,7 +558,7 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
     heures = sorted({m // 60 for m in pi_min if m % 60 == 0})
 
     for k, b in enumerate(col.balises):
-        if b.get("source") != SOURCE_NOTEE:
+        if b.get("source") not in SOURCE_NOTEE:
             continue
         kpi = ix_pi.get(str(b["id"]))
         if kpi is None:
@@ -635,7 +652,7 @@ def lignes(col, man: dict, maille: str = MAILLE_DEFAUT, *,
     t0 = int(run_dt.timestamp())
 
     for k, b in enumerate(col.balises):
-        if b.get("source") != SOURCE_NOTEE:
+        if b.get("source") not in SOURCE_NOTEE:
             continue
         d_balise = None if delta is None else delta.get(k)
         if delta is not None and not d_balise:
@@ -670,7 +687,9 @@ def lignes(col, man: dict, maille: str = MAILLE_DEFAUT, *,
             continue
         ligne = {
             "station_id": str(b["id"]),
-            "source": SOURCE_NOTEE,
+            # ⛔ `b.get("source")`, JAMAIS `SOURCE_NOTEE` — cf. l'arbitrage
+            # sur SOURCE_NOTEE ci-dessus. Un ensemble n'est pas une valeur.
+            "source": b.get("source"),
             "lat": b.get("lat"), "lon": b.get("lon"),
             "model": model,
             # L'heure du RUN, pas celle d'un appel d'API — cf. l'en-tête.
@@ -760,8 +779,8 @@ def main() -> int:
     n_axe = len(col.balises)
     print(f"  run retenu : {run} — {n_axe} points d'archive, "
           f"{n_pas} échéances (0 → {horizon} h)")
-    print(f"  {len(rows)} balises {SOURCE_NOTEE} avec au moins une valeur "
-          f"de vent 10 m")
+    print(f"  {len(rows)} balises ({', '.join(sorted(SOURCE_NOTEE))}) avec "
+          f"au moins une valeur de vent 10 m")
 
     # ── La seconde série : AGRUME + AROME-PI ──────────────────────────
     # ⛔ ELLE S'AJOUTE, ELLE NE REMPLACE PAS. Et son absence n'est JAMAIS
