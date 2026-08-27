@@ -301,6 +301,116 @@ def main():
              f"Δ {diag['mesures']['delta_pi_arome_median_ms']} contre "
              f"{diag['mesures']['erreur_interpolation_median_ms']} m/s")
 
+    print("\n── 8. ⬜→⭐ L5 : le désaccord AROME/PI, publié ──")
+
+    def jeu_vecteurs(u_arome, v_arome, u_pi, v_pi, nb_pts=1):
+        """Champ CONSTANT en niveau/échéance/point — pour que l'angle et
+        le ratio attendus se calculent à la main, sans bruit."""
+        steps = list(range(0, 7))
+        ar = np.zeros((2, len(NIVEAUX_H_0025), len(steps), nb_pts))
+        ar[0], ar[1] = u_arome, v_arome
+        pi = np.zeros((2, len(NIVEAUX_PI), len(ECHEANCES_MIN), nb_pts))
+        pi[0], pi[1] = u_pi, v_pi
+        return pi, ar, steps
+
+    # ── scène ALIGNÉE : même direction, désaccord ~0 ──
+    pi_a, ar_a, steps_a = jeu_vecteurs(5.0, 0.0, 6.0, 0.0)
+    _, diag_a = composer(pi_a, ar_a, steps_a)
+    d_a = diag_a["desaccord"]
+    verifier("scène ALIGNÉE (AROME 5 m/s, PI 6 m/s, même direction) : "
+             "angle ~0° à TOUTES les échéances",
+             all(abs(a) < 1e-6 for a in d_a["angle_deg_echeance"]),
+             f"max {max(d_a['angle_deg_echeance'])}°")
+    verifier("… et le ratio publié vaut bien |6−5| / 5 = 0,2",
+             all(abs(r - 0.2) < 1e-9 for r in d_a["ratio_echeance"]),
+             f"{d_a['ratio_echeance'][:3]}")
+    verifier("… donc la proposition de seuil ne se déclenche NULLE PART",
+             not any(d_a["depasse_seuil_propose"]))
+
+    # ── scène OPPOSÉE : vecteurs exactement à l'opposé, désaccord max ──
+    pi_o, ar_o, steps_o = jeu_vecteurs(5.0, 0.0, -5.0, 0.0)
+    _, diag_o = composer(pi_o, ar_o, steps_o)
+    d_o = diag_o["desaccord"]
+    verifier("⚠️⚠️ scène OPPOSÉE (AROME 5 m/s, PI −5 m/s) : angle 180° — "
+             "le désaccord de direction que la moyenne de vecteurs rend "
+             "invisible en ne servant qu'un vent faible",
+             all(abs(a - 180.0) < 1e-6 for a in d_o["angle_deg_echeance"]),
+             f"{d_o['angle_deg_echeance'][:3]}")
+    verifier("… et ‖Δ‖/‖AROME‖ = |−10| / 5 = 2,0 — largement au-dessus "
+             "de la proposition de seuil (1,0)",
+             all(abs(r - 2.0) < 1e-9 for r in d_o["ratio_echeance"]),
+             f"{d_o['ratio_echeance'][:3]}")
+    verifier("… donc la proposition de seuil se déclenche PARTOUT",
+             all(d_o["depasse_seuil_propose"]))
+
+    # ── la garde epsilon : un AROME quasi nul ne fait pas exploser le ratio ──
+    pi_e, ar_e, steps_e = jeu_vecteurs(1e-4, 0.0, -5.0, 0.0)
+    _, diag_e = composer(pi_e, ar_e, steps_e)
+    d_e = diag_e["desaccord"]
+    verifier("⚠️ un AROME quasi nul (1e-4 m/s) ne fait PAS exploser le "
+             "ratio — le dénominateur est plafonné par EPSILON_DESACCORD_MS",
+             all(np.isfinite(r) and r < 20.0 for r in d_e["ratio_echeance"]),
+             f"{d_e['ratio_echeance'][:3]}")
+    attendu_eps = abs(-5.0 - 1e-4) / CO.EPSILON_DESACCORD_MS
+    verifier("… et le calcul utilise bien EPSILON_DESACCORD_MS au "
+             "dénominateur, pas ‖AROME‖ brut (qui donnerait ~50 000)",
+             abs(d_e["ratio_echeance"][0] - attendu_eps) < 1e-3,
+             f"{d_e['ratio_echeance'][0]} attendu {attendu_eps:.4f}")
+
+    # ── la garde 0/0 : deux vecteurs nuls sont d'accord, pas NaN ──
+    pi_z, ar_z, steps_z = jeu_vecteurs(0.0, 0.0, 0.0, 0.0)
+    _, diag_z = composer(pi_z, ar_z, steps_z)
+    d_z = diag_z["desaccord"]
+    verifier("⚠️ deux vecteurs NULS des deux côtés sont déclarés D'ACCORD "
+             "(angle 0, pas NaN) — un vent nul partout n'est pas un "
+             "désaccord de direction",
+             all(a == 0.0 and np.isfinite(a) for a in d_z["angle_deg_echeance"]),
+             f"{d_z['angle_deg_echeance'][:3]}")
+
+    # ── la proposition de seuil est un OU, pas un ET ──
+    import math
+    theta = math.radians(65.0)
+    mag_pi = 10.0 * math.cos(theta)   # optimal : minimise le ratio à angle fixé
+    pi_u, pi_v = mag_pi * math.cos(theta), mag_pi * math.sin(theta)
+    pi_m, ar_m, steps_m = jeu_vecteurs(10.0, 0.0, pi_u, pi_v)
+    _, diag_m = composer(pi_m, ar_m, steps_m)
+    d_m = diag_m["desaccord"]
+    verifier("ⓘ scène de contrôle : angle ≥ 60° MAIS ratio < 1 — "
+             "construite pour que les deux conditions du seuil proposé "
+             "ne se recouvrent pas (sinon un OU câblé en ET passerait "
+             "inaperçu)",
+             d_m["angle_deg_echeance"][0] >= 60.0
+             and d_m["ratio_echeance"][0] < 1.0,
+             f"angle={d_m['angle_deg_echeance'][0]}° "
+             f"ratio={d_m['ratio_echeance'][0]}")
+    verifier("⚠️⚠️ …et la proposition de seuil se déclenche QUAND MÊME — "
+             "c'est un OU (angle ≥ 60° OU ratio > 1), pas un ET",
+             all(d_m["depasse_seuil_propose"]))
+
+    # ── la forme publiée ──
+    verifier("le désaccord est publié PAR ÉCHÉANCE (25) ET PAR NIVEAU "
+             "(les 5 niveaux où Δ est MESURÉ, jamais les niveaux étendus)",
+             len(d_a["angle_deg_echeance"]) == len(ECHEANCES_MIN)
+             and len(d_a["angle_deg_par_niveau"]) == len(ECHEANCES_MIN)
+             and all(len(row) == len(NIVEAUX_DELTA)
+                     for row in d_a["angle_deg_par_niveau"])
+             and d_a["niveaux_m_sol"] == list(NIVEAUX_DELTA))
+    verifier("l'epsilon publié EST la constante du module — pas une "
+             "valeur en dur qui pourrait diverger d'elle",
+             d_a["epsilon_ms"] == CO.EPSILON_DESACCORD_MS)
+    # ⚠️ ÉCRIT EN POSITIF (piège nº 9 de BUGS.md 26/08) : on exige la
+    # PRÉSENCE des deux nombres et du mot qui dit que ce n'est PAS
+    # tranché, pas l'ABSENCE d'un mot qu'on pourrait supprimer par
+    # inadvertance sans que ce banc s'en aperçoive.
+    verifier("⚠️⚠️ le seuil proposé est publié EN TOUTES LETTRES (les deux "
+             "nombres ET « NON TRANCHÉE » ET « Yann ») — sinon un lecteur "
+             "croirait la proposition déjà décidée en production",
+             d_a["seuil_propose"]["angle_deg"] == CO.SEUIL_ANGLE_DESACCORD_DEG
+             and d_a["seuil_propose"]["ratio"] == CO.SEUIL_RATIO_DESACCORD
+             and "NON TRANCHÉE" in d_a["seuil_propose"]["arbitrage"]
+             and "Yann" in d_a["seuil_propose"]["arbitrage"],
+             d_a["seuil_propose"]["arbitrage"])
+
     print("\n  composite :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     for e in echecs:
         print(f"    ⛔ {e}")

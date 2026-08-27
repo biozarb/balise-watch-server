@@ -52,6 +52,27 @@ MUTATIONS = [
      "    f = (z - bas) / (haut - bas + 10.0)"),
     ("le diagnostic cesse de publier α",
      "        alpha_melange=ALPHA_MELANGE,", "        "),
+    # ── L5 (27/08/2026) : le désaccord AROME/PI ──
+    ("le produit scalaire du désaccord change de signe — l'angle "
+     "afficherait 180° − θ au lieu de θ, la scène ALIGNÉE mesurerait un "
+     "désaccord max et la scène OPPOSÉE un accord parfait",
+     "    produit = u_a * u_p + v_a * v_p",
+     "    produit = -(u_a * u_p + v_a * v_p)"),
+    ("la garde epsilon du ratio disparaît — un AROME quasi nul ferait "
+     "exploser ‖Δ‖/‖AROME‖ au lieu d'être plafonné",
+     "    ratio = norme_d / np.maximum(norme_a, EPSILON_DESACCORD_MS)",
+     "    ratio = norme_d / norme_a"),
+    ("la proposition de seuil devient un ET au lieu d'un OU — un fort "
+     "désaccord d'angle SEUL (65°, ratio 0,9) ne se signalerait plus",
+     "                bool(a >= SEUIL_ANGLE_DESACCORD_DEG\n"
+     "                    or r > SEUIL_RATIO_DESACCORD)",
+     "                bool(a >= SEUIL_ANGLE_DESACCORD_DEG\n"
+     "                    and r > SEUIL_RATIO_DESACCORD)"),
+    ("le diagnostic cesse de publier le désaccord",
+     "        desaccord=dict(\n"
+     "            niveaux_m_sol=list(NIVEAUX_DELTA),",
+     "        desaccord=dict(\n"
+     "            _MUTE_niveaux_m_sol=list(NIVEAUX_DELTA),"),
 ]
 
 

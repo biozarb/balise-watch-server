@@ -619,6 +619,44 @@ def section_8_resolution():
              "composite survivent aussi (Δ vaut 2,5 fois le bruit)",
              man["mesures"]["rapport"].startswith("Δ vaut")
              and "extinction" in man["conventions"])
+
+    # ── L5 (27/08/2026) : le désaccord AROME/PI SURVIT au manifeste ──
+    # ⛔⛔ SUR LE MANIFESTE, PAS SUR LE DIAGNOSTIC SEUL — exactement la
+    # leçon du piège nº 7 (BUGS.md 26/08) qui a fait manquer
+    # `alpha_melange` au manifeste alors qu'il vivait bien dans
+    # `composer()`. `test_composite.py` vérifie déjà le producteur ; ce
+    # banc-ci vérifie l'objet qui PART, et c'est lui qui aurait vu le
+    # défaut du 26/08.
+    verifier("⛔⛔ le manifeste PUBLIE le bloc `desaccord` — sans lui, "
+             "un lecteur ne peut pas savoir que le composite MOYENNE "
+             "deux vecteurs qui peuvent se contredire en direction",
+             "desaccord" in man and "angle_deg_echeance" in man["desaccord"],
+             f"clés du manifeste : {sorted(man.keys())[:5]}…")
+    verifier("…avec les 25 échéances et les 5 niveaux MESURÉS, comme "
+             "dans le diagnostic",
+             len(man["desaccord"]["angle_deg_echeance"]) == len(RA.ECHEANCES_MIN)
+             and man["desaccord"]["niveaux_m_sol"] == list(NIVEAUX_DELTA))
+    r0 = man["provenance"]["par_echeance"][0]["blocs"][RA.BLOC]
+    verifier("⚠️ le bloc `arome+pi` (τ = 0, PI pleinement disponible) "
+             "PORTE le désaccord — angle et ratio, à côté de `poids_pi` "
+             "comme le prompt du lot le demande",
+             "angle_deg_desaccord" in r0 and "ratio_desaccord" in r0
+             and "depasse_seuil_desaccord_propose" in r0,
+             sorted(r0.keys()))
+    verifier("…et ce n'est pas un zéro décoratif : `pi_bidon()` fabrique "
+             "un écart franc (1,3 m/s), l'angle mesuré n'est pas nul",
+             r0["angle_deg_desaccord"] >= 0.0
+             and isinstance(r0["ratio_desaccord"], float),
+             f"angle={r0['angle_deg_desaccord']}° "
+             f"ratio={r0['ratio_desaccord']}")
+    r_dernier = man["provenance"]["par_echeance"][-1]["blocs"][RA.BLOC]
+    verifier("⛔ …ALORS QUE la dernière échéance (`arome` seul, aucune "
+             "trace de PI) NE PORTE PAS de désaccord — en publier un "
+             "inventerait une comparaison qui n'a pas eu lieu",
+             "angle_deg_desaccord" not in r_dernier
+             and "ratio_desaccord" not in r_dernier,
+             sorted(r_dernier.keys()))
+
     plat = json.dumps(man, ensure_ascii=False)
     verifier("⛔ AUCUN âge publié — il périme à la lecture, il se calcule "
              "depuis `run_pi` et `run_produit_b`",
@@ -810,7 +848,13 @@ def section_11_sait_echouer():
     man = raf.manifeste()
     naif = {k: v for k, v in man.items()
             if k not in ("provenance", "niveaux", "niveaux_valables_si",
-                         "poids_pi", "preseance", "mesures", "conventions")}
+                         "poids_pi", "preseance", "mesures", "conventions",
+                         # ⓘ L5 (27/08/2026) : sans ça, ce contrôle ne
+                         # remarquerait jamais l'absence future de
+                         # `desaccord` — il resterait « naïvement » dans
+                         # la liste plate, comme s'il n'affirmait rien
+                         # sur À QUI la valeur est due.
+                         "desaccord")}
     plat = json.dumps(naif, ensure_ascii=False)
     verifier("⛔ SANS ces champs, rien dans le manifeste ne distingue une "
              "échéance CORRIGÉE par PI d'une échéance qui ne l'est pas — "

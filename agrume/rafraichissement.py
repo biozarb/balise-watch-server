@@ -479,6 +479,15 @@ class Rafraichissement:
         ensemble ; aucune des deux ne se déduit de l'autre.
         """
         poids = list(self.diagnostic["poids_pi"])
+        # ── L5 (27/08/2026) : le désaccord AROME/PI, PAR ÉCHÉANCE ──────
+        # ⓘ Le résumé « toutes niveaux confondus » (`angle_deg_echeance`/
+        # `ratio_echeance`), pas la table par niveau : `poids_pi` non
+        # plus ne varie pas avec l'altitude choisie à l'écran (aucune
+        # liste d'altitudes n'existe côté client — cf.
+        # `AltitudeWindPanel.tsx`), donc le désaccord affiché À CÔTÉ de
+        # lui doit vivre à la même granularité, pas à une plus fine que
+        # personne ne peut sélectionner.
+        desac = self.diagnostic["desaccord"]
         par_echeance = []
         for k, minute in enumerate(ECHEANCES_MIN):
             w = float(poids[k])
@@ -497,6 +506,14 @@ class Rafraichissement:
             # phrases qui la citaient.* Celui-ci n'a été trouvé ni par un
             # banc ni par une relecture, mais en LISANT L'ÉCRAN.
             r = rampe_pi(minute)
+            # ⚠️ Le désaccord n'a de sens QUE là où PI existe (r > 0) —
+            # ajouté aux DEUX branches "arome+pi", jamais à "arome" seul :
+            # sans second vecteur à comparer, publier un angle serait
+            # inventer un désaccord qui n'a pas été mesuré.
+            champs_desaccord = dict(
+                angle_deg_desaccord=desac["angle_deg_echeance"][k],
+                ratio_desaccord=desac["ratio_echeance"][k],
+                depasse_seuil_desaccord_propose=desac["depasse_seuil_propose"][k])
             if r >= 1.0:
                 bloc = dict(
                     modele="arome+pi", run=self.run_b, run_pi=self.run_pi,
@@ -504,7 +521,8 @@ class Rafraichissement:
                     regime_temporel=(
                         f"PI pleinement disponible sous 500 m/sol, mélangé "
                         f"à AROME à parts {ALPHA_MELANGE:.0%} / "
-                        f"{1 - ALPHA_MELANGE:.0%}"))
+                        f"{1 - ALPHA_MELANGE:.0%}"),
+                    **champs_desaccord)
             elif r > 0.0:
                 bloc = dict(
                     modele="arome+pi", run=self.run_b, run_pi=self.run_pi,
@@ -513,7 +531,8 @@ class Rafraichissement:
                         "rampe d'horizon : la DISPONIBILITÉ de PI décroît "
                         "vers son horizon de 6 h, l'erreur d'interpolation "
                         "résiduelle vaut (1 − poids_pi) × "
-                        "erreurInterpolationMs"))
+                        "erreurInterpolationMs"),
+                    **champs_desaccord)
             else:
                 bloc = dict(
                     modele="arome", run=self.run_b, poids_pi=0.0,
@@ -647,6 +666,15 @@ class Rafraichissement:
             alpha_melange=self.diagnostic["alpha_melange"],
             conventions=dict(self.diagnostic["conventions"]),
             mesures=dict(self.diagnostic["mesures"]),
+            # ⛔ L5 (27/08/2026) : LE MÊME PIÈGE QUE `alpha_melange`
+            # CI-DESSUS, ÉVITÉ EN LE RECOPIANT EXPLICITEMENT ICI. Le
+            # diagnostic de `composite.composer()` porte bien la clé
+            # `desaccord`, et un banc la vérifie LÀ (`test_composite.py`)
+            # — mais ce manifeste recopie des champs NOMMÉS, et un champ
+            # qu'on oublie de nommer ici n'atteint JAMAIS le client. cf.
+            # piège nº 7 de BUGS.md 26/08 : *vérifier le producteur ne
+            # vérifie pas le publié.*
+            desaccord=dict(self.diagnostic["desaccord"]),
             provenance=self.provenance(),
             # ══ LA PRÉSÉANCE — publiée, jamais devinée ═══════════════
             preseance=(

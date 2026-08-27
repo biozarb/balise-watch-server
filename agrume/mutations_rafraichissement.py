@@ -29,6 +29,15 @@ MUTATIONS = [
      "                \"PLEINEMENT DISPONIBLE, c'est-à-dire jusqu'à 4 h. Au-delà, \"",
      "                \"⚠️ la table `niveaux` décrit le régime à `poids_pi = 1`, \"\n"
      "                \"c'est-à-dire jusqu'à 4 h. Au-delà, \""),
+    # ── L5 (27/08/2026) : le désaccord AROME/PI ──
+    ("le manifeste cesse de publier le désaccord — le champ existe dans "
+     "le diagnostic mais n'arrive jamais au client, exactement le "
+     "défaut du 26/08 sur `alpha_melange`",
+     "            desaccord=dict(self.diagnostic[\"desaccord\"]),", "            "),
+    ("la provenance cesse d'attacher le désaccord aux blocs `arome+pi` "
+     "— l'écran n'aurait plus rien à afficher à côté de `poids_pi`",
+     "                    **champs_desaccord)\n            elif r > 0.0:",
+     "                    )\n            elif r > 0.0:"),
 ]
 
 

@@ -134,14 +134,51 @@ TAU_FIN_MIN = 360          # 6 h : horizon de PI, rampe = 0
 #  lisait « 6,8 au 305° » — un chiffre confiant et faux une fois sur
 #  deux. Aucune des deux lectures n'est bonne.
 #
-#  ⬜ CE QUI RESTE À FAIRE, ET QUI N'EST PAS FAIT : publier un indicateur
-#  de DÉSACCORD (‖PI − AROME‖ rapporté à la vitesse) à côté de
-#  `poids_pi`, pour que l'écran puisse dire « les deux modèles divergent »
-#  au lieu de servir un vecteur faible sans explication. La maxime du
-#  projet s'applique telle quelle : *on ne refuse pas de servir, on
-#  refuse de laisser croire.* Le composite sait déjà calculer Δ ; il ne
-#  le publie pas.
+#  ⭐ RÉPONDU LE 27/08/2026 (LOT L5) : publier un indicateur de
+#  DÉSACCORD (‖Δ‖ rapporté à ‖AROME‖, et l'angle entre V_AROME et V_PI)
+#  à côté de `poids_pi`, pour que l'écran puisse dire « les deux modèles
+#  divergent » au lieu de servir un vecteur faible sans explication. La
+#  maxime du projet s'applique telle quelle : *on ne refuse pas de
+#  servir, on refuse de laisser croire.* Voir `_desaccord_arome_pi` et
+#  le bloc `desaccord` du diagnostic, plus bas dans ce fichier.
+#  ⓘ CE QUI RESTE SÉPARÉ, ET LE RESTE À DESSEIN (audit §4 bis) : mélanger
+#  vitesse scalaire + direction circulaire, ou SÉLECTIONNER une
+#  composante au-delà d'un désaccord d'angle, changeraient la physique
+#  servie — ce sont des chantiers à mesurer au banc AVANT tout câblage,
+#  pas ce lot. Ce lot PUBLIE le désaccord ; il ne le corrige pas.
 ALPHA_MELANGE = 0.5
+
+# ── ⬜→⭐ L5 (27/08/2026) : L'INDICATEUR DE DÉSACCORD AROME/PI ─────────
+#
+#  Une moyenne de vecteurs EN DÉSACCORD DE DIRECTION rend un vent FAIBLE
+#  (voir plus haut : 7,8 % des heures corrigées du 25/08 tombent sous la
+#  moitié d'AROME). Ce bloc publie, PAR ÉCHÉANCE et PAR NIVEAU où Δ est
+#  MESURÉ (les 5 niveaux de `NIVEAUX_DELTA` — jamais les niveaux étendus,
+#  où on n'a plus deux vecteurs à comparer mais un seul Δ extrapolé) :
+#  l'angle entre V_AROME et V_PI, et le rapport ‖Δ‖/max(‖AROME‖, ε).
+#
+#  ⚠️⚠️ LE SEUIL D'AFFICHAGE EST UN ARBITRAGE, PAS UNE MESURE — le
+#  prompt du lot le dit explicitement : « proposer, ne pas trancher
+#  seul ». Les deux constantes ci-dessous sont la PROPOSITION de l'audit
+#  §4 bis (« signaler au-delà de 60° d'angle OU ‖Δ‖ > ‖AROME‖ »), publiée
+#  et appliquée dans `depasse_seuil_propose` pour que l'écran puisse déjà
+#  s'en servir — mais ce nom le dit : c'est une PROPOSITION en attente de
+#  la confirmation de Yann, pas une règle de conduite. *cf. BUGS.md
+#  26/08, piège nº 5 : un quantile d'affichage promu règle de conduite
+#  sans revue est exactement le défaut à ne pas reproduire ici.*
+SEUIL_ANGLE_DESACCORD_DEG = 60.0
+SEUIL_RATIO_DESACCORD = 1.0
+
+# ε au dénominateur de ‖Δ‖/‖AROME‖, dans l'unité de u/v ICI (m/s — pas
+# les km/h du scoring, un autre sous-système). Empêche un AROME quasi
+# nul de produire un ratio qui explose sans rien dire d'un vrai
+# désaccord de DIRECTION (à vent nul, la direction n'est pas définie).
+# ⚠️ N'est PAS la même garde que le `1e-9` de `_desaccord_arome_pi` :
+# celui-là protège une division 0/0 (deux vecteurs nuls n'ont pas
+# d'angle, on les déclare d'accord plutôt que de lever) ; celui-ci est
+# une CONVENTION physique, à la même place que `Z_EXTINCTION_*` plus
+# bas — écrite pour qu'on sache où la contester.
+EPSILON_DESACCORD_MS = 0.5
 
 # ── L'extinction verticale de Δ ───────────────────────────────────────
 # Δ n'est mesuré qu'aux niveaux de PI, dont le plus haut est 500 m. Au
@@ -386,6 +423,53 @@ def resolution_temporelle(z):
                 erreurInterpolationMs=round(err, 2))
 
 
+def _desaccord_arome_pi(pi_delta, ar_delta, delta):
+    """Le désaccord entre V_PI et V_AROME, aux niveaux COMMUNS.
+
+    `pi_delta`, `ar_delta`, `delta` : (2, len(NIVEAUX_DELTA), …points),
+    u/v en première dimension. `delta = pi_delta - ar_delta`, passé en
+    argument plutôt que recalculé : la production ne doit jamais avoir
+    deux définitions de Δ qui pourraient un jour diverger (piège nº 2
+    de BUGS.md 26/08 : le piège des deux consommateurs).
+
+    Renvoie `(angle_par_niveau, ratio_par_niveau, angle_global,
+    ratio_global)` :
+      · les deux premiers, (len(NIVEAUX_DELTA),) — MÉDIANE sur les
+        points (s'il y en a) ;
+      · les deux derniers, deux flottants Python — MÉDIANE sur niveaux
+        ET points confondus, le résumé publié à côté de `poids_pi` (qui,
+        lui non plus, ne varie pas par niveau).
+
+    ⚠️ MÉDIANE, pas moyenne — comme partout ailleurs dans ce projet où
+    un point isolé (un point de grille en bord de domaine, une division
+    par un AROME presque nul) ne doit pas peser sur le chiffre publié.
+    """
+    u_a, v_a = ar_delta[0], ar_delta[1]
+    u_p, v_p = pi_delta[0], pi_delta[1]
+    norme_a = np.sqrt(u_a ** 2 + v_a ** 2)
+    norme_p = np.sqrt(u_p ** 2 + v_p ** 2)
+    norme_d = np.sqrt(delta[0] ** 2 + delta[1] ** 2)
+
+    produit = u_a * u_p + v_a * v_p
+    denom = norme_a * norme_p
+    # ⚠️ Garde 0/0 : deux vecteurs (quasi) nuls n'ont pas de direction à
+    # comparer. On les déclare d'ACCORD (cos = 1, angle = 0) plutôt que
+    # de lever ou de rendre NaN — un vent nul des deux côtés n'est pas
+    # un désaccord.
+    produit_f = np.asarray(produit, dtype=np.float64)
+    cos_angle = np.divide(produit_f, denom, out=np.ones_like(produit_f),
+                          where=denom > 1e-9)
+    cos_angle = np.clip(cos_angle, -1.0, 1.0)
+    angle = np.degrees(np.arccos(cos_angle))
+    ratio = norme_d / np.maximum(norme_a, EPSILON_DESACCORD_MS)
+
+    axes_points = tuple(range(1, angle.ndim))
+    angle_niveau = np.median(angle, axis=axes_points) if axes_points else angle
+    ratio_niveau = np.median(ratio, axis=axes_points) if axes_points else ratio
+    return (angle_niveau, ratio_niveau,
+           float(np.median(angle)), float(np.median(ratio)))
+
+
 def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
              niveaux_cibles=NIVEAUX_H_0025, alpha=None):
     """Le composite, sur les 25 échéances de PI et les 25 niveaux d'AROME.
@@ -433,17 +517,30 @@ def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
     # quoi. *Constaté au banc, le 10/08.*
     arome_par_step = np.moveaxis(arome_uv, 2, -1)
 
+    desaccord_angle_niveau, desaccord_ratio_niveau = [], []
+    desaccord_angle_echeance, desaccord_ratio_echeance = [], []
     for it, minute in enumerate(ECHEANCES_MIN):
         # AROME interpolé à CETTE minute, sur TOUS les niveaux.
         ar = np.stack([arome_interpole(arome_par_step[c], steps_arome_h,
                                        minute + decalage_min)
                        for c in (0, 1)])
+        # V_AROME et V_PI aux 5 niveaux COMMUNS — les deux vecteurs bruts,
+        # nommés pour le lot L5 (désaccord = angle + ‖Δ‖/‖AROME‖).
+        # `composer` ne les gardait jusqu'ici que le temps d'un calcul.
+        ar_delta = np.stack([ar[c][i_arome_delta] for c in (0, 1)])
+        pi_delta = np.stack([pi_uv[c][i_delta, it] for c in (0, 1)])
         # Δ aux 5 niveaux communs — CALCULÉ, jamais propagé en τ.
-        delta = np.stack([pi_uv[c][i_delta, it] - ar[c][i_arome_delta]
-                          for c in (0, 1)])
+        delta = pi_delta - ar_delta
+        a_niv, r_niv, a_ech, r_ech = _desaccord_arome_pi(pi_delta, ar_delta,
+                                                          delta)
+        desaccord_angle_niveau.append(a_niv)
+        desaccord_ratio_niveau.append(r_niv)
+        desaccord_angle_echeance.append(a_ech)
+        desaccord_ratio_echeance.append(r_ech)
         # (2, 5, …) → (2, …, 5) pour `etendre_delta`, puis retour.
-        delta = np.moveaxis(delta, 1, -1)
-        etendu = np.moveaxis(etendre_delta(delta, niveaux_cibles), -1, 1)
+        delta_pour_extension = np.moveaxis(delta, 1, -1)
+        etendu = np.moveaxis(etendre_delta(delta_pour_extension, niveaux_cibles),
+                             -1, 1)
         w = poids_pi(minute, alpha)
         poids.append(w)
         sortie[:, :, it] = ar + w * etendu
@@ -478,6 +575,47 @@ def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
             delta_pi_arome_q90_ms=1.78,
             erreur_interpolation_median_ms=0.31,
             rapport="Δ vaut 2,5 fois l'erreur d'interpolation",
+        ),
+        # ── L5 (27/08/2026) : le désaccord AROME/PI, publié ───────────
+        # ⚠️ Champ NOMMÉ, à recopier explicitement partout où ce
+        # diagnostic est repris (rafraichissement.manifeste() : piège
+        # nº 7 de BUGS.md 26/08, « vérifier le producteur ne vérifie pas
+        # le publié » — c'est EXACTEMENT le défaut qui a fait manquer
+        # `alpha_melange` entre le diagnostic et l'objet servi).
+        desaccord=dict(
+            niveaux_m_sol=list(NIVEAUX_DELTA),
+            epsilon_ms=EPSILON_DESACCORD_MS,
+            angle_deg_echeance=[round(a, 2) for a in desaccord_angle_echeance],
+            ratio_echeance=[round(r, 4) for r in desaccord_ratio_echeance],
+            angle_deg_par_niveau=[[round(float(a), 2) for a in arr]
+                                  for arr in desaccord_angle_niveau],
+            ratio_par_niveau=[[round(float(r), 4) for r in arr]
+                              for arr in desaccord_ratio_niveau],
+            depasse_seuil_propose=[
+                bool(a >= SEUIL_ANGLE_DESACCORD_DEG
+                    or r > SEUIL_RATIO_DESACCORD)
+                for a, r in zip(desaccord_angle_echeance,
+                                desaccord_ratio_echeance)],
+            seuil_propose=dict(
+                angle_deg=SEUIL_ANGLE_DESACCORD_DEG,
+                ratio=SEUIL_RATIO_DESACCORD,
+                arbitrage=(
+                    "PROPOSITION de l'audit §4 bis (signaler au-delà de "
+                    "60° d'angle OU ‖Δ‖ > ‖AROME‖) — NON TRANCHÉE : "
+                    "`depasse_seuil_propose` l'applique pour que l'écran "
+                    "puisse déjà s'en servir, mais elle attend la "
+                    "confirmation de Yann avant de devenir une règle de "
+                    "conduite (cf. BUGS.md 26/08, piège nº 5)."),
+            ),
+            note=(
+                "PAR échéance ET par niveau où Δ est MESURÉ (les 5 de "
+                "`niveaux_m_sol`, jamais les niveaux étendus/interpolés "
+                "— là on n'a plus deux vecteurs à comparer, juste un Δ "
+                "extrapolé). MÉDIANE sur les points du domaine. Ce lot "
+                "PUBLIE le désaccord, il ne le corrige pas — mélanger "
+                "vitesse scalaire et direction circulaire, ou "
+                "sélectionner une composante, sont des chantiers "
+                "SÉPARÉS (audit §4 bis)."),
         ),
     )
     return sortie, diagnostic
