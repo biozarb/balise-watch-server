@@ -67,6 +67,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import duel as DUEL  # noqa: E402
 import events as EV  # noqa: E402
 import inference as INF  # noqa: E402
 import scoring as S  # noqa: E402
@@ -3726,7 +3727,8 @@ def rounds_rows(state: dict) -> list[dict]:
 
 
 def _publish_light(st, scores: list[dict], ev_scores: list[dict],
-                   rounds_state: dict, as_of: datetime, dry_run: bool):
+                   rounds_state: dict, as_of: datetime, dry_run: bool,
+                   duels: list[dict] | None = None):
     """Publie `model_scores_light.json` — le sous-ensemble pour la pastille.
 
     Même bucket, même clé stable, même cache court que
@@ -3758,6 +3760,13 @@ def _publish_light(st, scores: list[dict], ev_scores: list[dict],
         "scores": light_score_rows(scores),
         "bascules": light_bascule_rows(ev_scores),
         "rounds": rounds_rows(rounds_state),
+        # ⛔ LE DUEL VOYAGE ICI ET NULLE PART AILLEURS (lot L1). Il n'est
+        # PAS un score de zone : ni `zone_id`, ni `rank`, ni `agg_level`.
+        # Le fondre dans `scores` en ferait une colonne de classement au
+        # premier écran qui les lit ensemble — et c'est exactement ce que
+        # l'audit §2.4 interdit : le classement ne peut PAS trancher cette
+        # question, c'est pour ça que le duel existe.
+        "duels": list(duels or []),
     }, separators=(",", ":")).encode("utf-8")
     st.put("model_scores_light.json", body, cache_control=CACHE_REECRIT)
     st.bilan()
@@ -4520,6 +4529,56 @@ def main() -> int:
         print(f"  ⚠️ pression (S1) : {type(exc).__name__} — {exc}. "
               f"La notation du VENT n'est pas affectée.", file=sys.stderr)
 
+    # ── L1 : LE DUEL APPARIÉ, HORS CLASSEMENT (27/08/2026) ────
+    #
+    # ⛔ POURQUOI UNE SECONDE LECTURE, ET POURQUOI ELLE EST PETITE.
+    # La fenêtre glissante du run (`daily`, plus bas) couvre
+    # `ROLLING_DAYS` = 15 jours ; le duel en veut 30 — l'écart
+    # qu'il cherche (~0,03 km/h) demande 15 à 40 jours pour se voir
+    # (audit §2.4). Mais il ne lit QUE quatre modèles, un lead et un
+    # réseau, sur sept colonnes : quelques dizaines de milliers de
+    # lignes contre les centaines de milliers de la fenêtre entière.
+    #
+    # ⛔ ET IL EST ICI, HORS DU `else: (zone_of non vide)` OÙ IL AVAIT
+    # D'ABORD ÉTÉ ÉCRIT. Le duel ne connaît AUCUNE zone : il apparie des
+    # balise-jours, pas des cases. L'avoir laissé sous ce `if` aurait
+    # rendu son silence indistinguable d'un défaut de `station_zone` —
+    # un couplage invisible, du genre qui se découvre le soir où la
+    # table de zones est vide et où l'on cherche pourquoi le duel a
+    # disparu.
+    #
+    # ⚠️ SOUS `try`, COMME LE BILAN DES PARTIES ET LA PRESSION. Le duel
+    # est un DIAGNOSTIC : il ne décide d'aucun rang, d'aucune ligne de
+    # `model_score_zone`. Une nuit de notation perdue parce qu'un bloc
+    # d'observation n'a pas pu se calculer serait le remède pire que
+    # le mal — et le journal, lui, dira ce qui s'est passé.
+    duels_rows: list[dict] = []
+    try:
+        depuis_duel = (day - timedelta(days=DUEL.DUEL_DAYS - 1)
+                       ).strftime("%Y-%m-%d")
+        daily_duel = sb.select(
+            "model_verif_daily", DUEL.query_duel(depuis_duel),
+            order="day,source,station_id,model,lead_h,fcst_src")
+        duels_rows = DUEL.duels(daily_duel)
+        print(f"  duel apparié ({DUEL.DUEL_VALUE_KEY}, lead "
+              f"{DUEL.DUEL_LEAD_H}, {DUEL.DUEL_SOURCE}) : "
+              f"{len(daily_duel)} lignes lues depuis le {depuis_duel}")
+        for _d in duels_rows:
+            print(DUEL.dire(_d))
+            if _d["excluded_duplicates"]:
+                print(f"     ⚠️ {_d['excluded_duplicates']} balise-jour(s) "
+                      f"écartée(s) : deux `fcst_src` pour une même "
+                      f"balise-jour (cf. duel.lignes_du_modele)",
+                      file=sys.stderr)
+            if _d["truncated_by_retention"]:
+                print(f"     ⓘ cumul TRONQUÉ par la rétention "
+                      f"({DUEL.DUEL_DAYS} j) : le « depuis la naissance "
+                      f"de la paire » n'est plus vrai — cf. duel.DUEL_DAYS")
+    except Exception as exc:                       # noqa: BLE001
+        print(f"  ⚠️ duel apparié : {type(exc).__name__} — {exc}. La "
+              f"notation continue, le bloc `duels` sera vide ce soir.",
+              file=sys.stderr)
+
     if not zone_of:
         print("  ⓘ `station_zone` est vide : aucune balise n'est encore")
         print("     rattachée à son bassin-versant. Les accumulateurs et les")
@@ -4611,6 +4670,7 @@ def main() -> int:
         since = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
         daily = sb.select("model_verif_daily", f"?day=gte.{since}",
                           order="day,source,station_id,model,lead_h,fcst_src")
+
         t_roll = time.monotonic()
         scores = rolling_scores(daily, zone_of, as_of)
         print(f"  score glissant : {len(scores)} lignes "
@@ -4702,7 +4762,7 @@ def main() -> int:
             # ── S13.0 : le fichier léger + le résumé des manches ──
             rounds_state = update_rounds(root, day, scores, args.dry_run)
             _publish_light(st, scores, ev_scores, rounds_state, as_of,
-                           args.dry_run)
+                           args.dry_run, duels_rows)
             print(f"  → manches : {rounds_state.get('nights', 0)} nuit(s) "
                   f"suivie(s) depuis le {rounds_state.get('since')}, "
                   f"{len(rounds_state.get('wins', {}))} case(s) "
