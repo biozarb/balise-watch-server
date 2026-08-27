@@ -3289,8 +3289,15 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
 #: ⛔ IL NE VOYAGE JAMAIS DANS `rank_reason` — seulement dans
 #: `rank_reason_corr`, une colonne à part. Le CHECK de
 #: `supabase_step40_lot_g.sql` porte sur la première, et lui ajouter une
-#: valeur qu'il ne connaît pas ferait tomber une nuit entière
-#: (cf. `_verifier_rank_reason`).
+#: valeur qu'il ne connaît pas ferait tomber une nuit entière.
+#: ⓘ 27/08 : ce pavé renvoyait à un `_verifier_rank_reason` QUI N'EXISTE
+#: PAS — le nom a changé sans que le commentaire suive. Le mécanisme
+#: réel est `RANK_REASONS_STEP40` (plus bas) et le repli de
+#: `_upsert_scores`, qui renvoie une fois avec la raison neuve à `null`
+#: quand la base refuse EN NOMMANT sa contrainte. C'est LUI qu'une
+#: raison neuve (`duplicate_chain` du lot L2, `fdr` du L3) doit
+#: rejoindre. *Un renvoi vers un nom mort coûte une recherche à chaque
+#: lecteur, et finit par en égarer un.*
 RANK_REASON_POPULATION_MIXTE = "mixed_population"
 
 

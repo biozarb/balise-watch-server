@@ -138,6 +138,43 @@ for B in tools/test_mf_s3.py tools/test_audit_r2.py agrume/test_orographie.py \\
 done
 echo "  ✓ 19/19 bancs Python verts sur le VPS"
 
+# ⛔ 27/08 — ET LES BANCS DE \`model-verif/\`, QUI N'AVAIENT JAMAIS
+# TOURNÉ ICI. Le 26/08 au soir, ce script ne SYNCHRONISAIT même pas
+# \`model-verif/\` (entrée BUGS.md : « le déploiement annonçait tout est
+# vert sur un tiers du lot manquant ») ; le rsync a été ajouté, la
+# VÉRIFICATION non. Le code de tout le scoring partait donc sur le VPS
+# — \`score.py\`, \`inference.py\`, \`agrume_fcst.py\` — sans qu'une seule
+# de ses ~1 100 assertions n'y soit rejouée. *Un rsync vérifié au
+# sha256 prouve que les octets sont arrivés, jamais qu'ils tournent.*
+# ⚠️ Mesuré le 27/08 : ces bancs prennent ~25 s de plus sur le VPS.
+# C'est le prix, et il est écrit ici pour qu'il ne surprenne personne.
+for B in model-verif/test_score.py model-verif/test_inference.py \\
+         model-verif/test_duel.py model-verif/test_collect.py \\
+         model-verif/test_collect_reduit.py model-verif/test_events.py \\
+         model-verif/test_geopair.py model-verif/test_run_selftest.py \\
+         model-verif/test_agrume_fcst.py model-verif/test_agrume_pi_fcst.py \\
+         model-verif/test_arome_fcst.py model-verif/test_sonde_delta_10m.py; do
+  echo "  · \$B"
+  "\$PY" "\$B" || exit 1
+done
+# ⚠️ \`test_scoring.py\` À PART, ET IL FAUT DIRE EXACTEMENT POURQUOI.
+# Sa moitié la plus précieuse compare \`scoring.py\` à son JUMEAU
+# TypeScript (\`src/lib/verifScore.ts\`) — le seul garde-fou contre une
+# duplication qui diverge. Elle exige un \`--ts-results\` produit en
+# TROIS ÉTAPES À LA MAIN (voir l'en-tête de \`test_scoring.py\` :
+# \`--emit-fixtures\`, puis \`node parity-scoring.js\`, puis comparer), et
+# \`node\` n'est de toute façon PAS sur ce VPS (vérifié le 27/08).
+# ⛔ DONC : la parité N'EST JOUÉE NULLE PART AUTOMATIQUEMENT — ni ici,
+# ni sur le Mac au déploiement (vérifié le 27/08 : \`test_scoring.py\`
+# sans argument ÉCHOUE aussi sur le Mac, faute du fichier TS). C'est un
+# TROU CONNU, pas une case cochée, et l'écrire ici est le minimum : un
+# \`vert\` qui couvre 66 assertions et zéro comparaison TS serait
+# exactement le motif que cette section entière corrige.
+echo "  · model-verif/test_scoring.py --unit-only"
+echo "    ⚠️ parité TypeScript NON jouée (procédure manuelle, cf. en-tête du banc)"
+"\$PY" model-verif/test_scoring.py --unit-only || exit 1
+echo "  ✓ 13/13 bancs model-verif verts sur le VPS"
+
 # ⛔ 27/08 — CELUI-CI N'EST PAS EN PYTHON, ET C'EST PRÉCISÉMENT
 # POURQUOI IL EST ICI. Ce qui a rempli la boîte de Yann la nuit du 26
 # au 27 n'était pas un calcul : c'était un \`case\` de shell qui pinguait

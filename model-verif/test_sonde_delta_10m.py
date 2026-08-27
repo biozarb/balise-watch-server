@@ -43,7 +43,7 @@ import agrume_fcst as A                                     # noqa: E402
 import scoring as S                                         # noqa: E402
 import sonde_delta_10m as B                                 # noqa: E402
 from colonnes import Colonnes                               # noqa: E402
-from composite import poids_pi                              # noqa: E402
+from composite import ALPHA_MELANGE, poids_pi                # noqa: E402
 from profil import decorer_vent                             # noqa: E402
 
 ECHECS: list[str] = []
@@ -194,8 +194,21 @@ def test_les_heures_sont_celles_ou_la_rampe_est_non_nulle():
     verifie(poids_pi(6 * 60) == 0.0 and 6 not in B.HEURES_PI,
             "+6 h est EXCLUE : Δ y serait multiplié par zéro, et une "
             "case à zéro se lirait comme « PI n'a rien à corriger »")
-    verifie(poids_pi(5 * 60) == 0.5,
-            "la 5ᵉ heure vaut bien 0,5 — la rampe s'importe du composite")
+    # ⛔ LE POIDS SERVI N'EST PAS LA RAMPE — 26/08 (clôture). `poids_pi`
+    # vaut α·rampe : α = ALPHA_MELANGE porte la CONFIANCE, la rampe porte
+    # la DISPONIBILITÉ. Les deux étaient un seul nombre jusqu'à ce soir-là,
+    # et ce banc, écrit avant, lisait 1,0 puis 0,5. La sonde mesure ce qui
+    # est SERVI : elle suit α.
+    verifie(ALPHA_MELANGE == 0.5,
+            f"⚠️ CE BANC EST ÉCRIT POUR α = 0,5 (α vaut {ALPHA_MELANGE}) — "
+            f"si α change, les scènes ci-dessous se relisent : elles "
+            f"fournissent Δ/α pour que l'effet SERVI reste celui sur "
+            f"lequel elles raisonnent")
+    verifie(poids_pi(5 * 60) == 0.25,
+            "la 5ᵉ heure vaut 0,25 = α × rampe(5 h) = 0,5 × 0,5 — la "
+            "rampe ET la confiance s'importent du composite")
+    verifie(poids_pi(0) == ALPHA_MELANGE,
+            "à l'heure 0 le poids servi est α tout entier, pas 1")
 
 
 def test_le_placebo_n_a_aucun_point_fixe():
@@ -425,9 +438,10 @@ def test_les_series_ajoutent_w_fois_delta_sur_u_et_v():
     verifie(np.allclose(w, [poids_pi(int(x) * 60) for x in h]),
             "la colonne w est EXACTEMENT la rampe du composite "
             f"(dont {sorted(set(w.tolist()))})")
-    verifie(0.5 in set(w.tolist()) and 1.0 in set(w.tolist()),
-            "la rampe est bien à deux régimes ici (1,0 puis 0,5) — sinon "
-            "le banc ne verrait pas un w écrasé à 1")
+    verifie(0.5 in set(w.tolist()) and 0.25 in set(w.tolist()),
+            f"la rampe est bien à deux régimes ici (0,5 puis 0,25 = α × "
+            f"1 et α × ½) — sinon le banc ne verrait pas un w écrasé à 1 "
+            f"(dont {sorted(set(w.tolist()))})")
     # Δ20 = 16 − 4 = 12 ; Δ10 = 8 − 2 = 6 ; base u = 1, v = 0.
     attendu_t1 = np.array([decorer_vent({"u": 1.0 + w[i] * 12.0,
                                          "v": 0.0})["vitesseKmh"]
@@ -451,13 +465,19 @@ def test_delta_s_ajoute_sur_u_v_et_pas_sur_la_vitesse():
     # Base plein NORD (u=0, v=-6 → 4 km/h de nord), Δ plein EST.
     # Ajouter Δ à la VITESSE laisserait la direction inchangée ;
     # l'ajouter à u/v la fait tourner. C'est là que 180° se gagnent.
+    # ⚠️ Δ EST FOURNI DIVISÉ PAR α, pour que le Δ SERVI (w·Δ) vaille
+    # exactement 6 m/s et que le virage attendu reste 45° — un nombre
+    # qu'on vérifie de tête. Écrire 6,0 ici ferait servir 3 m/s depuis la
+    # clôture du 26/08, donc 26,6°, et le banc ne testerait plus la
+    # propriété qu'il annonce (« Δ s'ajoute sur u/v ») mais la valeur de α.
     a = archive_a(lambda k, s: (0.0, -6.0), lambda k, s: (0.0, 0.0),
                   lambda k, s: (0.0, 0.0))
-    pi = archive_pi(lambda sid, niv, m: (6.0, 0.0) if niv == 10 else (0.0, 0.0))
+    pi = archive_pi(lambda sid, niv, m:
+                    (6.0 / ALPHA_MELANGE, 0.0) if niv == 10 else (0.0, 0.0))
     obs = {b["id"]: Obs(lambda i: (18.0, 90.0)).paire for b in PIOUPIOU}
     tab, ch = table_de(lancer(a, pi, obs))
     sers, _ = B.series(tab, ch)
-    m = col_de(tab, ch, "h") == 0            # w = 1
+    m = col_de(tab, ch, "h") == 0            # w = α (rampe pleine)
     d0 = sers["T0"][1][m][0]
     d2 = sers["T2"][1][m][0]
     verifie(abs(((d2 - d0) % 360) - 45.0) < 1.0 or
@@ -571,12 +591,17 @@ def test_bout_a_bout_un_delta_10m_parfait_se_voit_et_le_placebo_non():
     # Vent d'ouest (270°) ⇒ u > 0. On vise u = obs/3.6, v = 0.
     a = archive_a(lambda k, s: (0.0, 0.0), lambda k, s: (0.0, 0.0),
                   lambda k, s: (0.0, 0.0))
+    # ⚠️ obs/(3,6·α) et non obs/3,6 : c'est w·Δ qui est servi, et w vaut
+    # α à l'heure pleine. Un Δ « exactement l'observation » ne serait
+    # atteint qu'à α = 1 — depuis le 26/08 il en manquerait la moitié, et
+    # « Δ(10 m) PARFAIT » ne serait plus parfait du tout.
     pi = archive_pi(lambda sid, niv, m:
-                    ((obs_kmh[sid] / 3.6, 0.0) if niv == 10 else (0.5, 0.0)))
+                    ((obs_kmh[sid] / (3.6 * ALPHA_MELANGE), 0.0)
+                     if niv == 10 else (0.5, 0.0)))
     obs = {sid: Obs(lambda i, v=v: (v, 270.0)).paire
            for sid, v in obs_kmh.items()}
     tab, ch = table_de(lancer(a, pi, obs))
-    m = col_de(tab, ch, "h") == 0                      # w = 1, Δ plein
+    m = col_de(tab, ch, "h") == 0                # w = α, rampe pleine
     sers, _ = B.series(tab, ch)
     osp, odi = col_de(tab, ch, "obs_speed"), col_de(tab, ch, "obs_dir")
     vec = B.mode_commun(sers, osp, odi)
@@ -651,10 +676,22 @@ def scene_forte():
     # celui des T et « chaque tableau calcule le sien » deviendrait un
     # non-événement : le banc resterait vert sur la faute. Trouvé par la
     # mutation nº 19, deux fois de suite.
+    # ⚠️ LE 7,0 DE « 1377 » EST UN 5,0 CORRIGÉ DE α (26/08, clôture).
+    # Son rôle tient à ce que son T1 = 3,0 + w·(PI₂₀ − AROME₂₀) passe SOUS
+    # 5 km/h : il faut donc w·Δ₂₀ ≈ −2 m/s, donc Δ₂₀ = −2/α = −4, donc un
+    # AROME₂₀ à 3,0 + 4,0 = 7,0. Avec l'ancien 5,0, le Δ servi n'était plus
+    # que −1 m/s, T1 remontait à 7,2 km/h et le masque des dix séries
+    # cessait d'être STRICTEMENT plus étroit — la propriété disparaissait
+    # en silence. ⛔ Et c'est AROME₂₀ qu'on remonte, pas PI₂₀ qu'on
+    # abaisse : PI₂₀ est lui-même une des cinq séries BRUTES, le faire
+    # passer sous le seuil ferait sortir « 1377 » du masque des brutes et
+    # lui ferait perdre son rôle (il doit sortir de celui des T, et de
+    # celui-là SEUL).
     a = archive_a(lambda k, s: (3.0, 0.0),      # T0 = 10,8 km/h
                   lambda k, s: (3.2, 0.0),      # AROME₁₀ 0,025° = 11,5
                   lambda k, s: ((1.0 if k == 0 else
-                                 (5.0 if k == 1 else 3.0)), 0.0))
+                                 (3.0 + 2.0 / ALPHA_MELANGE if k == 1
+                                  else 3.0)), 0.0))
     pi = archive_pi(lambda sid, niv, m:
                     (3.9, 0.0) if niv == 10
                     else ((1.3, 0.0) if sid == "70"

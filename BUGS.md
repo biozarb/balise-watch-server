@@ -6,6 +6,63 @@
 
 ---
 
+## 27/08/2026 (lot L1) — trois instruments qui ne pouvaient pas mesurer ce qu'on leur demandait
+
+**Piège nº 1 — UNE MÉTRIQUE PEUT ÊTRE INCAPABLE DE VOIR UN EFFET, ET
+RENDRE QUAND MÊME UN CHIFFRE.** Le classement ne tranchera JAMAIS
+`agrume` contre `agrume_pi` : l'écart attendu (~0,03 km/h sur 4,1) est
+vingt fois sous `MIN_RELATIVE_GAP` (15 %), donc `rank` rendra `tied`
+pour toujours — non pas faute de données, mais par construction. Et
+`err_vec_med` ne le verra pas davantage : médiane sur 24 h d'un effet
+qui touche 6 h. On aurait pu attendre des mois devant un tableau qui
+répond, poliment, à une question qu'il ne sait pas poser. *Avant
+d'attendre un verdict d'une colonne, calculer si elle a la PUISSANCE de
+le rendre — c'est une division, pas une intuition.* La réponse est
+ailleurs : différence appariée sur `err_vec_rms`, IC par blocs de jours
+(`duel.py`), et un verdict attendu vers ~40 jours (puissance mesurée :
+9 scènes sur 10 à 40 jours, 3 sur 10 à 15 jours).
+
+**Piège nº 2 — UN NOMBRE SERVI QUI CHANGE PÉRIME LES INSTRUMENTS QUI LE
+LISENT, ET LES RAPPORTS DÉJÀ ÉCRITS.** La clôture du 26/08 a séparé
+`rampe_pi` (disponibilité) de `poids_pi` (= α·rampe, avec
+`ALPHA_MELANGE = 0,5`). `test_sonde_delta_10m.py` est resté ROUGE
+depuis — sept assertions, dont cinq qui n'étaient pas des vérifications
+de la rampe mais des scènes CONSTRUITES pour w = 1 : un Δ « exactement
+l'observation » n'atteignait plus que la moitié de l'observation, et
+une balise dont le rôle était de passer sous le seuil de 5 km/h n'y
+passait plus. Le banc ne testait plus ce qu'il annonçait. *Une scène de
+banc qui pose une valeur d'entrée pose implicitement TOUS les
+coefficients qu'elle traverse ; quand l'un d'eux change, ce n'est pas
+l'assertion qu'il faut détendre, c'est la scène qu'il faut relire.*
+Fix : les scènes fournissent Δ/α (l'effet SERVI reste celui sur lequel
+elles raisonnent), les trois assertions qui portent VRAIMENT sur la
+rampe gardent les littéraux de production (0,25 à la 5ᵉ heure), et une
+assertion nommée épingle `ALPHA_MELANGE == 0,5` pour que le prochain
+changement rougisse à UN endroit qui le dit, au lieu de cinq qui n'en
+parlent pas. Les 21 mutations restent toutes vues.
+⚠️ **Et le corollaire qui vaut plus que le banc** : le rapport de
+phase B (`rapport-brut-sonde-delta-10m-26-08.txt`) a été mesuré AVANT
+la clôture, donc **à α = 1**. Son verdict tient (α multiplie T1 et T2
+par le même facteur, l'ordre ne bouge pas), mais ses AMPLITUDES se
+lisent « à α = 1 ». Un rapport ne porte pas que ses chiffres, il porte
+l'état du code qui les a produits.
+
+**Piège nº 3 — UN RSYNC VÉRIFIÉ AU SHA256 PROUVE QUE LES OCTETS SONT
+ARRIVÉS, JAMAIS QU'ILS TOURNENT.** L'entrée du 26/08 au soir a fait
+ajouter `model-verif/` au rsync du déploiement, et au contrôle sha256.
+Elle n'a pas fait ajouter ses BANCS : les « 19/19 verts sur le VPS »
+étaient `tools/`, `agrume/` et `verif/`. Tout le code du scoring —
+`score.py`, `inference.py`, `agrume_fcst.py` — partait donc sur le VPS
+sans qu'une seule de ses ~1 100 assertions n'y soit rejouée, et le
+script continuait d'annoncer un déploiement réussi. *Le correctif d'un
+oubli de couverture doit couvrir les DEUX moitiés : envoyer, et
+vérifier sur place.* Fix : treize bancs `model-verif/` dans la boucle du
+VPS (+25 s mesurées), dont `test_scoring.py --unit-only` — et le script
+DIT que la parité TypeScript n'est pas jouée là-bas, faute de `node`,
+plutôt que de laisser un « vert » couvrir un contrôle absent.
+
+---
+
 ## 27/08/2026 — la nuit où la passerelle Météo-France a menti en HTTP 200
 
 **Piège nº 1 — `codes_new_from_message()` REND UN HANDLE SUR N'IMPORTE
