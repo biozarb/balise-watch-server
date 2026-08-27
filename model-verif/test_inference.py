@@ -389,5 +389,145 @@ check("aucune case commune classable → no_common_case",
       st4.reason == "no_common_case" and st4.kendall_tau is None)
 
 # ══════════════════════════════════════════════════════════════════
+#  10. LOT L3 (27/08/2026) — la p-valeur bootstrap, Benjamini-Hochberg,
+#      et l'écart pratique enfin mesuré sur la population appariée.
+# ══════════════════════════════════════════════════════════════════
+print("── 10. lot L3 : p-valeur, multiplicité, gap apparié ──")
+
+PLANCHER_P = 2 / (I.BOOTSTRAP_ITERATIONS + 1)
+
+# ── 10.a. la p-valeur se lit dans la distribution, pas dans l'IC ─────
+# Un décalage FRANC : toutes les journées penchent du même côté.
+franc = {f"2026-07-{d:02d}": [-2.0, -2.1, -1.9, -2.2] for d in range(1, 16)}
+ci_franc = I.block_ci_by_day(franc)
+check("cas franc : l'IC exclut zéro", ci_franc.separates is True)
+check("… et la p-valeur existe", ci_franc.p_value is not None)
+check("⭐ … et elle est AU PLANCHER du tirage (aucun des 500 tirages du "
+      "mauvais côté) — jamais zéro, ce qui serait affirmer l'infini",
+      ci_franc.p_value == PLANCHER_P,
+      f"p = {ci_franc.p_value} attendu {PLANCHER_P}")
+
+# Un jeu SANS écart : la moitié des tirages de chaque côté.
+nul = {f"2026-07-{d:02d}": [-1.0, 1.0, -1.0, 1.0] for d in range(1, 16)}
+ci_nul = I.block_ci_by_day(nul)
+check("cas nul : l'IC n'exclut pas zéro", ci_nul.separates is False)
+check("… et la p-valeur est GRANDE (proche de 1), pas seulement « pas "
+      "significative »", ci_nul.p_value is not None and ci_nul.p_value > 0.5,
+      f"p = {ci_nul.p_value}")
+
+# ⛔ LA PROPRIÉTÉ QUI COMPTE POUR BH : p et IC ne peuvent pas se
+# contredire, puisqu'ils sortent du MÊME tirage.
+check("⭐⭐ p ≤ 0,05 si et seulement si l'IC 95 % exclut zéro — un seul "
+      "rééchantillonnage, donc jamais deux verdicts contraires",
+      all((c.p_value <= 0.05) == (c.separates is True)
+          for c in (ci_franc, ci_nul)))
+
+check("aucune p-valeur quand aucun tirage n'a eu lieu (fenêtre trop "
+      "courte)",
+      I.block_ci_by_day({f"2026-07-0{d}": [1.0] * 4
+                         for d in range(1, 5)}).p_value is None)
+
+check("⚠️ le PLANCHER est une propriété du tirage, pas du phénomène : "
+      "aucune p-valeur ne peut descendre sous 2/(B+1)",
+      min(c.p_value for c in (ci_franc, ci_nul)) >= PLANCHER_P)
+
+# ── 10.b. Benjamini-Hochberg : step-up, pas une suite de tests ───────
+# Famille construite à la main : 10 cases franches au plancher, une à
+# 0,0055 (qui ÉCHOUE à son propre rang), une à 0,009, une « limite » à
+# 0,02, et 90 cases sans conclusion. m = 103, α = 0,10.
+ps = ([PLANCHER_P] * 10 + [0.0110, 0.0115, 0.02]
+      + [0.30 + 0.005 * i for i in range(90)])
+surv, seuil, k = I.benjamini_hochberg(ps, 0.10)
+m = len(ps)
+check("BH : la famille est bien de 103 tests", m == 103)
+check("⭐ la case LIMITE (p = 0,02) ne survit pas — seule, elle aurait "
+      "été « significative » à 5 %", surv[12] is False)
+check("⭐ les cases FRANCHES survivent", all(surv[i] for i in range(10)))
+check("⭐⭐ STEP-UP : p = 0,0110 échoue à SON rang (11ᵉ seuil = "
+      f"{11 * 0.10 / m:.5f}) mais survit parce qu'un k plus grand passe — "
+      "c'est ce qui distingue BH d'une suite de tests indépendants",
+      0.0110 > 11 * 0.10 / m and surv[10] is True,
+      f"seuil rang 11 = {11 * 0.10 / m:.6f}, k = {k}")
+check("… et p = 0,0115 survit aussi (c'est lui qui fixe k)",
+      surv[11] is True and k == 12, f"k = {k}, seuil = {seuil}")
+check("… aucune des 90 cases sans conclusion ne survit",
+      not any(surv[13:]))
+
+check("BH sur une famille vide ne rejette rien et ne plante pas",
+      I.benjamini_hochberg([], 0.10) == ([], None, 0))
+check("BH ignore les `None` (aucun test joué) et les rend non-survivants",
+      I.benjamini_hochberg([None, None], 0.10) == ([False, False], None, 0))
+sv2, _, k2 = I.benjamini_hochberg([None, PLANCHER_P], 0.10)
+check("… et un `None` ne compte PAS dans m : une seule vraie p-valeur, "
+      "seuil = α", sv2 == [False, True] and k2 == 1)
+check("⛔ toutes grandes → k = 0, personne ne publie",
+      I.benjamini_hochberg([0.4, 0.5, 0.9], 0.10)[2] == 0)
+check("⚠️ α plus sévère tue plus : la même famille à 0,01 garde moins",
+      I.benjamini_hochberg(ps, 0.01)[2] <= k)
+
+# ── 10.c. le gap PRATIQUE sur les balise-jours appariés ──────────────
+# ⛔ LE DÉFAUT MESURÉ DE L'AUDIT §2.5, reproduit exprès : A n'est noté
+# que les jours faciles ET les jours difficiles ; B seulement les jours
+# difficiles. Sur leurs populations propres, B a l'air BIEN pire. Sur
+# les balise-jours COMMUNS, les deux sont à égalité stricte.
+# ⚠️ LES DEUX CÔTÉS ONT DES BALISE-JOURS HORS DU NOYAU, et c'est
+# nécessaire : un jeu où seul A déborde laisserait passer la faute
+# « un seul des deux côtés est apparié », qui ne se voit pas à la
+# lecture (mutation nº 16 du lot).
+jours = [f"2026-07-{d:02d}" for d in range(1, 16)]
+rows_a, rows_b = [], []
+for j in jours:
+    for u in ("u1", "u2", "u3", "u4", "u5", "u6"):
+        rows_a.append({"day": j, "unit": u, "err_vec_med": 9.0})   # commun
+        rows_b.append({"day": j, "unit": u, "err_vec_med": 9.4})   # commun
+    for u in ("f1", "f2", "f3", "f4", "f5", "f6"):
+        rows_a.append({"day": j, "unit": u, "err_vec_med": 1.0})   # A seul
+    for u in ("g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8"):
+        rows_b.append({"day": j, "unit": u, "err_vec_med": 30.0})  # B seul
+v = I.compare_pair("A", "B", rows_a, rows_b)
+check("⭐⭐ gap APPARIÉ : sur les balise-jours communs, l'écart réel est "
+      "de 0,4 km/h sur 9,4 — soit 4 %, très en dessous des 15 % utiles",
+      v.relative_gap is not None and abs(v.relative_gap - 0.4 / 9.4) < 1e-9,
+      f"gap = {v.relative_gap}")
+check("⛔ … le test apparié SÉPARE pourtant (l'écart est parfaitement "
+      "réel) : c'est bien la condition PRATIQUE qui refuse, et elle ne "
+      "peut le faire que si elle porte sur la même population",
+      v.ci is not None and v.ci.separates is True)
+check("… verdict `tied`, au lieu d'un vainqueur fabriqué par deux "
+      "populations", v.winner is None and v.reason == "tied",
+      f"{v.winner}/{v.reason}")
+check("⭐ `n_comparable` dit sur combien de balise-jours l'écart repose "
+      "(90 communs, ni les 180 lignes de A ni les 210 de B)",
+      v.n_comparable == 90, f"n_comparable = {v.n_comparable}")
+
+# Le gap NON apparié, celui d'avant le lot, sur les MÊMES données :
+med_a_tout = S.median([r["err_vec_med"] for r in rows_a])
+med_b_tout = S.median([r["err_vec_med"] for r in rows_b])
+gap_avant = abs(med_a_tout - med_b_tout) / max(med_a_tout, med_b_tout)
+check("⛔ … alors que l'ancien calcul (médianes de populations propres) "
+      "annonçait un écart énorme sur les mêmes données — c'est LE défaut "
+      "que ce lot ferme",
+      gap_avant >= I.MIN_RELATIVE_GAP, f"gap non apparié = {gap_avant:.3f}")
+check("⚠️ les deux gaps DIVERGENT vraiment (le banc ne serait pas une "
+      "preuve s'ils coïncidaient)", abs(gap_avant - v.relative_gap) > 0.5)
+
+# ⛔ ET L'ASYMÉTRIE, la plus discrète des trois fautes : UN SEUL des
+# deux côtés apparié. Le gap qui en sort n'est ni l'un ni l'autre, et
+# rien dans le code ne le signale.
+med_a_app = S.median([r["err_vec_med"] for r in rows_a
+                      if r["unit"].startswith("u")])
+gap_mixte = abs(med_a_app - med_b_tout) / max(med_a_app, med_b_tout)
+check("⛔ apparier UN SEUL côté donnerait encore un écart « utile » "
+      f"({gap_mixte:.2f}), donc un vainqueur — les DEUX médianes "
+      "doivent porter sur le noyau", gap_mixte >= I.MIN_RELATIVE_GAP)
+
+# Et le cas où l'appariement ne rend rien : pas de gap inventé.
+v0 = I.compare_pair("A", "B", rows_a,
+                    [{"day": "2026-09-01", "unit": "z", "err_vec_med": 1.0}])
+check("aucun balise-jour commun → gap `None`, jamais un chiffre tiré de "
+      "deux populations étrangères",
+      v0.relative_gap is None and v0.n_comparable == 0)
+
+# ══════════════════════════════════════════════════════════════════
 print(f"\n{'✅' if KO == 0 else '❌'} {OK} assertions vertes, {KO} rouges.\n")
 sys.exit(1 if KO else 0)

@@ -3157,6 +3157,17 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             "bias_n_days": _r(S.median(b["nd"]), 1) if b["nd"] else None,
             "ci_low": _r(ci.ci_low), "ci_high": _r(ci.ci_high),
             "rank": None, "rank_reason": None,
+            # ── lot L3 (27/08/2026) : sur combien de balise-jours ce
+            # modèle est-il COMPARABLE au premier de sa case ? ─────────
+            # ⛔ Le complément indispensable de `occurrences`. Les rangs
+            # 2..n sont un tri de `typical_err_kmh` calculé par chacun
+            # SUR SA POPULATION (audit §2.5) : seule la marche du haut
+            # est prouvée par un test apparié. Une case où un modèle
+            # note 40 balise-jours et le premier 6 peut publier « 2ᵉ »
+            # sans que rien ne dise que les deux chiffres ne portent pas
+            # sur la même météo. `occurrences` seul ne le dit pas ;
+            # `n_comparable` à côté le dit. Rempli par `_apply_rank`.
+            "n_comparable": None,
             # ── colonnes du lot G ──
             # `err_sd` : dispersion des balise-jours de la case. Publiée
             # parce qu'elle est lisible en soi (« ce modèle est régulier
@@ -3296,6 +3307,25 @@ def _duplicate_chain_excluded(rows: list[dict]) -> str | None:
 RANK_REASON_DUPLICATE_CHAIN = "duplicate_chain"
 
 
+#: Le motif d'un rang RETIRÉ par le contrôle de multiplicité (lot L3,
+#: 27/08/2026). ⛔ Il ne dit PAS « les modèles se valent » et PAS « pas
+#: assez de recul » : il dit que l'écart, réel et utile pris isolément,
+#: n'a pas survécu au fait qu'on pose la même question à ~1 121 cases
+#: chaque nuit. Comme `duplicate_chain`, il rejoint le repli générique
+#: de `_upsert_scores` tant que le CHECK de `rank_reason` n'a pas été
+#: élargi côté base (`.sql` préparé pour Yann, jamais joué d'ici).
+RANK_REASON_FDR = "fdr"
+
+#: Les deux clés PRIVÉES par lesquelles `_apply_rank` transmet à
+#: `appliquer_fdr` la p-valeur de la case. ⛔ Elles ne doivent JAMAIS
+#: atteindre le JSON publié (qui, lui, porte tout le reste sans filtre) :
+#: `appliquer_fdr` les RETIRE des lignes, et c'est sa dernière
+#: instruction. Le préfixe `_` n'est pas une protection, c'est un
+#: signal — le retrait, lui, est bancé.
+FDR_P_BRUT = "_fdr_p"
+FDR_P_CORR = "_fdr_p_corr"
+
+
 def _apply_rank(by_case: dict[tuple, list[dict]],
                 rows_by_case_model: dict[tuple, dict[str, list[dict]]]):
     """Classe, ou refuse de classer — par TEST APPARIÉ (lot G2).
@@ -3346,12 +3376,89 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
         for r in admis:
             r["rank_reason"] = reason
             r["rank"] = ranks.get(r["model"])
+        # ── lot L3 (a) : la p-valeur de la case, mise de côté ─────────
+        # ⚠️ ELLE N'EST PAS UTILISÉE ICI, ET C'EST TOUT LE POINT. Le
+        # contrôle de multiplicité ne peut pas se décider case par case :
+        # il lui faut le TABLEAU de la nuit entière. `_apply_rank` est
+        # appelé une fois par (fenêtre, régime) — il ne voit jamais plus
+        # qu'un morceau. On dépose donc la p-valeur sur les lignes, et
+        # `appliquer_fdr` tranche plus tard, quand tout est là.
+        # ⓘ Déposée sur TOUTES les lignes admises (elle est la même pour
+        # la case) plutôt que sur une seule : l'ordre des lignes n'est
+        # garanti nulle part, et une case dont la p-valeur voyagerait sur
+        # `rows[0]` serait le piège nº 8 une fois de plus.
+        p_case = verdict.ci.p_value if (verdict is not None
+                                        and verdict.ci is not None) else None
+        for r in admis:
+            r[FDR_P_BRUT] = p_case
+        # ── lot L3 (b) : `n_comparable`, la population partagée ───────
+        # La référence est le PREMIER de la case au sens de `rank_models`
+        # (le plus petit `typical_err_kmh` parmi les admis qui passent le
+        # quorum) — le même que celui qui reçoit le rang 1 quand un rang
+        # est publié. Chaque ligne dit sur combien de balise-jours elle
+        # partage la météo de ce premier-là.
+        _poser_n_comparable(rows, rbcm, admis)
         if exclu is not None:
             for r in rows:
                 if r["model"] == exclu:
                     r["rank_reason"] = RANK_REASON_DUPLICATE_CHAIN
                     r["rank"] = None
         _apply_rank_corr(rows, rbcm, exclu)
+
+
+def _jours_balises(rows_du_modele) -> set:
+    """Les (jour, balise) où ce modèle porte une erreur vectorielle.
+
+    ⚠️ `err_vec_med` FINIE, pas « la ligne existe ». C'est la MÊME
+    condition que `INF.paired_differences`, et elle doit le rester : un
+    `n_comparable` qui compterait des lignes vides annoncerait une
+    population commune que le test, lui, n'a pas eue.
+    """
+    return {(r.get("day"), r.get("unit")) for r in (rows_du_modele or ())
+            if S._finite(r.get("err_vec_med"))}
+
+
+def _poser_n_comparable(rows: list[dict],
+                        rows_by_model: dict[str, list[dict]],
+                        admis: list[dict]) -> None:
+    """Écrit `n_comparable` sur chaque ligne de la case (lot L3).
+
+    ⭐ LA DÉFINITION, ET ELLE A ÉTÉ CHOISIE CONTRE UNE AUTRE. C'est
+    l'INTERSECTION des balise-jours de TOUS les modèles admis et
+    chiffrés de la case — le noyau commun — et non l'intersection avec
+    le seul premier. Les deux étaient défendables ; celle-ci se lit,
+    l'autre non. Avec le noyau commun, toutes les lignes admises portent
+    le MÊME `n_comparable`, et le lecteur n'a qu'une comparaison à
+    faire, ligne par ligne : `n_comparable` contre `occurrences`. Quand
+    les deux coïncident, les rangs 2..n comparent bien la même météo ;
+    quand `n_comparable` est plus petit, une part du chiffre de cette
+    ligne repose sur des balise-jours que personne d'autre n'a vus, et
+    le rang qui en découle mélange des populations (audit §2.5).
+    Avec l'intersection au seul premier, la ligne du premier portait son
+    propre total et n'informait que sur les autres.
+
+    ⚠️ HOMONYME À NE PAS CONFONDRE : `stability_report` publie déjà un
+    `n_comparable` dans `meta.stability` — c'est le nombre de CASES
+    comparables entre deux fenêtres pour le tau de Kendall. Rien à voir
+    avec celui-ci, qui est un nombre de BALISE-JOURS par ligne de score.
+    Deux objets différents, deux endroits différents ; le nom vient de
+    l'audit (§2.5, P5) et on le garde tel quel plutôt que d'en inventer
+    un troisième.
+
+    ⓘ La ligne ÉCARTÉE d'une double chaîne AROME reçoit sa valeur elle
+    aussi, contre le même noyau : elle ne concourt pas, mais son chiffre
+    est publié et se lit à côté des autres.
+    """
+    chiffres = [r for r in admis if r.get("typical_err_kmh") is not None]
+    if not chiffres:
+        return
+    noyau = None
+    for r in chiffres:
+        j = _jours_balises(rows_by_model.get(r["model"]))
+        noyau = j if noyau is None else (noyau & j)
+    for r in rows:
+        r["n_comparable"] = len(_jours_balises(rows_by_model.get(r["model"]))
+                                & noyau)
 
 
 #: Le motif de refus PROPRE au classement corrigé : la case mélange des
@@ -3430,17 +3537,127 @@ def _apply_rank_corr(rows: list[dict],
                   "occurrences": r.get("n_corr") or 0} for r in chiffrees]
         rbm = (rows_by_model if exclu is None
                else {m: v for m, v in rows_by_model.items() if m != exclu})
-        ranks, reason, _ = INF.rank_models(
+        ranks, reason, verdict = INF.rank_models(
             cases, rbm,
             err_key="typical_err_kmh_corr", value_key="err_vec_med_corr")
         for r in admis:
             r["rank_reason_corr"] = reason
             r["rank_corr"] = ranks.get(r["model"])
+        # ⛔ LOT L3 — UNE FAMILLE À PART, PAS LA MÊME QUE LE BRUT. Le
+        # classement corrigé est un SECOND tableau publié, sur une autre
+        # grandeur (`err_vec_med_corr`) : Benjamini-Hochberg s'y applique
+        # pour la même raison, mais séparément. Les fondre ferait `m` le
+        # double en comptant DEUX FOIS les mêmes données — la correction
+        # deviendrait plus sévère sans qu'aucune répétition
+        # supplémentaire ne le justifie. Contrôler le FDR table par
+        # table est la lecture standard de « BH sur le tableau ».
+        for r in admis:
+            r[FDR_P_CORR] = (verdict.ci.p_value
+                             if (verdict is not None
+                                 and verdict.ci is not None) else None)
     if exclu is not None:
         for r in rows:
             if r["model"] == exclu:
                 r["rank_corr"] = None
                 r["rank_reason_corr"] = RANK_REASON_DUPLICATE_CHAIN
+
+
+def _cle_de_case(r: dict) -> tuple:
+    """La case d'une ligne de score : zone × lead × fenêtre × régime ×
+    échelon. C'est l'unité que `_apply_rank` classe, et donc l'unité
+    qu'un contrôle de multiplicité doit compter — pas la LIGNE (une case
+    de neuf modèles porte neuf lignes et n'a posé QU'UNE question).
+    Confondre les deux ferait `m` neuf fois trop grand et tuerait tout.
+    """
+    return (r.get("zone_id"), r.get("lead_h"), r.get("window_kind"),
+            r.get("regime"), r.get("agg_level"))
+
+
+def appliquer_fdr(rows: list[dict], alpha: float = INF.ALPHA_FDR) -> dict:
+    """Benjamini-Hochberg sur le TABLEAU de la nuit (lot L3, 27/08/2026).
+
+    ⭐ LE DÉFAUT QU'ELLE FERME (audit §4.2, Wilks 2016). ~1 121 cases
+    testées chaque nuit, aucun contrôle de la répétition : en régime
+    permanent, environ 5 % des « gagnants » publiés seraient du bruit, et
+    ils portaient jusqu'ici la MÊME phrase que les vrais (« un modèle se
+    détache »). Un lecteur ne peut pas distinguer les deux ; le
+    dispositif, lui, le peut — c'est le seul endroit du chantier où
+    l'information existe.
+
+    ⛔ ELLE DOIT VOIR LA NUIT ENTIÈRE, et c'est pourquoi elle vit ici et
+    pas dans `_apply_rank`. `rolling_scores` et `regime_scores` classent
+    chacun leur part ; la famille de tests, elle, est leur RÉUNION. Une
+    correction appliquée deux fois sur deux moitiés ne contrôle pas le
+    FDR de l'ensemble — elle le contrôle sur deux ensembles dont personne
+    ne publie le tableau.
+
+    ⚠️ ORDRE : AVANT `marquer_parties_manquantes`. Celle-ci ne requalifie
+    que les rangs PUBLIÉS restés « ok » ; passer après elle laisserait
+    échapper au contrôle exactement les cases d'une journée incomplète —
+    celles qui ont le moins de raisons d'être crues.
+
+    DEUX FAMILLES, deux corrections séparées : le brut (`rank`) et le
+    corrigé (`rank_corr`) sont deux tableaux publiés, sur deux
+    grandeurs — cf. le pavé de `_apply_rank_corr`.
+
+    ⓘ Elle RETIRE les clés privées `FDR_P_*` en sortant : elles ont servi
+    à transporter la p-valeur d'un bout à l'autre du run, et le JSON
+    publié porte tout ce qui reste sur la ligne, sans filtre.
+
+    Rend un rapport par famille : `m` (tests joués), `k` (survivants),
+    `seuil`, `publies_avant`, `retrogrades`.
+    """
+    par_case: dict[tuple, list[dict]] = defaultdict(list)
+    for r in rows:
+        par_case[_cle_de_case(r)].append(r)
+
+    rapport: dict[str, dict] = {}
+    for famille, cle_p, cle_rank, cle_reason in (
+            ("brut", FDR_P_BRUT, "rank", "rank_reason"),
+            ("corrige", FDR_P_CORR, "rank_corr", "rank_reason_corr")):
+        cles, ps = [], []
+        for cle, lignes in par_case.items():
+            # La p-valeur est la MÊME sur toutes les lignes admises de la
+            # case ; on prend la première qui existe. Les lignes écartées
+            # (`duplicate_chain`) ne l'ont pas — elles n'ont rien testé.
+            p = next((l[cle_p] for l in lignes
+                      if l.get(cle_p) is not None), None)
+            if p is None:
+                continue          # aucun test joué ici : hors famille
+            cles.append(cle)
+            ps.append(p)
+        survivants, seuil, k = INF.benjamini_hochberg(ps, alpha)
+        publies = retrogrades = 0
+        for cle, vivant in zip(cles, survivants):
+            lignes = par_case[cle]
+            # ⚠️ « publiée » = la case a un rang, pas « la case a un p ».
+            # `not_separable` et `tied` ONT un p (le test a eu lieu) et
+            # n'ont rien affirmé : ils comptent dans `m`, jamais dans les
+            # rétrogradations.
+            if not any(l.get(cle_reason) == "ok" for l in lignes):
+                continue
+            publies += 1
+            if vivant:
+                continue
+            retrogrades += 1
+            for l in lignes:
+                # ⛔ ON NE TOUCHE QUE LES LIGNES « ok ». La ligne écartée
+                # d'une double chaîne AROME garde `duplicate_chain` : la
+                # case dirait sinon que son AROME de secours a été retiré
+                # par la multiplicité, ce qui est faux et effacerait au
+                # passage le motif du lot L2.
+                if l.get(cle_reason) == "ok":
+                    l[cle_reason] = RANK_REASON_FDR
+                    l[cle_rank] = None
+        rapport[famille] = {"m": len(ps), "k": k, "seuil": seuil,
+                            "publies_avant": publies,
+                            "retrogrades": retrogrades,
+                            "p_min": min(ps) if ps else None}
+
+    for r in rows:
+        r.pop(FDR_P_BRUT, None)
+        r.pop(FDR_P_CORR, None)
+    return rapport
 
 
 #: La valeur que porte un rang publié sur une journée à laquelle il
@@ -3684,6 +3901,22 @@ LIGHT_SCORE_FIELDS = (
     "zone_id", "agg_level", "lead_h", "model", "typical_err_kmh",
     "ci_low", "ci_high", "n_days", "n_hours", "rank", "rank_reason",
     "borrowed_weight",
+    # ── lot L3 (27/08/2026) : la population partagée, ET son dénominateur ──
+    # ⛔ Dans le LÉGER, pas seulement dans le gros fichier. C'est
+    # l'écran léger (pastille, feuille « ici », Podium) qui montre les
+    # rangs 2..n, donc lui qui a besoin de pouvoir dire sur quoi ils
+    # reposent. Une colonne publiée dans le seul fichier lourd serait
+    # une colonne que personne ne lit.
+    #
+    # ⚠️ ET `occurrences` ENTRE AVEC LUI, alors que le S13.0 l'avait
+    # exclu exprès (« la pastille n'en a pas besoin »). C'est vrai de la
+    # pastille et faux de ce couple-là : `n_comparable` SEUL ne veut
+    # rien dire. « 90 balise-jours comparables » ne se lit que contre le
+    # total de la ligne — 90 sur 90 dit « même population », 90 sur 180
+    # dit « la moitié de ce chiffre vient de balises que personne
+    # d'autre n'a vues ». Publier le premier sans le second, c'est
+    # publier un numérateur.
+    "n_comparable", "occurrences",
     # ── lot S2, publiés dans le léger le 25/08 ──
     "typical_err_kmh_corr", "bias_n_days", "n_corr",
     # ── le verdict PROPRE à la colonne corrigée (25/08, `_apply_rank_corr`) ──
@@ -3902,8 +4135,21 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
     _S2 = {"bias_slope", "err_vec_med_corr", "mse_model_corr", "bias_n_days",
            "typical_err_kmh_corr", "beats_clim_corr", "skill_clim_corr",
            "n_corr"}
-    fichier = ("supabase_step49_lot_s2_biais_corrige.sql"
-               if set(absentes) & _S2 else "supabase_step40_lot_g.sql")
+    # ⚠️ LOT L3 (27/08/2026) — LA COLONNE QUE CE LOT AJOUTE SE NOMME
+    # ELLE-MÊME. Sans cette ligne, `n_comparable` absente en base ferait
+    # dire « Lancer supabase_step40_lot_g.sql », un fichier DÉJÀ PASSÉ :
+    # exactement la fausse déduction que l'audit §2.5 a payée pour
+    # `rank_corr`, reproduite par le lot suivant. ⓘ Ceci n'est PAS le
+    # correctif de fond (une table colonne→fichier avec un troisième cas
+    # explicite « migration à écrire ») — celui-là est la dette nº 2 du
+    # lot L13. C'est le minimum pour que CE lot n'ajoute pas un mensonge
+    # de plus en attendant.
+    _L3 = {"n_comparable"}
+    if set(absentes) & _L3:
+        fichier = "supabase_step54_lot_l3_fdr.sql"
+    else:
+        fichier = ("supabase_step49_lot_s2_biais_corrige.sql"
+                   if set(absentes) & _S2 else "supabase_step40_lot_g.sql")
     print(f"  ⓘ {table} : colonnes pas encore en base, non envoyées — "
           f"{', '.join(absentes)}. Lancer {fichier} pour les activer.")
     out = [{k: v for k, v in r.items() if k in cols} for r in rows]
@@ -3935,6 +4181,23 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
 #: Les `rank_reason` que le CHECK de `supabase_step40_lot_g.sql` admet.
 #: `single_model` (lot S0.5) n'y est PAS : il vient avec
 #: `supabase_step42_lot_s05.sql`.
+#:
+#: ⚠️ CE SET EST DEVENU UN GROS FILET (constat du lot L3, 27/08/2026 —
+#: le journal du L2 demandait de le signaler si L3 rouvrait ce fichier).
+#: QUATRE valeurs vivent aujourd'hui hors de lui : `single_model`
+#: (step42), `partie_manquante` (step48), `duplicate_chain` (step53) et
+#: `fdr` (step54). Le repli de `_upsert_scores` ne se déclenche que si
+#: la base nomme SA contrainte `rank_reason` — donc jamais pour une
+#: raison sans rapport — mais quand il se déclenche, il met à `null`
+#: les QUATRE, y compris celles que la base accepte parfaitement. On
+#: perd alors plus d'information que le refus n'en concernait.
+#: ⓘ Ce n'est pas réparable ici : PostgREST ne dit pas QUELLE valeur sa
+#: contrainte a refusée. Le vrai correctif est celui de la dette nº 2 du
+#: lot L13 — une table « colonne/valeur → fichier SQL » tenue à jour,
+#: qui saurait dire quelles migrations sont jouées. À NE PAS bricoler en
+#: attendant : élargir ce set à l'aveugle ferait tomber la nuit entière
+#: le jour où l'une des quatre est vraiment refusée, ce qui est
+#: exactement le contraire de ce que le repli existe pour éviter.
 RANK_REASONS_STEP40 = {"ok", "insufficient", "tied", "not_separable",
                        "window_too_short", "too_few_pairs", None}
 
@@ -3970,9 +4233,13 @@ def _upsert_scores(sb, rows: list[dict]) -> int:
                         - RANK_REASONS_STEP40)
         print(f"  ⚠️ rank_reason : {', '.join(neuves)} refusé(s) par le "
               f"CHECK en base → écrit `null` cette nuit. Jouer "
-              f"`supabase_step42_lot_s05.sql` (`single_model`) et/ou "
+              f"`supabase_step42_lot_s05.sql` (`single_model`), "
               f"`supabase_step48_lot_s06_collect_part.sql` "
-              f"(`partie_manquante`). Le JSON publié garde la raison "
+              f"(`partie_manquante`), "
+              f"`supabase_step53_lot_l2_duplicate_chain.sql` "
+              f"(`duplicate_chain`) et/ou "
+              f"`supabase_step54_lot_l3_fdr.sql` (`fdr`, "
+              f"`n_comparable`). Le JSON publié garde la raison "
               f"exacte.", file=sys.stderr)
         for r in rows:
             if r.get("rank_reason") not in RANK_REASONS_STEP40:
@@ -4800,6 +5067,23 @@ def main() -> int:
         # rien ne dise que sept manquaient. On garde le classement — un
         # classement absent et un classement partiel se lisent pareil à
         # l'écran, et le second au moins se dit — mais on le QUALIFIE.
+        # ⛔ LA MULTIPLICITÉ, SUR LE TABLEAU ENTIER (lot L3, 27/08/2026).
+        # Ici et pas ailleurs : `scores` porte enfin la RÉUNION du
+        # glissant et des régimes, c'est-à-dire la famille de tests que
+        # la nuit publie. Et AVANT `marquer_parties_manquantes`, qui ne
+        # requalifie que les rangs restés « ok » (cf. son pavé).
+        rapport_fdr = appliquer_fdr(scores)
+        for _fam, _b in rapport_fdr.items():
+            if not _b["m"]:
+                continue
+            _seuil = ("aucun" if _b["seuil"] is None else f"{_b['seuil']:.5f}")
+            print(f"  ⓘ FDR ({_fam}) : {_b['m']} test(s) joué(s), "
+                  f"{_b['k']} survivant(s) à BH α={INF.ALPHA_FDR}, "
+                  f"seuil p ≤ {_seuil} (p min observé "
+                  f"{_b['p_min']:.5f}) — {_b['retrogrades']} rang(s) "
+                  f"retiré(s) sur {_b['publies_avant']} publié(s) → "
+                  f"`{'rank_reason' if _fam == 'brut' else 'rank_reason_corr'}"
+                  f" = {RANK_REASON_FDR}`")
         n_marques = marquer_parties_manquantes(scores, bilans_parties)
         if n_marques:
             print(f"  ⛔ {n_marques} rang(s) publié(s) sur une journée "

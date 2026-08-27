@@ -104,6 +104,19 @@ BOOTSTRAP_ITERATIONS = 500
 MIN_RELATIVE_GAP = 0.15
 
 
+#: Le taux de fausses découvertes visé sur le TABLEAU d'une nuit
+#: (lot L3, 27/08/2026). ⛔ Ce n'est PAS un α de test : 0,10 ne veut pas
+#: dire « 10 % de chances de se tromper sur cette case », il veut dire
+#: « parmi les rangs publiés cette nuit, au plus 10 % en moyenne sont du
+#: bruit ». La valeur vient de Wilks 2016 (BAMS 97:2263) : pour des
+#: tests CORRÉLÉS — et les nôtres le sont massivement, une même journée
+#: de flux traversant toutes les zones à la fois — la recommandation est
+#: α_FDR ≈ 2α, soit 0,10 pour un α usuel de 0,05. Prendre 0,05 ici
+#: serait plus sévère que la littérature ne le demande ET reposerait sur
+#: une indépendance qu'on sait fausse.
+ALPHA_FDR = 0.10
+
+
 # ══════════════════════════════════════════════════════════════════
 #  1. DIFFÉRENCES APPARIÉES
 # ══════════════════════════════════════════════════════════════════
@@ -180,6 +193,14 @@ class DiffCI:
     n_days: int
     block_days: int | None
     reason: str          # 'ok' | 'window_too_short' | 'too_few_pairs'
+    #: p-valeur bilatérale de « la médiane des différences vaut zéro »,
+    #: dérivée de la DISTRIBUTION bootstrap — voir `_p_bilaterale`.
+    #: `None` quand aucun rééchantillonnage n'a eu lieu (`reason` != 'ok').
+    #: ⛔ Ajouté EN DERNIER, avec un défaut : les six constructions
+    #: positionnelles existantes (ici et dans `score.py`) restent justes
+    #: au bit près. Un champ inséré au milieu les aurait toutes décalées
+    #: en silence — le genre de faute qui ne rougit à aucun banc.
+    p_value: float | None = None
 
     @property
     def separates(self) -> bool | None:
@@ -268,6 +289,51 @@ def _median_sorted(v: list[float]) -> float | None:
     return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2
 
 
+def _p_bilaterale(meds: Sequence[float]) -> float | None:
+    """p-valeur bilatérale de « la médiane des différences vaut zéro »,
+    lue dans la distribution bootstrap DÉJÀ tirée.
+
+    ⭐ POURQUOI IL EN FAUT UNE (lot L3, 27/08/2026). Benjamini-Hochberg
+    ordonne des p-valeurs ; le dispositif ne produisait qu'un
+    INTERVALLE, c'est-à-dire une réponse binaire à 95 % (« zéro dedans /
+    zéro dehors »). Deux cases également « séparées » ne sont pas
+    également improbables, et un tableau de 1 121 cases se trie sur
+    cette différence-là, pas sur le binaire.
+
+    **La formule.** `p = 2 · (1 + #{tirages du mauvais côté}) / (B + 1)`,
+    plafonnée à 1. C'est la p-valeur de rééchantillonnage usuelle
+    (Davison & Hinkley 1997 §4.2 ; Phipson & Smyth 2010, qui montrent que
+    le `+1` n'est pas une commodité : sans lui, `p = 0` est possible et
+    fait passer une case pour infiniment improbable alors qu'on a
+    seulement épuisé la résolution du tirage). Les tirages EXACTEMENT
+    nuls sont comptés des DEUX côtés — le choix conservateur : ils
+    grossissent p, donc retiennent une affirmation plutôt que d'en
+    fabriquer une.
+
+    ⚠️ SA LIMITE, ET ELLE DÉCIDE. La résolution est `2/(B+1)` : avec
+    `BOOTSTRAP_ITERATIONS = 500`, AUCUNE case ne peut descendre sous
+    `p ≈ 0,003992`, même si sa vraie p-valeur vaut 1e-9. Le seuil BH du
+    premier rang, lui, vaut `α/m ≈ 0,10/1 121 ≈ 8,9e-5` — DIX FOIS PLUS
+    BAS que ce plancher. Conséquence à connaître avant de lire un
+    résultat : BH ne peut rejeter QUE par le nombre, jamais par
+    l'extrémité d'une seule case — il faut qu'environ `m·p_min/α ≈ 45`
+    cases atteignent ensemble le plancher pour que la première franchisse
+    son seuil. C'est une propriété du tirage, pas du phénomène ; la seule
+    façon de la lever est d'augmenter `BOOTSTRAP_ITERATIONS` (coût
+    linéaire sur le poste le plus cher du run, 85 s mesurées le 09/08).
+    ⇒ Arbitrage du 27/08 : on garde 500 et on VIT avec le plancher,
+    parce qu'un p plancher est un MAJORANT de la vraie p-valeur, donc
+    une erreur du côté qui publie MOINS de rangs. Publier moins est le
+    sens du lot ; publier plus serait la faute.
+    """
+    if not meds:
+        return None
+    B = len(meds)
+    n_neg = sum(1 for m in meds if m <= 0)
+    n_pos = sum(1 for m in meds if m >= 0)
+    return min(1.0, 2.0 * (1 + min(n_neg, n_pos)) / (B + 1))
+
+
 def block_ci_by_day(by_day: Mapping[str, Sequence[float]],
                     iterations: int = BOOTSTRAP_ITERATIONS,
                     seed: int = 0x9E3779B9,
@@ -318,7 +384,13 @@ def block_ci_by_day(by_day: Mapping[str, Sequence[float]],
         median=S.median(vals),
         ci_low=meds[lo_i] if lo_i < len(meds) else None,
         ci_high=meds[hi_i] if hi_i < len(meds) else None,
-        n_pairs=n_pairs, n_days=n_days, block_days=L, reason="ok")
+        n_pairs=n_pairs, n_days=n_days, block_days=L, reason="ok",
+        # ⚠️ LA MÊME LISTE `meds` QUE L'INTERVALLE, pas un second tirage.
+        # Deux rééchantillonnages du même jeu donneraient un IC et une
+        # p-valeur légèrement discordants — un jour, une case dont l'IC
+        # exclut zéro et dont le p dit le contraire, et personne pour
+        # savoir lequel croire.
+        p_value=_p_bilaterale(meds))
 
 
 def iid_bootstrap_ci(diffs: Sequence[PairedDiff],
@@ -347,10 +419,14 @@ def iid_bootstrap_ci(diffs: Sequence[PairedDiff],
     meds.sort()
     lo_i = math.floor(len(meds) * 0.025)
     hi_i = math.floor(len(meds) * 0.975)
+    # ⓘ La p-valeur aussi, pour la MÊME raison que l'IC : sans un i.i.d.
+    # à côté, on ne saurait pas dire si le p par blocs a été implémenté
+    # ou seulement nommé. Sur des données corrélées, le p par blocs DOIT
+    # être le plus GRAND des deux (l'IC par blocs est le plus large).
     return DiffCI(S.median(vals),
                   meds[lo_i] if lo_i < len(meds) else None,
                   meds[hi_i] if hi_i < len(meds) else None,
-                  len(vals), days, None, "ok")
+                  len(vals), days, None, "ok", _p_bilaterale(meds))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -363,6 +439,12 @@ class Verdict:
     reason: str
     ci: DiffCI | None = None
     relative_gap: float | None = None
+    #: Le nombre de balise-jours sur lesquels `relative_gap` a été
+    #: calculé — c'est-à-dire les balise-jours COMMUNS aux deux modèles
+    #: (lot L3). Il vaut `ci.n_pairs` quand l'appariement a eu lieu ; il
+    #: est publié parce qu'un écart de 15 % sur 6 balise-jours communs
+    #: et le même écart sur 400 ne se lisent pas pareil.
+    n_comparable: int = 0
 
 
 def compare_pair(model_a: str, model_b: str,
@@ -375,11 +457,13 @@ def compare_pair(model_a: str, model_b: str,
 
     1. **Réel** — l'IC 95 % de la différence appariée, par blocs de
        jours, exclut zéro. C'est la question statistique.
-    2. **Utile** — l'écart relatif sur l'erreur en km/h atteint 15 %.
-       C'est la question pratique, et elle est distincte : avec assez
-       de journées, un écart de 0,2 km/h finit par être « significatif »
-       sans rien changer à une décision de vol. C'est le défaut n°3 du
-       §16.4, « significatif ≠ applicable », déjà payé une fois.
+    2. **Utile** — l'écart relatif sur l'erreur en km/h atteint 15 %,
+       ⛔ mesuré sur les MÊMES balise-jours que le test (lot L3,
+       27/08/2026 — voir le pavé dans le corps). C'est la question
+       pratique, et elle est distincte : avec assez de journées, un
+       écart de 0,2 km/h finit par être « significatif » sans rien
+       changer à une décision de vol. C'est le défaut n°3 du §16.4,
+       « significatif ≠ applicable », déjà payé une fois.
 
     ⚠️ Quand la fenêtre est trop courte pour le test, on ne RETOMBE PAS
     sur l'écart relatif seul. Ce serait remettre en service le
@@ -402,21 +486,50 @@ def compare_pair(model_a: str, model_b: str,
     # reste `err_vec_med`, donc tous les appels existants sont
     # inchangés au bit près.
     value_key = kw.get("value_key", "err_vec_med")
-    med_a = S.median([r.get(value_key) for r in rows_a])
-    med_b = S.median([r.get(value_key) for r in rows_b])
+
+    # ⛔ LOT L3 (27/08/2026) — `med_a` ET `med_b` SUR LES BALISE-JOURS
+    # COMMUNS, plus jamais sur `rows_a`/`rows_b` entiers. C'est le défaut
+    # MESURÉ de l'audit §2.5 : la « marche du haut » était protégée par
+    # l'appariement, mais l'écart « utile » qui la valide juste après
+    # comparait deux médianes calculées CHACUNE SUR SA POPULATION. Sur
+    # les 58 cases mesurées le 25/08, `agrume` et `arome_r2` cohabitent
+    # partout sans noter les mêmes balises : un modèle noté surtout les
+    # jours de brise et l'autre surtout les jours de flux se voyaient
+    # attribuer un écart pratique qui était, pour partie, un écart de
+    # MÉTÉO. Les deux conditions du verdict portent maintenant sur la
+    # même population, la même que l'intervalle — et c'est la seule
+    # façon que « réel » et « utile » parlent du même écart.
+    #
+    # ⚠️ Conséquence assumée : quand l'appariement ne rend rien, le gap
+    # vaut `None` au lieu d'un chiffre issu de deux populations
+    # étrangères. Un `None` refuse de trancher (branche `tied`) — c'est
+    # le bon sens de l'erreur, et c'était déjà le comportement quand
+    # l'une des deux médianes manquait.
+    communs = {(d.day, d.unit) for d in diffs}
+    unit_key = kw.get("unit_key", "unit")
+    day_key = kw.get("day_key", "day")
+
+    def _med_appariee(rows):
+        return S.median([r.get(value_key) for r in rows
+                         if (r.get(day_key), r.get(unit_key)) in communs])
+
+    med_a = _med_appariee(rows_a)
+    med_b = _med_appariee(rows_b)
     gap = None
     if med_a is not None and med_b is not None:
         worse = max(med_a, med_b)
         gap = None if worse == 0 else abs(med_a - med_b) / worse
+    n_comparable = len(communs)
 
     if ci.reason != "ok":
-        return Verdict(None, ci.reason, ci, gap)
+        return Verdict(None, ci.reason, ci, gap, n_comparable)
     if ci.separates is not True:
-        return Verdict(None, "not_separable", ci, gap)
+        return Verdict(None, "not_separable", ci, gap, n_comparable)
     if gap is None or gap < min_relative_gap:
-        return Verdict(None, "tied", ci, gap)
+        return Verdict(None, "tied", ci, gap, n_comparable)
     # `diff` = err(A) − err(B) : négatif veut dire que A se trompe moins.
-    return Verdict(model_a if ci.median < 0 else model_b, "ok", ci, gap)
+    return Verdict(model_a if ci.median < 0 else model_b, "ok", ci, gap,
+                   n_comparable)
 
 
 def rank_models(cases: Sequence[Mapping],
@@ -481,6 +594,71 @@ def rank_models(cases: Sequence[Mapping],
     if v.winner != best:
         return {}, v.reason, v
     return {c["model"]: i for i, c in enumerate(ordered, 1)}, "ok", v
+
+
+# ══════════════════════════════════════════════════════════════════
+#  3 bis. LA MULTIPLICITÉ — Benjamini-Hochberg (lot L3, 27/08/2026)
+# ══════════════════════════════════════════════════════════════════
+
+def benjamini_hochberg(p_values: Sequence[float | None],
+                       alpha: float = ALPHA_FDR) -> tuple[list[bool], float | None, int]:
+    """Quelles p-valeurs survivent au contrôle du taux de fausses
+    découvertes, à `alpha`, sur la famille ENTIÈRE qu'on lui donne.
+
+    Rend `(survivants, seuil, k)` — un booléen par p-valeur DANS L'ORDRE
+    REÇU, la p-valeur seuil retenue (`None` si aucune ne survit), et le
+    nombre de survivantes.
+
+    ⭐ POURQUOI (audit §4.2, Wilks 2016). Le dispositif teste ~1 121
+    cases (zone × lead × régime) CHAQUE NUIT et publie celles qui
+    passent. Sans contrôle de la répétition, en régime permanent, environ
+    5 % des « gagnants » publiés seraient du bruit — et ils seraient
+    publiés avec exactement la même phrase que les vrais. La procédure de
+    Benjamini & Hochberg (1995) ordonne les p-valeurs et retient les
+    `k` plus petites telles que `p_(k) ≤ k·α/m`.
+
+    ⛔ LA FAMILLE, C'EST TOUS LES TESTS JOUÉS, PAS LES SEULS PUBLIÉS.
+    `m` doit compter les cases où un test a EU LIEU et n'a rien conclu
+    (`not_separable`, `tied`) autant que celles qui ont conclu. Ne
+    passer que les gagnantes ferait `m` = le nombre de succès et
+    rendrait la correction quasi inopérante — l'erreur classique, et
+    celle qui donne l'illusion d'avoir corrigé. En revanche les cases
+    où AUCUN test n'a été joué (`insufficient`, `window_too_short`,
+    `too_few_pairs`, `single_model`) n'en sont pas : il n'y a pas
+    d'hypothèse testée à corriger, et les compter gonflerait `m` d'un
+    tiers pour rien.
+
+    ⚠️ BH SUPPOSE L'INDÉPENDANCE (ou la PRDS) ; nos tests sont corrélés.
+    Le remède retenu est celui de Wilks — `alpha` doublé
+    (`ALPHA_FDR`) — et non Benjamini-Yekutieli, dont le facteur
+    `Σ 1/i ≈ 7,6` à m = 1 121 est bien trop sévère pour des tests
+    positivement corrélés. Arbitrage écrit, pas mesuré : à réviser si
+    un jour on sait estimer la corrélation effective du tableau.
+
+    ⓘ Les `None` (pas de p-valeur) ne sont PAS dans la famille et
+    rendent `False` — l'appelant décide ce qu'il en fait ; ici il ne les
+    rétrograde pas, puisqu'elles n'ont rien affirmé.
+    """
+    indices = [i for i, p in enumerate(p_values) if p is not None]
+    m = len(indices)
+    survivants = [False] * len(p_values)
+    if m == 0:
+        return survivants, None, 0
+    ordre = sorted(indices, key=lambda i: p_values[i])
+    # Le plus GRAND k qui satisfait p_(k) ≤ k·α/m — pas le premier qui
+    # échoue. La différence n'est pas cosmétique : les p-valeurs de
+    # rang inférieur à k sont rejetées MÊME si elles échouent
+    # individuellement au seuil, et c'est exactement ce qui fait de BH
+    # une procédure « step-up » plutôt qu'une suite de tests.
+    k = 0
+    for rang, i in enumerate(ordre, 1):
+        if p_values[i] <= rang * alpha / m:
+            k = rang
+    if k == 0:
+        return survivants, None, 0
+    for i in ordre[:k]:
+        survivants[i] = True
+    return survivants, p_values[ordre[k - 1]], k
 
 
 # ══════════════════════════════════════════════════════════════════

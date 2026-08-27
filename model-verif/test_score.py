@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scoring as S      # noqa: E402
 import score as J        # noqa: E402
+import inference as I    # noqa: E402  (lot L3 : BOOTSTRAP_ITERATIONS)
 
 OK = KO = 0
 DAY = datetime(2026, 8, 5)
@@ -2903,6 +2904,283 @@ def test_l2_apply_rank_transmet_lexclu_au_corrige():
     check("corrigé : mfhd 2ᵉ", hd["rank_corr"], 2)
 
 
+def test_l3_gap_apparie_bout_en_bout():
+    """Lot L3 (27/08/2026), objectif 2 — l'écart PRATIQUE se mesure sur
+    les balise-jours COMMUNS aux deux modèles, plus jamais sur deux
+    populations propres (défaut mesuré, audit §2.5).
+    """
+    print("── lot L3 : le gap pratique, sur la population appariée ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(900, 912)}
+
+    # ⛔ LE PIÈGE, REPRODUIT EXPRÈS. `icon_d2` note DOUZE balises ; six
+    # d'entre elles sont faciles (1,0 km/h) et six sont dures
+    # (9,0 km/h). `mfhd` ne note QUE les six dures, et s'y trompe à
+    # peine plus (9,4). Sur leurs populations propres, icon a l'air
+    # DEUX FOIS meilleur ; sur les six balises qu'ils partagent, ils
+    # sont à 4 % l'un de l'autre — bien sous les 15 % « utiles ».
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(900, 912):
+            dure = i >= 906
+            daily.append({
+                "day": d, "source": "pioupiou", "station_id": str(i),
+                "model": "icon_d2", "lead_h": 24, "regime": "fluxN",
+                "n_hours": 12, "err_vec_med": 9.0 if dure else 1.0,
+                "mse_model": 81.0 if dure else 1.0, "mse_persist": 200.0})
+            if dure:
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": J.AROME_HD_MODEL, "lead_h": 24, "regime": "fluxN",
+                    "n_hours": 12, "err_vec_med": 9.4,
+                    "mse_model": 88.36, "mse_persist": 200.0})
+
+    rows = J.rolling_scores(daily, zone_of, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    icon = next(r for r in fine if r["model"] == "icon_d2")
+    hd = next(r for r in fine if r["model"] == J.AROME_HD_MODEL)
+
+    check("icon_d2 a bien l'air deux fois meilleur sur SA population "
+          "(5,0 contre 9,4) — c'est le chiffre publié, et il est juste",
+          (icon["typical_err_kmh"], hd["typical_err_kmh"]), (5.0, 9.4))
+    check("⭐⭐ … et pourtant AUCUN rang n'est publié : sur les six "
+          "balises qu'ils partagent, l'écart utile tombe à 4 %",
+          (icon["rank"], hd["rank"]), (None, None))
+    check("… la raison est `tied` (« écart réel mais trop faible »), pas "
+          "`not_separable` : le test apparié sépare parfaitement, c'est "
+          "la condition PRATIQUE qui refuse",
+          icon["rank_reason"], "tied")
+
+    # ⭐ `n_comparable` publie le dénominateur du raisonnement.
+    check("⭐⭐ `n_comparable` : le noyau commun de la case vaut 90 "
+          "balise-jours (6 balises × 15 jours) — icon_d2 publie donc un "
+          "chiffre dont la MOITIÉ vient de balises que personne d'autre "
+          "n'a vues, et sa ligne le dit",
+          (icon["occurrences"], icon["n_comparable"]), (180, 90))
+    check("… et mfhd, lui, est comparable sur la totalité des siens : "
+          "`n_comparable == occurrences`",
+          (hd["occurrences"], hd["n_comparable"]), (90, 90))
+
+    # ⛔ ET LE GARDE-FOU QUI NE SE VOIT PAS AUTREMENT. `_jours_balises`
+    # exige une `err_vec_med` FINIE, pas seulement une ligne présente —
+    # la MÊME condition que `INF.paired_differences`. Sans elle,
+    # `n_comparable` compterait des balise-jours vides et annoncerait
+    # une population commune que le test, lui, n'a jamais eue. Le bout
+    # en bout ne peut pas l'attraper (la collecte n'accumule que des
+    # valeurs finies) : c'est donc ici, en direct, ou nulle part.
+    lignes = [{"day": "2026-08-26", "unit": "pioupiou:1", "err_vec_med": 3.0},
+              {"day": "2026-08-26", "unit": "pioupiou:2", "err_vec_med": None},
+              {"day": "2026-08-26", "unit": "pioupiou:3",
+               "err_vec_med": float("nan")},
+              {"day": "2026-08-26", "unit": "pioupiou:4"}]
+    check("⭐ `_jours_balises` ne retient que les balise-jours à erreur "
+          "FINIE — ni `None`, ni `NaN`, ni champ absent",
+          J._jours_balises(lignes), {("2026-08-26", "pioupiou:1")})
+    check("… et une liste vide ou absente ne plante pas",
+          (J._jours_balises([]), J._jours_balises(None)), (set(), set()))
+
+
+def _ligne_fdr(zone, p, reason="ok", rank=1, model="icon_d2", p_corr=None):
+    """Une ligne de score minimale, telle que `appliquer_fdr` la lit."""
+    r = {"as_of": "2026-08-27", "zone_id": zone, "model": model, "lead_h": 24,
+         "window_kind": "rolling15", "regime": "all", "agg_level": "basin",
+         "rank": rank, "rank_reason": reason,
+         "rank_corr": None, "rank_reason_corr": None}
+    if p is not None:
+        r[J.FDR_P_BRUT] = p
+    if p_corr is not None:
+        r[J.FDR_P_CORR] = p_corr
+    return r
+
+
+def test_l3_fdr_tue_la_limite_et_garde_la_franche():
+    """Lot L3, objectif 1 — Benjamini-Hochberg sur le TABLEAU de la nuit.
+
+    ⛔ Le jeu est construit pour que la réponse ne fasse aucun doute :
+    dix cases FRANCHES (p au plancher du tirage), une case LIMITE
+    (p = 0,02 — « significative » à 5 % prise toute seule), et 92 cases
+    où un test a bien eu lieu sans rien conclure. BH doit garder les
+    dix, tuer la limite, et compter les 92 dans `m` — c'est ce dernier
+    point qui fait toute la sévérité de la correction.
+    """
+    print("── lot L3 : BH tue la case limite, garde les franches ──")
+    PLANCHER = 2 / (I.BOOTSTRAP_ITERATIONS + 1)
+    rows = []
+    for i in range(10):
+        rows.append(_ligne_fdr(f"franche:{i}", PLANCHER))
+    rows.append(_ligne_fdr("limite", 0.02))
+    for i in range(92):
+        # Un test JOUÉ qui n'a rien conclu : pas de rang, mais une
+        # p-valeur — donc dans la famille.
+        rows.append(_ligne_fdr(f"muette:{i}", 0.30 + 0.005 * i,
+                               reason="not_separable", rank=None))
+    # Et deux cases où AUCUN test n'a eu lieu : hors famille.
+    rows.append(_ligne_fdr("courte", None, reason="window_too_short",
+                           rank=None))
+    rows.append(_ligne_fdr("seule", None, reason="single_model", rank=None))
+
+    # ⛔ ET UNE CASE JUMELLE, À TOUT SAUF LA FENÊTRE PRÈS. Le glissant
+    # et le régime posent DEUX questions sur la même zone : les
+    # confondre diviserait `m` par deux et rendrait la correction deux
+    # fois trop indulgente, sans que rien ne le montre.
+    jumelle = _ligne_fdr("limite", 0.02)
+    jumelle["window_kind"], jumelle["regime"] = "regime", "fluxN"
+    rows.append(jumelle)
+
+    rapport = J.appliquer_fdr(rows)
+    b = rapport["brut"]
+    check("⭐ la famille compte les tests JOUÉS (104), pas les seuls "
+          "rangs publiés (12) ni toutes les cases (106)", b["m"], 104)
+    check("⭐⭐ … et la jumelle « régime » compte comme une case À PART "
+          "de la jumelle « rolling15 » — même zone, même lead, deux "
+          "questions", b["publies_avant"], 12)
+    check("⭐⭐ les deux limites sont retirées, aucune autre",
+          b["retrogrades"], 2)
+
+    limite = next(r for r in rows if r["zone_id"] == "limite"
+                  and r["window_kind"] == "rolling15")
+    check("⭐⭐ la case limite perd son rang", limite["rank"], None)
+    check("… et sa raison le NOMME (`fdr`), au lieu de la faire "
+          "disparaître en silence", limite["rank_reason"], J.RANK_REASON_FDR)
+    check("… la jumelle « régime » tombe elle aussi, séparément",
+          jumelle["rank_reason"], J.RANK_REASON_FDR)
+    check("les dix franches gardent leur rang",
+          [r["rank"] for r in rows if r["zone_id"].startswith("franche")],
+          [1] * 10)
+    check("… et leur raison intacte",
+          {r["rank_reason"] for r in rows
+           if r["zone_id"].startswith("franche")}, {"ok"})
+    check("⛔ les cases muettes ne sont PAS rétrogradées — elles "
+          "n'avaient rien affirmé, `not_separable` reste `not_separable`",
+          {r["rank_reason"] for r in rows if r["zone_id"].startswith("muette")},
+          {"not_separable"})
+    check("… et les cases sans test gardent la leur",
+          [next(r["rank_reason"] for r in rows if r["zone_id"] == z)
+           for z in ("courte", "seule")],
+          ["window_too_short", "single_model"])
+
+    check("⭐ les clés privées de transport sont RETIRÉES — le JSON "
+          "publié porte tout le reste sans filtre",
+          any(J.FDR_P_BRUT in r or J.FDR_P_CORR in r for r in rows), False)
+
+    # ⛔ ET LE CONTRÔLE QUI COMPTE VRAIMENT : sans les 92 muettes dans la
+    # famille, la limite SURVIVRAIT. C'est la preuve que `m` est le bon.
+    rows2 = ([_ligne_fdr(f"franche:{i}", PLANCHER) for i in range(10)]
+             + [_ligne_fdr("limite", 0.02)])
+    J.appliquer_fdr(rows2)
+    limite2 = next(r for r in rows2 if r["zone_id"] == "limite")
+    check("⭐⭐ sur une famille de 11 seulement, la MÊME case limite "
+          "survit — la sévérité vient bien du nombre de tests joués",
+          limite2["rank_reason"], "ok")
+
+
+def test_l3_fdr_ne_touche_pas_lecarte_ni_le_corrige():
+    """Le motif `fdr` ne doit écraser NI `duplicate_chain` (lot L2), NI
+    la colonne corrigée, qui est une famille à part.
+
+    ⛔ C'est la leçon du lot L2 appliquée d'avance : depuis lui, une case
+    n'est plus uniforme en `rank_reason`. Une rétrogradation qui
+    balaierait toutes les lignes de la case effacerait le motif de
+    l'écarté — et l'écran afficherait « retiré par la multiplicité » sur
+    un modèle qui n'a jamais concouru.
+    """
+    print("── lot L3 : `fdr` n'écrase ni l'écarté, ni l'autre colonne ──")
+    PLANCHER = 2 / (I.BOOTSTRAP_ITERATIONS + 1)
+    rows = []
+    # Une case publiée qui va tomber, avec son écarté L2 dedans.
+    rows.append(_ligne_fdr("mixte", 0.02, model="icon_d2", rank=1))
+    ecarte = _ligne_fdr("mixte", None, model=J.AROME_R2_MODEL, rank=None,
+                        reason=J.RANK_REASON_DUPLICATE_CHAIN)
+    rows.append(ecarte)
+    for i in range(92):
+        rows.append(_ligne_fdr(f"muette:{i}", 0.30 + 0.005 * i,
+                               reason="not_separable", rank=None))
+    J.appliquer_fdr(rows)
+    gagnant = next(r for r in rows
+                   if r["zone_id"] == "mixte" and r["model"] == "icon_d2")
+    check("la case tombe bien", gagnant["rank_reason"], J.RANK_REASON_FDR)
+    check("⭐⭐ … et l'écarté du lot L2 garde `duplicate_chain` — jamais "
+          "`fdr`", ecarte["rank_reason"], J.RANK_REASON_DUPLICATE_CHAIN)
+    check("… et son rang reste nul", ecarte["rank"], None)
+
+    # ── deux familles séparées : le corrigé a son propre BH ──────────
+    rows_c = []
+    # ⓘ HUIT franches, pas trois : au plancher du tirage (p ≈ 0,003992)
+    # et sur une famille de 101, il en faut au moins cinq pour que la
+    # première franchisse son seuil BH (0,10/101 = 9,9e-4). C'est la
+    # limite de résolution documentée dans `_p_bilaterale`, visible ici
+    # à taille de banc — et une raison de plus de la connaître.
+    for i in range(8):
+        r = _ligne_fdr(f"c:{i}", PLANCHER, p_corr=PLANCHER)
+        r["rank_corr"], r["rank_reason_corr"] = 1, "ok"
+        rows_c.append(r)
+    r_lim = _ligne_fdr("c:lim", PLANCHER, p_corr=0.02)
+    r_lim["rank_corr"], r_lim["rank_reason_corr"] = 1, "ok"
+    rows_c.append(r_lim)
+    for i in range(92):
+        m = _ligne_fdr(f"cm:{i}", 0.90, reason="not_separable", rank=None,
+                       p_corr=0.30 + 0.005 * i)
+        m["rank_reason_corr"] = "not_separable"
+        rows_c.append(m)
+    rap = J.appliquer_fdr(rows_c)
+    check("le corrigé a sa propre famille, de la même taille ici",
+          (rap["brut"]["m"], rap["corrige"]["m"]), (101, 101))
+    check("⭐ le brut ne tombe pas (ses neuf p sont au plancher)",
+          rap["brut"]["retrogrades"], 0)
+    check("⭐⭐ … et le corrigé, lui, perd sa case limite — les deux "
+          "colonnes sont jugées séparément",
+          rap["corrige"]["retrogrades"], 1)
+    check("… c'est bien `rank_reason_corr` qui porte le motif, jamais "
+          "`rank_reason`",
+          (r_lim["rank_reason_corr"], r_lim["rank_reason"]),
+          (J.RANK_REASON_FDR, "ok"))
+
+
+def test_l3_la_p_valeur_arrive_vraiment_du_classement():
+    """⛔ LE BANC QUI EMPÊCHE LES TROIS AUTRES D'ÊTRE UNE MISE EN SCÈNE.
+
+    Les bancs de `appliquer_fdr` posent les p-valeurs à la main. Celui-ci
+    vérifie qu'un classement RÉEL en dépose une, non nulle, sur toutes
+    les lignes admises et sur aucune autre — sans quoi la correction
+    tournerait chaque nuit sur une famille vide, en silence.
+    """
+    print("── lot L3 : la p-valeur vient bien du test apparié réel ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(940, 946)}
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(940, 946):
+            for model, err in (("icon_d2", 3.0),
+                               (J.AROME_HD_MODEL, 9.0),
+                               (J.AROME_R2_MODEL, 9.5)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": 24, "regime": "fluxN",
+                    "n_hours": 12, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 200.0})
+    rows = J.rolling_scores(daily, zone_of, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    icon = next(r for r in fine if r["model"] == "icon_d2")
+    r2 = next(r for r in fine if r["model"] == J.AROME_R2_MODEL)
+    check("le classement tranche (icon_d2 1er, écart franc)",
+          (icon["rank"], icon["rank_reason"]), (1, "ok"))
+    check("⭐⭐ une p-valeur RÉELLE a été déposée sur la ligne admise",
+          isinstance(icon.get(J.FDR_P_BRUT), float), True)
+    check("… au plancher du tirage, comme il se doit pour un écart franc",
+          icon[J.FDR_P_BRUT], 2 / (I.BOOTSTRAP_ITERATIONS + 1))
+    check("⛔ … et AUCUNE sur l'écarté du lot L2, qui n'a rien testé",
+          r2.get(J.FDR_P_BRUT), None)
+    rap = J.appliquer_fdr(rows)
+    check("la famille n'est pas vide — la correction a de quoi mordre",
+          rap["brut"]["m"] >= 1, True)
+
+
 def test_light_scores_sous_ensemble_exact():
     print("── S13.0 : le léger est un sous-ensemble exact du gros ──")
     plein = {
@@ -2916,6 +3194,7 @@ def test_light_scores_sous_ensemble_exact():
         "bias_n_days": None, "ci_low": 2.9, "ci_high": 4.1, "rank": 1,
         "rank_reason": "ok", "rank_corr": None,
         "rank_reason_corr": "mixed_population", "err_sd": 1.2, "n_days": 15,
+        "n_comparable": 37,
         "ci_kind": "block_day", "ci_reason": "ok", "block_days": 15,
         "pooled_err_kmh": None, "borrowed_weight": 0.0, "variable": "wind",
     }
@@ -3132,6 +3411,11 @@ def main() -> int:
                test_l2_un_seul_arome_au_classement,
                test_l2_duplicate_chain_sur_le_classement_corrige,
                test_l2_apply_rank_transmet_lexclu_au_corrige,
+               # ── lot L3 (27/08) : multiplicité + gap apparié ──
+               test_l3_gap_apparie_bout_en_bout,
+               test_l3_fdr_tue_la_limite_et_garde_la_franche,
+               test_l3_fdr_ne_touche_pas_lecarte_ni_le_corrige,
+               test_l3_la_p_valeur_arrive_vraiment_du_classement,
                # ── lot S13.0 : le fichier léger + le résumé des manches ──
                test_light_scores_sous_ensemble_exact,
                test_light_scores_bout_en_bout_ne_recalcule_rien,
