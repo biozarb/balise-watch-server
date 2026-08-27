@@ -6,6 +6,53 @@
 
 ---
 
+## 27/08/2026 — la nuit où la passerelle Météo-France a menti en HTTP 200
+
+**Piège nº 1 — `codes_new_from_message()` REND UN HANDLE SUR N'IMPORTE
+QUOI.** Trois passes de la pluie à venir mortes sur
+`gribapi.errors.KeyValueNotFoundError: Key/value not found` — un message
+qui ne nomme ni le champ, ni l'échéance, ni la cause. Ce n'était pas
+eccodes : le portail servait son corps d'erreur XML (`mw:code` 868502,
+« Can't start new thread ») avec un **HTTP 200**. Le garde-fou en place
+ne vérifiait que `len(octets) >= 256` ; le corps d'erreur en fait 416.
+Et eccodes, sur ces octets-là, **construit un handle valide** — il se
+contente d'un `ECCODES ERROR : No final 7777 in message!` sur stderr,
+noyé dans le journal. La panne n'apparaît qu'au premier `codes_get`, dix
+lignes plus loin, dans une fonction qui n'y est pour rien. *Un plancher
+de taille voit le corps VIDE ; il ne voit pas le corps FAUX.* Vingt
+octets de magie (`GRIB` … `7777`) suffisent — et vérifiés DANS la boucle
+de retry, ils transforment la panne en hoquet retenté.
+
+**Piège nº 2 — UN `/fail` EXPLICITE COURT-CIRCUITE LA GRÂCE DU CHECK.**
+`bw-agrume-piaf` était réglé « période 10 min, grâce 25 min » — trois
+passages manqués avant de crier, exactement ce qu'il fallait. Sauf que
+ce réglage ne gouverne que le SILENCE. Le script, lui, pinguait `/fail`
+à chaque passe perdue, et un `/fail` fait tomber le voyant sur-le-champ.
+Six passes perdues sur ~36 dans la nuit, jamais deux d'affilée : douze
+mails pour une chaîne qui n'a jamais eu plus de dix minutes de retard,
+la passe suivante rattrapant intégralement la précédente. *Un voyant qui
+crie pour une perte sans conséquence apprend à être ignoré — et c'est la
+seule panne dont ce projet ne se remet pas.* Corrigé en comptant les
+échecs CONSÉCUTIFS (`/fail` au troisième), le compteur étant remis à
+zéro par une réussite et par rien d'autre.
+
+**Piège nº 3 — UN REPLI LINÉAIRE CALIBRÉ SUR UN HOQUET NE TIENT PAS UNE
+SATURATION.** `1,5 × (n+1)` sur quatre essais = **15 s de patience en
+tout**, réglées le 10/08 sur des 502 isolés qui repassaient au premier
+essai. La saturation du 26/08 durait des minutes : les quatre essais
+s'épuisaient en un quart de minute et la passe tombait. Passé à
+1,5 / 5 / 15 / 30 s — *le premier palier reste court parce que la
+plupart des 502 y passent ; c'est la QUEUE qu'il fallait allonger*, et
+elle tient dans les 10 min du timer pour une passe qui en prend 40.
+
+**Piège nº 4 (banc) — `flock` N'EXISTE PAS SUR macOS.** Le banc du
+voyant, écrit sur le Mac, prenait silencieusement la branche « une
+ingestion est déjà en cours » : cinq vérifications VERTES qui ne
+vérifiaient rien. *Un banc de shell écrit sur macOS et exécuté sur Linux
+ne teste pas le même script.* Doublure posée, et elle le DIT à l'écran.
+
+---
+
 ## 26/08/2026 (clôture) — le composite remplaçait au lieu de mélanger
 
 **Piège nº 1 — UN SEUL NOMBRE POUR DEUX QUESTIONS.** `poids_pi(τ)`

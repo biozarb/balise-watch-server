@@ -32,6 +32,12 @@ ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY="${BW_PYTHON:-$HOME/venv-balise/bin/python}"
 ALERTES_FILE="${BW_ALERTES_ENV:-$HOME/.balise-watch-alertes.env}"
 VERROU="${BW_PIAF_VERROU:-/tmp/bw-agrume-piaf.lock}"
+# ⚠️ PAS dans /tmp : le compteur doit survivre à un redémarrage du VPS,
+# sinon une panne longue se remettrait à zéro toute seule au pire moment.
+COMPTEUR="${BW_PIAF_COMPTEUR:-$HOME/.bw-agrume-piaf-echecs}"
+# ⛔ 27/08 — LE VOYANT CLIGNOTAIT POUR UNE PASSE PERDUE SUR TRENTE-SIX.
+# Voir le pavé « CE QUE LE VOYANT SURVEILLE » plus bas.
+SEUIL_ECHECS="${BW_PIAF_SEUIL_ECHECS:-3}"
 
 # ⚠️ LES ALERTES SE CHARGENT EN PREMIER — leçon du 03/08. Le tout premier
 # échec possible est « un fichier d'environnement est absent » ; si le
@@ -101,6 +107,40 @@ export PYTHONUNBUFFERED=1
 #  « la pluie à venir » ne soit pas vieille d'une heure sans que
 #  personne ne le sache.
 #
+#  ══════════════════════════════════════════════════════════════════
+#  ⛔⛔ 27/08 — UN `/fail` COURT-CIRCUITE CETTE GRÂCE, ET C'EST CE QUI
+#     A REMPLI LA BOÎTE DE YANN.
+#
+#  Le réglage ci-dessus est juste : trois passages manqués avant de
+#  crier. Mais il ne s'applique qu'au SILENCE. Un `/fail` explicite,
+#  lui, fait tomber le voyant SUR-LE-CHAMP — grâce ou pas.
+#
+#  Nuit du 26 au 27/08 : la passerelle Météo-France sature par
+#  bouffées. SIX passes perdues sur ~36, jamais deux d'affilée. Chaque
+#  passe perdue = un mail DOWN ; la passe suivante, dix minutes plus
+#  tard, = un mail UP. Douze mails pour une chaîne qui n'a jamais eu
+#  plus de dix minutes de retard — parce que le producteur publie
+#  toutes les 5 min et qu'une passe manquée est intégralement rattrapée
+#  par la suivante, plus fraîche.
+#
+#  ⚠️ Un voyant qui crie pour une perte SANS CONSÉQUENCE apprend à
+#  être ignoré, et c'est la seule panne dont ce projet ne se remet
+#  pas : le jour où il criera pour de bon, personne ne regardera.
+#
+#  Donc : on COMPTE les échecs consécutifs et on ne pingue `/fail`
+#  qu'au troisième. En dessous, on se TAIT — et le silence est déjà
+#  surveillé, par la grâce de 25 min réglée plus haut. Les deux
+#  mécanismes disent alors la même chose au même moment (~30-35 min
+#  sans passe fraîche), l'un explicitement, l'autre par défaut.
+#
+#  ⛔ Le compteur se remet à zéro à la PREMIÈRE réussite, jamais par
+#  le temps qui passe : deux échecs séparés d'une réussite ne sont pas
+#  une panne, ce sont deux hoquets.
+#  ⚠️ Les échecs de CONFIGURATION (fichier d'env illisible, plus haut)
+#  gardent leur `/fail` immédiat : ceux-là ne se rattrapent pas tout
+#  seuls dans dix minutes.
+#  ══════════════════════════════════════════════════════════════════
+#
 #  ⛔ ET C'EST LE SEUL VOYANT. À 144 exécutions par jour, la surveillance
 #  ne peut pas passer par la lecture d'un journal : personne ne lit 144
 #  lignes par jour, et un silence ne se voit pas « en cherchant bien ».
@@ -116,10 +156,39 @@ fi
 "$PY" "$ICI/ingest_piaf.py" "$@"
 code=$?
 
+# ⚠️ Filtré aux chiffres : un fichier tronqué par un redémarrage rendrait
+# `$(( ... + 1 ))` fatal, et le script mourrait AVANT de pouvoir pinguer
+# quoi que ce soit — un garde-fou qui casse le voyant qu'il garde.
+lire_compteur() {
+  n=$(tr -cd '0-9' < "$COMPTEUR" 2>/dev/null)
+  echo "${n:-0}"
+}
+
 case "$code" in
-  0) pinguer "" "passe ingérée et écrite" ;;
-  3) dire "rien à faire (code 3) — aucun ping" ;;
-  *) pinguer /fail "ingest_piaf.py a rendu le code $code" ;;
+  0)
+    # ⚠️ Remise à zéro AVANT le ping : si le ping échoue (réseau), on
+    # veut quand même avoir enregistré que la chaîne est repartie.
+    echo 0 > "$COMPTEUR" 2>/dev/null || dire "⚠️ $COMPTEUR non inscriptible"
+    pinguer "" "passe ingérée et écrite"
+    ;;
+  3)
+    # ⚠️ « Rien à faire » n'est ni une réussite ni un échec : le
+    # compteur ne bouge pas. Le remettre à zéro effacerait une panne
+    # en cours qu'un simple saut de verrou aurait masquée.
+    dire "rien à faire (code 3) — aucun ping"
+    ;;
+  *)
+    n=$(( $(lire_compteur) + 1 ))
+    echo "$n" > "$COMPTEUR" 2>/dev/null || dire "⚠️ $COMPTEUR non inscriptible"
+    if [ "$n" -ge "$SEUIL_ECHECS" ]; then
+      dire "⛔ $n échecs CONSÉCUTIFS (seuil $SEUIL_ECHECS) — le voyant tombe"
+      pinguer /fail "ingest_piaf.py a rendu le code $code — $n échecs consécutifs"
+    else
+      # ⚠️ Aucun ping du tout, pas même un succès : le voyant doit
+      # rester sur la grâce, pas repartir à zéro sur une passe perdue.
+      dire "⚠️ échec $n/$SEUIL_ECHECS (code $code) — pas encore de /fail : la passe suivante sort dans 5 min"
+    fi
+    ;;
 esac
 
 exit "$code"

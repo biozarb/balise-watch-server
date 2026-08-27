@@ -118,6 +118,71 @@ AXES_VERTICAUX_CONNUS = ("height", "z", "elevation", "vertical", "depth")
 # plus petit champ réel mesuré sur ce domaine en fait 7 957.
 MIN_OCTETS_GRIB = 256
 
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔⛔ 27/08 — LE PLANCHER DE 256 OCTETS NE VOIT QUE LE CORPS *VIDE*,
+#     PAS LE CORPS *FAUX*.
+#
+#  Nuit du 26 au 27/08, la passerelle Météo-France sature (`mw:code`
+#  868502, « Can't start new thread »). Trois passes de la pluie à venir
+#  sont mortes sur `gribapi.errors.KeyValueNotFoundError: Key/value not
+#  found` — un message qui ne nomme ni le champ, ni l'échéance, ni la
+#  cause, et qui a l'air d'un bug d'eccodes.
+#
+#  Ce n'en était pas un. Le portail a servi son corps d'erreur XML en
+#  **HTTP 200** : 416 octets, donc au-dessus du plancher, donc laissés
+#  passer. Et — reproduit sur le VPS le 27/08 —
+#  `ec.codes_new_from_message()` sur ces octets-là **rend un handle
+#  valide**. Il se contente d'écrire `ECCODES ERROR : No final 7777 in
+#  message!` sur stderr, que systemd noie dans le reste du journal. La
+#  panne n'apparaît que dix lignes plus loin, au premier `codes_get`.
+#
+#  ⚠️ Un GRIB2 s'ouvre par « GRIB » et se ferme par « 7777 ». Vingt
+#  octets à comparer suffisent à distinguer un hoquet de passerelle
+#  d'une donnée — et à le RETENTER au lieu de perdre la passe.
+# ══════════════════════════════════════════════════════════════════════
+MAGIE_GRIB_DEBUT = b"GRIB"
+MAGIE_GRIB_FIN = b"7777"
+
+# ⛔ Le repli sur les incidents de passerelle. ANCIENNEMENT `1,5 × (n+1)`
+# — 1,5 / 3 / 4,5 / 6 s, soit **15 s de patience en tout**. La nuit du
+# 26 au 27/08 l'a montré trop court : la saturation durait des MINUTES,
+# et six passes de la pluie à venir sont tombées après avoir épuisé les
+# quatre essais en un quart de minute.
+#
+# ⚠️ Le PREMIER palier reste à 1,5 s, et c'est délibéré : sur les
+# journaux de cette nuit, la grande majorité des 502 passent dès l'essai
+# 1. Allonger le début ferait payer à tout le monde une attente qui ne
+# sert qu'aux cas rares. C'est la QUEUE qui s'allonge — 51,5 s au pire
+# contre 15 s, à comparer aux 10 min du timer pour une passe qui en
+# prend 30 à 50 s.
+REPLI_PASSERELLE = (1.5, 5.0, 15.0, 30.0)
+
+
+def repli(essai):
+    """Secondes à attendre avant l'essai suivant (essai indexé à 0)."""
+    return REPLI_PASSERELLE[min(essai, len(REPLI_PASSERELLE) - 1)]
+
+
+def corps_grib_invalide(octets):
+    """Rend `None` si le corps est un GRIB2 plausible, sinon la RAISON.
+
+    ⚠️ Ce n'est PAS un décodeur : il ne dit rien de la justesse du
+    champ. Il répond à une seule question — « le portail m'a-t-il rendu
+    de la donnée, ou sa page d'erreur ? » — et il y répond avant
+    eccodes, pendant qu'on peut encore retenter.
+    """
+    if len(octets) < MIN_OCTETS_GRIB:
+        return (f"{len(octets)} octets, trop court pour un GRIB2 "
+                f"(plancher {MIN_OCTETS_GRIB})")
+    if not octets.startswith(MAGIE_GRIB_DEBUT):
+        return (f"ne commence pas par « GRIB » mais par {octets[:24]!r} — "
+                f"c'est un corps d'erreur servi en HTTP 200")
+    if not octets.rstrip().endswith(MAGIE_GRIB_FIN):
+        return ("ne se termine pas par « 7777 » — message GRIB2 TRONQUÉ "
+                "(eccodes en ferait quand même un handle)")
+    return None
+
+
 # ── Le quota, MESURÉ et non lu ────────────────────────────────────────
 # Rafale de 150 requêtes à 404 req/min → premier HTTP 429 à la requête
 # 105. La limite annoncée de 100 req/min est donc réelle et elle mord.
@@ -250,8 +315,13 @@ class Portail:
             time.sleep(max(dodo, 0.05))
 
     # ── HTTP ──────────────────────────────────────────────────────────
-    def _http(self, url, essais=4, timeout=60):
+    def _http(self, url, essais=4, timeout=60, valider=None):
         """Renvoie le corps (octets). Lève `ErreurPortail`/`CouvertureAbsente`.
+
+        ⚠️ `valider` (27/08) — une fonction `octets → raison ou None`,
+        appelée DANS la boucle. Un corps refusé y est traité comme un
+        502 : on retente. C'est tout l'intérêt de le brancher ICI et pas
+        chez l'appelant — dehors, il ne resterait qu'à lever.
 
         Trois comportements du portail sont traités ici et nulle part
         ailleurs :
@@ -278,7 +348,22 @@ class Portail:
                               "User-Agent": "balise-watch-agrume/1"})
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
-                    return r.read()
+                    octets = r.read()
+                # ⛔ 27/08 — HTTP 200 NE VEUT PAS DIRE « de la donnée ».
+                # Le corps d'erreur de la passerelle arrive avec ce
+                # code-là, et il est plus long que le plancher. Refusé
+                # ici, il redevient ce qu'il est : un hoquet, retenté.
+                if valider is not None:
+                    raison = valider(octets)
+                    if raison:
+                        self.compteur["corps_invalide"] += 1
+                        dernier = (200, f"corps illisible : {raison}")
+                        self._crier(f"    corps illisible en HTTP 200 "
+                                    f"({raison}) — on retente "
+                                    f"[essai {essai + 1}/{essais}]")
+                        time.sleep(repli(essai))
+                        continue
+                return octets
             except urllib.error.HTTPError as e:
                 corps = e.read()
                 texte = corps.decode("utf-8", "replace")
@@ -313,16 +398,18 @@ class Portail:
                 if e.code in (502, 503, 504):
                     self.compteur[f"http_{e.code}_retente"] += 1
                     self._crier(f"    {e.code} (passerelle) — on retente "
+                                f"dans {repli(essai):.0f} s "
                                 f"[essai {essai + 1}/{essais}]")
-                    time.sleep(1.5 * (essai + 1))
+                    time.sleep(repli(essai))
                     continue
 
                 if e.code == 500 and "SUSPENDED" in texte:
                     # Mesuré : le retry immédiat passe.
                     self.compteur["500_suspended"] += 1
                     self._crier(f"    500 [State : SUSPENDED] — on retente "
+                                f"dans {repli(essai):.0f} s "
                                 f"[essai {essai + 1}/{essais}]")
-                    time.sleep(1.5 * (essai + 1))
+                    time.sleep(repli(essai))
                     continue
 
                 exc, msg = _lire_exception_wcs(texte)
@@ -338,8 +425,9 @@ class Portail:
                 dernier = (None, repr(e))
                 self.compteur["reseau"] += 1
                 self._crier(f"    réseau : {e!r} — on retente "
+                            f"dans {repli(essai):.0f} s "
                             f"[essai {essai + 1}/{essais}]")
-                time.sleep(1.5 * (essai + 1))
+                time.sleep(repli(essai))
         code, texte = dernier if dernier else (None, "")
         raise ErreurPortail(f"échec après {essais} essais : {texte[:200]}",
                             code=code, corps=texte)
@@ -528,18 +616,20 @@ class Portail:
                + ("" if surface else f"&subset={subset_niveau(axe, niveau)}")
                + f"&subset={boite}"
                f"&format={FORMAT_GRIB}")
-        octets = self._http(url, timeout=timeout)
+        # ⚠️ Un corps vide, faux ou tronqué n'est PAS une erreur HTTP :
+        # le portail a répondu 200. Sans ce contrôle, il traverserait le
+        # décodeur et deviendrait une nappe de NaN — c'est-à-dire un trou
+        # qui ressemble à une donnée manquante légitime, et qui se
+        # propagerait jusque dans le delta du composite. Ou pire, comme
+        # la nuit du 26 au 27/08 : un handle eccodes parfaitement
+        # constitué, et une `KeyValueNotFoundError` dix lignes plus loin.
+        #
+        # ⛔ Il est passé À `_http` et non gardé ici : dedans, un corps
+        # refusé est RETENTÉ comme le hoquet de passerelle qu'il est.
+        # Ici, il ne resterait qu'à lever — et à perdre la passe.
+        octets = self._http(url, timeout=timeout,
+                            valider=corps_grib_invalide)
         self.compteur["octets"] += len(octets)
-        # ⚠️ Un corps vide n'est PAS une erreur HTTP : le portail a
-        # répondu 200. Sans ce contrôle, il traverserait le décodeur et
-        # deviendrait une nappe de NaN — c'est-à-dire un trou qui
-        # ressemble à une donnée manquante légitime, et qui se
-        # propagerait jusque dans le delta du composite.
-        if len(octets) < MIN_OCTETS_GRIB:
-            raise ErreurPortail(
-                f"GetCoverage a rendu {len(octets)} octets pour {champ} au "
-                f"niveau {niveau} à {instant_iso} — trop court pour un "
-                f"GRIB2. ⚠️ Le portail a pourtant répondu HTTP 200.")
         return octets
 
     def bilan(self):
@@ -549,6 +639,12 @@ class Portail:
                 + (f", {c['500_suspended']} × 500 SUSPENDED"
                    if c["500_suspended"] else "")
                 + (f", {c['reseau']} incidents réseau" if c["reseau"] else "")
+                # ⚠️ Compté À PART des 502 : le corps illisible arrive en
+                # HTTP 200 et resterait invisible dans un bilan qui ne
+                # compte que les codes d'erreur. C'est précisément ce qui
+                # l'a laissé passer trois nuits de suite.
+                + (f", {c['corps_invalide']} corps illisibles en 200"
+                   if c["corps_invalide"] else "")
                 + "".join(f", {c[f'http_{k}_retente']} × {k} retentés"
                           for k in (502, 503, 504) if c[f"http_{k}_retente"])
                 + (f", {c['attente_quota']} attentes de quota"

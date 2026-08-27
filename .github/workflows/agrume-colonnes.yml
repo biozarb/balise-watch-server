@@ -172,6 +172,31 @@ jobs:
           # pas cesse de protéger quoi que ce soit, c'est écrit trois fois
           # plus haut et ça restait vrai pour celui-là.
           python3 agrume/test_front_altitude.py
+          # ⛔⛔ 27/08 — LES BANCS DE LA NUIT DU 26 AU 27, ET TROIS
+          # ORPHELINS QUI TRAÎNAIENT.
+          #
+          # `test_portail.py` est NEUF : ce module n'avait aucun banc, et
+          # c'est lui qui a laissé passer un corps d'erreur HTTP 200 dans
+          # eccodes trois nuits de suite. Il rejoue le corps exact du
+          # journal du VPS.
+          #
+          # `test-voyant-piaf.sh` est NEUF aussi et n'est pas en Python :
+          # ce qui a rempli la boîte de Yann n'était pas un calcul, c'est
+          # un `case` de shell qui pinguait `/fail` dès la première passe
+          # perdue. Le banc s'écrit donc là où vit la faute.
+          #
+          # ⚠️ Et `test_piaf`, `test_poller`, `test_rafraichissement`
+          # existaient depuis le 20/08 sans JAMAIS entrer dans cette
+          # liste. Trois secondes à eux trois, hors-ligne et sans clé —
+          # ils n'avaient aucune raison d'en être absents, sinon qu'on a
+          # oublié de les y mettre. C'est écrit quatre fois plus haut :
+          # un banc qu'on ne lance jamais cesse de protéger quoi que ce
+          # soit.
+          python3 agrume/test_portail.py
+          bash    agrume/test-voyant-piaf.sh
+          python3 agrume/test_piaf.py
+          python3 agrume/test_poller.py
+          python3 agrume/test_rafraichissement.py
       # ══════════════════════════════════════════════════════════════
       #  ⛔⛔ LE BANC DE PARITÉ Python ↔ TypeScript (13/08 → câblé ce jour)
       #
