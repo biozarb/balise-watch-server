@@ -131,11 +131,23 @@ for B in tools/test_mf_s3.py tools/test_audit_r2.py agrume/test_orographie.py \\
          agrume/test_profil.py agrume/test_radiosondage.py agrume/test_transect.py \\
          agrume/test_ingest_pi.py agrume/test_composite.py \\
          agrume/test_rafraichissement.py agrume/test_piaf.py \\
-         agrume/test_freeze_balises.py agrume/test_calque.py agrume/test_front_altitude.py; do
+         agrume/test_freeze_balises.py agrume/test_calque.py \\
+         agrume/test_front_altitude.py agrume/test_portail.py; do
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
 done
-echo "  ✓ 18/18 bancs verts sur le VPS"
+echo "  ✓ 19/19 bancs Python verts sur le VPS"
+
+# ⛔ 27/08 — CELUI-CI N'EST PAS EN PYTHON, ET C'EST PRÉCISÉMENT
+# POURQUOI IL EST ICI. Ce qui a rempli la boîte de Yann la nuit du 26
+# au 27 n'était pas un calcul : c'était un \`case\` de shell qui pinguait
+# \`/fail\` dès la première passe perdue. Une boucle qui ne sait lancer
+# que du \`.py\` n'aurait jamais rien vu.
+# ⚠️ Et il tourne ICI plutôt que seulement sur le Mac parce que \`flock\`
+# n'existe pas sur macOS : sur le Mac, le banc pose une doublure et ne
+# teste PAS le verrou. Sur le VPS, il le teste pour de vrai.
+echo "  · agrume/test-voyant-piaf.sh"
+bash agrume/test-voyant-piaf.sh || exit 1
 EOF
 [ $? -eq 0 ] || echec "un banc a échoué sur le VPS — RIEN N'A ÉTÉ REDÉMARRÉ"
 
