@@ -399,15 +399,15 @@ def main():
              "valeur en dur qui pourrait diverger d'elle",
              d_a["epsilon_ms"] == CO.EPSILON_DESACCORD_MS)
     # ⚠️ ÉCRIT EN POSITIF (piège nº 9 de BUGS.md 26/08) : on exige la
-    # PRÉSENCE des deux nombres et du mot qui dit que ce n'est PAS
-    # tranché, pas l'ABSENCE d'un mot qu'on pourrait supprimer par
-    # inadvertance sans que ce banc s'en aperçoive.
-    verifier("⚠️⚠️ le seuil proposé est publié EN TOUTES LETTRES (les deux "
-             "nombres ET « NON TRANCHÉE » ET « Yann ») — sinon un lecteur "
-             "croirait la proposition déjà décidée en production",
+    # PRÉSENCE des deux nombres et du mot qui dit que Yann a confirmé,
+    # pas l'ABSENCE d'un mot qu'on pourrait supprimer par inadvertance
+    # sans que ce banc s'en aperçoive.
+    verifier("⚠️⚠️ le seuil est publié EN TOUTES LETTRES (les deux nombres "
+             "ET « CONFIRMÉE » ET « Yann ») — sinon un lecteur ne pourrait "
+             "pas savoir que ce n'est plus une proposition en attente",
              d_a["seuil_propose"]["angle_deg"] == CO.SEUIL_ANGLE_DESACCORD_DEG
              and d_a["seuil_propose"]["ratio"] == CO.SEUIL_RATIO_DESACCORD
-             and "NON TRANCHÉE" in d_a["seuil_propose"]["arbitrage"]
+             and "CONFIRMÉE" in d_a["seuil_propose"]["arbitrage"]
              and "Yann" in d_a["seuil_propose"]["arbitrage"],
              d_a["seuil_propose"]["arbitrage"])
 

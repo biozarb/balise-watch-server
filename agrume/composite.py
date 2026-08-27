@@ -157,15 +157,14 @@ ALPHA_MELANGE = 0.5
 #  où on n'a plus deux vecteurs à comparer mais un seul Δ extrapolé) :
 #  l'angle entre V_AROME et V_PI, et le rapport ‖Δ‖/max(‖AROME‖, ε).
 #
-#  ⚠️⚠️ LE SEUIL D'AFFICHAGE EST UN ARBITRAGE, PAS UNE MESURE — le
-#  prompt du lot le dit explicitement : « proposer, ne pas trancher
-#  seul ». Les deux constantes ci-dessous sont la PROPOSITION de l'audit
-#  §4 bis (« signaler au-delà de 60° d'angle OU ‖Δ‖ > ‖AROME‖ »), publiée
-#  et appliquée dans `depasse_seuil_propose` pour que l'écran puisse déjà
-#  s'en servir — mais ce nom le dit : c'est une PROPOSITION en attente de
-#  la confirmation de Yann, pas une règle de conduite. *cf. BUGS.md
-#  26/08, piège nº 5 : un quantile d'affichage promu règle de conduite
-#  sans revue est exactement le défaut à ne pas reproduire ici.*
+#  ⚠️ LE SEUIL D'AFFICHAGE EST UN ARBITRAGE, PAS UNE MESURE — le
+#  prompt du lot le disait explicitement : « proposer, ne pas trancher
+#  seul ». Les deux constantes ci-dessous étaient la PROPOSITION de
+#  l'audit §4 bis (« signaler au-delà de 60° d'angle OU ‖Δ‖ > ‖AROME‖ »),
+#  appliquée dans `depasse_seuil_propose` dès sa publication — et Yann
+#  l'a CONFIRMÉE le 27/08, sans changement de valeur (cf. BUGS.md 26/08,
+#  piège nº 5 : un quantile d'affichage promu règle de conduite SANS
+#  revue est le défaut à ne pas reproduire ; celui-ci, lui, a été revu).
 SEUIL_ANGLE_DESACCORD_DEG = 60.0
 SEUIL_RATIO_DESACCORD = 1.0
 
@@ -600,12 +599,10 @@ def composer(pi_uv, arome_uv, steps_arome_h, decalage_min=0,
                 angle_deg=SEUIL_ANGLE_DESACCORD_DEG,
                 ratio=SEUIL_RATIO_DESACCORD,
                 arbitrage=(
-                    "PROPOSITION de l'audit §4 bis (signaler au-delà de "
-                    "60° d'angle OU ‖Δ‖ > ‖AROME‖) — NON TRANCHÉE : "
-                    "`depasse_seuil_propose` l'applique pour que l'écran "
-                    "puisse déjà s'en servir, mais elle attend la "
-                    "confirmation de Yann avant de devenir une règle de "
-                    "conduite (cf. BUGS.md 26/08, piège nº 5)."),
+                    "Proposition de l'audit §4 bis (signaler au-delà de "
+                    "60° d'angle OU ‖Δ‖ > ‖AROME‖) — CONFIRMÉE par Yann "
+                    "le 27/08 : `depasse_seuil_propose` l'applique en "
+                    "règle de conduite (cf. BUGS.md 26/08, piège nº 5)."),
             ),
             note=(
                 "PAR échéance ET par niveau où Δ est MESURÉ (les 5 de "
