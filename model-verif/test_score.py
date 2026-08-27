@@ -2713,6 +2713,196 @@ def test_rank_corr_le_meme_test_sur_la_colonne_corrigee():
           [r.get("rank_reason") for r in mixte], [None] * 3)
 
 
+def test_l2_un_seul_arome_au_classement():
+    """Lot L2 (27/08/2026) — `meteofrance_arome_france_hd` et `arome_r2`
+    sont le MÊME modèle lu par deux chaînes : une case ne les admet
+    JAMAIS tous les deux au classement (audit §2.2/PS2, décision de
+    Yann du 27/08).
+    """
+    print("── lot L2 : un seul AROME au classement (`duplicate_chain`) ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+
+    # ⭐ arome_r2 (4,5 km/h) bat NUMÉRIQUEMENT mfhd (5,0) — sans le lot
+    # L2 il prendrait le 2ᵉ billet du podium devant mfhd. C'est
+    # précisément ce que la décision de Yann interdit.
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(830, 836):
+            for model, err in (("icon_d2", 3.0),
+                               (J.AROME_HD_MODEL, 5.0),
+                               (J.AROME_R2_MODEL, 4.5)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": 24, "regime": "fluxN",
+                    "n_hours": 12, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+    rows = J.rolling_scores(daily, zone_of, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    check("les trois modèles ont chacun leur ligne (rien n'est supprimé)",
+          sorted(r["model"] for r in fine),
+          sorted(["icon_d2", J.AROME_HD_MODEL, J.AROME_R2_MODEL]))
+
+    icon = next(r for r in fine if r["model"] == "icon_d2")
+    hd = next(r for r in fine if r["model"] == J.AROME_HD_MODEL)
+    r2 = next(r for r in fine if r["model"] == J.AROME_R2_MODEL)
+
+    check("⭐ icon_d2 reste 1er (3,0 km/h, imbattu)", icon["rank"], 1)
+    check("⭐⭐ mfhd est 2ᵉ, alors que arome_r2 (4,5) bat mfhd (5,0) — "
+          "arome_r2 n'a jamais eu le droit de concourir",
+          hd["rank"], 2)
+    check("`arome_r2` n'a AUCUN rang, quel que soit son chiffre",
+          r2["rank"], None)
+    check("… et sa raison le nomme précisément",
+          r2["rank_reason"], "duplicate_chain")
+    check("mfhd garde sa vraie raison de classement (« ok »), pas "
+          "« duplicate_chain »", hd["rank_reason"], "ok")
+    check("icon_d2 aussi", icon["rank_reason"], "ok")
+    check("⛔ arome_r2 garde son erreur typique intacte (4,5 km/h) — "
+          "seul le RANG lui est refusé", r2["typical_err_kmh"], 4.5)
+    check("… et son `beats_persist` aussi, calculé contre la "
+          "persistance/climatologie, pas contre les autres modèles",
+          r2["beats_persist"] is not None, True)
+
+    # ⛔ SEUL, arome_r2 concourt normalement — c'est le cas structurel
+    # des balises hors Pioupiou (lot S0.5), où mfhd n'existe pas.
+    seul = [d for d in daily if d["model"] != J.AROME_HD_MODEL]
+    rows_seul = J.rolling_scores(seul, zone_of, DAY)
+    fine_seul = [r for r in rows_seul if r["zone_id"] == "b1:valley"]
+    r2_seul = next(r for r in fine_seul if r["model"] == J.AROME_R2_MODEL)
+    check("seul (mfhd absent de la case), arome_r2 concourt normalement",
+          (r2_seul["rank"], r2_seul["rank_reason"]), (2, "ok"))
+
+    # ⛔ Et SEULS les deux AROME dans une case : personne à départager
+    # pour mfhd (`single_model`) — une raison DIFFÉRENTE de celle
+    # d'arome_r2, et les deux ne doivent jamais se confondre.
+    duo = [d for d in daily if d["model"] != "icon_d2"]
+    rows_duo = J.rolling_scores(duo, zone_of, DAY)
+    fine_duo = [r for r in rows_duo if r["zone_id"] == "b1:valley"]
+    hd_duo = next(r for r in fine_duo if r["model"] == J.AROME_HD_MODEL)
+    r2_duo = next(r for r in fine_duo if r["model"] == J.AROME_R2_MODEL)
+    check("⚠️ mfhd seul admis → `single_model`, PAS `ok` (rien à battre)",
+          (hd_duo["rank"], hd_duo["rank_reason"]), (None, "single_model"))
+    check("… et arome_r2 reste `duplicate_chain`, pas `single_model`",
+          (r2_duo["rank"], r2_duo["rank_reason"]), (None, "duplicate_chain"))
+
+
+def test_l2_duplicate_chain_sur_le_classement_corrige():
+    """Lot L2 — même écarté, même raison, sur `rank_corr`/`rank_reason_corr`."""
+    print("── lot L2 : `duplicate_chain` sur la colonne corrigée ──")
+    jours = [f"2026-08-{d:02d}" for d in range(1, 16)]
+    par_modele = {"icon_d2": [], J.AROME_HD_MODEL: [], J.AROME_R2_MODEL: []}
+    for j in jours:
+        for u in range(6):
+            par_modele["icon_d2"].append(
+                {"day": j, "unit": f"p:{u}",
+                 "err_vec_med": 3.0, "err_vec_med_corr": 3.0})
+            par_modele[J.AROME_HD_MODEL].append(
+                {"day": j, "unit": f"p:{u}",
+                 "err_vec_med": 5.0, "err_vec_med_corr": 5.0})
+            par_modele[J.AROME_R2_MODEL].append(
+                {"day": j, "unit": f"p:{u}",
+                 "err_vec_med": 4.5, "err_vec_med_corr": 1.0})
+
+    rows = [
+        {"model": "icon_d2", "typical_err_kmh": 3.0, "typical_err_kmh_corr": 3.0,
+         "occurrences": 90, "n_corr": 90},
+        {"model": J.AROME_HD_MODEL, "typical_err_kmh": 5.0,
+         "typical_err_kmh_corr": 5.0, "occurrences": 90, "n_corr": 90},
+        {"model": J.AROME_R2_MODEL, "typical_err_kmh": 4.5,
+         "typical_err_kmh_corr": 1.0, "occurrences": 90, "n_corr": 90},
+    ]
+    exclu = J._duplicate_chain_excluded(rows)
+    check("l'écarté calculé par `_apply_rank` est bien `arome_r2`",
+          exclu, J.AROME_R2_MODEL)
+    J._apply_rank_corr(rows, par_modele, exclu)
+    icon, hd, r2 = rows
+    check("⭐ icon_d2 gagne le corrigé (3,0 contre 5,0) — arome_r2 "
+          "(1,0, le plus bas des trois) n'a jamais concouru",
+          (icon["rank_reason_corr"], icon["rank_corr"]), ("ok", 1))
+    check("… mfhd 2ᵉ", hd["rank_corr"], 2)
+    check("arome_r2 : rang nul, `duplicate_chain` — pas `mixed_population`",
+          (r2["rank_corr"], r2["rank_reason_corr"]),
+          (None, "duplicate_chain"))
+
+    # ⛔ L'écarté ne doit pas faire tomber les autres dans le refus
+    # « population mixte » quand IL est le seul sans corrigé. Sans le
+    # filtrer AVANT ce test, `len(avec) != len(chiffrees)` verrait 3
+    # lignes chiffrées et seulement 2 avec un corrigé, et refuserait
+    # tout le monde.
+    sans_corr = [dict(icon), dict(hd),
+                 {**dict(r2), "typical_err_kmh_corr": None, "n_corr": 0}]
+    J._apply_rank_corr(sans_corr, par_modele, J.AROME_R2_MODEL)
+    check("⭐⭐ arome_r2 sans corrigé DU TOUT n'empêche pas icon_d2/mfhd "
+          "de se classer sur le corrigé (l'écarté est retiré AVANT le "
+          "test de population mixte)",
+          (sans_corr[0]["rank_reason_corr"], sans_corr[0]["rank_corr"]),
+          ("ok", 1))
+    check("… et arome_r2 reste `duplicate_chain`, pas `mixed_population`",
+          sans_corr[2]["rank_reason_corr"], "duplicate_chain")
+
+    # ⛔ Sans exclusion (`exclu=None`), le comportement d'AVANT le lot
+    # L2 doit être EXACTEMENT préservé — régression zéro pour toutes
+    # les cases qui ne portent pas les deux AROME.
+    sans_dup = [dict(icon), dict(hd)]
+    par_modele_sans_r2 = {"icon_d2": par_modele["icon_d2"],
+                          J.AROME_HD_MODEL: par_modele[J.AROME_HD_MODEL]}
+    J._apply_rank_corr(sans_dup, par_modele_sans_r2)
+    check("sans second AROME, `_apply_rank_corr` se comporte à l'identique "
+          "d'avant le lot L2 (icon_d2 gagne)",
+          (sans_dup[0]["rank_reason_corr"], sans_dup[0]["rank_corr"]),
+          ("ok", 1))
+
+
+def test_l2_apply_rank_transmet_lexclu_au_corrige():
+    """Lot L2 — `_apply_rank` doit transmettre L'ÉCARTÉ à
+    `_apply_rank_corr` : la même case n'a pas le droit de dire
+    `duplicate_chain` sur le brut et `mixed_population` (ou pire, un
+    rang) sur le corrigé, pour le MÊME modèle.
+    """
+    print("── lot L2 : l'écarté du brut voyage bien jusqu'au corrigé ──")
+    key = ("b1:valley", 24, "basin_landform")
+    rows = [
+        {"model": "icon_d2", "typical_err_kmh": 3.0, "occurrences": 90,
+         "typical_err_kmh_corr": 3.0, "n_corr": 90},
+        {"model": J.AROME_HD_MODEL, "typical_err_kmh": 5.0, "occurrences": 90,
+         "typical_err_kmh_corr": 5.0, "n_corr": 90},
+        # ⭐ arome_r2 porte le MEILLEUR corrigé des trois (1,0) : s'il
+        # n'est pas écarté ICI AUSSI, il gagne le classement corrigé.
+        {"model": J.AROME_R2_MODEL, "typical_err_kmh": 4.5, "occurrences": 90,
+         "typical_err_kmh_corr": 1.0, "n_corr": 90},
+    ]
+    jours = [f"2026-08-{d:02d}" for d in range(1, 16)]
+    rbcm = {"icon_d2": [], J.AROME_HD_MODEL: [], J.AROME_R2_MODEL: []}
+    for j in jours:
+        for u in range(6):
+            rbcm["icon_d2"].append({"day": j, "unit": f"p:{u}",
+                                    "err_vec_med": 3.0, "err_vec_med_corr": 3.0})
+            rbcm[J.AROME_HD_MODEL].append({"day": j, "unit": f"p:{u}",
+                                           "err_vec_med": 5.0, "err_vec_med_corr": 5.0})
+            rbcm[J.AROME_R2_MODEL].append({"day": j, "unit": f"p:{u}",
+                                           "err_vec_med": 4.5, "err_vec_med_corr": 1.0})
+    J._apply_rank({key: rows}, {key: rbcm})
+    icon, hd, r2 = rows
+    check("brut : icon_d2 1er", icon["rank"], 1)
+    check("brut : mfhd 2ᵉ (arome_r2 écarté du calcul, pas juste du rang)",
+          hd["rank"], 2)
+    check("brut : arome_r2 `duplicate_chain`",
+          r2["rank_reason"], "duplicate_chain")
+    check("⭐⭐ corrigé : arome_r2 est AUSSI `duplicate_chain`, pas "
+          "`mixed_population` ni un rang gagné sur son 1,0 — l'écarté du "
+          "brut a bien voyagé jusqu'au corrigé",
+          r2["rank_reason_corr"], "duplicate_chain")
+    check("… et son rang corrigé est nul", r2["rank_corr"], None)
+    check("corrigé : icon_d2 gagne quand même (3,0 contre 5,0 — arome_r2 "
+          "toujours hors compétition malgré son 1,0)",
+          (icon["rank_reason_corr"], icon["rank_corr"]), ("ok", 1))
+    check("corrigé : mfhd 2ᵉ", hd["rank_corr"], 2)
+
+
 def test_light_scores_sous_ensemble_exact():
     print("── S13.0 : le léger est un sous-ensemble exact du gros ──")
     plein = {
@@ -2938,6 +3128,10 @@ def main() -> int:
                test_s3_self_test_injection,
                # ── 25/08 : le classement sur la colonne corrigée ──
                test_rank_corr_le_meme_test_sur_la_colonne_corrigee,
+               # ── lot L2 (27/08) : un seul AROME au classement ──
+               test_l2_un_seul_arome_au_classement,
+               test_l2_duplicate_chain_sur_le_classement_corrige,
+               test_l2_apply_rank_transmet_lexclu_au_corrige,
                # ── lot S13.0 : le fichier léger + le résumé des manches ──
                test_light_scores_sous_ensemble_exact,
                test_light_scores_bout_en_bout_ne_recalcule_rien,

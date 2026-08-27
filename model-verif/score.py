@@ -94,6 +94,18 @@ AGRUME_MODEL = "agrume"
 #: nom, et c'est ce qui rend ce branchement court.
 AGRUME_PI_MODEL = "agrume_pi"
 
+#: Les deux chaînes qui lisent le MÊME modèle AROME (lot L2, 27/08/2026)
+#: — `meteofrance_arome_france_hd` via Open-Meteo, `arome_r2` via nos
+#: propres tuiles `arome/sol` relues sur R2 (lot S0.5). L'écart de
+#: chaîne mesuré entre les deux (+0,17 km/h médian, audit §2.2/PS2) est
+#: de l'ordre des écarts qui séparent des modèles DIFFÉRENTS : dans les
+#: 573 Pioupiou où les deux concourent, AROME prenait deux billets au
+#: podium pour une seule prévision. Nommées ici parce qu'aucune des
+#: deux ne l'était encore dans ce fichier — contrairement à
+#: `AGRUME_MODEL`/`AGRUME_PI_MODEL`, qui existaient déjà.
+AROME_HD_MODEL = "meteofrance_arome_france_hd"
+AROME_R2_MODEL = "arome_r2"
+
 #: Heures minimales appariées pour qu'une journée-balise-modèle compte.
 #: En dessous, l'agrégat est du bruit : une balise qui n'a émis que
 #: trois heures ne dit rien de la qualité d'un modèle sur la journée.
@@ -3248,6 +3260,42 @@ def regime_scores(units: list[dict], as_of: datetime,
     return rows
 
 
+def _duplicate_chain_excluded(rows: list[dict]) -> str | None:
+    """Le modèle à ÉCARTER du classement d'une case (lot L2, 27/08/2026).
+
+    ⛔ `meteofrance_arome_france_hd` (Open-Meteo) et `arome_r2` (nos
+    tuiles `arome/sol` relues sur R2, lot S0.5) sont le MÊME modèle lu
+    par deux chaînes — pas deux modèles. Décision de Yann (27/08) : au
+    classement, une case n'en admet qu'UN — `AROME_HD_MODEL`
+    prioritaire (la chaîne de référence, la plus ancienne), `AROME_R2_MODEL`
+    écarté SEULEMENT quand les deux sont présents dans la MÊME case.
+    Seul, `arome_r2` continue de concourir normalement — c'est le cas
+    STRUCTUREL des balises hors Pioupiou que lui seul note (lot S0.5).
+
+    ⓘ L'écarté garde toutes ses lignes et ses scores absolus
+    (`typical_err_kmh`, `skill`, `beats_*`) : seul le rang lui est
+    refusé. EN BASE les deux séries restent, pour le contrôle croisé
+    du duel (lot L1, `duel.py`) qui a précisément besoin des deux pour
+    mesurer l'écart de chaîne dans la durée.
+    """
+    present = {r["model"] for r in rows}
+    if AROME_HD_MODEL in present and AROME_R2_MODEL in present:
+        return AROME_R2_MODEL
+    return None
+
+
+#: Le motif propre à l'écarté d'une case à double chaîne AROME (lot L2,
+#: 27/08/2026). ⛔ Comme `RANK_REASON_POPULATION_MIXTE`, il rejoint le
+#: repli GÉNÉRIQUE de `_upsert_scores` (plus bas, `RANK_REASONS_STEP40`)
+#: tant que le CHECK de `rank_reason` n'a pas été élargi côté base —
+#: `.sql` préparé pour Yann (`supabase_step53_lot_l2_duplicate_chain.sql`),
+#: jamais exécuté d'ici. Ce repli est GÉNÉRIQUE (`_upsert_scores` écrit
+#: `null` pour TOUTE raison hors de l'ensemble connu, quelle qu'elle
+#: soit) : aucune modification de `_upsert_scores` n'est donc
+#: nécessaire pour que la nuit passe avant que le SQL soit joué.
+RANK_REASON_DUPLICATE_CHAIN = "duplicate_chain"
+
+
 def _apply_rank(by_case: dict[tuple, list[dict]],
                 rows_by_case_model: dict[tuple, dict[str, list[dict]]]):
     """Classe, ou refuse de classer — par TEST APPARIÉ (lot G2).
@@ -3269,19 +3317,41 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
     ⚠️ ET PAS DE REPLI. Quand la fenêtre est trop courte pour le test,
     on ne retombe pas sur l'écart relatif seul : ce serait remettre en
     service le mécanisme qu'on remplace, et publier sous le même nom
-    deux verdicts de nature différente. `rank_reason` vaut alors
+    `rank_reason` vaut alors
     `window_too_short`, et c'est la réponse honnête tant que l'archive
     ne porte que deux jours.
+
+    ⛔ LOT L2 (27/08/2026) — UN SEUL AROME AU CLASSEMENT. Avant de
+    construire les cases envoyées à `INF.rank_models`, le modèle que
+    rend `_duplicate_chain_excluded` (`arome_r2`, quand
+    `meteofrance_arome_france_hd` est aussi présent dans la case) est
+    RETIRÉ de la compétition : ni « meilleur », ni « second », il ne
+    peut donc plus prendre le second billet d'un podium qui n'est déjà
+    QUE le sien (audit §2.2/PS2, +0,17 km/h médian de chaîne). Son rang
+    est ensuite forcé à `None` avec `rank_reason = "duplicate_chain"`,
+    EN PLUS de — jamais à la place de — la raison que le test rend pour
+    les modèles admis. Ses scores absolus (`typical_err_kmh`, `skill`,
+    `beats_*`) ne sont pas touchés : ils viennent de `_case_rows`, pas
+    d'ici.
     """
     for key, rows in by_case.items():
+        exclu = _duplicate_chain_excluded(rows)
+        admis = [r for r in rows if exclu is None or r["model"] != exclu]
         cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],
-                  "occurrences": r["occurrences"]} for r in rows]
-        ranks, reason, verdict = INF.rank_models(
-            cases, rows_by_case_model.get(key, {}))
-        for r in rows:
+                  "occurrences": r["occurrences"]} for r in admis]
+        rbcm = rows_by_case_model.get(key, {})
+        rbcm_admis = (rbcm if exclu is None
+                      else {m: v for m, v in rbcm.items() if m != exclu})
+        ranks, reason, verdict = INF.rank_models(cases, rbcm_admis)
+        for r in admis:
             r["rank_reason"] = reason
             r["rank"] = ranks.get(r["model"])
-        _apply_rank_corr(rows, rows_by_case_model.get(key, {}))
+        if exclu is not None:
+            for r in rows:
+                if r["model"] == exclu:
+                    r["rank_reason"] = RANK_REASON_DUPLICATE_CHAIN
+                    r["rank"] = None
+        _apply_rank_corr(rows, rbcm, exclu)
 
 
 #: Le motif de refus PROPRE au classement corrigé : la case mélange des
@@ -3302,7 +3372,8 @@ RANK_REASON_POPULATION_MIXTE = "mixed_population"
 
 
 def _apply_rank_corr(rows: list[dict],
-                     rows_by_model: dict[str, list[dict]]) -> None:
+                     rows_by_model: dict[str, list[dict]],
+                     exclu: str | None = None) -> None:
     """Le MÊME test apparié, sur l'erreur corrigée du biais de site.
 
     ⭐ POURQUOI CETTE FONCTION EXISTE (25/08/2026). Depuis le S2 la
@@ -3333,26 +3404,43 @@ def _apply_rank_corr(rows: list[dict],
     avec la couverture du cache de rejeu, jusqu'à doubler au plus
     l'étape de classement (jamais la collecte, jamais le bootstrap des
     IC unaires, qui ne sont pas recalculés ici).
+
+    ⛔ LOT L2 (27/08/2026) — MÊME ÉCARTÉ, MÊME RAISON, SUR CETTE COLONNE
+    AUSSI. `exclu` est celui que `_apply_rank` a déjà calculé pour le
+    brut (`_duplicate_chain_excluded`) : la MÊME case n'a pas le droit
+    de dire « duplicate_chain » sur une colonne et « mixed_population »
+    sur l'autre pour le MÊME modèle. Il est donc retiré du calcul AVANT
+    le test de population mixte, jamais après — sa propre absence de
+    corrigé (ou sa présence) ne doit pas décider si LES AUTRES peuvent
+    être classés sur le corrigé.
     """
-    chiffrees = [r for r in rows if r.get("typical_err_kmh") is not None]
+    admis = [r for r in rows if exclu is None or r["model"] != exclu]
+    chiffrees = [r for r in admis if r.get("typical_err_kmh") is not None]
     avec = [r for r in chiffrees if r.get("typical_err_kmh_corr") is not None]
     if not chiffrees or len(avec) != len(chiffrees):
-        for r in rows:
+        for r in admis:
             r["rank_corr"] = None
             r["rank_reason_corr"] = RANK_REASON_POPULATION_MIXTE
-        return
-    cases = [{"model": r["model"],
-              "typical_err_kmh_corr": r["typical_err_kmh_corr"],
-              # `n_corr` peut manquer sur une ligne d'avant le S2 : son
-              # absence vaut zéro, donc sous le quorum, donc écartée —
-              # jamais un repli sur `occurrences`, qui compte autre chose.
-              "occurrences": r.get("n_corr") or 0} for r in chiffrees]
-    ranks, reason, _ = INF.rank_models(
-        cases, rows_by_model,
-        err_key="typical_err_kmh_corr", value_key="err_vec_med_corr")
-    for r in rows:
-        r["rank_reason_corr"] = reason
-        r["rank_corr"] = ranks.get(r["model"])
+    else:
+        cases = [{"model": r["model"],
+                  "typical_err_kmh_corr": r["typical_err_kmh_corr"],
+                  # `n_corr` peut manquer sur une ligne d'avant le S2 : son
+                  # absence vaut zéro, donc sous le quorum, donc écartée —
+                  # jamais un repli sur `occurrences`, qui compte autre chose.
+                  "occurrences": r.get("n_corr") or 0} for r in chiffrees]
+        rbm = (rows_by_model if exclu is None
+               else {m: v for m, v in rows_by_model.items() if m != exclu})
+        ranks, reason, _ = INF.rank_models(
+            cases, rbm,
+            err_key="typical_err_kmh_corr", value_key="err_vec_med_corr")
+        for r in admis:
+            r["rank_reason_corr"] = reason
+            r["rank_corr"] = ranks.get(r["model"])
+    if exclu is not None:
+        for r in rows:
+            if r["model"] == exclu:
+                r["rank_corr"] = None
+                r["rank_reason_corr"] = RANK_REASON_DUPLICATE_CHAIN
 
 
 #: La valeur que porte un rang publié sur une journée à laquelle il
