@@ -817,6 +817,63 @@ def skill_vs_climatology(pairs: Sequence[S.VerifPair],
 
 
 # ══════════════════════════════════════════════════════════════════
+#  5 bis. AGRÉGER UN ANGLE (lot L9a, 28/08/2026)
+# ══════════════════════════════════════════════════════════════════
+
+def circular_mean_deg(angles: Sequence[float]) -> float | None:
+    """La moyenne CIRCULAIRE d'écarts de cap, en degrés dans (−180, 180].
+
+    ⛔ POURQUOI ELLE EXISTE, ET CE QU'ELLE ÉVITE. `bias_dir_deg` est un
+    écart signé rendu par `scoring.angular_diff` : il vit dans
+    (−180, 180], et deux balise-jours à +179° et −179° décrivent le MÊME
+    écart (le modèle est à un demi-tour près) à deux degrés près. Leur
+    moyenne — ou leur médiane — arithmétique vaut 0°, c'est-à-dire
+    « modèle parfaitement calé », l'exact contraire de ce que la donnée
+    dit. La moyenne circulaire, elle, rend +180°.
+    Ce n'est pas un cas d'école : un modèle en désaccord franc de cap
+    sur un site de brise (donc oscillant autour du demi-tour) produit
+    précisément cette population-là, et c'est le cas où l'indicateur
+    doit crier.
+
+    ⚠️ MOYENNE, PAS MÉDIANE, ET C'EST UN ARBITRAGE. Tout le reste du
+    dispositif publie des médianes (`typical_err_kmh`, `bias_ratio`),
+    par robustesse. La médiane circulaire n'a pas de définition unique
+    bon marché — il faut minimiser une somme de distances angulaires sur
+    un cercle, donc balayer les candidats en O(n²) — quand la moyenne
+    circulaire, elle, est spécifiée en une ligne et se recalcule à la
+    main. On publie donc une MOYENNE, et le pavé de `_case_rows` le dit
+    en toutes lettres à côté du champ, pour que personne ne la lise
+    comme une médiane. ⓘ À rouvrir le jour où une case est assez petite
+    pour qu'une valeur aberrante déplace l'aiguille : ce serait une
+    médiane circulaire écrite et testée ICI, jamais un tri ailleurs.
+
+    Rend `None` si la liste est vide ou si la résultante est nulle — deux
+    écarts diamétralement opposés n'ont pas de moyenne, et inventer 0°
+    serait exactement la faute que cette fonction corrige.
+    """
+    sx = sy = 0.0
+    n = 0
+    for a in angles:
+        if a is None or not S._finite(a):
+            continue
+        r = math.radians(a)
+        sx += math.cos(r)
+        sy += math.sin(r)
+        n += 1
+    if n == 0:
+        return None
+    # Résultante nulle : la population n'a pas de direction moyenne.
+    # Le seuil est relatif à `n` — deux angles opposés donnent
+    # exactement 0, mais l'arithmétique flottante laisse des miettes.
+    if math.hypot(sx, sy) < 1e-12 * n:
+        return None
+    ang = math.degrees(math.atan2(sy, sx))
+    # Ramené dans (−180, 180] : `atan2` rend déjà [−180, 180], on ne
+    # corrige que le −180 exact pour qu'un demi-tour ait UN seul nom.
+    return 180.0 if ang <= -180.0 else ang
+
+
+# ══════════════════════════════════════════════════════════════════
 #  6. STABILITÉ DES RANGS — le critère de sortie, mesuré
 # ══════════════════════════════════════════════════════════════════
 

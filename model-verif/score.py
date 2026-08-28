@@ -3098,7 +3098,17 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         lambda: {"by_day": defaultdict(list), "st": set(), "rows": [],
                  "mse_m": [], "mse_r": [], "mse_c": [], "n_hours": 0,
                  # ── lot S2 : la colonne corrigée, À CÔTÉ ─────────────
-                 "err_corr": [], "mse_cc": [], "nd": []})
+                 "err_corr": [], "mse_cc": [], "nd": [],
+                 # ── lot L9a (28/08) : le compagnon WMO du score ──────
+                 # Deux listes SÉPARÉES, et pas un couple : une
+                 # balise-jour porte presque toujours son `bias_ratio`
+                 # (il suffit d'heures appariées, que la ligne a par
+                 # construction) et souvent PAS son `bias_dir_deg` (il
+                 # faut une girouette des deux côtés ET plus de
+                 # BIAS_MIN_WIND_KMH des deux côtés). Les mettre dans un
+                 # même couple obligerait à jeter le premier quand le
+                 # second manque.
+                 "bias_ratio": [], "bias_dir": []})
     #: Balise-jours écartés parce que doublon d'inscription (lot L17).
     #: ⚠️ DÉCLARÉ ICI, avant la boucle qui l'incrémente — et pas à côté
     #: de `sous_plancher`, qui vit APRÈS elle.
@@ -3159,6 +3169,17 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             if (d.get("mse_model_corr") is not None
                     and d.get("mse_clim") is not None):
                 b["mse_cc"].append((d["mse_model_corr"], d["mse_clim"]))
+            # ── lot L9a : le biais de vitesse, compagnon du score ─────
+            # ⚠️ RAMASSÉ ICI, DANS LA MÊME BOUCLE QUE L'ERREUR, donc
+            # sur EXACTEMENT la même population de balise-jours : les
+            # mêmes exclusions (zone inconnue, `basin_uncertain`,
+            # `position_suspecte`, doublon L17) s'appliquent d'elles-
+            # mêmes. Un second passage ailleurs aurait été un second
+            # chemin, avec un second jeu de filtres à tenir à jour.
+            if S._finite(d.get("bias_ratio")):
+                b["bias_ratio"].append(d["bias_ratio"])
+            if S._finite(d.get("bias_dir_deg")):
+                b["bias_dir"].append(d["bias_dir_deg"])
             b["st"].add(d["unit"])
             b["n_hours"] += d.get("n_hours") or 0
 
@@ -3233,6 +3254,45 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             "agg_level": level, "n_stations": len(b["st"]),
             "n_hours": b["n_hours"], "occurrences": len(values),
             "typical_err_kmh": _r(ci.median),
+            # ── lot L9a (28/08/2026) : LE COMPAGNON WMO DU SCORE ──────
+            # ⛔ POURQUOI ICI, COLLÉ À `typical_err_kmh`. Le standard WMO
+            # exige le biais de VITESSE à côté de l'erreur vectorielle,
+            # parce que l'erreur vectorielle les CONFOND : ‖V⃗p − V⃗o‖
+            # vaut la même chose pour un modèle qui souffle 20 % trop
+            # fort dans la bonne direction et pour un modèle juste en
+            # force avec 12° d'écart de cap. Les deux se corrigent
+            # autrement — le premier par une pente (lot S2), le second
+            # pas du tout — et rien dans le score publié ne permettait
+            # de les distinguer (audit §4.3, point 3 du « ce qui
+            # manque »).
+            #
+            # `bias_ratio` = Σ(obs·prev)/Σ(prev²) par balise-jour
+            # (`scoring.pente_moindres_carres`), MÉDIANÉ sur la case.
+            # > 1 : le modèle SOUS-estime le vent ici. < 1 : il le
+            # surestime. ⓘ La médiane d'un rapport n'a pas besoin d'être
+            # prise en logarithme : la médiane commute avec toute
+            # transformation monotone, donc med(r) = exp(med(log r)).
+            # (Ce n'est PAS vrai de la moyenne — et c'est bien pour ça
+            # que `prior_biais`, qui MOYENNE, le fait en log.)
+            "bias_ratio": _r(S.median(b["bias_ratio"]), 3),
+            # ⚠️ MOYENNE **CIRCULAIRE**, PAS MÉDIANE — voir le pavé de
+            # `inference.circular_mean_deg`. Un écart de cap vit sur un
+            # cercle : +179° et −179° décrivent le même désaccord et
+            # leur médiane arithmétique vaut 0°, c'est-à-dire
+            # « parfait ». C'est le seul champ de cette ligne qui ne
+            # soit pas une médiane, et c'est pour ça qu'il le dit ici.
+            "bias_dir_deg": _r(INF.circular_mean_deg(b["bias_dir"]), 1),
+            # ⛔ LE DÉNOMINATEUR DE LA LIGNE PRÉCÉDENTE, ET IL EST
+            # INDISPENSABLE (leçon `n_comparable` du lot L3 : publier un
+            # numérateur seul, c'est publier un chiffre illisible).
+            # `bias_ratio` repose sur ~toutes les `occurrences` de la
+            # case ; `bias_dir_deg`, lui, ne repose que sur les
+            # balise-jours où les DEUX côtés avaient une direction ET
+            # plus de BIAS_MIN_WIND_KMH. Sur un site calme, ça peut être
+            # une poignée sur deux cents — et l'écart de cap publié
+            # serait alors celui des rares heures ventées, pas celui de
+            # la case.
+            "n_bias_dir": len(b["bias_dir"]),
             "worst_decile_kmh": _r(ordered[min(len(ordered) - 1,
                                                math.floor(len(ordered) * 0.9))])
             if len(ordered) >= 5 else None,
@@ -4018,6 +4078,21 @@ LIGHT_SCORE_FIELDS = (
     # d'autre n'a vues ». Publier le premier sans le second, c'est
     # publier un numérateur.
     "n_comparable", "occurrences",
+    # ── lot L9a (28/08/2026) : le compagnon WMO, DANS LE LÉGER ────────
+    # ⛔ Dans le léger, et pas seulement dans le gros fichier, pour la
+    # raison exacte du L3 : c'est l'écran LÉGER (pastille, feuille
+    # « ici », Podium) qui affiche l'erreur d'un modèle. Un biais de
+    # vitesse publié dans un fichier que cet écran ne lit pas serait un
+    # compagnon que personne n'accompagne.
+    #
+    # ⚠️ ET `n_bias_dir` VOYAGE AVEC, même règle que `occurrences` avec
+    # `n_comparable` : « le modèle est à −40° de cap ici » ne se lit pas
+    # sans savoir si c'est mesuré sur 3 balise-jours ou sur 300.
+    #
+    # ⓘ PRIX MESURÉ (28/08, sur l'objet réel) : voir le journal du lot.
+    # Trois champs sur 8 180 lignes — le seul poste de ce lot qui
+    # alourdisse un fichier servi à chaque ouverture de fiche.
+    "bias_ratio", "bias_dir_deg", "n_bias_dir",
     # ── lot S2, publiés dans le léger le 25/08 ──
     "typical_err_kmh_corr", "bias_n_days", "n_corr",
     # ── le verdict PROPRE à la colonne corrigée (25/08, `_apply_rank_corr`) ──
@@ -4246,7 +4321,18 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
     # lot L13. C'est le minimum pour que CE lot n'ajoute pas un mensonge
     # de plus en attendant.
     _L3 = {"n_comparable"}
-    if set(absentes) & _L3:
+    # ⚠️ LOT L9 (28/08/2026) — MÊME RÈGLE, MÊME RAISON. Cinq colonnes
+    # neuves partent dans le même `.sql` : le compagnon WMO du score
+    # (volet a) sur `model_score_zone`, la référence combinée (volet c)
+    # sur `model_verif_daily` ET son skill de case sur
+    # `model_score_zone`. Sans cette ligne, la nuit d'avant l'exécution
+    # du SQL enverrait Yann rejouer `step40`, un fichier passé depuis
+    # trois semaines.
+    _L9 = {"bias_ratio", "bias_dir_deg", "n_bias_dir",
+           "mse_comb", "mse_model_comb", "skill_comb", "beats_comb"}
+    if set(absentes) & _L9:
+        fichier = "supabase_step57_lot_l9_compagnons.sql"
+    elif set(absentes) & _L3:
         fichier = "supabase_step54_lot_l3_fdr.sql"
     else:
         fichier = ("supabase_step49_lot_s2_biais_corrige.sql"

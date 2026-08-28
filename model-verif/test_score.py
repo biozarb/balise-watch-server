@@ -3343,6 +3343,8 @@ def test_light_scores_sous_ensemble_exact():
         "rank_reason": "ok", "rank_corr": None,
         "rank_reason_corr": "mixed_population", "err_sd": 1.2, "n_days": 15,
         "n_comparable": 37,
+        # ── lot L9a : le compagnon WMO entre dans le léger ──
+        "bias_ratio": 1.084, "bias_dir_deg": -12.4, "n_bias_dir": 31,
         "ci_kind": "block_day", "ci_reason": "ok", "block_days": 15,
         "pooled_err_kmh": None, "borrowed_weight": 0.0, "variable": "wind",
     }
@@ -3393,6 +3395,117 @@ def test_light_scores_bout_en_bout_ne_recalcule_rien():
         for champ in J.LIGHT_SCORE_FIELDS:
             check(f"léger == gros sur `{champ}` "
                   f"({lr['zone_id']}/{lr['model']})", lr[champ], fr[champ])
+
+
+def test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap():
+    print("── L9a : le biais de vitesse et de cap, compagnons du score ──")
+    # Cinq balises, cinq jours. Les `bias_ratio` sont choisis pour que la
+    # MÉDIANE et la MOYENNE diffèrent franchement (une valeur très haute
+    # tire la moyenne, pas la médiane) : sans ça, la mutation « moyenne
+    # au lieu de médiane » resterait verte — piège nº 2 de la phase B,
+    # « le jeu doit être irrégulier dans la dimension testée ».
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(1, 6)}
+    RATIOS = [0.90, 0.95, 1.00, 1.05, 4.00]       # médiane 1,00 · moyenne 1,58
+    # Les écarts de CAP sont à cheval sur le demi-tour : leur moyenne
+    # circulaire vaut 180°, leur moyenne (et leur médiane) arithmétique 0.
+    CAPS = [179.0, -179.0, 178.0, -178.0, None]
+    daily = []
+    for j in range(5):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(1, 6):
+            daily.append({
+                "day": d, "source": "pioupiou", "station_id": str(i),
+                "model": "icon_d2", "lead_h": 6, "regime": "fluxN",
+                "n_hours": 20, "err_vec_med": 4.0,
+                "mse_model": 16.0, "mse_persist": 100.0,
+                "bias_ratio": RATIOS[i - 1],
+                "bias_dir_deg": CAPS[i - 1]})
+    rows = J.rolling_scores(daily, zone_of, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"][0]
+
+    check("`bias_ratio` de la case = MÉDIANE des balise-jours (1,00)",
+          fine["bias_ratio"], 1.0)
+    check("⛔ … et PAS leur moyenne (1,58), qu'une seule balise déréglée "
+          "suffirait à imposer",
+          abs(sum(RATIOS) / len(RATIOS) - 1.58) < 0.005, True)
+    check("⭐ `bias_dir_deg` = moyenne CIRCULAIRE (180°), la seule qui "
+          "voie le demi-tour", fine["bias_dir_deg"], 180.0)
+    check("⛔ … là où la médiane arithmétique des mêmes écarts dirait "
+          "« cap parfait »", S.median([c for c in CAPS if c is not None]),
+          0.0)
+    check("`n_bias_dir` compte les balise-jours qui PORTAIENT un cap "
+          "(4 balises × 5 jours), pas les occurrences",
+          fine["n_bias_dir"], 20)
+    check("… et `occurrences` en compte 25 — le couple se lit ensemble",
+          fine["occurrences"], 25)
+
+    # ⛔ MÊME POPULATION QUE L'ERREUR, PROUVÉ PAR UNE EXCLUSION. Une
+    # balise marquée `basin_uncertain` sort de la case : elle doit sortir
+    # du compagnon AUSSI, sinon le biais publié porterait sur des
+    # balise-jours que le score, lui, a refusés.
+    zone_ko = {**zone_of}
+    zone_ko["pioupiou:5"] = {**zone_of["pioupiou:5"], "basin_uncertain": True}
+    fine_ko = [r for r in J.rolling_scores(daily, zone_ko, DAY)
+               if r["zone_id"] == "b1:valley"][0]
+    check("une balise exclue de la case sort aussi du compagnon "
+          "(occurrences 25 → 20)", fine_ko["occurrences"], 20)
+    check("… la balise à 4,00 étant sortie, la médiane du ratio descend "
+          "à 0,975", fine_ko["bias_ratio"], 0.975)
+    check("… `n_bias_dir` ne bouge pas : la balise sortie n'avait pas de "
+          "cap", fine_ko["n_bias_dir"], 20)
+
+    # Aucune direction du tout : le champ se tait, il n'invente pas 0°.
+    daily_sans_cap = [{**d, "bias_dir_deg": None} for d in daily]
+    fine_sc = [r for r in J.rolling_scores(daily_sans_cap, zone_of, DAY)
+               if r["zone_id"] == "b1:valley"][0]
+    check("⛔ aucun cap exploitable → `bias_dir_deg` nul, jamais 0°",
+          fine_sc["bias_dir_deg"], None)
+    check("… et `n_bias_dir` vaut 0, ce qui le DIT", fine_sc["n_bias_dir"], 0)
+
+    # Un fichier d'avant ce lot ne porte pas les colonnes : la case doit
+    # sortir muette, pas tomber.
+    daily_vieux = [{k: v for k, v in d.items()
+                    if k not in ("bias_ratio", "bias_dir_deg")} for d in daily]
+    fine_v = [r for r in J.rolling_scores(daily_vieux, zone_of, DAY)
+              if r["zone_id"] == "b1:valley"][0]
+    check("des balise-jours d'avant le lot ne font pas tomber la case",
+          (fine_v["bias_ratio"], fine_v["bias_dir_deg"], fine_v["n_bias_dir"]),
+          (None, None, 0))
+
+    # ⛔ LES TROIS CHAMPS SONT NOMMÉS EN TOUTES LETTRES, ET C'EST LE
+    # POINT. `test_light_scores_sous_ensemble_exact` compare la sortie à
+    # `J.LIGHT_SCORE_FIELDS` — donc au code testé lui-même : retirer un
+    # champ du tuple retirerait les DEUX côtés de l'égalité et le banc
+    # resterait vert (piège nº 1 de la phase B, 26/08). Ici la liste
+    # attendue est écrite à la main : perdre `n_bias_dir` du léger
+    # rougit.
+    for champ in ("bias_ratio", "bias_dir_deg", "n_bias_dir"):
+        check(f"⛔ `{champ}` est DANS le fichier léger (nommé à la main, "
+              f"pas relu depuis la constante)",
+              champ in J.LIGHT_SCORE_FIELDS, True)
+    leger = J.light_score_rows([{**fine, "variable": "wind"}])
+    check("… et il arrive bien jusqu'à la ligne publiée",
+          (leger[0]["bias_ratio"], leger[0]["bias_dir_deg"],
+           leger[0]["n_bias_dir"]), (1.0, 180.0, 20))
+
+    # ⚠️ ET LE NOM DU `.sql`, parce que la fausse déduction « rejouer
+    # step40 » a déjà coûté une session (audit §2.5, puis lot L3).
+    class _SbFactice:
+        def columns(self, table):
+            return {"as_of", "zone_id", "model", "lead_h", "typical_err_kmh"}
+    import io
+    import contextlib
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        J._pour_la_base(_SbFactice(), "model_score_zone", [dict(fine)])
+    dit = tampon.getvalue()
+    check("⛔ colonnes du L9 absentes en base → le journal nomme "
+          "step57, jamais step40",
+          "supabase_step57_lot_l9_compagnons.sql" in dit
+          and "step40" not in dit, True, )
 
 
 def test_light_bascules_resume():
@@ -3567,6 +3680,8 @@ def main() -> int:
                test_l3_fdr_tue_la_limite_et_garde_la_franche,
                test_l3_fdr_ne_touche_pas_lecarte_ni_le_corrige,
                test_l3_la_p_valeur_arrive_vraiment_du_classement,
+               # ── lot L9a (28/08) : le compagnon WMO du score ──
+               test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap,
                # ── lot S13.0 : le fichier léger + le résumé des manches ──
                test_light_scores_sous_ensemble_exact,
                test_light_scores_bout_en_bout_ne_recalcule_rien,

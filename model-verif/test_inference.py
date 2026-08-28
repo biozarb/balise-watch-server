@@ -529,5 +529,75 @@ check("aucun balise-jour commun → gap `None`, jamais un chiffre tiré de "
       v0.relative_gap is None and v0.n_comparable == 0)
 
 # ══════════════════════════════════════════════════════════════════
+#  9. LOT L9a — agréger un ANGLE sans le mettre à plat
+# ══════════════════════════════════════════════════════════════════
+print("\n── 9. lot L9a : la moyenne circulaire des écarts de cap ──")
+
+# ⛔ LA SCÈNE QUI FAIT TOUT LE LOT. Deux balise-jours à +179° et −179°
+# décrivent le MÊME désaccord (le modèle est à un demi-tour). La
+# moyenne — et la médiane — arithmétiques valent 0°, c'est-à-dire
+# « modèle parfaitement calé ». La valeur attendue est écrite en
+# TOUTES LETTRES (180), jamais dérivée du code testé : piège nº 3 du
+# 26/08 (clôture).
+check("⭐ +179° et −179° → 180°, pas 0° (la faute que ce lot évite)",
+      round(I.circular_mean_deg([179.0, -179.0]), 6) == 180.0,
+      f"rendu : {I.circular_mean_deg([179.0, -179.0])}")
+check("⛔ … alors que la moyenne arithmétique dirait « parfait »",
+      (179.0 + -179.0) / 2 == 0.0)
+check("⛔ … et la médiane arithmétique aussi",
+      S.median([179.0, -179.0]) == 0.0)
+
+# Le cas ordinaire : loin du saut, la circulaire redonne l'arithmétique.
+check("loin du saut, elle coïncide avec la moyenne ordinaire",
+      round(I.circular_mean_deg([10.0, 20.0, 30.0]), 6) == 20.0,
+      f"rendu : {I.circular_mean_deg([10.0, 20.0, 30.0])}")
+check("… y compris à cheval sur 0° (−10 et +10 → 0)",
+      abs(I.circular_mean_deg([-10.0, 10.0])) < 1e-9,
+      f"rendu : {I.circular_mean_deg([-10.0, 10.0])}")
+check("un seul angle se rend lui-même",
+      round(I.circular_mean_deg([-42.5]), 6) == -42.5)
+
+# Résultante nulle : deux caps diamétralement opposés n'ont PAS de
+# moyenne. Inventer 0° serait exactement la faute du haut, à l'envers.
+check("⛔ 0° et 180° → None, jamais un 90° inventé",
+      I.circular_mean_deg([0.0, 180.0]) is None,
+      f"rendu : {I.circular_mean_deg([0.0, 180.0])}")
+check("liste vide → None", I.circular_mean_deg([]) is None)
+check("None et NaN sont ignorés, pas comptés",
+      round(I.circular_mean_deg([None, float("nan"), 30.0, 30.0]), 6) == 30.0,
+      f"rendu : {I.circular_mean_deg([None, float('nan'), 30.0, 30.0])}")
+check("… et une liste qui n'a QUE des non-finis rend None",
+      I.circular_mean_deg([None, float("inf")]) is None)
+
+# La sortie vit dans (−180, 180] : un demi-tour a UN seul nom.
+check("le demi-tour sort à +180, jamais à −180",
+      I.circular_mean_deg([180.0]) == 180.0)
+# ⚠️ LE CAS QUI PROUVE LA NORMALISATION, et il fallait le chercher :
+# `atan2` ne rend −180 que si le sinus est NÉGATIF, ce qui n'arrive
+# qu'en partant d'un angle déjà écrit −180 (sin(−π) = −1,2e−16).
+# Écrire seulement `[180.0]` laissait la mutation « la normalisation
+# saute » passer VERTE — la branche n'était pas atteinte.
+check("⭐ … y compris quand l'entrée elle-même est écrite −180 "
+      "(le seul chemin par lequel `atan2` rend −π)",
+      I.circular_mean_deg([-180.0]) == 180.0,
+      f"rendu : {I.circular_mean_deg([-180.0])}")
+check("… et sur une population entière à −180",
+      I.circular_mean_deg([-180.0, -180.0]) == 180.0)
+for a in (-179.0, -90.0, 0.0, 90.0, 179.9, 180.0):
+    m = I.circular_mean_deg([a])
+    check(f"… {a}° reste dans (−180, 180] ({m})", -180.0 < m <= 180.0)
+
+# ⚠️ LE JEU EST IRRÉGULIER DANS LA DIMENSION TESTÉE (piège nº 2 de la
+# phase B) : une population ASYMÉTRIQUE autour du saut. Trois angles
+# près de +180 et un près de −180 : la réponse doit pencher du côté des
+# trois, ce qu'aucune moyenne arithmétique ne saurait faire.
+m = I.circular_mean_deg([170.0, 175.0, 178.0, -175.0])
+check("⭐ population asymétrique autour du demi-tour : la moyenne "
+      f"circulaire penche du bon côté ({m:.2f}°)", 165.0 < m < 180.0)
+check("⛔ … là où l'arithmétique aurait rendu un cap Sud-Est",
+      round((170.0 + 175.0 + 178.0 - 175.0) / 4, 2) == 87.0)
+
+
+# ══════════════════════════════════════════════════════════════════
 print(f"\n{'✅' if KO == 0 else '❌'} {OK} assertions vertes, {KO} rouges.\n")
 sys.exit(1 if KO else 0)
