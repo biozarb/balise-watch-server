@@ -52,6 +52,7 @@ DISANT. Une balise sans zone n'est pas rangée dans une case au hasard.
 from __future__ import annotations
 
 import argparse
+import gc
 import gzip
 import json
 import math
@@ -261,8 +262,152 @@ class Abort(Exception):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  LA MÉMOIRE DU RUN — l'instrument, puis le garde-fou (28/08/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ POURQUOI CE BLOC EXISTE : LA NUIT DU 28/08 A ÉTÉ PERDUE SANS UN MOT.
+# À 06:20:40 CEST, le noyau a tué ce processus (`oom-kill`, anon-rss
+# 2 819 Mo) au milieu du chemin régime. Le journal du run s'arrête en
+# pleine phrase : ni ligne d'erreur, ni bilan, ni cause. Il a fallu le
+# journal du NOYAU pour apprendre ce qui s'était passé — et une sonde,
+# le lendemain, pour apprendre où la mémoire dormait. Trois lots (L2,
+# L3, L7) attendaient cette nuit-là leur premier objet publié ; aucun
+# ne l'a eu, et rien dans le journal du job ne le disait.
+#
+# ⚠️ C'EST LE RAISONNEMENT DU CHIEN DE GARDE DES MINUTES, APPLIQUÉ À
+# L'AUTRE RESSOURCE. `10-timeout-s3.conf` le dit déjà en toutes lettres
+# pour le temps : « on veut que ce soit run.sh qui constate l'échec et
+# alerte, jamais systemd qui tue tout sans que personne ne l'apprenne ».
+# La mémoire n'avait pas son équivalent. Elle l'a ici.
+#
+# ⓘ ET CE QUE ÇA NE FAIT PAS : ça n'interrompt rien. Un run tué à 90 %
+# est une nuit perdue de toute façon, et s'arrêter tout seul n'en
+# sauverait aucune ; le jalon PARLE, c'est la seule chose qui manquait.
+# La décision d'arrêter, si elle vient un jour, se prendra sur des
+# courbes que ce jalon aura écrites — pas sur celle-ci.
+
+#: Au-delà, chaque jalon crie sur `stderr`. ⛔ CE N'EST PAS UN PLAFOND
+#: TECHNIQUE, c'est une MARGE MESURÉE : la machine a 3 825 Mo et aucun
+#: swap avant le 28/08 ; `bw-agrume-piaf.service` y prend ~910 Mo
+#: (min 909, max 928 sur les vingt passes du 28/08) TOUTES LES DIX
+#: MINUTES, donc au moins une fois pendant un run qui dure un quart
+#: d'heure. 3 825 − 910 − ~120 Mo de système et de pollers laisse
+#: ~2 800 Mo à la notation. Franchir ce seuil, ce n'est pas « être
+#: gros » : c'est jouer la nuit à pile ou face contre l'horloge de
+#: piaf. Réglable par `BW_MODEL_VERIF_MAX_RSS_MO`, comme les minutes.
+MAX_RSS_MO = float(os.environ.get("BW_MODEL_VERIF_MAX_RSS_MO", "2800"))
+
+
+def _rss_mo(chemin: str = "/proc/self/status") -> float | None:
+    """La mémoire résidente de CE processus, en Mo. `None` hors Linux.
+
+    ⚠️ `VmRSS` ET PAS `ru_maxrss`, et la nuance décide de tout ici : on
+    veut la mémoire MAINTENANT, pour voir un bloc mourir ENTRE deux
+    jalons. `ru_maxrss` ne redescend jamais — il lirait « rien n'a été
+    libéré » sur un run qui vient précisément de tout libérer. Le PIC,
+    lui, systemd le journalise déjà tout seul (`Consumed … memory
+    peak`) : c'est par là qu'on a lu la dérive du 10 au 28/08.
+
+    ⓘ `chemin` n'existe que pour le banc : sans lui, la seule épreuve
+    possible serait une allocation réelle, qui ne se joue pas sur un
+    Mac — et une mutation qu'on ne peut pas jouer est une mutation qui
+    ne prouve rien.
+    """
+    try:
+        with open(chemin, encoding="ascii") as f:
+            for ligne in f:
+                if ligne.startswith("VmRSS:"):
+                    return int(ligne.split()[1]) / 1024.0
+    except OSError:
+        return None
+    return None
+
+
+def jalon_memoire(etiquette: str, seuil_mo: float = MAX_RSS_MO,
+                  rss=None) -> float | None:
+    """Dit la mémoire résidente à une étape NOMMÉE du run.
+
+    Rend les Mo lus (ou `None` là où `/proc` n'existe pas — le banc
+    tourne aussi sur un Mac). Au-dessus du seuil, la ligne part sur
+    `stderr` : c'est ce qui la fait remonter dans l'alerte, et pas
+    seulement dans le journal que personne ne lit les nuits qui vont
+    bien.
+    """
+    mo = (rss or _rss_mo)()
+    if mo is None:
+        return None
+    trop = mo > seuil_mo
+    texte = f"  {'⛔' if trop else 'ⓘ'} mémoire après {etiquette} : {mo:.0f} Mo"
+    if trop:
+        texte += (f" — AU-DESSUS DU SEUIL DE {seuil_mo:.0f} Mo. Le noyau "
+                  f"tue le plus gros processus sans prévenir : c'est ce "
+                  f"qui a emporté la nuit du 28/08.")
+    print(texte, file=sys.stderr if trop else sys.stdout)
+    return mo
+
+
+# ══════════════════════════════════════════════════════════════════
 #  SUPABASE (PostgREST, clé service_role — contourne RLS)
 # ══════════════════════════════════════════════════════════════════
+
+#: Octets lus du corps d'une erreur HTTP. Large, parce qu'on ne lit
+#: plus la tête du corps mais ce qu'on y CHOISIT (cf. `_detail_erreur`).
+ERREUR_OCTETS = 65536
+
+#: Caractères de `details` (la LIGNE fautive) gardés dans le message.
+#: Assez pour reconnaître la ligne, jamais assez pour noyer la cause.
+ERREUR_DETAILS_CAR = 300
+
+
+def _detail_erreur(brut: bytes, car_details: int = ERREUR_DETAILS_CAR) -> str:
+    """Le corps d'une erreur PostgREST, ramené à ce qui SERT.
+
+    ⛔⛔ POURQUOI CETTE FONCTION EXISTE, ET ELLE A COÛTÉ DEUX REJEUX
+    COMPLETS LE 28/08. Le code lisait `e.read()[:400]` — les 400
+    PREMIERS octets du corps. Or PostgREST sérialise ses erreurs dans
+    cet ordre :
+
+        {"code":…, "details":…, "hint":…, "message":…}
+
+    et `details` porte LA LIGNE ENTIÈRE qui a été refusée. Sur
+    `model_score_zone`, une ligne fait trente-huit colonnes : elle
+    dépasse à elle seule les 400 octets. **Le `message` — c'est-à-dire
+    le SEUL endroit où le nom de la contrainte apparaît — était donc
+    systématiquement coupé.**
+
+    ⚠️ CONSÉQUENCE, ET ELLE EST PLUS GRAVE QUE LE MESSAGE ILLISIBLE :
+    le repli d'`_upsert_scores` cherche ce nom (`if "…_check" in
+    str(exc)`). Il ne pouvait pas le trouver. **Le repli existait
+    depuis le lot G, il était écrit, banc à l'appui, et il n'a JAMAIS
+    pu se déclencher sur cette table-là.** Un garde-fou qu'on croit
+    armé et qui ne peut pas partir est pire qu'un garde-fou absent :
+    on compte dessus.
+
+    ⓘ On lit donc TOUT le corps (`ERREUR_OCTETS`), on le relit comme du
+    JSON, et on remonte `code` et `message` EN PREMIER — `details` vient
+    à la fin et c'est LUI qu'on tronque. Si le corps n'est pas du JSON
+    (une passerelle, un HTML d'erreur), on rend le texte brut : mieux
+    vaut un message laid qu'un message absent.
+    """
+    texte = brut.decode("utf-8", "replace")
+    try:
+        objet = json.loads(texte)
+    except ValueError:
+        objet = None
+    if not isinstance(objet, dict):
+        return texte[:2000]
+    bouts = []
+    for cle in ("code", "message", "hint", "details"):
+        valeur = objet.get(cle)
+        if valeur in (None, ""):
+            continue
+        valeur = str(valeur)
+        if cle == "details" and len(valeur) > car_details:
+            valeur = (valeur[:car_details]
+                      + f"… (+{len(valeur) - car_details} car.)")
+        bouts.append(f'"{cle}":"{valeur}"')
+    return "{" + ", ".join(bouts) + "}" if bouts else texte[:2000]
+
 
 class Supabase:
     """Le strict nécessaire : lire une table, en écrire une par upsert.
@@ -579,7 +724,7 @@ class Supabase:
                 with urllib.request.urlopen(req, timeout=120) as r:
                     r.read()
             except urllib.error.HTTPError as e:
-                detail = e.read()[:400].decode("utf-8", "replace")
+                detail = _detail_erreur(e.read(ERREUR_OCTETS))
                 raise Abort(f"upsert {table} : HTTP {e.code} — {detail}") from e
             n += len(rows[i:i + chunk])
         self.ecritures += n
@@ -732,7 +877,7 @@ class Supabase:
                 with urllib.request.urlopen(req, timeout=120) as r:
                     r.read()
             except urllib.error.HTTPError as e:
-                detail = e.read()[:400].decode("utf-8", "replace")
+                detail = _detail_erreur(e.read(ERREUR_OCTETS))
                 raise Abort(f"insert {table} : HTTP {e.code} — {detail}") from e
             n += len(rows[i:i + chunk])
         self.ecritures += n
@@ -2135,7 +2280,8 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
 
 def replay_window(root: pathlib.Path, day: datetime, storage,
                   utc_offset_s: int, n_days: int = REGIME_REPLAY_DAYS,
-                  budget_new_days: int | None = None):
+                  budget_new_days: int | None = None,
+                  murphy_acc: dict | None = None):
     """La fenêtre rejouée, la plus récente d'abord.
 
     Rend `(lignes, bilan)`. Chaque ligne porte en plus `unit`
@@ -2165,7 +2311,24 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
         vus += 1
         for r in cached:
             r = dict(r)
-            r["unit"] = f"{r['source']}:{r['station_id']}"
+            unit = f"{r['source']}:{r['station_id']}"
+            r["unit"] = unit
+            # ── lot L9b (28/08) : Murphy se FOND ICI, au fil de l'eau ──
+            # ⛔⛔ ET LA CLÉ EST RETIRÉE DE LA LIGNE, TOUJOURS. Six
+            # flottants et une liste par balise-jour coûtent ~260
+            # octets ; la fenêtre en porte 405 486 (mesuré sur la
+            # production le 28/08) — soit **~107 Mo au pic**, sur un VPS
+            # de 3,8 Go SANS SWAP dont le run de cette nuit-là venait
+            # d'être tué par l'OOM killer. L'accumulateur, lui, tient en
+            # ~5 Mo parce que les six sommes sont ADDITIVES.
+            #
+            # ⚠️ `pop` INCONDITIONNEL, même sans accumulateur : personne
+            # d'autre que Murphy ne lit cette clé, et la laisser
+            # traîner ferait payer la mémoire à qui ne s'en sert pas
+            # (`regime_scores`, `stability_report`).
+            mo = r.pop(MU.MURPHY_KEY, None)
+            if murphy_acc is not None:
+                MU.accumule(murphy_acc, (unit, r["model"], r["lead_h"]), mo)
             rows.append(r)
     bilan = (f"{len(rows)} balise-jours sur {vus} journées "
              f"({rejoues} rejouée(s) cette nuit, {manquants} vide(s)"
@@ -4609,6 +4772,42 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
 RANK_REASONS_STEP40 = {"ok", "insufficient", "tied", "not_separable",
                        "window_too_short", "too_few_pairs", None}
 
+#: ⛔ LE SECOND CHECK, CELUI DU CLASSEMENT CORRIGÉ — et il a coûté une
+#: nuit de plus que l'OOM. `supabase_step52_rank_corr.sql` admet, pour
+#: `rank_reason_corr`, les raisons du step40, plus `single_model`
+#: (step42) et `mixed_population`, qui lui est propre. NI
+#: `duplicate_chain` (lot L2) NI `fdr` (lot L3) n'y sont — et les deux
+#: lots ÉCRIVENT pourtant dans cette colonne (`_apply_rank_corr` pose
+#: `duplicate_chain` sur l'écarté, `appliquer_fdr` pose `fdr` sur la
+#: famille « corrige »).
+#:
+#: ⚠️ MESURÉ LE 28/08, EN REJOUANT LA NUIT DU 27 : la base répond
+#: `23514` en nommant `model_score_zone_rank_reason_corr_check`, et
+#: c'est l'upsert ENTIER de `model_score_zone` qui tombe — donc LA
+#: NUIT, pas la colonne. Le repli d'`_upsert_scores` ne regardait que
+#: le CHECK de `rank_reason` : il a laissé passer l'autre et re-levé.
+#: ⓘ Le pavé de `RANK_REASON_POPULATION_MIXTE` annonçait déjà que
+#: `duplicate_chain` et `fdr` devaient « rejoindre ce repli ». Ils y
+#: sont maintenant — des deux côtés.
+RANK_REASONS_CORR_STEP52 = (RANK_REASONS_STEP40
+                            | {"single_model", "mixed_population"})
+
+#: Les deux CHECK de raison de `model_score_zone`, et de quoi désarmer
+#: chacun : (nom de la contrainte, colonne à taire, raisons admises,
+#: `.sql` à jouer pour que le repli redevienne inerte).
+REPLIS_RANG = (
+    ("model_score_zone_rank_reason_check", "rank_reason",
+     RANK_REASONS_STEP40,
+     "supabase_step42_lot_s05.sql (`single_model`), "
+     "supabase_step48_lot_s06_collect_part.sql (`partie_manquante`), "
+     "supabase_step53_lot_l2_duplicate_chain.sql (`duplicate_chain`) "
+     "et/ou supabase_step54_lot_l3_fdr.sql (`fdr`)"),
+    ("model_score_zone_rank_reason_corr_check", "rank_reason_corr",
+     RANK_REASONS_CORR_STEP52,
+     "supabase_step58_rank_reason_corr.sql "
+     "(`duplicate_chain` et `fdr` sur la colonne CORRIGÉE)"),
+)
+
 
 def _upsert_scores(sb, rows: list[dict]) -> int:
     """`model_score_zone`, avec un repli sur le CHECK de `rank_reason`.
@@ -4630,29 +4829,51 @@ def _upsert_scores(sb, rows: list[dict]) -> int:
     ⇒ La nuit passe même si `supabase_step42_lot_s05.sql` n'a pas
     encore été joué, et ce repli devient inerte le jour où il l'est —
     sans qu'il faille penser à retirer quoi que ce soit.
+
+    ⛔ ET DEPUIS LE 28/08, LES DEUX COLONNES DE RAISON, PAS UNE. Ce
+    repli ne regardait que `model_score_zone_rank_reason_check`. Or les
+    lots L2 et L3 écrivent AUSSI dans `rank_reason_corr`
+    (`duplicate_chain`, `fdr`), dont le CHECK est un AUTRE objet
+    (`supabase_step52_rank_corr.sql`) qui ne les connaît pas. Mesuré en
+    rejouant la nuit du 27/08 : la base a nommé
+    `model_score_zone_rank_reason_corr_check`, le `if` ne l'a pas
+    reconnu, et la nuit est tombée à la toute dernière étape — après
+    vingt-trois minutes de calcul, `model_events.json` déjà publié et
+    `model_score_zone` intact. *Un repli qui ne couvre qu'une des deux
+    colonnes d'une même famille n'est pas un repli, c'est une chance.*
     """
     cle = "as_of,zone_id,model,lead_h,window_kind,regime"
-    try:
-        return sb.upsert("model_score_zone", rows, cle)
-    except Abort as exc:
-        if "model_score_zone_rank_reason_check" not in str(exc):
-            raise
-        neuves = sorted({r.get("rank_reason") for r in rows}
-                        - RANK_REASONS_STEP40)
-        print(f"  ⚠️ rank_reason : {', '.join(neuves)} refusé(s) par le "
-              f"CHECK en base → écrit `null` cette nuit. Jouer "
-              f"`supabase_step42_lot_s05.sql` (`single_model`), "
-              f"`supabase_step48_lot_s06_collect_part.sql` "
-              f"(`partie_manquante`), "
-              f"`supabase_step53_lot_l2_duplicate_chain.sql` "
-              f"(`duplicate_chain`) et/ou "
-              f"`supabase_step54_lot_l3_fdr.sql` (`fdr`, "
-              f"`n_comparable`). Le JSON publié garde la raison "
-              f"exacte.", file=sys.stderr)
-        for r in rows:
-            if r.get("rank_reason") not in RANK_REASONS_STEP40:
-                r["rank_reason"] = None
-        return sb.upsert("model_score_zone", rows, cle)
+    # ⛔ UNE BOUCLE, ET PAS UN SECOND `try` : les deux CHECK peuvent
+    # refuser l'un APRÈS l'autre. Désarmer `rank_reason`, renvoyer, et
+    # se faire refuser sur `rank_reason_corr` est EXACTEMENT le cas
+    # réel du 28/08 — un seul repli aurait rendu la main au premier
+    # tour en croyant avoir tout réparé.
+    desarmes: set[str] = set()
+    while True:
+        try:
+            return sb.upsert("model_score_zone", rows, cle)
+        except Abort as exc:
+            # ⛔ `nom not in desarmes` N'EST PAS UN DÉTAIL. Sans lui, une
+            # contrainte déjà désarmée qui refuse ENCORE (parce qu'elle
+            # porte sur autre chose que la raison) ferait BOUCLER le run
+            # à l'infini — un run qui ne finit pas est pire qu'un run
+            # qui échoue, parce que personne ne reçoit rien.
+            repli = next((p for p in REPLIS_RANG
+                          if p[0] in str(exc) and p[0] not in desarmes),
+                         None)
+            if repli is None:
+                raise
+            nom, colonne, admises, quoi_jouer = repli
+            desarmes.add(nom)
+            neuves = sorted(str(x) for x in {r.get(colonne) for r in rows}
+                            if x not in admises)
+            print(f"  ⚠️ {colonne} : {', '.join(neuves)} refusé(s) par le "
+                  f"CHECK en base → écrit `null` cette nuit. Jouer "
+                  f"{quoi_jouer}. Le JSON publié garde la raison exacte.",
+                  file=sys.stderr)
+            for r in rows:
+                if r.get(colonne) not in admises:
+                    r[colonne] = None
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -5224,6 +5445,8 @@ def main() -> int:
         print(f"     {ligne}",
               file=sys.stderr if ligne.startswith("⛔") else sys.stdout)
 
+    jalon_memoire("la relecture de l'archive")
+
     # ── 1 bis. le bilan des parties EN BASE (lot S0.6) ────────────
     #
     # ⚠️ TOUT CE BLOC EST SOUS `try`, POUR LA MÊME RAISON QUE CELUI DE LA
@@ -5317,6 +5540,7 @@ def main() -> int:
     # rend le rejeu tenable en régime de croisière : le run ne rattrape
     # que le passé, et le passé se remplit une fois.
     replay_write(root, day, rows)
+    jalon_memoire("l'agrégat quotidien (chemin J-0)")
 
     # ── 4-5. zones, accumulateurs, scores ────────────────────────
     # ⚠️ Chaque `select` passe la clé primaire de sa table en `order` :
@@ -5524,10 +5748,52 @@ def main() -> int:
             print("  → model_verif_event : aucune ligne (aucun événement "
                   "confirmé par le réseau cette journée)")
 
+        # ══════════════════════════════════════════════════════════
+        #  ⛔ L'OUBLI DU CHEMIN J-0 — LA CAUSE DE L'OOM DU 28/08
+        # ══════════════════════════════════════════════════════════
+        #
+        # Tout ce que ce bloc relâche a fini son travail À LA LIGNE
+        # PRÉCÉDENTE, et restait pourtant vivant jusqu'à la fin du run
+        # — c'est-à-dire pendant les deux phases les plus lourdes de la
+        # nuit (la fenêtre glissante, puis le rejeu d'archive). Python
+        # ne libère rien tant qu'un nom du cadre pointe dessus, et
+        # `main()` est un cadre unique de six cents lignes : ici, tout
+        # ce qui a servi une fois survit jusqu'au `return`.
+        #
+        # ⚠️ CE N'EST PAS UNE MICRO-OPTIMISATION, C'EST MESURÉ. Le
+        # 28/08, le processus est mort à 2 819 Mo dans `regime_scores`.
+        # `daily` seul (relâché plus bas) pesait 497 Mo sondés sur la
+        # production ; les snapshots des trois offsets, les
+        # observations de deux journées, la climatologie de trente et
+        # les agrégats du jour tiennent le même ordre de grandeur. Rien
+        # de tout cela n'est relu après cette ligne — vérifié nom par
+        # nom, c'est la seule chose qui rend ce bloc sûr.
+        #
+        # ⚠️ `= None` ET NON `del`, ET C'EST DÉLIBÉRÉ : `pres_obs`,
+        # `p_rows` et `daily_duel` naissent dans des `try` qui ont le
+        # droit de ne pas aboutir. `del` sur un nom jamais lié lèverait
+        # `NameError` et ferait tomber la notation POUR AVOIR VOULU
+        # ÉCONOMISER DE LA MÉMOIRE — le remède pire que le mal, une
+        # fois de plus. Une affectation, elle, marche dans les deux cas.
+        #
+        # ⓘ Les deux comptes qui survivent (`n_prior`, `n_clim`) sont
+        # lus par le `meta` de `_publish`, tout en bas. On garde le
+        # NOMBRE, pas les tables : deux entiers contre quelques
+        # centaines de Mo.
+        n_prior, n_clim = len(prior), len(clim)
+        snapshots = obs_day = obs_prev = clim = poids_comb = prior = None
+        rows = banded = temoin = zones_raw = None
+        pres_obs = p_rows = daily_duel = updates = ev_rows = None
+        gc.collect()
+        jalon_memoire("l'oubli du chemin J-0")
+
         since_ev = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
         ev_all = sb.select("model_verif_event", f"?day=gte.{since_ev}",
                            order="id")
         ev_scores, rejets, inconnues, retenues = event_scores(ev_all, zone_of)
+        # ⓘ 15 jours de `model_verif_event`, dont plus rien ne se sert
+        # dès que les scores d'événement sont calculés.
+        ev_all = None
         if inconnues:
             print(f"  ⚠️ {inconnues} lignes d'événement sur une zone qui n'a "
                   f"plus aucune balise rattachée : publiées telles quelles, "
@@ -5548,6 +5814,16 @@ def main() -> int:
         scores = rolling_scores(daily, zone_of, as_of)
         print(f"  score glissant : {len(scores)} lignes "
               f"({time.monotonic() - t_roll:.1f} s)")
+        # ⛔ 497 Mo, SONDÉS SUR LA PRODUCTION LE 28/08 : `daily` porte
+        # 332 307 lignes de `model_verif_daily` (15 jours × ~1 568
+        # octets par ligne en mémoire). Plus une seule ligne ne le relit
+        # après `rolling_scores` — et il restait pourtant vivant pendant
+        # tout le chemin régime, qui est justement le plus gros
+        # consommateur du run. C'est le plus lourd des blocs morts de
+        # cette nuit-là, et le plus facile à relâcher.
+        daily = None
+        gc.collect()
+        jalon_memoire("l'oubli de la fenêtre glissante")
         # `model_zone` est relue APRÈS l'upsert des échelons 2 et 4, pour
         # que `agg_level` soit littéralement le `kind` de la zone et non
         # une déduction faite sur la forme de son identifiant. Une table
@@ -5557,10 +5833,16 @@ def main() -> int:
 
         # ── chemin régime : archive rejouée, plus accumulateurs ───
         t_replay = time.monotonic()
+        # ⚠️ L'accumulateur de Murphy se remplit PENDANT la lecture de la
+        # fenêtre (lot L9b) : une seule passe, et la clé `_murphy` ne
+        # survit pas à la ligne. Voir le pavé dans `replay_window`.
+        murphy_acc: dict = {}
         units, bilan_replay = replay_window(
-            root, day, st, utc_offset_s, args.regime_days, args.replay_budget)
+            root, day, st, utc_offset_s, args.regime_days,
+            args.replay_budget, murphy_acc=murphy_acc)
         print(f"  rejeu d'archive : {bilan_replay} en "
               f"{time.monotonic() - t_replay:.1f} s")
+        jalon_memoire("le rejeu d'archive")
         # ── lot L9b (28/08) : TIMING ou AMPLITUDE, par balise ─────────
         #
         # ⚠️ IL MONTE SUR LA FENÊTRE DÉJÀ REJOUÉE, ET C'EST UN ARBITRAGE
@@ -5579,7 +5861,7 @@ def main() -> int:
         # fait pas tomber une nuit de notation.
         t_mur = time.monotonic()
         try:
-            mur_balises = MU.par_balise(units)
+            mur_balises = MU.par_balise_depuis_acc(murphy_acc)
             mur_modeles = MU.par_modele(mur_balises)
             n_ok = sum(1 for l in mur_balises if l["reason"] == "ok")
             print(f"  décomposition de Murphy : {len(mur_balises)} "
@@ -5610,6 +5892,7 @@ def main() -> int:
         # C'est le poste le plus cher du lot G, et il grandit avec la
         # profondeur d'archive. Le jour où il déborde, la manette est
         # `--regime-days`, pas le timer.
+        jalon_memoire("le score par régime")
         print(f"  score par régime : {len(reg_rows)} lignes "
               f"({time.monotonic() - t_reg:.1f} s)")
 
@@ -5654,6 +5937,13 @@ def main() -> int:
                  f"{stabilite['shared_days']} jour(s) partagé(s)"
                  if stabilite["kendall_tau"] is not None else ""))
         print(f"     ⓘ {stabilite['covers']}")
+        # ⓘ Dernier lecteur de la fenêtre rejouée : `units` porte
+        # 405 486 balise-jours (mesuré le 28/08, ~1 598 octets par ligne
+        # en mémoire, soit ~650 Mo), et la publication qui suit n'en lit
+        # plus une seule. Même geste que pour `daily`, même raison.
+        units = None
+        gc.collect()
+        jalon_memoire("l'oubli de la fenêtre rejouée")
 
         if scores:
             n = _upsert_scores(sb, _pour_la_base(sb, "model_score_zone",
@@ -5683,10 +5973,10 @@ def main() -> int:
                                "half_life_days": BIAIS_DEMI_VIE_J,
                                "min_days": BIAIS_MIN_JOURS,
                                "estimator": "ls_slope_sum_of_over_sum_ff",
-                               "pairs_with_prior": len(prior),
+                               "pairs_with_prior": n_prior,
                                "witness": part_temoin,
                            },
-                           "climatology_stations": len(clim),
+                           "climatology_stations": n_clim,
                            "events_calibrated": EVENTS_CALIBRATED,
                            "audience": "beta"})
 

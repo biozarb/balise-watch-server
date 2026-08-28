@@ -16,6 +16,7 @@ lecture d'archive du calcul précisément pour que ce soit possible.
 """
 from __future__ import annotations
 
+import json
 import math
 import os
 import pathlib
@@ -53,6 +54,394 @@ def _same(a, b, tol):
     if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
         return len(a) == len(b) and all(_same(x, y, tol) for x, y in zip(a, b))
     return a == b
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LE REPLI DES DEUX RAISONS DE RANG (28/08/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ LA NUIT DU 27/08, REJOUÉE LE 28, EST MORTE ICI — après l'OOM, et
+# pour une tout autre cause. `_apply_rank_corr` pose `duplicate_chain`
+# et `appliquer_fdr` pose `fdr` dans `rank_reason_corr`, dont le CHECK
+# (`supabase_step52_rank_corr.sql`) ne connaît ni l'un ni l'autre. La
+# base a répondu `23514` en nommant
+# `model_score_zone_rank_reason_corr_check` ; le repli ne regardait que
+# le CHECK de `rank_reason`, il a re-levé, et l'upsert ENTIER de
+# `model_score_zone` est tombé — vingt-trois minutes de calcul pour
+# rien, et L2/L3/L7 toujours sans un objet publié.
+
+
+def _corps_postgrest(contrainte: str) -> bytes:
+    """Le corps EXACT que PostgREST rend sur un CHECK violé.
+
+    ⓘ La ligne de `details` est celle du 28/08, recopiée du journal :
+    438 caractères pour une seule ligne de `model_score_zone`. C'est
+    elle qui poussait `message` hors des 400 octets lus.
+    """
+    ligne = ("(2026-08-28, *:valley, arome_r2, 6, rolling15, all, "
+             "landform, 324, 38444, 1935, 3.55, 8.3392, f, -0.3475, "
+             "null, null, null, duplicate_chain, null, null, null, "
+             "null, 6, null, window_too_short, null, 3.5976, 3.5636, "
+             "0.005, -1.3479, f, 2.8772, f, -0.198, 820, 4, 78, null, "
+             "duplicate_chain)")
+    return json.dumps({
+        "code": "23514",
+        "details": f"Failing row contains {ligne}.",
+        "hint": None,
+        "message": (f'new row for relation "model_score_zone" violates '
+                    f'check constraint "{contrainte}"'),
+    }).encode("utf-8")
+
+
+def test_detail_erreur_le_nom_de_la_contrainte_survit():
+    print("── erreur PostgREST : le nom de la contrainte survit (28/08) ──")
+    corps = _corps_postgrest("model_score_zone_rank_reason_corr_check")
+    check("⛔ le corps réel dépasse les 400 octets que le code lisait",
+          len(corps) > 400, True)
+    check("⛔ … et le nom de la contrainte est APRÈS le 400ᵉ octet : "
+          "c'est pour ça que le repli ne partait jamais",
+          corps.decode().index("rank_reason_corr_check") > 400, True)
+
+    check("⛔ … et le code lit assez d'octets pour que ce corps entre en "
+          "ENTIER : une lecture courte re-couperait le message avant "
+          "même la mise en forme",
+          J.ERREUR_OCTETS > len(corps), True)
+
+    lu = J._detail_erreur(corps)
+    check("le nom de la contrainte survit à la mise en forme",
+          "model_score_zone_rank_reason_corr_check" in lu, True)
+    check("le code SQL aussi", "23514" in lu, True)
+    check("la ligne fautive reste reconnaissable", "*:valley" in lu, True)
+    check("… mais elle est tronquée, pas rendue entière",
+          "(+" in lu and "car.)" in lu, True)
+    check("le message reste court", len(lu) < 900, True)
+
+    # ⛔ ET SURTOUT : `message` avant `details`. C'est l'ORDRE qui tient
+    # la propriété, pas la longueur — un jour la ligne fera cinquante
+    # colonnes.
+    check("`message` est placé AVANT `details`",
+          lu.index('"message"') < lu.index('"details"'), True)
+
+    # Une ligne fautive démesurée ne doit rien pousser dehors.
+    enorme = json.dumps({"code": "23514", "details": "x" * 50000,
+                         "message": 'violates check constraint "zz_check"'})
+    lu2 = J._detail_erreur(enorme.encode("utf-8"))
+    check("une ligne de 50 000 caractères ne chasse pas le message",
+          "zz_check" in lu2, True)
+    check("… et le message reste borné", len(lu2) < 900, True)
+
+    # Un corps qui n'est pas du JSON (passerelle, HTML) : on rend le
+    # texte, on ne perd pas l'information et on ne lève pas.
+    brut = b"<html><body>502 Bad Gateway</body></html>"
+    check("un corps non-JSON est rendu tel quel",
+          "502 Bad Gateway" in J._detail_erreur(brut), True)
+    check("un corps vide ne lève pas", J._detail_erreur(b""), "")
+
+
+class _SbRefuse:
+    """Un Supabase qui refuse en NOMMANT sa contrainte, une fois chacune."""
+
+    def __init__(self, contraintes):
+        self.restantes = list(contraintes)
+        self.appels = []
+
+    def upsert(self, table, rows, cle):
+        self.appels.append([dict(r) for r in rows])
+        # ⛔ LE GARDE-FOU DU BANC LUI-MÊME. Une mutation qui retire le
+        # « déjà désarmée » du repli fait boucler `_upsert_scores` POUR
+        # TOUJOURS ; sans ce compteur, la mutation ne rougirait pas —
+        # elle PENDRAIT, et un banc qui pend ne dit rien du tout.
+        if len(self.appels) > 20:
+            raise RuntimeError("le repli ne s'arrête pas : 20 upserts")
+        if self.restantes:
+            nom = self.restantes.pop(0)
+            # ⛔⛔ ET LE MESSAGE PASSE PAR LE MÊME CHEMIN QUE LE VRAI —
+            # `_detail_erreur` sur un corps PostgREST À LA BONNE FORME.
+            # C'est là toute la leçon du 28/08 : le banc d'origine
+            # fabriquait un message court où le nom de la contrainte
+            # arrivait en deuxième position, donc TOUJOURS lisible. Le
+            # vrai corps met `details` — la ligne entière, trente-huit
+            # colonnes — AVANT `message`, et le code lisait 400 octets.
+            # Le repli était vert au banc et mort en production.
+            raise J.Abort(f"upsert {table} : HTTP 400 — "
+                          + J._detail_erreur(_corps_postgrest(nom)))
+        return len(rows)
+
+
+def _lignes_de_rang():
+    return [
+        {"rank_reason": "duplicate_chain", "rank_reason_corr": "duplicate_chain"},
+        {"rank_reason": "fdr", "rank_reason_corr": "fdr"},
+        {"rank_reason": "ok", "rank_reason_corr": "mixed_population"},
+        {"rank_reason": "single_model", "rank_reason_corr": "ok"},
+        {"rank_reason": None, "rank_reason_corr": None},
+    ]
+
+
+def test_repli_rang_corr_la_seconde_contrainte_ne_tue_plus_la_nuit():
+    print("── repli : les DEUX raisons de rang (28/08) ──")
+    import contextlib, io
+
+    # (1) SEULE la contrainte du CORRIGÉ refuse — le cas réel du 28/08.
+    rows = _lignes_de_rang()
+    sb = _SbRefuse(["model_score_zone_rank_reason_corr_check"])
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        n = J._upsert_scores(sb, rows)
+    check("la nuit passe malgré le CHECK du corrigé", n, 5)
+    check("`duplicate_chain` est tu dans la colonne CORRIGÉE",
+          rows[0]["rank_reason_corr"], None)
+    check("`fdr` aussi", rows[1]["rank_reason_corr"], None)
+    check("⛔ mais la colonne BRUTE n'est PAS touchée : c'est un autre "
+          "CHECK, et l'écraser perdrait une raison que la base accepte",
+          rows[0]["rank_reason"], "duplicate_chain")
+    check("`mixed_population` survit (le step52 l'admet)",
+          rows[2]["rank_reason_corr"], "mixed_population")
+    check("`ok` survit", rows[3]["rank_reason_corr"], "ok")
+    check("le journal nomme le `.sql` à jouer",
+          "supabase_step58_rank_reason_corr.sql" in err.getvalue(), True)
+    check("… et nomme la colonne, pas seulement la valeur",
+          "rank_reason_corr" in err.getvalue(), True)
+
+    # (2) LES DEUX contraintes refusent, l'une APRÈS l'autre. C'est ce
+    # qu'un `try` unique ne pouvait pas tenir.
+    rows = _lignes_de_rang()
+    sb = _SbRefuse(["model_score_zone_rank_reason_check",
+                    "model_score_zone_rank_reason_corr_check"])
+    with contextlib.redirect_stderr(io.StringIO()):
+        n = J._upsert_scores(sb, rows)
+    check("la nuit passe même avec DEUX refus successifs", n, 5)
+    check("trois tentatives d'upsert, pas deux", len(sb.appels), 3)
+    check("la raison brute neuve est tue", rows[0]["rank_reason"], None)
+    check("la raison corrigée neuve aussi", rows[0]["rank_reason_corr"], None)
+    check("`single_model` est tu côté BRUT (step42 pas joué)",
+          rows[3]["rank_reason"], None)
+    check("… mais reste admis côté CORRIGÉ (step52 le connaît)",
+          rows[3]["rank_reason_corr"], "ok")
+
+    # (3) UNE CONTRAINTE QU'ON NE SAIT PAS DÉSARMER PASSE À TRAVERS.
+    # Un repli qui avale tout ferait disparaître les vraies pannes.
+    rows = _lignes_de_rang()
+    sb = _SbRefuse(["model_score_zone_pkey"])
+    try:
+        J._upsert_scores(sb, rows)
+        check("une contrainte inconnue doit RE-LEVER", "passé", "Abort")
+    except J.Abort as exc:
+        check("une contrainte inconnue re-lève telle quelle",
+              "model_score_zone_pkey" in str(exc), True)
+
+    # (4) ⛔ ET LA MÊME CONTRAINTE QUI REFUSE DEUX FOIS NE BOUCLE PAS.
+    # Sans le garde `déjà désarmée`, le run tournerait pour toujours —
+    # et un run qui ne finit jamais est pire qu'un run qui échoue.
+    rows = _lignes_de_rang()
+    sb = _SbRefuse(["model_score_zone_rank_reason_corr_check"] * 6)
+    try:
+        J._upsert_scores(sb, rows)
+        check("la même contrainte deux fois doit RE-LEVER", "passé", "Abort")
+    except J.Abort:
+        check("la même contrainte deux fois re-lève au lieu de boucler",
+              len(sb.appels) <= len(J.REPLIS_RANG) + 1, True)
+
+
+def test_repli_rang_les_deux_ensembles_admis_disent_le_schema_reel():
+    print("── repli : ce que chaque CHECK admet vraiment ──")
+    # ⛔ CES DEUX ENSEMBLES SONT UNE LECTURE DU SCHÉMA, pas un choix de
+    # code : les élargir « au cas où » ferait taire une raison que la
+    # base accepte, ou laisser passer une raison qu'elle refuse — et
+    # dans ce second cas la nuit retombe.
+    check("le CHECK brut (step40) n'admet PAS `duplicate_chain`",
+          "duplicate_chain" in J.RANK_REASONS_STEP40, False)
+    check("le CHECK brut n'admet PAS `fdr`",
+          "fdr" in J.RANK_REASONS_STEP40, False)
+    check("le CHECK brut n'admet PAS `single_model` (step42 est un "
+          "fichier à part)", "single_model" in J.RANK_REASONS_STEP40, False)
+    check("le CHECK corrigé (step52) admet `mixed_population`",
+          "mixed_population" in J.RANK_REASONS_CORR_STEP52, True)
+    check("… et `single_model`",
+          "single_model" in J.RANK_REASONS_CORR_STEP52, True)
+    check("… mais PAS `duplicate_chain` : c'est toute l'affaire du 28/08",
+          "duplicate_chain" in J.RANK_REASONS_CORR_STEP52, False)
+    check("… ni `fdr`", "fdr" in J.RANK_REASONS_CORR_STEP52, False)
+    check("les deux CHECK sont couverts par un repli",
+          sorted(p[0] for p in J.REPLIS_RANG),
+          ["model_score_zone_rank_reason_check",
+           "model_score_zone_rank_reason_corr_check"])
+    check("chaque repli vise sa PROPRE colonne",
+          [p[1] for p in J.REPLIS_RANG],
+          ["rank_reason", "rank_reason_corr"])
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  LA MÉMOIRE DU RUN (28/08/2026) — après l'OOM de la nuit du 28
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ CE QU'ON TIENT ICI ET CE QU'ON NE TIENT PAS. Un banc ne peut pas
+# mesurer 497 Mo relâchés au milieu d'un `main()` de six cents lignes
+# qui parle à Supabase et à R2 — et un banc qui prétendrait le faire
+# mentirait sur un Mac, où `/proc` n'existe pas. On tient donc DEUX
+# choses, séparément :
+#   · que l'INSTRUMENT est juste (il lit des Mo, il crie au bon
+#     moment, et il suit une allocation réelle là où `/proc` existe) ;
+#   · que l'ORDRE est juste — chaque bloc mort est relâché AVANT la
+#     phase qui l'écrasait. C'est une lecture de la SOURCE, assumée
+#     comme telle : c'est l'ordre, et rien d'autre, qui a tué la nuit
+#     du 28/08. Le chiffre, lui, se lit sur le VPS, dans les jalons
+#     que ce même lot écrit dans le journal.
+
+
+def test_memoire_le_jalon_dit_les_mo_et_crie_au_dessus_du_seuil():
+    print("── mémoire : le jalon (28/08) ──")
+    import io, contextlib
+    sortie = io.StringIO()
+    with contextlib.redirect_stdout(sortie):
+        mo = J.jalon_memoire("un essai", seuil_mo=2800.0, rss=lambda: 1234.0)
+    check("le jalon rend les Mo lus", mo, 1234.0)
+    check("sous le seuil, la ligne est calme et va sur stdout",
+          "ⓘ mémoire après un essai : 1234 Mo" in sortie.getvalue(), True)
+    check("sous le seuil, aucun cri", "⛔" in sortie.getvalue(), False)
+
+    err = io.StringIO()
+    out = io.StringIO()
+    with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+        J.jalon_memoire("le rejeu", seuil_mo=2800.0, rss=lambda: 2900.0)
+    check("au-dessus du seuil, la ligne part sur STDERR (c'est ce qui "
+          "la fait remonter dans l'alerte)", "⛔" in err.getvalue(), True)
+    check("… et pas sur stdout", out.getvalue(), "")
+    check("le cri nomme le seuil franchi",
+          "2800 Mo" in err.getvalue(), True)
+
+    # ⚠️ Le seuil est un « strictement au-dessus » : à la valeur exacte,
+    # on ne crie pas. Sinon un seuil rond crierait sur un run rond.
+    # ⚠️ LES DEUX TUYAUX, ET C'EST LA LEÇON DE LA MUTATION nº 9 : ne
+    # regarder que `stdout` laissait passer un `>=`, puisque le cri
+    # part justement sur `stderr`. Un banc qui ne lit qu'une moitié de
+    # la sortie tient une moitié de propriété.
+    calme_out, calme_err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(calme_out), \
+            contextlib.redirect_stderr(calme_err):
+        J.jalon_memoire("pile", seuil_mo=2800.0, rss=lambda: 2800.0)
+    check("pile sur le seuil : pas de cri (le seuil est un "
+          "« strictement au-dessus », sinon un seuil rond crie sur un "
+          "run rond)",
+          "⛔" in calme_out.getvalue() + calme_err.getvalue(), False)
+    check("pile sur le seuil : la ligne calme est quand même dite",
+          "ⓘ mémoire après pile" in calme_out.getvalue(), True)
+
+    check("hors Linux, le jalon se tait et rend None",
+          J.jalon_memoire("ailleurs", rss=lambda: None), None)
+
+
+def test_memoire_rss_lit_bien_vmrss_et_le_rend_en_mo():
+    print("── mémoire : `_rss_mo` lit VmRSS, en Mo ──")
+    import tempfile
+    # Un `/proc/self/status` de laboratoire, aux ordres de grandeur du
+    # VPS la nuit de l'OOM : VmPeak et VmRSS DIFFÈRENT, exprès.
+    faux = ("Name:\tpython3" + chr(10) +
+            "VmPeak:\t 3999999 kB" + chr(10) +
+            "VmSize:\t 2928108 kB" + chr(10) +
+            "VmHWM:\t  2900000 kB" + chr(10) +
+            "VmRSS:\t  2883584 kB" + chr(10) +
+            "Threads:\t1" + chr(10))
+    with tempfile.NamedTemporaryFile("w", suffix=".status",
+                                     delete=False, encoding="ascii") as f:
+        f.write(faux)
+        chemin = f.name
+    check("2 883 584 ko se lisent 2 816 Mo (division par 1024, pas par "
+          "1000, et surtout pas rien)", J._rss_mo(chemin), 2816.0, tol=1e-9)
+    check("c'est bien VmRSS qui est lu, pas VmPeak — sinon un bloc "
+          "relâché ne se verrait JAMAIS entre deux jalons",
+          J._rss_mo(chemin) < 3000.0, True)
+    check("un fichier absent ne fait pas tomber le run",
+          J._rss_mo(chemin + ".nexistepas"), None)
+    os.unlink(chemin)
+
+
+def test_memoire_rss_suit_une_allocation_reelle():
+    print("── mémoire : `_rss_mo` suit une allocation réelle ──")
+    avant = J._rss_mo()
+    if avant is None:
+        # ⓘ Pas un échec : `/proc/self/status` n'existe pas sur macOS,
+        # et le banc doit rester jouable sur la machine de dev. Le dire
+        # plutôt que de compter une assertion verte pour rien.
+        print("     ⓘ /proc indisponible (macOS ?) — épreuve sautée, "
+              "elle se joue sur le VPS.")
+        return
+    bloc = bytearray(120 * 1024 * 1024)     # 120 Mo, touchés page à page
+    for i in range(0, len(bloc), 4096):
+        bloc[i] = 1
+    pendant = J._rss_mo()
+    check("120 Mo alloués et touchés se voient (au moins 90 Mo de plus)",
+          pendant - avant > 90.0, True)
+    del bloc
+    check("l'unité est bien le Mo, pas le ko (un run de notation ne "
+          "tient pas dans 3 Mo et n'atteint pas 3 000 000)",
+          1.0 < pendant < 100000.0, True)
+
+
+def test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime():
+    print("── mémoire : l'ordre des oublis dans `main` (28/08) ──")
+    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+    src = src[src.index("def main() -> int:"):]
+
+    def pos(motif, quoi):
+        check(f"`{quoi}` est présent dans `main`", motif in src, True)
+        return src.index(motif) if motif in src else 10 ** 9
+
+    # ⛔ LA FENÊTRE GLISSANTE (497 Mo sondés le 28/08) doit mourir entre
+    # son dernier lecteur et le rejeu d'archive. C'est LA ligne dont
+    # l'absence a coûté la nuit du 28/08.
+    p_roll = pos("scores = rolling_scores(daily, zone_of, as_of)", "rolling_scores")
+    p_oubli = pos("        daily = None" + chr(10), "l'oubli de `daily`")
+    p_replay = pos("units, bilan_replay = replay_window(", "replay_window")
+    check("`daily` est relâché APRÈS son dernier lecteur", p_oubli > p_roll, True)
+    check("… et AVANT le rejeu d'archive, qui est la phase qu'il "
+          "écrasait", p_oubli < p_replay, True)
+
+    # ⛔ LE CHEMIN J-0 (snapshots, observations, climatologie, agrégats)
+    # doit mourir avant la fenêtre glissante ET avant le rejeu.
+    p_j0 = pos("        n_prior, n_clim = len(prior), len(clim)" + chr(10),
+               "l'oubli du chemin J-0")
+    p_daily = pos('daily = sb.select("model_verif_daily"', "lecture de la fenêtre")
+    check("le chemin J-0 est oublié avant la lecture de la fenêtre "
+          "glissante", p_j0 < p_daily, True)
+    for nom in ("snapshots", "obs_day", "obs_prev", "clim", "prior",
+                "banded", "poids_comb"):
+        check(f"`{nom}` est bien relâché", f"{nom} = " in
+              src[p_j0:p_j0 + 400] or f"= {nom} =" in src[p_j0:p_j0 + 400]
+              or f"{nom} =" in src[p_j0:p_j0 + 400], True)
+
+    # ⛔ ET LES COMPTES SURVIVENT AUX TABLES : `_publish` lit `n_prior` /
+    # `n_clim`, jamais `len(prior)` / `len(clim)` — qui lèveraient
+    # `TypeError` sur `None` et feraient tomber la publication.
+    check("le méta publie `n_prior` et non `len(prior)`",
+          '"pairs_with_prior": n_prior,' in src, True)
+    check("le méta publie `n_clim` et non `len(clim)`",
+          '"climatology_stations": n_clim,' in src, True)
+    check("plus aucun `len(prior)` après l'oubli",
+          "len(prior)" in src[p_j0 + 200:], False)
+    check("plus aucun `len(clim)` après l'oubli",
+          "len(clim)" in src[p_j0 + 200:], False)
+
+    # ⓘ Et le ramasse-miettes est appelé : sans lui, les cycles de
+    # références (une ligne qui pointe sa case, une case qui liste ses
+    # lignes) survivraient au `= None`.
+    check("`gc.collect()` suit chaque oubli",
+          src.count("gc.collect()") >= 3, True)
+
+    # ⓘ Enfin, les jalons — NOMMÉS UN PAR UN, et c'est la leçon de la
+    # mutation nº 10 : un simple compte laissait retirer celui du rejeu
+    # d'archive, c'est-à-dire l'étape exacte où le run est mort. Ce sont
+    # des étapes précises qu'on veut voir, pas un nombre.
+    for etape in ("la relecture de l'archive",
+                  "l'agrégat quotidien (chemin J-0)",
+                  "l'oubli du chemin J-0",
+                  "l'oubli de la fenêtre glissante",
+                  "le rejeu d'archive",
+                  "le score par régime",
+                  "l'oubli de la fenêtre rejouée"):
+        check(f"le run jalonne sa mémoire après « {etape} »",
+              f'jalon_memoire("{etape}")' in src, True)
+
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -3462,6 +3851,44 @@ def test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base():
     check("… et la formule du cache est bien la 5 (les moments + "
           "`mse_comb` l'ont fait passer de 4)", J.REPLAY_FORMULA, 5)
 
+    # ── ⛔ ET LA MÉMOIRE, qui est la vraie contrainte (28/08) ─────────
+    # La fenêtre rejouée porte 405 486 lignes en production. Y laisser
+    # une liste de six flottants coûte ~107 Mo au pic, sur un VPS de
+    # 3,8 Go SANS SWAP dont le run de cette nuit-là a été tué par l'OOM
+    # killer. `replay_window` FOND donc les sommes au passage et RETIRE
+    # la clé de la ligne.
+    acc: dict = {}
+    lus, _bilan = J.replay_window(tmp, DAY, None, 7200, n_days=1,
+                                  murphy_acc=acc)
+    check("⛔ aucune ligne rendue par `replay_window` ne porte encore "
+          "`_murphy` — la mémoire de la fenêtre ne le paie pas",
+          any(MU_.MURPHY_KEY in l for l in lus), False)
+    check("⭐ … et pourtant l'accumulateur, lui, l'a bien reçu",
+          len(acc) > 0, True)
+    cle = (f"{rows[0]['source']}:{rows[0]['station_id']}",
+           rows[0]["model"], rows[0]["lead_h"])
+    check("… sous la clé (balise, modèle, échéance)", cle in acc, True)
+    check("… avec les six sommes de la journée, plus le compteur de "
+          "journées", (list(acc[cle][:6]), acc[cle][6]),
+          (list(rows[0][MU_.MURPHY_KEY]), 1))
+    # ⚠️ Sans accumulateur, la clé disparaît QUAND MÊME : personne
+    # d'autre ne la lit, et la laisser traîner ferait payer la mémoire
+    # à `regime_scores` et `stability_report`.
+    lus2, _ = J.replay_window(tmp, DAY, None, 7200, n_days=1)
+    check("⛔ … et sans accumulateur du tout, la clé disparaît aussi",
+          any(MU_.MURPHY_KEY in l for l in lus2), False)
+
+    # ⭐ LES DEUX CHEMINS RENDENT LE MÊME OBJET. `par_balise` (lignes,
+    # pour le rapport ponctuel et le banc) et `par_balise_depuis_acc`
+    # (l'accumulateur, pour le run) ne doivent pas diverger — c'est le
+    # défaut classique des deux consommateurs (BUGS.md, 26/08).
+    lignes_acc = MU_.par_balise_depuis_acc(acc, min_pairs=1, min_days=1)
+    units_ref = [{**r, "unit": f"{r['source']}:{r['station_id']}"}
+                 for r in rows]
+    lignes_dir = MU_.par_balise(units_ref, min_pairs=1, min_days=1)
+    check("⭐ l'accumulateur et le chemin par lignes rendent EXACTEMENT "
+          "le même objet", lignes_acc, lignes_dir)
+
 
 def test_l9c_reference_combinee_bout_en_bout():
     print("── L9c : la référence combinée, du balise-jour à la case ──")
@@ -3937,7 +4364,17 @@ def main() -> int:
                test_light_scores_bout_en_bout_ne_recalcule_rien,
                test_light_bascules_resume,
                test_manches_demarre_au_deploiement_et_est_idempotent,
-               test_manches_pas_de_rejeu_historique_sous_min_block_days):
+               test_manches_pas_de_rejeu_historique_sous_min_block_days,
+               # ── 28/08 : le corps d'erreur qui cachait la cause ──
+               test_detail_erreur_le_nom_de_la_contrainte_survit,
+               # ── 28/08 : les deux raisons de rang ──
+               test_repli_rang_corr_la_seconde_contrainte_ne_tue_plus_la_nuit,
+               test_repli_rang_les_deux_ensembles_admis_disent_le_schema_reel,
+               # ── 28/08 : la mémoire du run, après l'OOM de la nuit ──
+               test_memoire_le_jalon_dit_les_mo_et_crie_au_dessus_du_seuil,
+               test_memoire_rss_lit_bien_vmrss_et_le_rend_en_mo,
+               test_memoire_rss_suit_une_allocation_reelle,
+               test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0
