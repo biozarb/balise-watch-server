@@ -1,0 +1,80 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-filet-arome.service — le filet sous l'Action `arome-wind`
+#                                              (lot LW, 28/08/2026)
+#
+#  ⛔ CE JOB N'ÉCRIT AUCUNE DONNÉE ET N'EN LIT AUCUNE. Il envoie un
+#  `workflow_dispatch` à GitHub, et c'est tout. Il ne relit pas les
+#  tuiles, ne touche pas la base, n'archive rien. C'est ce qui le rend
+#  différent de tous les autres jobs de `model-verif/systemd/` — et
+#  c'est délibéré : un filet doit avoir moins de choses qui peuvent
+#  casser que ce qu'il rattrape.
+#
+#  ⚠️ POURQUOI IL EXISTE (mesuré le 28/08, cf. le lot LW) : le
+#  planificateur de GitHub, qui tenait 96 créneaux sur 96 du 14 au
+#  25/08, est tombé à 3 sur 11 à partir du 26/08 au soir — sur les SEPT
+#  workflows du dépôt, pas seulement `arome-wind`. Le 28/08 la journée
+#  `arome_r2` n'a été sauvée que par un déclenchement à la main.
+#
+#  ⚠️ IL PASSE PAR `run.sh`, ET C'EST TOUT L'INTÉRÊT. Verrou expirant,
+#  compteur d'échecs consécutifs, ping Healthchecks, e-mail au sujet
+#  translittéré, chien de garde : tout est déjà là et a été payé au prix
+#  de plusieurs pannes (cf. le pavé « Où vit le job de ce mode » dans
+#  `run.sh`). Une unité qui appellerait `python3 filet_arome_wind.py`
+#  en direct s'en priverait — et un filet qu'on ne surveille pas est un
+#  filet dont on croit seulement qu'il est là.
+#
+#  ⚠️ IL A BESOIN DE `~/.balise-watch-model-verif.env`, qui porte
+#  `GITHUB_DISPATCH_TOKEN`. `run.sh` le source (l. 344). ⓘ Le jeton
+#  n'est jamais journalisé — `tools/gh_dispatch.py` s'en assure et
+#  `tools/test_gh_dispatch.py` le vérifie.
+#
+#  ⚠️ IL EXIGE AUSSI LES VARIABLES R2 ET `boto3`, dont il n'a aucun
+#  usage : `run.sh` les vérifie pour TOUS ses modes (l. 361-390). On
+#  hérite d'un contrôle inutile plutôt que d'ouvrir une exception dans
+#  l'enveloppe partagée — sur ce VPS les deux sont présents, et une
+#  exception coûterait plus cher le jour où quelqu'un la relira.
+#
+#  ⛔ AUCUN `Before=bw-model-arome.service`. La chaîne n'est pas
+#  systemd : entre ce dispatch (05:00 Z) et la lecture (06:00 Z) il y a
+#  GitHub, un runner, Météo-France et R2. Un `Before=` laisserait croire
+#  à une contrainte d'ordonnancement local qui n'existe pas — c'est le
+#  même refus que dans `bw-model-arome.timer`.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — filet de déclenchement de l'Action arome-wind
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/filet_arome_wind.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh filet-arome
+# ⓘ Court, et c'est mesurable : un POST de quelques centaines d'octets
+# avec un délai d'attente de 30 s (`gh_dispatch.TIMEOUT_S`). Les 5 min
+# ci-dessous laissent dix fois la marge, et bornent le job bien avant
+# la fenêtre utile. `MAX_MINUTES` vaut 2 côté `run.sh` — c'est lui qui
+# coupe en premier, celui-ci est le filet du filet.
+TimeoutStartSec=5min
+Nice=10
+
+# ── Cloisonnement, calqué sur bw-model-arome.service ─────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# ⓘ Le script n'écrit rien, mais `run.sh` si : verrou, journal et
+# compteur d'échecs vivent là.
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

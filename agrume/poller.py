@@ -65,6 +65,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 from domaine import (MAX_HOURS_GRILLE, PAQUETS_INGESTION,  # noqa: E402
                      PAQUETS_RALLONGE)
+from gh_dispatch import dispatch_github  # noqa: E402,F401
 from mf_s3 import covered_steps  # noqa: E402
 from portail import (SERVICE_AROME, SERVICE_AROMEPI, CouvertureAbsente,  # noqa: E402
                      ErreurPortail, Portail)
@@ -717,36 +718,24 @@ def _rapport_une_famille(entrees, garde, etiquette, crier):
 
 
 # ══════════════════════════════════════════════════════════════════════
-def dispatch_github(depot, workflow, ref="main", entrees=None, crier=print):
-    """Déclenche un `workflow_dispatch`. Optionnel, et volontairement
-    minimal : le VPS décide QUAND, l'Action fait le travail.
-
-    ⚠️ Le jeton se lit dans l'environnement et n'est jamais journalisé.
-    Sans jeton, on ne déclenche rien et on le DIT — un dispatch qui échoue
-    en silence donnerait un poller qui a l'air de marcher et une chaîne
-    qui ne tourne jamais.
-    """
-    jeton = os.environ.get("GITHUB_DISPATCH_TOKEN")
-    if not jeton:
-        crier("  ⚠️ GITHUB_DISPATCH_TOKEN absent — aucun déclenchement "
-              "(le run a bien été daté, mais rien n'a été lancé)")
-        return False
-    url = (f"https://api.github.com/repos/{depot}/actions/workflows/"
-           f"{workflow}/dispatches")
-    corps = json.dumps({"ref": ref, "inputs": entrees or {}}).encode()
-    req = urllib.request.Request(url, data=corps, method="POST", headers={
-        "Authorization": f"Bearer {jeton}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            crier(f"  ▶ workflow {workflow} déclenché (HTTP {r.status})")
-            return True
-    except urllib.error.HTTPError as e:
-        crier(f"  ❌ dispatch refusé : HTTP {e.code} "
-              f"{e.read()[:200].decode('utf-8', 'replace')}")
-        return False
+# ⛔ `dispatch_github()` A DÉMÉNAGÉ DANS `tools/gh_dispatch.py`
+# (lot LW, 28/08/2026) et n'est plus définie ici — elle est importée en
+# tête de fichier, et le nom reste donc disponible pour les appelants de
+# ce module, `run-poller.sh` compris.
+#
+# La raison est celle du lot LW : le filet de déclenchement AROME
+# (`model-verif/filet_arome_wind.py`) est un SECOND appelant, et le
+# projet refuse deux chemins pour une même écriture (cf. le pavé
+# `arome-rallonge` ci-dessus : « deux façons d'écrire le même objet,
+# c'est-à-dire deux façons de se tromper »). Recopier la fonction dans
+# `model-verif/` aurait donné deux jetons lus de deux manières et deux
+# gestions d'erreur à corriger séparément.
+#
+# ⓘ Le déménagement a corrigé un défaut au passage, et il concernait
+# CE fichier-ci : `urllib.error.URLError` (DNS muet, réseau coupé)
+# n'était pas rattrapée et remontait en exception nue — dans un service
+# qui tourne EN BOUCLE, elle le tuait. Elle rend désormais False,
+# comme un refus HTTP.
 
 
 def fabriquer_source(nom, journal=print):

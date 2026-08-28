@@ -57,8 +57,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau) ;;
-  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau" >&2
+  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau|filet-arome) ;;
+  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau|filet-arome" >&2
      exit 2 ;;
 esac
 
@@ -120,6 +120,17 @@ case "$MODE" in
   # serré du timer (06:00 UTC, entre la publication du run 00 Z vers
   # 05:42 et son écrasement vers 08:30) et d'où l'alerte.
   arome)          SCRIPT="$ICI/arome_fcst.py";          LIBELLE="flux AROME R2" ;;
+  # ⭐ LE FILET SOUS L'ACTION `arome-wind` (lot LW, 28/08/2026).
+  # ⛔ SEUL MODE DE CE FICHIER QUI N'ÉCRIT NI NE LIT AUCUNE DONNÉE : il
+  # envoie un `workflow_dispatch` à GitHub. Il est ici, et non dans une
+  # unité systemd qui appellerait le script en direct, pour la raison
+  # donnée en tête de ce bloc — verrou, compteur, ping et e-mail ont été
+  # payés au prix de plusieurs pannes, et un filet non surveillé est un
+  # filet dont on croit seulement qu'il est là.
+  # ⚠️ Il hérite au passage des contrôles R2/boto3 ci-dessous, dont il
+  # n'a aucun usage. C'est le prix de l'enveloppe partagée, et il est
+  # plus bas que celui d'une exception à relire dans six mois.
+  filet-arome)    SCRIPT="$ICI/filet_arome_wind.py";    LIBELLE="filet AROME wind" ;;
   # ⭐ LE CONTRÔLE N°3 DU LOT S3 — le tau inter-populations (lot L8,
   # 28/08/2026). ⛔ CE MODE N'ARCHIVE RIEN ET NE GARDE RIEN : il LIT la
   # base et les archives, et dépose un rapport. C'est ce qui le rend
@@ -222,6 +233,23 @@ elif [[ "$MODE" == "arome" ]]; then
   # ⚠️ Et la fenêtre est étroite : le run 00 Z n'est en ligne que de
   # ~05:42 à ~08:30 UTC. Un échec doit sonner le matin même, tant qu'un
   # rattrapage à la main est encore possible.
+  SEUIL_ALERTE=1
+elif [[ "$MODE" == "filet-arome" ]]; then
+  # Un POST de quelques centaines d'octets, `gh_dispatch.TIMEOUT_S` = 30 s.
+  # 2 min laissent quatre fois la marge et coupent bien avant que la
+  # fenêtre utile (dispatch à 05:00 Z, lecture à 06:00 Z) se referme.
+  MAX_MINUTES="${BW_FILET_AROME_MAX_MINUTES:-2}"
+  # ⛔ SEUIL_ALERTE=1, COMME `arome` ET POUR LA MÊME RAISON, D'UN CRAN
+  # PLUS TÔT DANS LA CHAÎNE. Ce job est la seule chose qui garantit
+  # qu'`arome-wind` tournera ce matin ; s'il n'est pas parti, plus rien
+  # ne rattrape la journée, et `arome_fcst.py` ne le dira qu'à 06:00 Z,
+  # quand il ne restera plus qu'à constater. Un filet qui tombe doit
+  # sonner le matin même, tant qu'un `workflow_dispatch` à la main est
+  # encore possible.
+  # ⚠️ Et il faut un `BW_MODEL_FILET_AROME_PING_URL` dans
+  # `~/.balise-watch-alertes.env` : sans lui, `run.sh` dit « PERSONNE NE
+  # SURVEILLE CE JOB » à chaque run — un filet qui ne part plus du tout
+  # est SILENCIEUX par nature, c'est Healthchecks qui le voit.
   SEUIL_ALERTE=1
 elif [[ "$MODE" == "tau" ]]; then
   # Mesuré le 28/08 sur le VPS : 24 s de bout en bout (une requête
