@@ -599,5 +599,199 @@ check("⛔ … là où l'arithmétique aurait rendu un cap Sud-Est",
 
 
 # ══════════════════════════════════════════════════════════════════
+#  10. LOT L9c — la référence COMBINÉE (Murphy 1992)
+# ══════════════════════════════════════════════════════════════════
+print("\n── 10. lot L9c : k·persistance + (1−k)·climatologie ──")
+
+# ── (i) les deux BORNES du mélange, exactes ──────────────────────
+persist = (20.0, 90.0)
+climh = (8.0, 0.0, 12)
+check("⭐ k = 1 rend la PERSISTANCE au bit près",
+      I.combined_reference(1.0, persist, climh) == (20.0, 90.0),
+      f"{I.combined_reference(1.0, persist, climh)}")
+check("⭐ k = 0 rend la CLIMATOLOGIE au bit près",
+      I.combined_reference(0.0, persist, climh) == (8.0, 0.0),
+      f"{I.combined_reference(0.0, persist, climh)}")
+
+# ── (ii) un k INTERMÉDIAIRE, calculé à la main hors du code ──────
+# force : 0,25 × 20 + 0,75 × 8 = 5 + 6 = 11
+# cap   : vecteurs UNITAIRES, u = 0,25·sin90 + 0,75·sin0 = 0,25
+#                             v = 0,25·cos90 + 0,75·cos0 = 0,75
+#         atan2(0,25 ; 0,75) = 18,4349°
+f_i, d_i = I.combined_reference(0.25, persist, climh)
+check("⭐ k = 0,25 : la FORCE vaut 11 km/h (5 + 6, calculé à la main)",
+      abs(f_i - 11.0) < 1e-9, f"force = {f_i}")
+check("⭐ k = 0,25 : le CAP vaut 18,4349° (atan2(0,25 ; 0,75), calculé "
+      "à la main)", abs(d_i - 18.4349) < 1e-3, f"cap = {d_i}")
+check("⛔ … et PAS la moyenne arithmétique des caps (22,5°) : le "
+      "mélange est circulaire", abs(d_i - 22.5) > 3.0)
+# ⚠️ La force ne passe PAS par (u, v). Le vérifier explicitement : la
+# norme du mélange vectoriel VRAI vaudrait ici bien moins que 11.
+_u = 0.25 * 20 * math.sin(math.radians(90)) + 0.75 * 8 * math.sin(0.0)
+_v = 0.25 * 20 * math.cos(math.radians(90)) + 0.75 * 8 * math.cos(0.0)
+check("⛔⛔ mélanger en (u, v) puis reprendre la norme rendrait une "
+      f"référence artificiellement FAIBLE ({math.hypot(_u, _v):.2f} au "
+      "lieu de 11) — donc un skill artificiellement bon",
+      math.hypot(_u, _v) < 9.0)
+
+check("un cap manquant d'un côté laisse passer celui de l'autre",
+      I.combined_reference(0.5, (10.0, None), (6.0, 40.0, 9))[1] == 40.0)
+check("deux caps manquants → aucun cap inventé",
+      I.combined_reference(0.5, (10.0, None), (6.0, None, 9))[1] is None)
+check("⛔ deux caps diamétralement opposés à poids égal → aucun cap "
+      "(la moyenne n'existe pas)",
+      I.combined_reference(0.5, (10.0, 0.0), (6.0, 180.0, 9))[1] is None)
+
+# ── (iii) la borne du poids, et ce qu'elle DIT ───────────────────
+check("ρ dans [0, 1] passe tel quel", I.poids_combine(0.42) == (0.42, False))
+check("ρ négatif est ramené à 0 ET SIGNALÉ",
+      I.poids_combine(-0.3) == (0.0, True))
+check("ρ > 1 est ramené à 1 ET SIGNALÉ", I.poids_combine(1.4) == (1.0, True))
+check("ρ absent reste absent — jamais un poids inventé",
+      I.poids_combine(None) == (None, False))
+
+# ── (iv) ⭐ L'ESTIMATEUR RETROUVE UN ρ CONNU ─────────────────────
+# Série fabriquée : cycle diurne + anomalie journalière AR(1) de
+# coefficient 0,6 CONNU. `autocorr_lag24` doit le retrouver — c'est la
+# seule façon de savoir qu'il mesure ce que son nom dit.
+# ⚠️ Le cycle diurne est ÉNORME devant l'anomalie (±5 contre ±2) :
+# c'est exprès. Un estimateur qui oublierait de retirer la climatologie
+# rendrait un ρ dominé par le cycle, donc proche de 1 — la faute que le
+# pavé de la fonction nomme.
+rng = LCG(4242)
+JOURS = 40
+clim_h = {h: (10.0 + 5.0 * math.sin(2 * math.pi * h / 24), None, JOURS)
+          for h in range(24)}
+A, obs_by_day = 0.0, {}
+anomalies_vraies = []
+for j in range(JOURS):
+    A = 0.6 * A + 2.0 * (rng.u() - 0.5)
+    anomalies_vraies.append(A)
+    jour = f"2026-06-{j + 1:02d}"
+    # ⚠️ ORIGINE ALIGNÉE SUR MINUIT UTC (1 779 926 400 = 20 601 × 86 400),
+    # et ce n'est PAS un détail de fixture. `hourly_climatology` et
+    # `autocorr_lag24` calculent l'heure locale sur le timestamp ABSOLU
+    # (`(t//1000 + offset)//3600 % 24`). Une origine non alignée décale
+    # la climatologie d'un cran par rapport aux observations, ce qui
+    # fabrique une anomalie DIURNE identique chaque jour — mesuré en
+    # écrivant ce banc : ρ sortait à 0,981 au lieu de 0,60. Le banc
+    # aurait « prouvé » que l'estimateur marche… en mesurant une faute
+    # de fixture.
+    t0 = (1779926400 + j * 86400) * 1000
+    obs_by_day[jour] = [
+        S.ObsSample(t=t0 + h * 3_600_000,
+                    speed=clim_h[h][0] + A + 0.3 * (rng.u() - 0.5),
+                    dir=None)
+        for h in range(24)]
+rho = I.autocorr_lag24(obs_by_day, clim_h, 0)
+check("⭐⭐ `autocorr_lag24` retrouve le ρ de 0,6 qu'on a injecté "
+      f"({rho:.3f})", rho is not None and 0.45 < rho < 0.75,
+      f"rho = {rho}")
+
+# ⛔ ET LE CONTRE-CAS : la même série SANS retirer la climatologie.
+clim_plate = {h: (10.0, None, JOURS) for h in range(24)}
+rho_brut = I.autocorr_lag24(obs_by_day, clim_plate, 0)
+check("⛔⛔ … là où la même série, l'anomalie mesurée contre une "
+      f"climatologie PLATE, rend {rho_brut:.3f} — le cycle diurne pris "
+      "pour de la persistance",
+      rho_brut is not None and rho_brut > 0.85, f"rho brut = {rho_brut}")
+
+# Les planchers, et le trou d'archive.
+check("moins de 5 journées → pas de ρ (jamais un poids sur trois jours)",
+      I.autocorr_lag24({k: v for k, v in list(obs_by_day.items())[:4]},
+                       clim_h, 0) is None)
+troue = {k: v for k, v in obs_by_day.items() if int(k[-2:]) % 2 == 1}
+check("⛔ des journées NON consécutives ne s'apparient pas à « 24 h » "
+      "(lundi contre vendredi ne serait pas de la persistance)",
+      I.autocorr_lag24(troue, clim_h, 0) is None)
+
+# ── (v) ⭐⭐ LA PROPRIÉTÉ DE MURPHY : la combinaison DOMINE ────────
+# Sur la dernière journée de la série fabriquée, les trois références
+# sont mises côte à côte sur les MÊMES heures.
+# ⛔ SUR TOUTE LA SÉRIE, PAS SUR UNE JOURNÉE. La domination de Murphy
+# est une propriété EN ESPÉRANCE, pas une garantie par réalisation :
+# une journée où l'anomalie est proche de zéro donne raison à la
+# climatologie seule, et un banc écrit sur cette journée-là « prouverait »
+# le contraire du théorème. Mesuré en écrivant ce banc — la version à
+# une journée rendait clim 0,026 contre combinaison 0,460.
+def _mse_des_trois(jours_utiles):
+    sp = sc = sb_ = 0.0
+    np_ = 0
+    for j in jours_utiles:
+        d0 = f"2026-06-{j + 1:02d}"
+        d1 = f"2026-06-{j:02d}"
+        t_j = (1779926400 + j * 86400) * 1000
+        serie = obs_by_day[d0] + obs_by_day[d1]
+        pr = [S.VerifPair(t=t_j + h * 3_600_000,
+                          fcst_speed=clim_h[h][0] + 0.7 * anomalies_vraies[j],
+                          fcst_dir=None,
+                          obs_speed=obs_by_day[d0][h].speed,
+                          obs_dir=None, n_obs=1)
+              for h in range(24)]
+        _, na, _, mp = S.skill_vs_persistence(pr, serie)
+        _, nb, _, mc = I.skill_vs_climatology(pr, clim_h, 0)
+        _, nc, _, mb = I.skill_vs_combined(pr, clim_h, rho, serie, 0)
+        if not (na == nb == nc == 24):
+            continue
+        sp += mp * na
+        sc += mc * nb
+        sb_ += mb * nc
+        np_ += na
+    return sp / np_, sc / np_, sb_ / np_, np_
+
+
+mse_p_tot, mse_c_tot, mse_b_tot, n_tot = _mse_des_trois(range(1, 29))
+check("les trois références sont mesurées sur les mêmes heures, sur "
+      f"28 journées ({n_tot} heures)", n_tot == 28 * 24, f"n = {n_tot}")
+check("⭐⭐ le MSE de la COMBINAISON est inférieur ou égal à celui de la "
+      f"persistance ({mse_b_tot:.3f} ≤ {mse_p_tot:.3f}) — la propriété "
+      "de Murphy 1992, mesurée", mse_b_tot <= mse_p_tot + 1e-9)
+check("⭐⭐ … ET à celui de la climatologie "
+      f"({mse_b_tot:.3f} ≤ {mse_c_tot:.3f})", mse_b_tot <= mse_c_tot + 1e-9)
+check("⚠️ les trois DIFFÈRENT vraiment (le banc ne prouverait rien si "
+      "elles coïncidaient)",
+      abs(mse_p_tot - mse_c_tot) > 0.05
+      and abs(mse_b_tot - min(mse_p_tot, mse_c_tot)) > 1e-6,
+      f"persist {mse_p_tot:.3f} · clim {mse_c_tot:.3f} · "
+      f"comb {mse_b_tot:.3f}")
+
+# ── (vi) les bornes, bout en bout, sur une journée quelconque ────
+obs_serie = obs_by_day["2026-06-29"] + obs_by_day["2026-06-28"]
+prevs = [S.VerifPair(t=(1779926400 + 28 * 86400) * 1000 + h * 3_600_000,
+                     fcst_speed=clim_h[h][0] + 0.7 * anomalies_vraies[28],
+                     fcst_dir=None,
+                     obs_speed=obs_by_day["2026-06-29"][h].speed,
+                     obs_dir=None, n_obs=1)
+         for h in range(24)]
+_, _, _, mse_p1 = S.skill_vs_persistence(prevs, obs_serie)
+_, _, _, mse_c1 = I.skill_vs_climatology(prevs, clim_h, 0)
+_, n_b1, mm_b1, _ = I.skill_vs_combined(prevs, clim_h, rho, obs_serie, 0)
+_, _, _, mse_k1 = I.skill_vs_combined(prevs, clim_h, 1.0, obs_serie, 0)
+_, _, _, mse_k0 = I.skill_vs_combined(prevs, clim_h, 0.0, obs_serie, 0)
+check("⭐ bout en bout : k = 1 rend EXACTEMENT le MSE de la persistance",
+      abs(mse_k1 - mse_p1) < 1e-9, f"{mse_k1} vs {mse_p1}")
+check("⭐ bout en bout : k = 0 rend EXACTEMENT le MSE de la climatologie",
+      abs(mse_k0 - mse_c1) < 1e-9, f"{mse_k0} vs {mse_c1}")
+check("⛔ `skill_vs_combined` rend SON PROPRE mse_model, pas celui de la "
+      "persistance (deux populations d'heures, deux témoins)",
+      mm_b1 is not None and n_b1 == 24)
+
+# Une heure sans climatologie sort du calcul plutôt que d'être comblée.
+clim_trouee = {h: v for h, v in clim_h.items() if h != 12}
+_, n_t, _, _ = I.skill_vs_combined(prevs, clim_trouee, rho, obs_serie, 0)
+check("une heure sans climatologie n'entre pas dans le mélange "
+      "(23 heures, pas 24 comblées)", n_t == 23, f"n = {n_t}")
+
+# ⛔ ET LE TÉMOIN QUI COMPTE : sur la MÊME population d'heures, le MSE
+# du modèle rendu par `skill_vs_combined` doit être celui du modèle —
+# pas une valeur recopiée d'ailleurs. On le confronte au calcul direct.
+mse_mod_direct = sum(
+    S.pair_error(p)[0] ** 2 for p in prevs) / len(prevs)
+check("⭐ … et ce mse_model coïncide avec le calcul direct sur les "
+      "mêmes 24 heures", abs(mm_b1 - mse_mod_direct) < 1e-9,
+      f"{mm_b1} vs {mse_mod_direct}")
+
+
+# ══════════════════════════════════════════════════════════════════
 print(f"\n{'✅' if KO == 0 else '❌'} {OK} assertions vertes, {KO} rouges.\n")
 sys.exit(1 if KO else 0)

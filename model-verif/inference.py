@@ -817,6 +817,263 @@ def skill_vs_climatology(pairs: Sequence[S.VerifPair],
 
 
 # ══════════════════════════════════════════════════════════════════
+#  5 ter. LA RÉFÉRENCE COMBINÉE (lot L9c, 28/08/2026)
+#  Murphy 1992, Wea. Forecasting 7:692 — « Climatology, persistence,
+#  and their linear combination as standards of reference »
+# ══════════════════════════════════════════════════════════════════
+#
+# ⭐ POURQUOI UNE TROISIÈME RÉFÉRENCE, ALORS QU'IL Y EN A DÉJÀ DEUX.
+# Le dispositif mesure aujourd'hui deux exploits séparés : battre la
+# persistance (« hier à la même heure ») et battre la climatologie
+# horaire (« le vent habituel ici à cette heure »). Un modèle peut
+# gagner l'un en perdant l'autre, et c'est même l'intérêt de les avoir
+# tous les deux.
+#
+# Mais aucun des deux n'est la référence la PLUS DURE. Murphy (1992)
+# montre que leur combinaison linéaire optimale les DOMINE toutes les
+# deux — elle a, par construction, un MSE inférieur ou égal à chacune —
+# et que le poids optimal sur la persistance est ρ, l'autocorrélation
+# de l'anomalie à l'échéance considérée (24 h ici) :
+#
+#     ref(t) = clim(h) + ρ · [obs(t − 24 h) − clim(h)]
+#            = ρ · persistance + (1 − ρ) · climatologie
+#
+# Autrement dit : « comme hier, mais ramené vers l'habituel d'autant
+# plus fort que hier prédit mal aujourd'hui ». ⛔ Tant qu'on ne la
+# publie pas, l'objection « votre skill bat une référence faible » n'a
+# aucune réponse chiffrée (audit §4.4, P7).
+#
+# ⚠️ À CÔTÉ, JAMAIS À LA PLACE. `mse_persist` et `mse_clim` répondent à
+# deux questions de pilote (« mieux qu'hier ? », « mieux que
+# d'habitude ? ») ; `mse_comb` répond à une question de méthode
+# (« mieux que ce qu'on peut faire sans modèle ? »). Remplacer l'une
+# par l'autre changerait la question sans changer le nom de la réponse.
+
+#: Couples (anomalie du jour, anomalie de la veille) minimaux pour
+#: qu'un `k` soit estimé, et journées distinctes minimales. ⚠️ 120
+#: couples, c'est cinq journées pleines : un ρ tiré d'une poignée
+#: d'heures pondérerait une référence PUBLIÉE avec une estimation de
+#: bruit.
+AUTOCORR_MIN_PAIRS = 120
+AUTOCORR_MIN_DAYS = 5
+
+
+def autocorr_lag24(obs_by_day: Mapping[str, Sequence[S.ObsSample]],
+                   clim: Mapping[int, tuple],
+                   utc_offset_s: int = 0) -> float | None:
+    """ρ, l'autocorrélation à 24 h de l'ANOMALIE de force, sur une balise.
+
+    Rend `None` (jamais 0, jamais 1) quand l'archive est trop courte —
+    une référence combinée bâtie sur un poids inventé serait pire que
+    pas de référence combinée du tout.
+
+    ⚠️ SUR LA FORCE, PAS SUR LE VECTEUR, et c'est le même arbitrage que
+    le mélange qu'elle pondère (`combined_reference` ci-dessous) : la
+    force se mélange linéairement — c'est là que le théorème de Murphy
+    s'applique — le cap se mélange circulairement, et une
+    « autocorrélation vectorielle » demanderait une définition qu'aucune
+    des deux moitiés ne réclame.
+
+    ⚠️ ANOMALIE, PAS VALEUR BRUTE. L'autocorrélation à 24 h de la force
+    BRUTE d'un site de brise est énorme (~0,7) et ne dit rien : elle
+    mesure le cycle diurne, que la climatologie connaît déjà. Ce qui
+    pondère la persistance, c'est ce qu'elle apporte EN PLUS de
+    l'habituel — donc la persistance de l'ÉCART à l'habituel. Pondérer
+    avec l'autocorrélation brute donnerait un poids proche de 1 partout,
+    c'est-à-dire referait de la persistance seule sous un autre nom (la
+    faute du 26/08 sur `poids_pi`, dans une autre matière).
+
+    ⚠️ Corrélation de PEARSON sur les couples appariés (les deux
+    moyennes retirées séparément) : les anomalies ne sont pas de moyenne
+    exactement nulle sur une fenêtre finie, et poser qu'elles le sont
+    fabriquerait un ρ biaisé — vers le haut, donc vers « la persistance
+    suffit ».
+    """
+    # ── force horaire moyenne, par (journée, heure locale) ──
+    par_jour: dict[str, dict[int, list[float]]] = defaultdict(
+        lambda: defaultdict(list))
+    for day, samples in obs_by_day.items():
+        for s in samples:
+            if not S._finite(s.speed):
+                continue
+            hod = ((s.t // 1000 + utc_offset_s) // 3600) % 24
+            par_jour[day][hod].append(s.speed)
+    # ⛔ L'ANOMALIE SE MESURE CONTRE LA MÊME CLIMATOLOGIE QUE CELLE QUI
+    # ENTRERA DANS LE MÉLANGE. Se servir d'une autre (la moyenne de la
+    # journée, par exemple) donnerait un ρ qui ne pondère pas la
+    # quantité qu'il est censé pondérer.
+    anomalies: dict[tuple[str, int], float] = {}
+    for day, heures in par_jour.items():
+        for hod, vals in heures.items():
+            ref = clim.get(hod)
+            if ref is None or not S._finite(ref[0]):
+                continue
+            anomalies[(day, hod)] = sum(vals) / len(vals) - ref[0]
+    # ── appariement à 24 h : même heure locale, journée précédente ──
+    jours = sorted({d for d, _ in anomalies})
+    index = {d: i for i, d in enumerate(jours)}
+    a, b = [], []
+    jours_vus = set()
+    for (day, hod), x in anomalies.items():
+        i = index[day]
+        if i == 0:
+            continue
+        veille = jours[i - 1]
+        # ⚠️ Les journées doivent être CONSÉCUTIVES : un trou d'archive
+        # ferait apparier lundi avec vendredi sous le nom de « 24 h ».
+        # Le test se fait sur les CHAÎNES de date, format `%Y-%m-%d`,
+        # via un delta d'un jour calculé ici plutôt que supposé.
+        if not _jours_consecutifs(veille, day):
+            continue
+        y = anomalies.get((veille, hod))
+        if y is None:
+            continue
+        a.append(x)
+        b.append(y)
+        jours_vus.add(day)
+    if len(a) < AUTOCORR_MIN_PAIRS or len(jours_vus) < AUTOCORR_MIN_DAYS:
+        return None
+    n = len(a)
+    ma, mb = sum(a) / n, sum(b) / n
+    num = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    da = math.sqrt(sum((x - ma) ** 2 for x in a))
+    db = math.sqrt(sum((y - mb) ** 2 for y in b))
+    if da <= 0.0 or db <= 0.0:
+        return None
+    return num / (da * db)
+
+
+def _jours_consecutifs(veille: str, jour: str) -> bool:
+    """`veille` est-elle la journée qui précède `jour` ? (`%Y-%m-%d`)"""
+    from datetime import date, timedelta
+    try:
+        d1 = date.fromisoformat(veille)
+        d2 = date.fromisoformat(jour)
+    except ValueError:
+        return False
+    return d2 - d1 == timedelta(days=1)
+
+
+def poids_combine(rho: float | None) -> tuple[float | None, bool]:
+    """Le poids de la persistance dans le mélange, borné à [0, 1].
+
+    Rend `(k, borne)` — `borne` vaut `True` quand ρ sortait de [0, 1] et
+    a été ramené.
+
+    ⚠️ POURQUOI ON BORNE, ET C'EST UN ARBITRAGE. Le poids optimal au
+    sens du MSE est ρ, y compris NÉGATIF : sur un site où l'écart à
+    l'habituel s'inverse d'un jour sur l'autre, la meilleure référence
+    « sans modèle » serait l'anti-persistance. C'est mathématiquement
+    juste et opérationnellement absurde — une référence que personne ne
+    saurait formuler comme conseil (« demain, l'inverse d'aujourd'hui »)
+    n'est pas une référence à battre, c'est une curiosité. On borne
+    donc, et le run COMPTE les balises bornées : le jour où elles sont
+    nombreuses, c'est le mélange qu'il faut rouvrir, pas la borne.
+    """
+    if rho is None or not S._finite(rho):
+        return None, False
+    if rho < 0.0:
+        return 0.0, True
+    if rho > 1.0:
+        return 1.0, True
+    return rho, False
+
+
+def combined_reference(k: float, persist: tuple, clim_h: tuple) -> tuple:
+    """`(force, cap)` du mélange `k·persistance + (1−k)·climatologie`.
+
+    `persist` et `clim_h` sont des couples `(force, cap)` ; `cap` peut
+    être `None` (station sans girouette, ou vent trop faible pour qu'elle
+    dise quelque chose).
+
+    ⚠️ FORCE EN SCALAIRE, CAP EN CIRCULAIRE — exactement le partage que
+    `scoring.mean_wind` fait déjà, et pour la même raison. Mélanger les
+    deux références en composantes (u, v) puis reprendre la norme
+    rendrait une force SYSTÉMATIQUEMENT plus petite que celle des deux
+    références mélangées (dès que leurs caps diffèrent), c'est-à-dire
+    une référence artificiellement faible — donc un skill artificiellement
+    bon. C'est la faute que ce lot existe pour ne PAS commettre.
+
+    ⓘ `k = 1` rend la persistance au bit près, `k = 0` la climatologie :
+    le banc le vérifie, parce qu'un mélange qui ne retrouve pas ses
+    bornes n'est pas un mélange.
+    """
+    sp, dp = persist
+    sc, dc = clim_h[0], clim_h[1]
+    force = k * sp + (1.0 - k) * sc
+    if dp is None and dc is None:
+        return force, None
+    if dp is None:
+        return force, dc
+    if dc is None:
+        return force, dp
+    # Vecteurs UNITAIRES : le cap se mélange indépendamment des forces,
+    # sinon la référence la plus forte imposerait aussi sa direction.
+    up, vp = S.to_uv(1.0, dp)
+    uc, vc = S.to_uv(1.0, dc)
+    u = k * up + (1.0 - k) * uc
+    v = k * vp + (1.0 - k) * vc
+    if math.hypot(u, v) < 1e-12:
+        # Deux caps diamétralement opposés à poids égal : aucune
+        # direction ne représente le mélange. On préfère se taire —
+        # `pair_error` retombera alors sur l'écart de force, et le
+        # `vector_ratio` de la série en gardera trace.
+        return force, None
+    return force, S.from_uv(u, v)
+
+
+def skill_vs_combined(pairs: Sequence[S.VerifPair],
+                      clim: Mapping[int, tuple],
+                      k: float,
+                      obs: Sequence[S.ObsSample],
+                      utc_offset_s: int = 0):
+    """Rend `(skill, n, mse_model, mse_comb)` — même forme que les deux
+    autres références, et les deux MSE sortent séparément pour la même
+    raison (le skill est indéfini quand la référence est parfaite).
+
+    ⛔ LE MSE DU MODÈLE EST RECALCULÉ SUR **CETTE** POPULATION D'HEURES,
+    et c'est la différence de fond avec `skill_vs_climatology`. Le
+    mélange n'existe qu'aux heures où la persistance ET la climatologie
+    existent toutes les deux — soit une population strictement plus
+    petite que celle de chacune. Comparer le `mse_model` de la
+    persistance à ce `mse_comb`-ci comparerait deux échantillons, pas
+    deux prévisions : c'est le défaut §2.5.a de l'audit, celui que le
+    lot L3 a fermé dans `compare_pair` et que le lot L8 a retrouvé
+    ailleurs. `daily_rows` publie donc `mse_model_comb` À CÔTÉ de
+    `mse_comb`, et les deux voyagent en couple.
+
+    ⓘ La même réserve VAUT pour `mse_clim`, qui compare depuis le lot G4
+    un `mse_model` de population « persistance » à un `mse_clim` de
+    population « climatologie ». Non corrigé ICI, et volontairement :
+    ce serait changer la DÉFINITION d'une colonne publiée au milieu
+    d'une fenêtre glissante de 15 et 30 jours — exactement l'interdit du
+    26/08 (« un changement de définition se publie sous un NOUVEAU nom,
+    jamais en place »). À traiter comme un lot, avec une colonne neuve.
+    """
+    from dataclasses import replace
+    sq_m = sq_c = 0.0
+    n = 0
+    for p in pairs:
+        ref_s, ref_d = S.persistence_reference(obs, p.t)
+        if ref_s is None:
+            continue
+        hod = ((p.t // 1000 + utc_offset_s) // 3600) % 24
+        c = clim.get(hod)
+        if c is None or not S._finite(c[0]):
+            continue
+        fs, fd = combined_reference(k, (ref_s, ref_d), c)
+        em, _ = S.pair_error(p)
+        ec, _ = S.pair_error(replace(p, fcst_speed=fs, fcst_dir=fd))
+        sq_m += em * em
+        sq_c += ec * ec
+        n += 1
+    if n < 2:
+        return None, n, None, None
+    mse_m, mse_c = sq_m / n, sq_c / n
+    return (None if sq_c == 0 else 1 - sq_m / sq_c), n, mse_m, mse_c
+
+
+# ══════════════════════════════════════════════════════════════════
 #  5 bis. AGRÉGER UN ANGLE (lot L9a, 28/08/2026)
 # ══════════════════════════════════════════════════════════════════
 

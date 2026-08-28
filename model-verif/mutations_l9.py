@@ -14,6 +14,8 @@ rougit toute seule, et toutes se publient.
     python3 mutations_l9.py            # tout
     python3 mutations_l9.py 1 6        # par tranches (voir `joue`)
 """
+from __future__ import annotations
+
 import pathlib
 import subprocess
 import sys
@@ -204,6 +206,90 @@ MUTATIONS = [
      SCORE, B_SCORE,
      'REPLAY_FORMULA = 5',
      'REPLAY_FORMULA = 4'),
+
+    # ══════════════════════════════════════════════════════════════
+    #  VOLET (c) — la référence combinée (Murphy 1992)
+    # ══════════════════════════════════════════════════════════════
+    ("⭐⭐ la FORCE du mélange devient la norme du mélange (u, v) — une "
+     "référence artificiellement faible, donc un skill "
+     "artificiellement bon",
+     INFER, B_INFER,
+     '    force = k * sp + (1.0 - k) * sc',
+     '    _uu = k * S.to_uv(sp, dp if dp is not None else 0.0)[0] + '
+     '(1.0 - k) * S.to_uv(sc, dc if dc is not None else 0.0)[0]\n'
+     '    _vv = k * S.to_uv(sp, dp if dp is not None else 0.0)[1] + '
+     '(1.0 - k) * S.to_uv(sc, dc if dc is not None else 0.0)[1]\n'
+     '    force = math.hypot(_uu, _vv)'),
+
+    ("le CAP du mélange est moyenné à plat (arithmétique) au lieu du "
+     "mélange circulaire",
+     INFER, B_INFER,
+     '    up, vp = S.to_uv(1.0, dp)\n    uc, vc = S.to_uv(1.0, dc)',
+     '    return force, k * dp + (1.0 - k) * dc\n'
+     '    up, vp = S.to_uv(1.0, dp)\n    uc, vc = S.to_uv(1.0, dc)'),
+
+    ("⭐ les poids sont ÉCHANGÉS : `k` porte sur la climatologie et "
+     "`1−k` sur la persistance — les deux bornes du mélange s'inversent",
+     INFER, B_INFER,
+     '    force = k * sp + (1.0 - k) * sc',
+     '    force = (1.0 - k) * sp + k * sc'),
+
+    ("⭐⭐ le ρ se mesure sur la force BRUTE, sans retirer la "
+     "climatologie : le cycle diurne est pris pour de la persistance et "
+     "`k` file vers 1 partout",
+     INFER, B_INFER,
+     '            anomalies[(day, hod)] = sum(vals) / len(vals) - ref[0]',
+     '            anomalies[(day, hod)] = sum(vals) / len(vals)'),
+
+    ("des journées NON consécutives s'apparient à « 24 h » : un trou "
+     "d'archive fait comparer lundi à vendredi",
+     INFER, B_INFER,
+     '        if not _jours_consecutifs(veille, day):\n            continue',
+     '        if False:\n            continue'),
+
+    ("le poids n'est plus borné : une anti-persistance devient une "
+     "référence publiée",
+     INFER, B_INFER,
+     '    if rho < 0.0:\n        return 0.0, True',
+     '    if rho < -99.0:\n        return 0.0, True'),
+
+    ("le mélange se contente de la persistance quand la climatologie "
+     "manque à cette heure-là — la référence change de définition en "
+     "cours de journée, sans le dire",
+     INFER, B_INFER,
+     '        if c is None or not S._finite(c[0]):\n            continue',
+     '        if c is None or not S._finite(c[0]):\n'
+     '            c = (ref_s, ref_d, 0)'),
+
+    ("⭐ `skill_comb` de la case est calculé contre `mse_model` (la "
+     "population « persistance ») au lieu de son témoin apparié "
+     "`mse_model_comb`",
+     SCORE, B_SCORE,
+     '                b["mse_cb"].append((d["mse_model_comb"], d["mse_comb"]))',
+     '                b["mse_cb"].append((d["mse_model"], d["mse_comb"]))'),
+
+    ("une balise sans `k` reçoit un poids par DÉFAUT au lieu de rester "
+     "muette — un poids inventé sur une référence publiée",
+     SCORE, B_SCORE,
+     '            if clim and poids_comb:\n'
+     '                c = clim.get(key)\n'
+     '                kk = poids_comb.get(key)',
+     '            if clim:\n'
+     '                c = clim.get(key)\n'
+     '                kk = (poids_comb or {}).get(key, 0.5)'),
+
+    ("le cache de climatologie garde son nom d'AVANT le lot : relu, il "
+     "rend une climatologie complète et AUCUN poids, sans que rien ne "
+     "le dise",
+     SCORE, B_SCORE,
+     'f"clim_{day:%Y-%m-%d}_{n_days}_v2.json.gz"',
+     'f"clim_{day:%Y-%m-%d}_{n_days}.json.gz"'),
+
+    ("le poids n'est pas ÉCRIT dans le cache : la première nuit le "
+     "calcule, toutes les suivantes le perdent",
+     SCORE, B_SCORE,
+     '             "k": poids},',
+     '             "k": {}},'),
 ]
 
 

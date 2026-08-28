@@ -3463,6 +3463,186 @@ def test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base():
           "`mse_comb` l'ont fait passer de 4)", J.REPLAY_FORMULA, 5)
 
 
+def test_l9c_reference_combinee_bout_en_bout():
+    print("── L9c : la référence combinée, du balise-jour à la case ──")
+    # ── 1. `daily_rows` : deux colonnes, et rien sans les deux entrées ─
+    snapshots = {
+        0: [fcst_line("835", "icon_d2", DAY, lambda i: brise(i % 24) * 1.2)],
+        1: [], 2: [],
+    }
+    obs_j = [obs_line("835", DAY, brise)]
+    obs_v = [obs_line("835", DAY - timedelta(days=1),
+                      lambda h: brise(h) * 0.6)]
+    clim = {"pioupiou:835": {h: (brise(h) * 0.8, None, 12) for h in range(24)}}
+
+    sans, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, 7200, clim)
+    r_sans = next(r for r in sans if r["lead_h"] == 6)
+    check("⛔ sans `poids_comb`, `mse_comb` reste NUL — jamais un poids "
+          "inventé", r_sans["mse_comb"], None)
+    check("… et son témoin apparié aussi", r_sans["mse_model_comb"], None)
+
+    avec, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, 7200, clim,
+                           poids_comb={"pioupiou:835": 0.5})
+    r = next(r for r in avec if r["lead_h"] == 6)
+    check("avec les deux, `mse_comb` est chiffré",
+          r["mse_comb"] is not None, True)
+    check("⛔ … et `mse_model_comb` VOYAGE AVEC LUI (le témoin sur la "
+          "même population d'heures)", r["mse_model_comb"] is not None, True)
+    check("le reste de la ligne n'a pas bougé d'un chiffre",
+          (r["err_vec_med"], r["mse_model"], r["mse_persist"]),
+          (r_sans["err_vec_med"], r_sans["mse_model"],
+           r_sans["mse_persist"]))
+    # ⭐ Les bornes, jusqu'au bout de la chaîne : k = 1 doit rendre le MSE
+    # de la persistance, k = 0 celui de la climatologie.
+    k1, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, 7200, clim,
+                         poids_comb={"pioupiou:835": 1.0})
+    k0, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, 7200, clim,
+                         poids_comb={"pioupiou:835": 0.0})
+    r1 = next(x for x in k1 if x["lead_h"] == 6)
+    r0 = next(x for x in k0 if x["lead_h"] == 6)
+    check("⭐ k = 1 → `mse_comb` == `mse_persist` de la même ligne",
+          r1["mse_comb"], r1["mse_persist"], 5e-4)
+    check("⭐ k = 0 → `mse_comb` == `mse_clim` de la même ligne",
+          r0["mse_comb"], r0["mse_clim"], 5e-4)
+    check("⭐⭐ … et le mélange à 0,5 fait MIEUX que les deux (Murphy "
+          "1992, sur une vraie ligne de production)",
+          r["mse_comb"] <= min(r1["mse_comb"], r0["mse_comb"]) + 1e-6, True)
+
+    # ── 2. `_case_rows` : le skill de la case, sur le BON témoin ──────
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(1, 5)}
+    daily = []
+    for j in range(6):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(1, 5):
+            daily.append({
+                "day": d, "source": "pioupiou", "station_id": str(i),
+                "model": "icon_d2", "lead_h": 6, "regime": "fluxN",
+                "n_hours": 20, "err_vec_med": 4.0,
+                # ⛔ LA SCÈNE QUI SÉPARE LES DEUX TÉMOINS. `mse_model`
+                # (population « persistance ») vaut 1,0 ; le modèle sur
+                # les heures du MÉLANGE en vaut 4,0. Un code qui
+                # reprendrait `mse_model` publierait skill_comb = 0,875
+                # au lieu de 0,5.
+                "mse_model": 1.0, "mse_persist": 100.0,
+                "mse_model_comb": 4.0, "mse_comb": 8.0})
+    fine = [r for r in J.rolling_scores(daily, zone_of, DAY)
+            if r["zone_id"] == "b1:valley"][0]
+    check("⭐ `skill_comb` = 1 − 4/8 = 0,5 (le témoin apparié)",
+          fine["skill_comb"], 0.5, 1e-6)
+    check("⛔ … et PAS 0,875, qu'aurait donné `mse_model` de la "
+          "population « persistance »",
+          abs(fine["skill_comb"] - 0.875) > 0.3, True)
+    check("`beats_comb` est vrai quand le modèle fait mieux",
+          fine["beats_comb"], True)
+    check("⚠️ il reste À CÔTÉ : `skill` et `skill_clim` n'ont pas bougé",
+          fine["skill"], 0.99, 1e-6)
+
+    perd = [{**d, "mse_model_comb": 9.0} for d in daily]
+    fine_p = [r for r in J.rolling_scores(perd, zone_of, DAY)
+              if r["zone_id"] == "b1:valley"][0]
+    check("un modèle battu par la référence la plus dure le dit",
+          fine_p["beats_comb"], False)
+
+    vieux = [{k: v for k, v in d.items()
+              if k not in ("mse_comb", "mse_model_comb")} for d in daily]
+    fine_v = [r for r in J.rolling_scores(vieux, zone_of, DAY)
+              if r["zone_id"] == "b1:valley"][0]
+    check("des balise-jours d'avant le lot laissent la case muette, pas "
+          "cassée", (fine_v["skill_comb"], fine_v["beats_comb"]),
+          (None, None))
+
+    # ── 3. le fichier léger ne s'alourdit PAS de ces deux champs ──────
+    for champ in ("skill_comb", "beats_comb"):
+        check(f"⛔ `{champ}` n'entre PAS dans le fichier léger (la "
+              f"pastille n'affiche aucun skill)",
+              champ in J.LIGHT_SCORE_FIELDS, False)
+
+    # ── 4. le `.sql` est nommé, pour ces colonnes-ci aussi ────────────
+    class _SbFactice:
+        def columns(self, table):
+            return {"day", "source", "station_id", "model", "lead_h",
+                    "err_vec_med", "mse_model", "mse_persist", "mse_clim"}
+    import contextlib                                      # noqa: PLC0415
+    import io                                              # noqa: PLC0415
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        sortie = J._pour_la_base(_SbFactice(), "model_verif_daily", [dict(r)])
+    dit = tampon.getvalue()
+    check("⛔ `mse_comb` absente en base → step57 nommé, jamais step40",
+          "supabase_step57_lot_l9_compagnons.sql" in dit
+          and "step40" not in dit, True)
+    check("… et la colonne ne part pas en base tant qu'elle n'existe pas",
+          "mse_comb" in sortie[0], False)
+
+    # ── 5. le cache de climatologie porte les DEUX, sous un nom NEUF ──
+    # ⛔ POURQUOI CE BANC. Le cache d'avant ce lot ne porte pas `k`.
+    # Relu sous son ancien nom, il aurait rendu une climatologie
+    # complète et AUCUN poids : `mse_comb` serait resté vide toute la
+    # journée du déploiement, et rien — ni log, ni colonne — ne l'aurait
+    # distingué d'une archive trop courte.
+    import gzip as _gz2                                    # noqa: PLC0415
+    import json as _json2                                  # noqa: PLC0415
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    (tmp / J.CLIM_SUBDIR).mkdir(parents=True, exist_ok=True)
+    corps = {"clim": {"pioupiou:1": {"12": [11.0, 200.0, 9]}},
+             "k": {"pioupiou:1": 0.42}}
+    (tmp / J.CLIM_SUBDIR /
+     f"clim_{DAY:%Y-%m-%d}_{J.CLIM_DAYS}_v2.json.gz").write_bytes(
+        _gz2.compress(_json2.dumps(corps).encode()))
+    # Le cache d'AVANT le lot, même journée, contenu DIFFÉRENT : il ne
+    # doit jamais être lu.
+    (tmp / J.CLIM_SUBDIR /
+     f"clim_{DAY:%Y-%m-%d}_{J.CLIM_DAYS}.json.gz").write_bytes(
+        _gz2.compress(_json2.dumps(
+            {"clim": {"pioupiou:999": {"12": [99.0, 1.0, 9]}}}).encode()))
+    c_lu, k_lu = J.climatology_by_station(tmp, DAY, None, 7200)
+    check("⭐ le cache rend un COUPLE (climatologie, poids)",
+          (sorted(c_lu), k_lu), (["pioupiou:1"], {"pioupiou:1": 0.42}))
+    check("… avec l'heure relue en ENTIER, pas en chaîne",
+          list(c_lu["pioupiou:1"]), [12])
+    check("⛔ le cache d'avant le lot (sans `_v2`) n'est PAS lu — sinon "
+          "tous les `k` sortiraient nuls sans que rien ne le dise",
+          "pioupiou:999" in c_lu, False)
+
+    # ── 6. ALLER-RETOUR COMPLET : calculé une fois, RELU ensuite ──────
+    # ⛔ LE BANC DU DESSUS NE PROUVE QUE LA LECTURE. Un cache où l'on
+    # oublierait d'ÉCRIRE `k` passerait la première nuit (le calcul a
+    # lieu) et perdrait le poids toutes les suivantes — c'est-à-dire
+    # que `mse_comb` marcherait le soir du déploiement et disparaîtrait
+    # le lendemain. On fabrique donc une archive, on laisse la fonction
+    # CALCULER, puis on la rappelle pour qu'elle RELISE.
+    tmp2 = pathlib.Path(tempfile.mkdtemp())
+    # Anomalie journalière PERSISTANTE (un décalage propre à chaque
+    # journée, corrélé d'un jour sur l'autre) : sans elle, ρ n'existe
+    # pas et le banc ne prouverait rien.
+    def _obs_du_jour(root_, d_, storage_):
+        j = (d_ - (DAY - timedelta(days=11))).days
+        ecart = 3.0 * math.cos(j * 0.4)
+        return [obs_line("1", d_, lambda h, e=ecart: brise(h) + e)]
+
+    vrai_all_obs = J.all_obs_rows
+    J.all_obs_rows = _obs_du_jour
+    try:
+        c_calc, k_calc = J.climatology_by_station(tmp2, DAY, None, 0)
+        c_relu, k_relu = J.climatology_by_station(tmp2, DAY, None, 0)
+    finally:
+        J.all_obs_rows = vrai_all_obs
+    check("l'archive fabriquée donne bien une climatologie",
+          "pioupiou:1" in c_calc, True)
+    check("⭐ … ET un poids `k`, calculé sur les mêmes journées",
+          k_calc.get("pioupiou:1") is not None, True,)
+    check("⭐⭐ le second appel RELIT le cache et retrouve le MÊME poids "
+          "— sans quoi `mse_comb` marcherait le soir du déploiement et "
+          "disparaîtrait le lendemain", k_relu, k_calc)
+    check("… et la même climatologie", sorted(c_relu), sorted(c_calc))
+    check("le fichier de cache porte bien le suffixe `_v2`",
+          (tmp2 / J.CLIM_SUBDIR /
+           f"clim_{DAY:%Y-%m-%d}_{J.CLIM_DAYS}_v2.json.gz").exists(), True)
+
+
 def test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap():
     print("── L9a : le biais de vitesse et de cap, compagnons du score ──")
     # Cinq balises, cinq jours. Les `bias_ratio` sont choisis pour que la
@@ -3750,6 +3930,8 @@ def main() -> int:
                test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap,
                # ── lot L9b (28/08) : les six sommes de Murphy ──
                test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base,
+               # ── lot L9c (28/08) : la référence combinée ──
+               test_l9c_reference_combinee_bout_en_bout,
                # ── lot S13.0 : le fichier léger + le résumé des manches ──
                test_light_scores_sous_ensemble_exact,
                test_light_scores_bout_en_bout_ne_recalcule_rien,

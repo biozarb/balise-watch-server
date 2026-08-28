@@ -1291,7 +1291,8 @@ def day_regime(fcst_ref: dict | None, obs: list[S.ObsSample],
 def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                obs_day: list[dict], obs_prev: list[dict],
                utc_offset_s: int, clim: dict | None = None,
-               bias_prior: dict | None = None, temoin: list | None = None):
+               bias_prior: dict | None = None, temoin: list | None = None,
+               poids_comb: dict | None = None):
     """Rend (lignes model_verif_daily, détail par tranche de vent).
 
     Le détail par tranche ne va PAS en base : il alimente les
@@ -1386,6 +1387,36 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 if c:
                     _, _, _, mse_c = INF.skill_vs_climatology(pairs, c, utc_offset_s)
 
+            # ── troisième référence : la COMBINAISON optimale (L9c) ───
+            # ⭐ Murphy 1992 : `k·persistance + (1−k)·climatologie`, avec
+            # `k` = autocorrélation à 24 h de l'anomalie, par site. Elle
+            # DOMINE les deux autres par construction — c'est la
+            # référence la plus dure, celle qui répond à « votre skill
+            # bat-il ce qu'on peut faire sans modèle » (audit §4.4).
+            #
+            # ⛔ DEUX COLONNES, PAS UNE. Le mélange n'existe qu'aux
+            # heures où la persistance ET la climatologie existent :
+            # `mse_model_comb` est le MSE du modèle sur CES heures-là.
+            # Comparer `mse_model` (population « persistance ») à
+            # `mse_comb` comparerait deux échantillons, pas deux
+            # prévisions — le défaut §2.5.a de l'audit. Les deux
+            # voyagent donc en couple, et `_case_rows` les médianise
+            # ensemble.
+            #
+            # ⚠️ `clim` ET `poids_comb` sont tous les deux nécessaires :
+            # `replay_day` n'en passe AUCUN (asymétrie connue depuis le
+            # lot G1, cf. le pavé du self-test), donc `mse_comb` est nul
+            # sur tout le chemin RÉGIME, exactement comme `mse_clim`. Ce
+            # n'est pas une nouveauté de ce lot, et ce lot ne la répare
+            # pas — il la NOMME.
+            mse_cb = mse_mcb = None
+            if clim and poids_comb:
+                c = clim.get(key)
+                kk = poids_comb.get(key)
+                if c and kk is not None:
+                    _, _, mse_mcb, mse_cb = INF.skill_vs_combined(
+                        pairs, c, kk, obs_for_skill, utc_offset_s)
+
             # ── la colonne corrigée du biais de site (lot S2) ─────────
             # ⛔ L'ANTÉCÉDENT NE CONTIENT JAMAIS LE JOUR J. Il est bâti
             # par `prior_biais` sur [J−30, J−1] et passé tout fait : il
@@ -1431,6 +1462,8 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 "err_vec_p90": _r(p90),
                 "mse_model": _r(mse_m), "mse_persist": _r(mse_r),
                 "mse_clim": _r(mse_c),
+                # ── lot L9c : la référence combinée, et son témoin ────
+                "mse_comb": _r(mse_cb), "mse_model_comb": _r(mse_mcb),
                 "bias_ratio": _r(bias.speed_ratio),
                 "bias_dir_deg": _r(bias.dir_offset),
                 "vector_ratio": _r(err.vector_ratio),
@@ -2174,13 +2207,33 @@ def climatology_by_station(root: pathlib.Path, day: datetime, storage,
     ⚠️ Rend `{}` plutôt qu'une climatologie fabriquée quand l'archive est
     trop courte : au 09/08 elle porte deux jours, et « le vent habituel »
     tiré de deux journées serait le vent de ces deux journées-là.
+
+    ── lot L9c (28/08) ──────────────────────────────────────────────
+    Rend désormais un COUPLE `(clim, poids)` :
+      · `clim`  — `{unit: {heure_locale: (force, cap, n_jours)}}`
+      · `poids` — `{unit: k}`, le poids de la persistance dans la
+        référence combinée de Murphy 1992 (l'autocorrélation à 24 h de
+        l'anomalie de force, bornée à [0, 1]). Une balise sans assez
+        d'archive n'y figure PAS — un `k` par défaut serait un poids
+        inventé sur une référence publiée.
+    Les deux sortent de la MÊME lecture de trente journées ; c'est toute
+    la raison de les calculer ensemble.
     """
-    cache = root / CLIM_SUBDIR / f"clim_{day:%Y-%m-%d}_{n_days}.json.gz"
+    # ⚠️ `_v2` DEPUIS LE LOT L9c (28/08) : le cache porte désormais DEUX
+    # choses — la climatologie horaire ET le poids `k` de la référence
+    # combinée, tiré des MÊMES trente journées d'observations. Garder le
+    # nom d'avant aurait rendu un cache sans `k` indistinguable d'un
+    # cache où aucune balise n'a assez d'archive : tous les `k` seraient
+    # sortis nuls, `mse_comb` serait resté vide, et rien ne l'aurait dit.
+    # Un cache qui change de CONTENU change de nom, comme une formule de
+    # rejeu change de numéro.
+    cache = root / CLIM_SUBDIR / f"clim_{day:%Y-%m-%d}_{n_days}_v2.json.gz"
     if cache.exists():
         try:
             d = json.loads(gzip.decompress(cache.read_bytes()).decode("utf-8"))
-            return {u: {int(h): tuple(v) for h, v in hs.items()}
-                    for u, hs in d.get("clim", {}).items()}
+            return ({u: {int(h): tuple(v) for h, v in hs.items()}
+                     for u, hs in d.get("clim", {}).items()},
+                    {u: v for u, v in (d.get("k") or {}).items()})
         except (OSError, ValueError):
             pass
 
@@ -2192,19 +2245,41 @@ def climatology_by_station(root: pathlib.Path, day: datetime, storage,
             obs_by_unit_day[unit][d.strftime("%Y-%m-%d")] = to_obs_samples(row)
 
     out: dict[str, dict[int, tuple]] = {}
+    poids: dict[str, float] = {}
+    bornes = 0
     for unit, by_day in obs_by_unit_day.items():
         clim = INF.hourly_climatology(by_day, utc_offset_s, CLIM_MIN_DAYS)
-        if clim:
-            out[unit] = clim
+        if not clim:
+            continue
+        out[unit] = clim
+        # ── lot L9c : le poids de Murphy 1992, sur les mêmes journées ──
+        # ⛔ CALCULÉ ICI ET PAS AILLEURS, et ce n'est pas de la commodité.
+        # `k` est l'autocorrélation à 24 h de l'ANOMALIE À CETTE
+        # CLIMATOLOGIE-CI : le calculer dans une seconde fonction
+        # obligerait à relire les trente mêmes journées d'archive (le
+        # poste le plus cher du run) et ouvrirait la porte à ce qu'un
+        # jour les deux ne parlent plus de la même climatologie.
+        rho = INF.autocorr_lag24(by_day, clim, utc_offset_s)
+        kk, borne = INF.poids_combine(rho)
+        if kk is not None:
+            poids[unit] = kk
+            bornes += int(borne)
+    if bornes:
+        # ⛔ COMPTÉ ET DIT. Une borne qui se déclenche souvent n'est plus
+        # un garde-fou, c'est un modèle faux — cf. le pavé de
+        # `INF.poids_combine`.
+        print(f"  ⓘ référence combinée : {bornes} balise(s) sur "
+              f"{len(poids)} avaient un ρ hors [0, 1], ramené à la borne")
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_bytes(gzip.compress(json.dumps(
             {"clim": {u: {str(h): list(v) for h, v in hs.items()}
-                      for u, hs in out.items()}},
+                      for u, hs in out.items()},
+             "k": poids},
             separators=(",", ":")).encode("utf-8")))
     except OSError:
         pass
-    return out
+    return out, poids
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -3137,7 +3212,8 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
     """
     acc: dict[tuple, dict] = defaultdict(
         lambda: {"by_day": defaultdict(list), "st": set(), "rows": [],
-                 "mse_m": [], "mse_r": [], "mse_c": [], "n_hours": 0,
+                 "mse_m": [], "mse_r": [], "mse_c": [], "mse_cb": [],
+                 "n_hours": 0,
                  # ── lot S2 : la colonne corrigée, À CÔTÉ ─────────────
                  "err_corr": [], "mse_cc": [], "nd": [],
                  # ── lot L9a (28/08) : le compagnon WMO du score ──────
@@ -3194,6 +3270,15 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
                 b["mse_r"].append(d["mse_persist"])
             if d.get("mse_model") is not None and d.get("mse_clim") is not None:
                 b["mse_c"].append((d["mse_model"], d["mse_clim"]))
+            # ── lot L9c : la référence combinée, appariée à SON témoin ─
+            # ⛔ `mse_model_comb`, PAS `mse_model`. Le mélange n'existe
+            # qu'aux heures où les deux références existent, et
+            # `daily_rows` a recalculé le MSE du modèle sur CES
+            # heures-là exprès. Reprendre `mse_model` ici referait le
+            # défaut §2.5.a que la colonne existe pour éviter.
+            if (d.get("mse_model_comb") is not None
+                    and d.get("mse_comb") is not None):
+                b["mse_cb"].append((d["mse_model_comb"], d["mse_comb"]))
             # ── lot S2 ────────────────────────────────────────────────
             # ⚠️ LA CLIMATOLOGIE N'EST PAS CORRIGÉE, ET C'EST LA QUESTION.
             # Elle est bâtie sur des OBSERVATIONS : elle porte déjà le
@@ -3270,6 +3355,15 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         mse_cc = S.median([c for _, c in b["mse_c"]])
         skill, bat_persist = skill_contre(mse_m, mse_r)
         skill_clim, bat_clim = skill_contre(mse_cm, mse_cc)
+        # ── lot L9c : la référence la plus dure des trois ─────────────
+        # ⚠️ Même appariement AVANT médianisation que pour la
+        # climatologie (« comparer la médiane des MSE du modèle à celle
+        # d'une référence calculée sur une population différente
+        # comparerait deux échantillons »), sauf qu'ici les deux membres
+        # du couple viennent DÉJÀ des mêmes heures.
+        mse_cbm = S.median([m for m, _ in b["mse_cb"]])
+        mse_cbc = S.median([c for _, c in b["mse_cb"]])
+        skill_comb, bat_comb = skill_contre(mse_cbm, mse_cbc)
         # ── lot S2 : la même arithmétique, sur le modèle corrigé ──────
         # ⚠️ Le quorum est CELUI DE LA CASE, pas un second : une case
         # publie son corrigé si et seulement si elle publie son brut.
@@ -3341,6 +3435,21 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             "skill": skill,
             "beats_clim": bat_clim,
             "skill_clim": skill_clim,
+            # ── lot L9c : À CÔTÉ des deux autres, jamais à leur place ──
+            # ⛔ `beats_persist` et `beats_clim` répondent à deux
+            # questions de PILOTE (« mieux qu'hier ? », « mieux que
+            # d'habitude ? ») ; `beats_comb` répond à une question de
+            # MÉTHODE (« mieux que ce qu'on sait faire sans modèle ? »)
+            # et c'est la plus dure des trois, par construction
+            # (Murphy 1992 : la combinaison optimale domine chacune de
+            # ses composantes). Un modèle peut battre les deux premières
+            # et perdre celle-ci — c'est même le cas intéressant.
+            # ⓘ Absent du fichier LÉGER, délibérément : la pastille
+            # n'affiche pas de skill, et ces deux champs sur 8 180
+            # lignes alourdiraient un objet servi à chaque ouverture de
+            # fiche pour un chiffre de diagnostic.
+            "beats_comb": bat_comb,
+            "skill_comb": skill_comb,
             # ── lot S2 : le corrigé, À CÔTÉ du brut, jamais à sa place ─
             # ⛔ Décision D intacte : `typical_err_kmh` reste LE score.
             # `n_corr` voyage avec, parce qu'une case peut publier son
@@ -4575,17 +4684,27 @@ def _upsert_scores(sb, rows: list[dict]) -> int:
 #  ⚠️ CE QU'IL NE COUVRE PAS, ET IL FAUT LE DIRE : le régime, le biais
 #  de site et sa colonne corrigée, les événements, la pression, les
 #  zones, le rang. Il couvre l'appariement, l'erreur vectorielle et les
-#  deux références (persistance, climatologie) — c'est-à-dire le tronc
-#  dont tout le reste dérive.
+#  TROIS références (persistance, climatologie, et depuis le lot L9c la
+#  COMBINAISON optimale de Murphy 1992) — c'est-à-dire le tronc dont
+#  tout le reste dérive.
 #
 #  ⚠️ ET UNE ASYMÉTRIE CONNUE, QU'IL NE MASQUE PAS. `replay_day`
 #  (l. ~1745) appelle `daily_rows` SANS climatologie : sur tout le
 #  chemin RÉGIME, `mse_clim` est nul depuis le lot G1 (trouvé au lot S2,
-#  non corrigé). Le self-test, lui, injecte une climatologie fabriquée
-#  et vérifie donc `skill_clim` sur le chemin NOCTURNE, celui de
-#  `main()`. Il ne prétend pas couvrir l'autre, et le dire ici vaut
-#  mieux que de laisser croire que « self-test vert » veut dire « les
-#  deux chemins sont bons ».
+#  non corrigé). ⚠️ **`mse_comb` HÉRITE EXACTEMENT DE CETTE ASYMÉTRIE**
+#  (lot L9c, 28/08) : il demande la climatologie ET le poids `k`, que
+#  `replay_day` ne passe pas davantage. Ce n'est donc PAS une régression
+#  du lot L9 — c'est la même asymétrie, sur une colonne de plus, et la
+#  réparer demanderait de faire lire la climatologie au rejeu (trente
+#  journées × un cache par journée), c'est-à-dire un lot à soi.
+#  ⇒ En pratique : `skill_comb` existe sur le chemin GLISSANT
+#  (`rolling15`, alimenté par `model_verif_daily`, écrit chaque nuit
+#  AVEC la climatologie) et reste nul sur le chemin RÉGIME.
+#  Le self-test, lui, injecte une climatologie ET un poids fabriqués :
+#  il vérifie donc `skill_clim` et `skill_comb` sur le chemin NOCTURNE,
+#  celui de `main()`. Il ne prétend pas couvrir l'autre, et le dire ici
+#  vaut mieux que de laisser croire que « self-test vert » veut dire
+#  « les deux chemins sont bons ».
 
 #: Balises fabriquées. 24 suffit à ce que la médiane de la population
 #: ait un sens, et le run entier tient en moins d'une seconde — ce qui
@@ -4855,7 +4974,17 @@ def self_test_epreuves(permuter=self_test_permuter, n=SELF_TEST_STATIONS,
         lignes.append(("     ✅ " if bon else "     ❌ ") + texte)
 
     # ── (a) la prévision EST l'observation ────────────────────────
-    honnete, _ = daily_rows(jour, snapshots, obs_day, obs_prev, 0, clim)
+    # ⚠️ `poids_comb` FABRIQUÉ ICI (lot L9c) : un demi-poids pour chaque
+    # balise de la fixture, de façon que le contrôle nocturne exerce
+    # AUSSI la troisième référence. Sans lui, `mse_comb` sortirait nul
+    # et le self-test le laisserait passer — un garde-fou qui ne
+    # regarde pas une colonne neuve laisse croire qu'il la couvre.
+    # ⓘ 0,5 et pas 1 ni 0 : les deux bornes du mélange sont vérifiées
+    # au banc (`test_score.py`), le self-test, lui, veut un mélange qui
+    # mélange vraiment.
+    poids_st = {u: 0.5 for u in (clim or {})}
+    honnete, _ = daily_rows(jour, snapshots, obs_day, obs_prev, 0, clim,
+                            poids_comb=poids_st)
     if not honnete:
         raise _SelfTestIndisponible(
             "l'épreuve (a) n'a produit AUCUNE ligne : la fixture ne "
@@ -4898,6 +5027,28 @@ def self_test_epreuves(permuter=self_test_permuter, n=SELF_TEST_STATIONS,
          and bat_c,
          f"(a) skill contre la climatologie = {skill_c} (attendu 1) — "
          f"mse_clim {mse_clim:.3f}")
+    # ── lot L9c : la troisième référence, dans le contrôle nocturne ───
+    # ⛔ SUR SON PROPRE `mse_model_comb`, jamais sur `mse_modele`. Le
+    # mélange n'existe qu'aux heures où les deux références existent :
+    # y opposer le MSE du modèle calculé sur la population de la
+    # persistance referait ici, dans le garde-fou lui-même, le défaut
+    # §2.5.a que la colonne existe pour éviter.
+    mse_comb = _med([r["mse_comb"] for r in honnete])
+    mse_mod_comb = _med([r["mse_model_comb"] for r in honnete])
+    if mse_comb is not None and mse_comb >= SKILL_MIN_REF_MSE:
+        skill_cb, bat_cb = skill_contre(mse_mod_comb, mse_comb)
+        dire(skill_cb is not None and abs(skill_cb - 1.0) <= SELF_TEST_ZERO_KMH
+             and bat_cb,
+             f"(a) skill contre la référence COMBINÉE = {skill_cb} "
+             f"(attendu 1) — mse_comb {mse_comb:.3f}")
+        mesures["mse_comb"] = mse_comb
+    else:
+        # ⓘ Pas une épreuve rouge : la fixture peut rendre un mélange
+        # trop bon (les deux références y sont fabriquées). On le DIT au
+        # lieu de le taire — un contrôle silencieux sur une colonne
+        # neuve se lit comme un contrôle réussi.
+        lignes.append(f"     ⓘ (a) référence combinée non éprouvée : "
+                      f"mse_comb = {mse_comb} (sous SKILL_MIN_REF_MSE)")
     mesures["skill_parfait"] = skill
     mesures["skill_clim_parfait"] = skill_c
 
@@ -5118,11 +5269,27 @@ def main() -> int:
 
     # ── 2-3. apparier et écrire l'agrégat quotidien ──────────────
     t_clim = time.monotonic()
-    clim = climatology_by_station(root, day, st, utc_offset_s)
+    clim, poids_comb = climatology_by_station(root, day, st, utc_offset_s)
     print(f"  climatologie horaire : {len(clim)} balises "
           f"({time.monotonic() - t_clim:.1f} s)"
           + ("" if clim else " — archive trop courte, seconde référence "
                              "indisponible, `beats_clim` restera nul"))
+    # ── lot L9c : le poids de la référence combinée ───────────────
+    # ⛔ LE COMPTE EST DIT, ET IL EST DIT CONTRE `clim`. Une balise qui a
+    # une climatologie mais pas de `k` (moins de cinq journées
+    # consécutives appariables) n'aura PAS de `mse_comb` : sans cette
+    # ligne, la colonne sortirait à moitié vide sans que rien ne dise
+    # pourquoi, et on chercherait le défaut dans le mélange.
+    if poids_comb:
+        _ks = sorted(poids_comb.values())
+        _med_k = _ks[len(_ks) // 2]
+        print(f"  référence combinée : k estimé sur {len(poids_comb)} "
+              f"balises / {len(clim)} climatologisées — médiane "
+              f"k = {_med_k:.3f} (k = 1 → persistance pure, "
+              f"k = 0 → climatologie pure)")
+    else:
+        print("  ⓘ référence combinée : aucun k estimable (archive trop "
+              "courte) — `mse_comb` restera nul cette nuit.")
     # ── l'antécédent du biais de site (lot S2) ───────────────────
     t_prior = time.monotonic()
     prior = prior_biais(root, day)
@@ -5134,7 +5301,8 @@ def main() -> int:
              f"nulles cette nuit ; `--replay-budget 30` comble d'un coup."))
     temoin: list = []
     rows, banded = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s,
-                              clim, bias_prior=prior, temoin=temoin)
+                              clim, bias_prior=prior, temoin=temoin,
+                              poids_comb=poids_comb)
     print(f"  {len(rows)} agrégats quotidiens, {len(banded)} détails par tranche")
     part_temoin = bilan_temoin(temoin)
     if part_temoin:
