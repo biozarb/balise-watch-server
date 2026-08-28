@@ -259,33 +259,56 @@ def mse_depuis_moments(m: Sequence[float]) -> float:
 #  3. PAR BALISE, PUIS LE RÉSUMÉ PAR MODÈLE
 # ══════════════════════════════════════════════════════════════════
 
-def par_balise(units: Iterable[Mapping],
-               min_pairs: int = MURPHY_MIN_PAIRS,
-               min_days: int = MURPHY_MIN_DAYS) -> list[dict]:
-    """Une ligne par (balise, modèle, échéance) sur la fenêtre rejouée.
+def accumule(acc: dict, cle: tuple, moments: Sequence[float] | None) -> None:
+    """Ajoute les six sommes d'UN balise-jour dans l'accumulateur.
 
-    `units` : les lignes de `score.replay_window` — elles portent
-    `unit`, `day`, `model`, `lead_h` et la clé privée `_murphy`.
+    ⛔⛔ POURQUOI UN ACCUMULATEUR ET PAS UNE LISTE DE LIGNES — ET C'EST
+    UNE MESURE, PAS UN GOÛT. La première version de ce module lisait
+    `units`, c'est-à-dire les 405 486 lignes de la fenêtre rejouée, avec
+    leur clé `_murphy` attachée. Chaque clé coûte une liste Python et
+    six flottants, soit ~260 octets : **~107 Mo de plus au pic**, sur un
+    VPS de 3,8 Go SANS SWAP dont le run de la nuit du 28/08 venait
+    précisément d'être tué par l'OOM killer (`Result: oom-kill`,
+    06:20:40 CEST).
+    Ici, l'état total tient dans un tableau de sept nombres par
+    (balise, modèle, échéance) : ~37 000 clés, **~5 Mo**. Les six sommes
+    sont ADDITIVES — c'est toute la raison de les avoir choisies — donc
+    rien ne se perd à les fondre au fil de l'eau.
 
-    ⚠️ UNE LIGNE SOUS LE PLANCHER EST PUBLIÉE QUAND MÊME, avec son
-    `reason` et ses termes nuls. Une ligne absente et une ligne à zéro
-    se lisent pareil dans un JSON, et c'est la première qu'on cherche
-    le soir où une ingestion est morte (leçon du lot L1).
+    `acc[cle] = [n, Σf, Σo, Σf², Σo², Σfo, n_journées]`.
+
+    ⚠️ `n_journées` est un COMPTEUR, pas un ensemble de dates : un
+    `set` de 30 chaînes par clé pèserait ~66 Mo à lui seul, ce qui
+    aurait rendu l'optimisation vaine. Il est exact parce que
+    l'appelant balaie la fenêtre JOUR PAR JOUR et qu'une clé ne reçoit
+    au plus qu'une ligne par journée (la clé d'upsert de
+    `model_verif_daily` le garantit, `fcst_src` mis à part — et un
+    doublon de chaîne y ajouterait une journée en trop, ce qui gonfle
+    le dénominateur du plancher, jamais le r² publié).
     """
-    acc: dict[tuple, dict] = defaultdict(lambda: {"m": [], "jours": set()})
-    for d in units:
-        mo = d.get(MURPHY_KEY)
-        if not mo:
-            continue
-        b = acc[(d["unit"], d["model"], d["lead_h"])]
-        b["m"].append(mo)
-        b["jours"].add(d.get("day"))
+    if not moments or not moments[0]:
+        return
+    b = acc.get(cle)
+    if b is None:
+        acc[cle] = [int(moments[0]), float(moments[1]), float(moments[2]),
+                    float(moments[3]), float(moments[4]), float(moments[5]), 1]
+        return
+    b[0] += int(moments[0])
+    for i in range(1, 6):
+        b[i] += float(moments[i])
+    b[6] += 1
+
+
+def par_balise_depuis_acc(acc: Mapping[tuple, Sequence[float]],
+                          min_pairs: int = MURPHY_MIN_PAIRS,
+                          min_days: int = MURPHY_MIN_DAYS) -> list[dict]:
+    """Les lignes publiables, depuis l'accumulateur de `accumule`."""
     out: list[dict] = []
     for (unit, model, lead), b in sorted(acc.items(),
                                          key=lambda kv: (kv[0][1], kv[0][2],
                                                          kv[0][0])):
-        tot = pool(b["m"])
-        n_jours = len(b["jours"])
+        tot = list(b[:6])
+        n_jours = int(b[6])
         dec = decompose(tot)
         if dec["reason"] == "ok" and (dec["n"] < min_pairs
                                       or n_jours < min_days):
@@ -295,6 +318,29 @@ def par_balise(units: Iterable[Mapping],
                     "n_days": n_jours, "value_key": "speed_kmh",
                     "ss_reference": SS_REFERENCE, **dec})
     return out
+
+
+def par_balise(units: Iterable[Mapping],
+               min_pairs: int = MURPHY_MIN_PAIRS,
+               min_days: int = MURPHY_MIN_DAYS) -> list[dict]:
+    """Une ligne par (balise, modèle, échéance) depuis des LIGNES.
+
+    ⚠️ CE CHEMIN N'EST PLUS CELUI DU RUN NOCTURNE — il tiendrait les
+    405 000 lignes de la fenêtre en mémoire, ce que le pavé de
+    `accumule` explique. Il reste pour le rapport ponctuel
+    (`python3 murphy.py`) et pour le banc, qui doit pouvoir partir de
+    lignes lisibles. Le run, lui, remplit l'accumulateur au fil de la
+    lecture (`score.replay_window`).
+
+    ⚠️ UNE LIGNE SOUS LE PLANCHER EST PUBLIÉE QUAND MÊME, avec son
+    `reason` et ses termes nuls. Une ligne absente et une ligne à zéro
+    se lisent pareil dans un JSON, et c'est la première qu'on cherche
+    le soir où une ingestion est morte (leçon du lot L1).
+    """
+    acc: dict[tuple, list] = {}
+    for d in units:
+        accumule(acc, (d["unit"], d["model"], d["lead_h"]), d.get(MURPHY_KEY))
+    return par_balise_depuis_acc(acc, min_pairs, min_days)
 
 
 def par_modele(lignes: Sequence[Mapping]) -> list[dict]:

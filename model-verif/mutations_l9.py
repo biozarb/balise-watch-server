@@ -159,8 +159,23 @@ MUTATIONS = [
      "regroupement perd l'unité) : la variance inter-sites est prise "
      "pour du talent",
      MURPHY, B_MURPHY,
-     '        b = acc[(d["unit"], d["model"], d["lead_h"])]',
-     '        b = acc[("*", d["model"], d["lead_h"])]'),
+     '        accumule(acc, (d["unit"], d["model"], d["lead_h"]),'
+     ' d.get(MURPHY_KEY))',
+     '        accumule(acc, ("*", d["model"], d["lead_h"]),'
+     ' d.get(MURPHY_KEY))'),
+
+    ("⛔ `replay_window` LAISSE `_murphy` sur chaque ligne de la fenêtre "
+     "— 107 Mo au pic sur un VPS de 3,8 Go sans swap",
+     SCORE, B_SCORE,
+     '            mo = r.pop(MU.MURPHY_KEY, None)',
+     '            mo = r.get(MU.MURPHY_KEY)'),
+
+    ("l'accumulateur compte les JOURNÉES au lieu de les additionner "
+     "(ou l'inverse) : le plancher de Murphy se lit sur un dénominateur "
+     "faux",
+     MURPHY, B_MURPHY,
+     '    b[6] += 1',
+     '    b[6] = 1'),
 
     ("une balise sous le plancher DISPARAÎT au lieu d'être publiée avec "
      "son motif — une ligne absente et une ligne à zéro se lisent "
@@ -252,6 +267,13 @@ MUTATIONS = [
      INFER, B_INFER,
      '    if rho < 0.0:\n        return 0.0, True',
      '    if rho < -99.0:\n        return 0.0, True'),
+
+    ("⭐⭐ le plancher du ρ redescend à 5 journées : sur la production "
+     "du 28/08, 85 % des balises rendaient alors un ρ NÉGATIF — leur "
+     "propre biais d'estimation, pris pour un fait de météo",
+     INFER, B_INFER,
+     'AUTOCORR_MIN_DAYS = 15',
+     'AUTOCORR_MIN_DAYS = 5'),
 
     ("le mélange se contente de la persistance quand la climatologie "
      "manque à cette heure-là — la référence change de définition en "

@@ -849,13 +849,53 @@ def skill_vs_climatology(pairs: Sequence[S.VerifPair],
 # (« mieux que ce qu'on peut faire sans modèle ? »). Remplacer l'une
 # par l'autre changerait la question sans changer le nom de la réponse.
 
-#: Couples (anomalie du jour, anomalie de la veille) minimaux pour
-#: qu'un `k` soit estimé, et journées distinctes minimales. ⚠️ 120
-#: couples, c'est cinq journées pleines : un ρ tiré d'une poignée
-#: d'heures pondérerait une référence PUBLIÉE avec une estimation de
-#: bruit.
+#: ⛔⛔ LE PLANCHER SE COMPTE EN JOURNÉES, PAS EN HEURES — ET CE N'EST
+#: PAS UN CHOIX DE PRUDENCE, C'EST UNE MESURE.
+#:
+#: La première version de ce lot exigeait 120 couples d'anomalies et
+#: 5 journées. 120 couples ressemble à un gros échantillon ; il n'en est
+#: pas un. Les 24 heures d'une même journée portent PRESQUE LA MÊME
+#: anomalie (c'est la définition d'une anomalie journalière) : la taille
+#: d'échantillon EFFECTIVE est le nombre de JOURNÉES, pas d'heures. Et
+#: le retrait des moyennes, sur N points, biaise l'autocorrélation de
+#: rang 1 d'environ **−1/N** — soit −0,20 pour cinq journées.
+#:
+#: ⭐ MESURÉ SUR LA PRODUCTION LE 28/08/2026 (3 725 balises, archive
+#: réelle lue sur R2), ρ horaire médian par profondeur d'archive :
+#:
+#:     0–7 journées   2 928 balises   ρ méd **−0,194**   85 % négatifs
+#:     8–14 journées      20 balises   ρ méd  +0,034     41 % négatifs
+#:     15–21 journées    777 balises   ρ méd  **+0,082**  25 % négatifs
+#:
+#: −0,194 pour ~5 journées, c'est le biais de −1/5 au centième près : ce
+#: que mesurait la première version, sur 85 % des balises, c'était son
+#: propre biais d'estimation. Et le sens de l'erreur est le pire
+#: possible : un ρ trop bas rend la référence combinée plus proche de la
+#: climatologie seule, donc PLUS FACILE À BATTRE, donc un skill publié
+#: FLATTEUR.
+#:
+#: ⇒ 15 journées. À 15 journées le biais résiduel vaut ≈ −1/14 ≈ −0,07,
+#: il est NOMMÉ ici et non corrigé : une correction de biais tirée d'un
+#: manuel (Marriott-Pope) suppose un AR(1) que rien n'a vérifié sur ces
+#: séries, et un ρ « corrigé » sur une hypothèse fausse serait
+#: exactement le nombre plausible et faux que tout ce chantier cherche à
+#: ne pas publier.
+#: ⚠️ CONSÉQUENCE ASSUMÉE : au 28/08, seuls `pioupiou` (21 j d'archive
+#: médiane) et `metar` (19 j) franchissent ce plancher. Les quatre
+#: réseaux nés le 21/08 (windsmobi, infoclimat, mf, aemet — 6 j) n'ont
+#: PAS de `k` et n'auront donc pas de `mse_comb` avant que leur archive
+#: n'atteigne 15 journées, soit vers le 05/09. C'est le comportement
+#: ATTENDU, pas une panne : `mse_comb` vide sur ces réseaux-là ne se
+#: diagnostique pas, il se lit dans ce pavé.
+#: ⓘ À ROUVRIR quand tous les réseaux auront 30 journées (mi-septembre) :
+#: remesurer la même table, et décider À CE MOMENT-LÀ si une correction
+#: de biais se justifie — validée par simulation, pas par citation.
+AUTOCORR_MIN_DAYS = 15
+
+#: Garde-fou secondaire, en couples d'heures. Non contraignant à
+#: 15 journées (≈ 360 couples) : il n'attrape que les balises dont la
+#: série est trouée à l'intérieur des journées.
 AUTOCORR_MIN_PAIRS = 120
-AUTOCORR_MIN_DAYS = 5
 
 
 def autocorr_lag24(obs_by_day: Mapping[str, Sequence[S.ObsSample]],

@@ -696,10 +696,29 @@ check("⛔⛔ … là où la même série, l'anomalie mesurée contre une "
       "pour de la persistance",
       rho_brut is not None and rho_brut > 0.85, f"rho brut = {rho_brut}")
 
-# Les planchers, et le trou d'archive.
-check("moins de 5 journées → pas de ρ (jamais un poids sur trois jours)",
+# ⛔ LE PLANCHER, ET IL SE COMPTE EN JOURNÉES. 14 journées font ~336
+# couples d'heures — largement au-dessus de `AUTOCORR_MIN_PAIRS` — et
+# doivent pourtant être REFUSÉES : la taille d'échantillon effective est
+# le nombre de JOURNÉES, et à 14 le biais de retrait de moyenne
+# (≈ −1/N) reste ce que l'estimateur mesure le mieux. Mesuré sur la
+# production le 28/08 : ρ médian −0,194 sous 8 journées, +0,082 entre
+# 15 et 21.
+check("le plancher est en JOURNÉES : 15 exigées",
+      I.AUTOCORR_MIN_DAYS == 15, f"{I.AUTOCORR_MIN_DAYS}")
+sous = {k: v for k, v in list(obs_by_day.items())[:14]}
+n_couples_sous = sum(len(v) for v in sous.values())
+check("⭐ 14 journées sont REFUSÉES bien qu'elles portent "
+      f"{n_couples_sous} relevés — largement plus que le garde-fou en "
+      f"couples ({I.AUTOCORR_MIN_PAIRS})",
+      I.autocorr_lag24(sous, clim_h, 0) is None
+      and n_couples_sous > I.AUTOCORR_MIN_PAIRS,
+      f"rho = {I.autocorr_lag24(sous, clim_h, 0)}")
+check("… et trois journées aussi, évidemment",
       I.autocorr_lag24({k: v for k, v in list(obs_by_day.items())[:4]},
                        clim_h, 0) is None)
+check("16 journées, elles, passent",
+      I.autocorr_lag24({k: v for k, v in list(obs_by_day.items())[:16]},
+                       clim_h, 0) is not None)
 troue = {k: v for k, v in obs_by_day.items() if int(k[-2:]) % 2 == 1}
 check("⛔ des journées NON consécutives ne s'apparient pas à « 24 h » "
       "(lundi contre vendredi ne serait pas de la persistance)",
