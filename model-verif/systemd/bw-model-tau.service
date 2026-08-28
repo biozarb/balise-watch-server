@@ -1,0 +1,70 @@
+[Unit]
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔⛔ UNITÉ PROPOSÉE, PAS INSTALLÉE, ET PAS ENCORE INSTALLABLE.
+#      (lot L8, 28/08/2026 — contrôle n°3 du lot S3)
+#
+#  `run.sh` N'A PAS DE MODE `tau` À CE JOUR. Installer ce couple
+#  service/timer tel quel produirait une unité qui échoue à chaque
+#  déclenchement. Le geste manquant est un ajout à `run.sh`, et il n'est
+#  PAS fait : le prompt du lot dit « timer hebdo à proposer, pas
+#  installer sans accord », et modifier l'orchestrateur déployé est
+#  précisément le genre de geste qui se demande.
+#
+#  ⛔ ET SURTOUT : NE PAS RECOPIER ICI LA MISE EN PLACE D'ENVIRONNEMENT
+#  DE `run.sh`. Elle fait trois choses qu'on n'a pas le droit d'oublier,
+#  et qui ne se devinent pas :
+#    · `source ~/.balise-watch-r2.env` PUIS `~/.balise-watch-model-verif.env`
+#      — ces fichiers sont écrits en `export VAR=…`, donc illisibles par
+#      la directive `EnvironmentFile=` de systemd (qui veut `VAR=valeur`) ;
+#    · `export STORAGE_BACKEND=r2` — ⚠️ SANS LUI, TOUTE LECTURE R2
+#      ÉCHOUE. Vécu le 28/08 en jouant ce lot à la main : la sonde
+#      rendait « 20 objets d'archive ILLISIBLES » et le contrôle
+#      dégradait proprement — mais la cause était l'environnement du
+#      shell, pas l'archive ;
+#    · `export R2_BUCKET=model-verif` ET `MODEL_VERIF_BUCKET=model-verif`,
+#      APRÈS le `source`, parce que le `.env` partagé pose
+#      `balise-watch-packs` et qu'on lirait le mauvais seau en silence.
+#  Deux chemins d'environnement qui se ressemblent, c'est le piège nº 1
+#  de BUGS.md du 26/08. Il n'y a qu'un chemin : `run.sh`.
+#
+#  ═══ CE QUE LE MODE `tau` DEVRAIT FAIRE ═══
+#
+#      tau)  exec "$PYTHON" "$ICI/controle_tau.py" \
+#              --jours "${BW_MODEL_TAU_JOURS:-14}" \
+#              --root "$OUT" \
+#              --out "$OUT/controle-tau-$(date -u +%F).txt" ;;
+#
+#  Aucun ping de vie, aucune alerte : ce contrôle ne garde rien. Une
+#  semaine sans tau ne perd AUCUNE donnée (tout est en base et dans les
+#  archives, il se rejoue à l'identique) — contrairement à
+#  `bw-model-reduit`, dont chaque nuit manquée est définitive. Lui
+#  câbler une alerte apprendrait à ignorer une alerte.
+#
+#  ═══ ET IL EST TROP TÔT ═══
+#
+#  ⚠️ Mesuré le 28/08 : les cinq modèles du groupe réduit n'ont que
+#  TROIS journées sur les réseaux candidats (24→26/08), et
+#  `inference.MIN_DAYS_BLOCK` en exige 8 pour borner quoi que ce soit.
+#  Toutes les marches du haut sortent en `window_too_short`. Un timer
+#  hebdomadaire installé aujourd'hui produirait, pendant un mois, des
+#  rapports que personne ne pourrait lire autrement que comme « pas
+#  encore ». ⇒ Proposition : l'installer quand la fenêtre atteindra
+#  ~15 jours de groupe réduit, soit **vers le 8-10/09/2026**.
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — contrôle n°3 : tau inter-populations (hebdo)
+Documentation=file:///home/debian/balise-watch/balise-watch-server/model-verif/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh tau
+# Lecture seule : une requête Supabase filtrée (~120 000 lignes) et
+# 14 jours × 3 flux d'archive. Mesuré le 28/08 sur le VPS : 24 s de bout
+# en bout. 10 min laissent la place à une base lente sans jamais laisser
+# traîner un processus oublié.
+TimeoutStartSec=10min
+
+[Install]
+WantedBy=multi-user.target

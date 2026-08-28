@@ -1,0 +1,44 @@
+[Unit]
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ TIMER PROPOSÉ, PAS INSTALLÉ — et voir le ⛔ de
+#  `bw-model-tau.service` AVANT toute chose : le mode `run.sh tau`
+#  n'existe pas encore, et il est trop tôt (fenêtre de 3 jours au
+#  28/08, il en faut 8 pour que le moindre intervalle sorte).
+#
+#  ⛔ HEBDOMADAIRE, ET PAS NOCTURNE — c'est une décision, pas une
+#  économie. Le tau se lit sur une fenêtre qui doit s'ÉPAISSIR : deux
+#  fenêtres glissantes de 14 jours à un jour d'écart partagent 13 jours
+#  sur 14, et mesurer leur accord mesurerait surtout ce recouvrement.
+#  C'est la leçon écrite dans `inference.rank_stability` (« LES DEUX
+#  FENÊTRES DOIVENT ÊTRE DISJOINTES »), appliquée à la CADENCE plutôt
+#  qu'aux données.
+#
+#  L'activation reste un geste séparé du déploiement :
+#      sudo cp /tmp/bw-model-tau.{service,timer} /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now bw-model-tau.timer
+#      systemctl list-timers bw-model-tau.timer --no-pager
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — contrôle n°3 (tau inter-populations), hebdo
+
+[Timer]
+# ⚠️ `UTC` EXPLICITE, comme les six autres timers du projet — sinon
+# `OnCalendar` suit l'heure locale du VPS et glisse d'une heure deux
+# fois par an.
+#
+# Lundi 07:00 UTC : APRÈS la notation de la nuit (03:56) et après
+# `bw-model-arome` (06:00), donc sur une base qui porte la veille
+# entière ; et un lundi, pour que le rapport couvre une semaine pleine
+# quand on vient le lire.
+OnCalendar=Mon *-*-* 07:00:00 UTC
+RandomizedDelaySec=300
+# ⛔ `Persistent=false`, À L'INVERSE de `bw-model-reduit`, et pour la
+# raison exactement opposée : là-bas une nuit manquée est une donnée
+# perdue POUR TOUJOURS (Open-Meteo n'a aucun historique) ; ici rien ne
+# se perd — la base et les archives restent, le contrôle se rejoue à
+# l'identique à la main. Rattraper au démarrage ne ferait qu'écrire un
+# rapport daté d'aujourd'hui sur une fenêtre d'hier.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
