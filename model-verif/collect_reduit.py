@@ -227,6 +227,7 @@ _ = en_retard
 # entre dans `score.OBS_KEY_FUNCS`, il entre du même coup dans le
 # dénominateur de cette règle, sans que personne n'y pense.
 from score import OBS_KEY_FUNCS, read_ndjson                 # noqa: E402
+import fraicheur as FR                                       # noqa: E402
 
 # ══════════════════════════════════════════════════════════════════
 #  CONSTANTES
@@ -357,41 +358,28 @@ RESERVE_NON_COMPTEE = 1_370.0
 #: référentiel réel et de `collect.poids_par_point()`.
 BACKFILL_PACKS_MESURE = 252.0
 
-#: Le point d'entrée de métadonnées d'Open-Meteo, mesuré au S0.10 :
-#: HTTP 200 sur les dix domaines interrogés, et il rend
-#: `last_run_initialisation_time` / `last_run_availability_time`.
-#: ⛔ CE N'EST PAS LE MIROIR AWS. Le même fichier existe sur
-#: `openmeteo.s3.amazonaws.com` SANS QUOTA — et il est PÉRIMÉ : mesuré
-#: le 23/08, `dwd_icon_d2` y portait encore le run du 15/08, huit jours
-#: de retard. Le miroir ne reflète pas ce que l'API sert, et pas de la
-#: même façon selon le modèle. La route gratuite n'existe pas.
-META_API = "https://api.open-meteo.com/data/{domaine}/static/meta.json"
+#: ⛔ LES TROIS CONSTANTES DE LA SONDE ONT DÉMÉNAGÉ DANS `fraicheur.py`
+#: (lot L8, 28/08/2026), ET ELLES NE SONT PAS RECOPIÉES ICI.
+#:
+#: La raison : depuis le L8, `collect.py` sonde LUI AUSSI la fraîcheur
+#: des runs — sans quoi le contrôle n°3 du S3 ne peut rien comparer (il
+#: rendait `non_verifiable` sur cinq modèles sur six, mesuré le 28/08).
+#: Deux relevés du même `meta.json`, écrits deux fois, sont la première
+#: chose qui divergera : c'est le piège nº 1 de BUGS.md du 26/08, et il
+#: a déjà coûté une journée sur le composite AGRUME.
+#:
+#: ⓘ Les noms restent liés ici pour que rien de ce fichier — ni son
+#: budget, ni son manifeste, ni ses bancs — n'ait à bouger.
+META_API = FR.META_API
+POIDS_SONDE = FR.POIDS_SONDE
 
-#: ⛔ POIDS RÉSERVÉ PAR APPEL DE SONDE — LE MINIMUM FACTURABLE.
-#: `quota_openmeteo.poids_url()` calcule le poids depuis les paramètres
-#: de l'URL ; celle-ci n'en a AUCUN, donc elle rend son plancher — qui
-#: vaut **1,0 depuis le débug du 24/08**, et non plus 0,1. Ce que cet
-#: endpoint facture réellement N'EST PAS ÉTABLI, mais un appel HTTP ne
-#: coûte jamais moins d'un appel : 1 pondéré par appel, 9 par nuit,
-#: 0,19 % de la fenêtre horaire effective.
-#: ⓘ Cette constante et `poids_url` disent désormais la même chose. On
-#: la garde quand même : elle DÉCLARE le choix, là où l'égalité avec
-#: `poids_url` n'est qu'une coïncidence d'aujourd'hui.
-POIDS_SONDE = 1.0
-
-#: Les domaines Open-Meteo des cinq modèles du groupe réduit. ⚠️ Ce sont
-#: des noms DE DOMAINE, pas des noms de modèle : `gfs_global` est servi
-#: par `ncep_gfs013` (mesuré au S0.10 — `ncep_gfs025`, lui, publie
-#: 43 min plus tard). Une correspondance fausse ici écrirait dans
-#: l'archive le run d'un autre modèle, ce qui est pire que pas de
-#: colonne du tout.
-DOMAINE_PAR_MODELE = {
-    "icon_d2": "dwd_icon_d2",
-    "icon_eu": "dwd_icon_eu",
-    "meteoswiss_icon_ch2": "meteoswiss_icon_ch2",
-    "ecmwf_ifs025": "ecmwf_ifs025",
-    "gfs_global": "ncep_gfs013",
-}
+#: ⭐ DÉRIVÉ de la carte canonique, jamais recopié : la vue restreinte
+#: aux cinq modèles de CE flux. ⚠️ Un modèle du groupe réduit absent de
+#: `fraicheur.DOMAINE_PAR_MODELE` fait maintenant lever un `KeyError` À
+#: L'IMPORT — c'est-à-dire au déploiement, et pas trois semaines plus
+#: tard dans un contrôle qui dirait `non_verifiable` sans qu'on sache
+#: pourquoi.
+DOMAINE_PAR_MODELE = {m: FR.DOMAINE_PAR_MODELE[m] for m in MODELS_REDUIT}
 
 #: Quatre domaines de plus, sondés pour le JOURNAL et le MANIFESTE, pas
 #: pour les lignes : ce sont les modèles que la passe Pioupiou collecte
@@ -866,72 +854,25 @@ def trier_et_evincer(population: list[dict], cap: int,
 
 def sonde_fraicheur(budget, avec_temoins: bool = True,
                     crier=print) -> tuple[dict, dict]:
-    """Quel run Open-Meteo sert CE SOIR, par modèle. Rend `(par_modele,
-    journal)`.
+    """Enveloppe de `fraicheur.sonde_fraicheur` — le CORPS a déménagé.
 
-    ⭐ C'EST LA COLONNE QUI TRANSFORME UNE HYPOTHÈSE EN DONNÉE. Le S0.10
-    a mesuré, sur UNE nuit, qu'`icon_d2` sert un run 03 Z aux candidates
-    (05:00) et un run 00 Z à Pioupiou (03:19) : trois heures d'écart, sur
-    un modèle sur six. Tant que ce n'est pas ÉCRIT DANS L'ARCHIVE, le
-    tau de Kendall du §S3 ne pourra pas le neutraliser, et l'écart
-    restera une hypothèse à n = 1 dans une archive irremplaçable.
+    ⛔ IL N'Y A PLUS QU'UN SEUL RELEVÉ DE `meta.json` DANS LE DÉPÔT
+    (lot L8, 28/08/2026). Depuis que `collect.py` sonde lui aussi la
+    fraîcheur — sans quoi le contrôle n°3 du S3 n'a rien à comparer —,
+    en garder deux copies condamnait les deux flux à diverger.
 
-    ⛔ **CHAQUE APPEL PASSE PAR `Budget.demander()`, ET RÉSERVE LE PIRE
-    CAS** (`POIDS_SONDE`, cf. son pavé). Le S0.10 a mesuré ces mêmes
-    URL depuis le Mac, précisément pour ne pas engager le seau du VPS ;
-    en production c'est l'inverse qui est vrai — le quota Open-Meteo se
-    compte par adresse IP, et c'est celle du VPS qui collecte.
+    ⚠️ LA SIGNATURE NE BOUGE PAS, et c'est délibéré : `main`, le
+    manifeste, `dire_sonde` et les bancs de ce fichier l'appellent
+    tels quels. Le déménagement doit être invisible d'ici, sinon ce
+    n'est plus un déménagement, c'est une réécriture.
 
-    ⚠️ **UN ÉCHEC NE TUE PAS LA PASSE.** On écrit ce qu'on a, on dit ce
-    qui manque, et la collecte part quand même : une colonne
-    d'information ne doit jamais coûter une nuit d'archive.
+    ⓘ `_get_json_retry` est INJECTÉ : c'est celui de `collect.py`,
+    importé en tête de ce fichier — donc le même code de réessai, avec
+    la même pause franche sur 429, que pour les prévisions.
     """
-    par_modele: dict[str, dict] = {}
-    jrn: dict = {"appels": 0, "ok": 0, "echecs": [], "refuses": [],
-                 "temoins": {}, "poids_reserve": 0.0}
-
-    cibles = [(m, d) for m, d in DOMAINE_PAR_MODELE.items()]
-    if avec_temoins:
-        cibles += [(None, d) for d in DOMAINES_TEMOINS]
-
-    for modele, domaine in cibles:
-        if budget is not None:
-            try:
-                budget.demander(POIDS_SONDE,
-                                etiquette=f"sonde meta.json {domaine}")
-                jrn["poids_reserve"] += POIDS_SONDE
-            except Exception as exc:                         # noqa: BLE001
-                # ⚠️ `BudgetRefuse` est un refus ARGUMENTÉ, pas une
-                # panne — et il ne doit pas emporter la collecte.
-                jrn["refuses"].append(f"{domaine} ({exc})")
-                continue
-        jrn["appels"] += 1
-        d = _get_json_retry(META_API.format(domaine=domaine),
-                            f"meta.json {domaine}")
-        if not isinstance(d, dict) or not d.get("last_run_initialisation_time"):
-            jrn["echecs"].append(domaine)
-            continue
-        jrn["ok"] += 1
-        info = {
-            "domaine": domaine,
-            "init": d.get("last_run_initialisation_time"),
-            "avail": d.get("last_run_availability_time"),
-        }
-        if modele:
-            par_modele[modele] = info
-        else:
-            jrn["temoins"][domaine] = info
-
-    if jrn["echecs"] or jrn["refuses"]:
-        crier(f"  ⚠️ sonde de fraîcheur INCOMPLÈTE : {jrn['ok']}/"
-              f"{len(cibles)} domaines rendus"
-              + (f" · échecs : {', '.join(jrn['echecs'])}"
-                 if jrn["echecs"] else "")
-              + (f" · refusés par le budget : {', '.join(jrn['refuses'])}"
-                 if jrn["refuses"] else "")
-              + " — la collecte part quand même, les lignes des modèles "
-                "manquants n'auront pas `run_init`.")
-    return par_modele, jrn
+    return FR.sonde_fraicheur(
+        budget, MODELS_REDUIT, get_json=_get_json_retry,
+        temoins=DOMAINES_TEMOINS if avec_temoins else (), crier=crier)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1245,21 +1186,13 @@ def dire_budget(population: int, jrn_cap: dict, evincees: int,
 
 
 def dire_sonde(jrn_sonde: dict, fraicheur: dict, crier=print) -> None:
-    crier("┌─ SONDE DE FRAÎCHEUR DE RUN ──────────────────────────────────")
-    crier(f"│ appels : {jrn_sonde['appels']} · rendus {jrn_sonde['ok']} · "
-          f"{jrn_sonde['poids_reserve']:.0f} pondérés RÉSERVÉS "
-          f"(pire cas {POIDS_SONDE:.0f}/appel — le poids réel de cet "
-          f"endpoint n'est pas établi)")
-    for m in MODELS_REDUIT:
-        info = fraicheur.get(m)
-        if info:
-            crier(f"│   {m:28s} run {info['init']} · publié {info['avail']}")
-        else:
-            crier(f"│   {m:28s} ⚠️ non rendu — lignes sans `run_init`")
-    for d, info in sorted(jrn_sonde["temoins"].items()):
-        crier(f"│   (témoin) {d:20s} run {info['init']} · publié "
-              f"{info['avail']}")
-    crier("└──────────────────────────────────────────────────────────────")
+    """Enveloppe de `fraicheur.dire_sonde` — même raison que ci-dessus.
+
+    ⓘ La liste des modèles est passée explicitement là-bas : le pavé
+    doit NOMMER ceux que la sonde n'a pas rendus, et seul l'appelant
+    sait lesquels il attendait.
+    """
+    FR.dire_sonde(jrn_sonde, fraicheur, MODELS_REDUIT, crier=crier)
 
 
 # ══════════════════════════════════════════════════════════════════

@@ -712,6 +712,63 @@ check("le rapport nomme la grandeur classée (sinon le lecteur devine)",
 check("le rapport dit si la réserve est levée, en toutes lettres",
       "levee : NON" in texte, texte[:600])
 
+print("\n── 10. `main()` : l'objet ÉCRIT, pas seulement calculé ───────")
+
+# ⚠️ Aucune des 105 assertions précédentes ne touche `main()`, et c'est
+# exactement là que vivent les fautes qu'un banc ne voit pas : le sens
+# de `--out`, l'écriture du rapport, le chemin par défaut. « Vérifier le
+# producteur ne vérifie pas le publié » (BUGS.md 26/08, piège nº 7) —
+# ici le publié est un FICHIER, et le seul contrôle qui vaille est de le
+# relire.
+#
+# ⓘ `--out` a d'ailleurs changé de sens en écrivant le mode `run.sh
+# tau` : il désignait un fichier de rapport, il désigne maintenant la
+# racine de l'état, comme pour TOUS les autres jobs du dépôt. Sans quoi
+# l'orchestrateur aurait eu besoin d'une exception pour ce mode-là.
+
+import unittest.mock as _mock  # noqa: E402
+
+
+class _FausseBase:
+    def select(self, table, query="", order=None):
+        if table == "station_zone":
+            return [{"source": "windsmobi", "station_id": "wi0",
+                     "doublon_de": "pioupiou:pp0"}]
+        return ref_rows + accord
+
+
+with tempfile.TemporaryDirectory() as tmp, \
+        _mock.patch.object(SC, "Supabase", lambda *a, **k: _FausseBase()), \
+        _mock.patch.object(sys, "argv",
+                           ["controle_tau.py", "--out", tmp,
+                            "--day", "2026-08-26", "--sans-archive"]):
+    rc = CT.main()
+    ecrits = sorted(pathlib.Path(tmp).glob("controle-tau-*.txt"))
+    check("main() sort en 0", rc == 0, f"{rc}")
+    check("⭐ le rapport est écrit PAR DÉFAUT, sans drapeau",
+          len(ecrits) == 1, f"{[p.name for p in ecrits]}")
+    check("… sous le jour demandé, pas sous la date du jour",
+          ecrits and ecrits[0].name == "controle-tau-2026-08-26.txt",
+          f"{[p.name for p in ecrits]}")
+    corps = ecrits[0].read_text(encoding="utf-8") if ecrits else ""
+    check("… et il porte bien un tau, pas un fichier vide",
+          "tau-b vs pioupiou" in corps, corps[:200])
+    check("… avec sa réserve, comme toute ligne publiée",
+          "reserve" in corps)
+    check("⭐ `--out` est bien la RACINE (le dossier existe, il n'a pas "
+          "été écrasé par un fichier)",
+          pathlib.Path(tmp).is_dir())
+
+with tempfile.TemporaryDirectory() as tmp, \
+        _mock.patch.object(SC, "Supabase", lambda *a, **k: _FausseBase()), \
+        _mock.patch.object(sys, "argv",
+                           ["controle_tau.py", "--out", tmp,
+                            "--day", "2026-08-26", "--sans-archive",
+                            "--rapport", "-"]):
+    CT.main()
+    check("`--rapport -` n'écrit rien (sonde ponctuelle, stdout seul)",
+          not list(pathlib.Path(tmp).glob("*.txt")))
+
 # ══════════════════════════════════════════════════════════════════
 print(f"\n{'✅' if KO == 0 else '❌'} {OK} assertions vertes, {KO} rouges.\n")
 sys.exit(1 if KO else 0)

@@ -1,9 +1,10 @@
 [Unit]
 # ══════════════════════════════════════════════════════════════════════
-#  ⛔ TIMER PROPOSÉ, PAS INSTALLÉ — et voir le ⛔ de
-#  `bw-model-tau.service` AVANT toute chose : le mode `run.sh tau`
-#  n'existe pas encore, et il est trop tôt (fenêtre de 3 jours au
-#  28/08, il en faut 8 pour que le moindre intervalle sorte).
+#  ⛔ TIMER PROPOSÉ, PAS INSTALLÉ. Le mode `run.sh tau` existe et le
+#  service est fonctionnel ; ce qui manque est une DATE — il est trop
+#  tôt (fenêtre de 3 journées de groupe réduit au 28/08, il en faut 8
+#  pour que le moindre intervalle sorte). Voir le ⛔ de
+#  `bw-model-tau.service`.
 #
 #  ⛔ HEBDOMADAIRE, ET PAS NOCTURNE — c'est une décision, pas une
 #  économie. Le tau se lit sur une fenêtre qui doit s'ÉPAISSIR : deux

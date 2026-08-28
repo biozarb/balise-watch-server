@@ -966,8 +966,17 @@ def main() -> int:
     ap.add_argument("--jours", type=int, default=TAU_DAYS)
     ap.add_argument("--day", default=None,
                     help="dernier jour de la fenetre (defaut : hier)")
-    ap.add_argument("--root", default="/var/lib/bw-model-verif",
-                    help="racine locale des archives (lecture de run_init)")
+    # ⛔ `--out` VEUT DIRE LA MÊME CHOSE QUE PARTOUT AILLEURS DANS CE
+    # DÉPÔT : la racine de l'état et des archives (`/var/lib/bw-model-verif`,
+    # c'est-à-dire `$ETAT` dans `run.sh`, qui le passe à TOUS ses jobs).
+    # Une première version en faisait un chemin de FICHIER de rapport ;
+    # le mode `run.sh tau` aurait alors reçu un dossier là où le script
+    # attendait un fichier, et il aurait fallu une exception dans
+    # l'orchestrateur — c'est-à-dire un second chemin. Le rapport, lui,
+    # a son propre drapeau.
+    ap.add_argument("--out", default="/var/lib/bw-model-verif",
+                    help="racine de l'etat et des archives (lecture de "
+                         "run_init), et ou le rapport est depose")
     ap.add_argument("--sans-archive", action="store_true",
                     help="ne pas ouvrir les archives : le tau sort NON "
                          "QUALIFIE et le rapport le dit sur chaque ligne")
@@ -975,9 +984,10 @@ def main() -> int:
                     help="ne pas lire station_zone.doublon_de. ⚠️ Le tau "
                          "pioupiou↔windsmobi devient alors partiellement "
                          "l'accord de capteurs avec eux-memes (lot L16)")
-    ap.add_argument("--out", default=None,
-                    help="ecrit le rapport horodate dans ce fichier "
-                         "(defaut : stdout seul)")
+    ap.add_argument("--rapport", default=None,
+                    help="chemin du rapport. Defaut : "
+                         "<out>/controle-tau-<jour>.txt ; `-` pour ne rien "
+                         "ecrire et rester sur stdout")
     ap.add_argument("--json", action="store_true",
                     help="ajoute le resultat complet en JSON sur stdout")
     args = ap.parse_args()
@@ -1024,7 +1034,7 @@ def main() -> int:
         print(f"  archives : {len(jours)} jour(s) × 3 flux, "
               f"{len(compares)} modele(s) compare(s)")
         try:
-            ri = verifier_run_init(pathlib.Path(args.root), jours, compares,
+            ri = verifier_run_init(pathlib.Path(args.out), jours, compares,
                                    storage=SC._storage())
         except Exception as exc:                      # noqa: BLE001
             # ⛔ On NE retombe PAS sur « pas de réserve ». Une archive
@@ -1040,8 +1050,15 @@ def main() -> int:
     print(texte)
     if args.json:
         print(json.dumps(res, indent=1, ensure_ascii=False, default=str))
-    if args.out:
-        p = pathlib.Path(args.out)
+    # ⚠️ LE RAPPORT EST ÉCRIT PAR DÉFAUT, pas sur demande. Un contrôle
+    # de véracité dont la sortie ne vit que dans un journal systemd est
+    # un contrôle que personne ne relira : `journalctl` tourne, et la
+    # comparaison d'une semaine à l'autre est justement ce que ce
+    # contrôle-ci existe pour permettre.
+    if args.rapport != "-":
+        p = (pathlib.Path(args.rapport) if args.rapport
+             else pathlib.Path(args.out)
+             / f"controle-tau-{day.strftime('%Y-%m-%d')}.txt")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(texte + "\n", encoding="utf-8")
         print(f"▶ rapport ecrit : {p}")

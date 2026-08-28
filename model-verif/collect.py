@@ -82,6 +82,18 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+# ── LA SONDE DE FRAÎCHEUR DE RUN (lot L8, 28/08/2026) ─────────────
+# ⛔ IMPORTÉE, PAS RECOPIÉE. `collect_reduit.py` l'appelle depuis le
+# même module : deux relevés du même `meta.json` écrits deux fois sont
+# la première chose qui divergera (piège nº 1 de BUGS.md du 26/08).
+# ⓘ Le chemin est posé comme dans `collect_reduit.py` : ce fichier est
+# lancé en script ET importé par trois autres, et sys.path[0] ne dit
+# pas la même chose dans les deux cas.
+_ICI = pathlib.Path(__file__).resolve().parent
+if str(_ICI) not in sys.path:
+    sys.path.insert(0, str(_ICI))
+import fraicheur as FR  # noqa: E402
+
 # ── Modèles suivis ────────────────────────────────────────────────
 # ⚠️ NOMMÉS, JAMAIS `*_seamless`. `meteofrance_seamless` bascule
 # silencieusement sur ARPEGE au-delà de ~T+51 h (cf. MODEL_COVERAGE
@@ -2580,6 +2592,13 @@ def main() -> int:
                     help="saute les observations mf (rétroactif 48h chez NOUS, pas la source)")
     ap.add_argument("--skip-aemet", action="store_true",
                     help="saute les observations aemet (rétroactif 48h chez NOUS, pas la source)")
+    ap.add_argument("--sans-sonde", action="store_true",
+                    help="ne pas appeler les meta.json de fraîcheur "
+                         f"(−{len(FR.DOMAINE_PAR_MODELE)} pondérés au plus). "
+                         "⚠️ La donnée n'est PAS rejouable : les lignes de "
+                         "cette nuit n'auront jamais `run_init`, et le "
+                         "contrôle n°3 (tau inter-populations) restera "
+                         "`non_verifiable` sur cette journée pour toujours.")
     ap.add_argument("--limit", type=int, default=0, help="0 = tout")
     ap.add_argument("--dry-run", action="store_true",
                     help="chiffre le run et sort, sans une seule requête météo")
@@ -2818,6 +2837,55 @@ def main() -> int:
         # relirait l'état 648 fois pour rien.
         qm = charger_quota()
         budget = qm.Budget("collect") if qm else None
+
+        # ⭐ LA SONDE DE FRAÎCHEUR — la colonne qui rend le contrôle n°3
+        # du lot S3 possible (lot L8, 28/08/2026).
+        #
+        # ⛔ POURQUOI ELLE MANQUAIT, ET CE QUE ÇA COÛTAIT. Ce flux est
+        # la population de RÉFÉRENCE du tau inter-populations : c'est
+        # SON classement qu'on demande aux autres réseaux de confirmer.
+        # `collect_reduit.py` écrit `run_init` depuis le S0.11 ; ici,
+        # rien. Mesuré le 28/08 en lisant les archives réelles
+        # (`controle_tau.verifier_run_init`) : **14 objets `fcst/` lus,
+        # ZÉRO `run_init`, 7 271 à 9 138 lignes muettes par modèle.** La
+        # réserve écrite du S3 — « ne pas calculer le tau sans regarder
+        # `run_init` » — ne pouvait donc pas être levée : il manquait la
+        # moitié de ce qu'elle demande de comparer.
+        #
+        # ⚠️ ELLE SONDE `modeles_passe`, PAS `MODELS`. Depuis le S0.6 une
+        # passe nommée ne collecte qu'une partie des modèles : sonder
+        # les neuf ferait payer des appels pour des lignes qu'on n'écrit
+        # pas, et collerait un `run_init` sur des modèles absents de
+        # cette archive-ci.
+        #
+        # ⚠️ AUCUN TÉMOIN ICI. `collect_reduit` en sonde quatre parce
+        # qu'il ne collecte pas ces modèles-là et voulait quand même
+        # savoir si la chaîne de publication avait bougé. Cette passe,
+        # elle, les collecte : ils sont dans `modeles_passe`, donc dans
+        # les lignes. Un témoin serait un appel payé deux fois.
+        # ⓘ Conséquence à noter pour plus tard, PAS un geste de ce lot :
+        # les 4 témoins de `collect_reduit` deviennent redondants avec
+        # ce relevé-ci (−4 pondérés/nuit possibles). À juger quand on
+        # aura vu que les deux relevés concordent.
+        fraicheur: dict = {}
+        if args.sans_sonde:
+            print("  ⓘ sonde de fraîcheur SAUTÉE (--sans-sonde) — les "
+                  "lignes de cette nuit n'auront pas `run_init`")
+        else:
+            try:
+                fraicheur, _jrn_sonde = FR.sonde_fraicheur(
+                    budget, modeles_passe, get_json=_get_json_retry)
+                FR.dire_sonde(_jrn_sonde, fraicheur, modeles_passe)
+            except Exception as _exc:                        # noqa: BLE001
+                # ⛔ UNE COLONNE D'INFORMATION NE COÛTE JAMAIS UNE NUIT
+                # D'ARCHIVE. Celle-ci ne se rattrape pas (Open-Meteo n'a
+                # aucun historique de runs), mais la PRÉVISION non plus,
+                # et elle vaut infiniment plus. On dit et on continue.
+                print(f"  ⚠️ sonde de fraîcheur en échec : "
+                      f"{type(_exc).__name__} — {_exc}. La collecte part "
+                      f"quand même, sans `run_init` cette nuit.",
+                      file=sys.stderr)
+                fraicheur = {}
         # ⚠️ POIDS DÉRIVÉ, JAMAIS RECOPIÉ, ET UN PAR GROUPE. Si quelqu'un
         # ajoute demain une variable ou un modèle, ce calcul suit ; un
         # `8` en dur, non. Le seau doit réserver le poids DU GROUPE au
@@ -2873,8 +2941,21 @@ def main() -> int:
                         perdus += 1
                     else:
                         collectes_g[gi] += 1
-                        yield from forecast_rows(st, payload, fetched_at,
-                                                 modeles)
+                        # ⭐ `run_init`/`run_avail` écrits DANS CHAQUE
+                        # LIGNE, et non dans un fichier à côté : une
+                        # archive qu'on relira dans trois ans ne doit
+                        # dépendre d'aucun objet latéral. ⚠️ Un champ
+                        # ABSENT signifie « la sonde n'a pas eu ce
+                        # domaine cette nuit-là » — une information ; un
+                        # `null` ne dirait rien.
+                        # ⓘ La pose est faite ICI et pas dans
+                        # `forecast_rows`, qui est importée telle quelle
+                        # par `collect_reduit` et `arome_fcst` : on
+                        # n'ajoute pas un paramètre à une fonction
+                        # partagée pour un besoin d'un seul appelant.
+                        for _row in forecast_rows(st, payload, fetched_at,
+                                                  modeles):
+                            yield FR.poser(_row, fraicheur)
                 if perdus:
                     failed += 1
                     if perdus < len(groupes):

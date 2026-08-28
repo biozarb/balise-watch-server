@@ -57,8 +57,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome) ;;
-  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome" >&2
+  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau) ;;
+  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau" >&2
      exit 2 ;;
 esac
 
@@ -120,6 +120,22 @@ case "$MODE" in
   # serré du timer (06:00 UTC, entre la publication du run 00 Z vers
   # 05:42 et son écrasement vers 08:30) et d'où l'alerte.
   arome)          SCRIPT="$ICI/arome_fcst.py";          LIBELLE="flux AROME R2" ;;
+  # ⭐ LE CONTRÔLE N°3 DU LOT S3 — le tau inter-populations (lot L8,
+  # 28/08/2026). ⛔ CE MODE N'ARCHIVE RIEN ET NE GARDE RIEN : il LIT la
+  # base et les archives, et dépose un rapport. C'est ce qui le rend
+  # différent de tous les autres modes de ce fichier, et ça se voit à
+  # deux endroits — son `SEUIL_ALERTE` (voir plus bas) et son absence
+  # de `--dry-run` : il n'y a rien à répéter à blanc quand on n'écrit
+  # rien qu'un fichier texte.
+  #
+  # ⛔ ET IL N'A AUCUN DRAPEAU `EXTRA`. `controle_tau.py` prend `--out`
+  # avec le MÊME sens que tous les autres jobs (la racine de l'état et
+  # des archives), et en dérive le chemin de son rapport. C'était le
+  # choix à faire : lui donner un `--out` de sens différent aurait
+  # obligé cet orchestrateur à connaître une exception, c'est-à-dire à
+  # porter un second chemin pour un seul mode.
+  tau)            SCRIPT="$ICI/controle_tau.py"
+                  LIBELLE="controle tau inter-populations" ;;
 esac
 if [[ ! -f "$SCRIPT" ]]; then
   echo "job introuvable : $SCRIPT" >&2; exit 2
@@ -207,6 +223,24 @@ elif [[ "$MODE" == "arome" ]]; then
   # ~05:42 à ~08:30 UTC. Un échec doit sonner le matin même, tant qu'un
   # rattrapage à la main est encore possible.
   SEUIL_ALERTE=1
+elif [[ "$MODE" == "tau" ]]; then
+  # Mesuré le 28/08 sur le VPS : 24 s de bout en bout (une requête
+  # Supabase filtrée d'environ 120 000 lignes, puis 14 jours × 3 flux
+  # d'archive). 10 min laissent la place à une base lente sans jamais
+  # laisser traîner un processus oublié.
+  MAX_MINUTES="${BW_MODEL_TAU_MAX_MINUTES:-10}"
+  # ⛔ SEUIL_ALERTE=3, ET C'EST LE PLUS HAUT DU FICHIER — délibérément.
+  # Tous les autres modes gardent quelque chose d'IRRÉCUPÉRABLE : une
+  # nuit de prévisions qu'Open-Meteo n'a pas en archive, des tuiles
+  # AROME réécrites toutes les 3 h. Celui-ci ne garde RIEN : la base et
+  # les archives restent, et le contrôle se rejoue à l'identique à la
+  # main, un mois plus tard, avec le même résultat.
+  # ⚠️ Mais pas de seuil INFINI pour autant : à raison d'un run par
+  # semaine, trois échecs consécutifs valent presque un mois de silence
+  # sur un contrôle de véracité — c'est-à-dire un contrôle mort dont
+  # personne ne s'est aperçu. C'est ça qu'on veut apprendre, et rien
+  # avant.
+  SEUIL_ALERTE=3
 elif [[ "$MODE" == "garde-fou-r2" ]]; then
   # Un listing complet des buckets, rien de plus. 10 min est déjà très
   # large ; si un jour ça dépasse, c'est que le compte a explosé — et

@@ -88,7 +88,46 @@ partager leurs journées.** Elles ne partagent aucune balise — c'est leur
 définition — mais un désaccord entre deux SEMAINES n'est pas un
 désaccord entre deux RÉSEAUX.
 
-**Piège nº 8 — DISCIPLINE, ET c'est moi qui l'ai enfreinte.** En
+**Piège nº 8 — DEUX DRAPEAUX `--out` QUI NE VEULENT PAS DIRE LA MÊME
+CHOSE.** `controle_tau.py` avait pris `--out` pour « le chemin du
+fichier de rapport ». Tous les autres jobs du dépôt l'entendent comme
+« la racine de l'état et des archives » — c'est ce que `run.sh` passe à
+chacun d'eux. Le mode `run.sh tau` aurait donc reçu un DOSSIER là où le
+script attendait un FICHIER, et il aurait fallu une exception dans
+l'orchestrateur, c'est-à-dire un second chemin pour un seul mode.
+*Un drapeau qui existe déjà ailleurs dans le dépôt garde son sens, ou il
+change de nom.* `--out` a repris le sens commun, le rapport a gagné son
+propre `--rapport`. ⓘ Trouvé en écrivant le mode, pas en l'exécutant :
+l'incompatibilité était visible dans la ligne de lancement de `run.sh`.
+
+**Piège nº 9 — UN DOUBLE DE BANC QUI NE SAIT ÉCHOUER QUE D'UNE FAÇON.**
+Le faux `meta.json` du banc de la sonde avait deux modes d'échec :
+l'exception réseau et la réponse non-objet (`None`). La mutation
+« accepter un `meta.json` sans `last_run_initialisation_time` » restait
+donc VERTE — les deux scènes existantes échouaient déjà sur le
+`isinstance`, bien avant d'atteindre la ligne mutée. Il manquait le
+troisième cas, et c'est le seul réaliste : une réponse **bien formée**
+dont le champ manque. *Le jeu d'essai doit être irrégulier dans la
+dimension testée, et la dimension d'un double d'API est la FORME de sa
+réponse, pas seulement sa présence.* (Troisième variante du piège nº 2
+de la phase B en trois jours.)
+
+**Piège nº 10 — « ON IMPORTE `collect.py`, ON NE LE MODIFIE PAS » A DÛ
+ÊTRE ENFREINT, ET LA BONNE FAÇON N'ÉTAIT PAS D'Y RECOPIER LA SONDE.**
+L'en-tête de `collect_reduit.py` l'écrit en toutes lettres : ce fichier
+porte la seule chaîne irremplaçable du chantier. Il fallait pourtant
+qu'il sonde la fraîcheur des runs, sans quoi le contrôle n°3 n'a rien à
+comparer. Les deux mauvaises réponses étaient symétriques : recopier la
+sonde (deux relevés qui divergeront — piège nº 1 du 26/08), ou la
+laisser dans `collect_reduit` et l'importer à l'envers (un cycle). La
+troisième : un module tiers, `fraicheur.py`, que les deux appellent, et
+une carte modèle→domaine CANONIQUE dont `collect_reduit` ne garde
+qu'une vue DÉRIVÉE — son budget ne bouge pas d'un appel, et un modèle
+manquant lève à l'import. *Quand une règle « ne pas toucher à ce
+fichier » doit céder, la sortie est de déplacer ce qui est partagé, pas
+de le dupliquer ni d'inverser la dépendance.*
+
+**Piège nº 11 — DISCIPLINE, ET c'est moi qui l'ai enfreinte.** En
 cherchant la cause du `HTTP 400`, un `echo` de contrôle a imprimé le
 contenu de `~/.balise-watch-r2.env` : `R2_ACCESS_KEY_ID` et
 `R2_SECRET_ACCESS_KEY` sont apparus en clair dans la transcription de

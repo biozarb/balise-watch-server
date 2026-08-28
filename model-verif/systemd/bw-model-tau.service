@@ -1,44 +1,29 @@
 [Unit]
 # ══════════════════════════════════════════════════════════════════════
-#  ⛔⛔ UNITÉ PROPOSÉE, PAS INSTALLÉE, ET PAS ENCORE INSTALLABLE.
+#  ⛔ UNITÉ PROPOSÉE, PAS INSTALLÉE.
 #      (lot L8, 28/08/2026 — contrôle n°3 du lot S3)
 #
-#  `run.sh` N'A PAS DE MODE `tau` À CE JOUR. Installer ce couple
-#  service/timer tel quel produirait une unité qui échoue à chaque
-#  déclenchement. Le geste manquant est un ajout à `run.sh`, et il n'est
-#  PAS fait : le prompt du lot dit « timer hebdo à proposer, pas
-#  installer sans accord », et modifier l'orchestrateur déployé est
-#  précisément le genre de geste qui se demande.
+#  Le mode `run.sh tau` EXISTE depuis le 28/08 : ce couple
+#  service/timer est fonctionnel, et l'installer est un `cp` + un
+#  `enable`. Ce qui manque n'est plus du code, c'est une décision — et
+#  la date, voir ci-dessous.
 #
-#  ⛔ ET SURTOUT : NE PAS RECOPIER ICI LA MISE EN PLACE D'ENVIRONNEMENT
-#  DE `run.sh`. Elle fait trois choses qu'on n'a pas le droit d'oublier,
-#  et qui ne se devinent pas :
+#  ⛔ ET IL PASSE PAR `run.sh`, JAMAIS À CÔTÉ. L'orchestrateur fait
+#  trois choses qu'on n'a pas le droit d'oublier et qui ne se devinent
+#  pas :
 #    · `source ~/.balise-watch-r2.env` PUIS `~/.balise-watch-model-verif.env`
 #      — ces fichiers sont écrits en `export VAR=…`, donc illisibles par
 #      la directive `EnvironmentFile=` de systemd (qui veut `VAR=valeur`) ;
 #    · `export STORAGE_BACKEND=r2` — ⚠️ SANS LUI, TOUTE LECTURE R2
 #      ÉCHOUE. Vécu le 28/08 en jouant ce lot à la main : la sonde
-#      rendait « 20 objets d'archive ILLISIBLES » et le contrôle
+#      annonçait « 20 objets d'archive ILLISIBLES » et le contrôle
 #      dégradait proprement — mais la cause était l'environnement du
 #      shell, pas l'archive ;
 #    · `export R2_BUCKET=model-verif` ET `MODEL_VERIF_BUCKET=model-verif`,
 #      APRÈS le `source`, parce que le `.env` partagé pose
 #      `balise-watch-packs` et qu'on lirait le mauvais seau en silence.
-#  Deux chemins d'environnement qui se ressemblent, c'est le piège nº 1
-#  de BUGS.md du 26/08. Il n'y a qu'un chemin : `run.sh`.
-#
-#  ═══ CE QUE LE MODE `tau` DEVRAIT FAIRE ═══
-#
-#      tau)  exec "$PYTHON" "$ICI/controle_tau.py" \
-#              --jours "${BW_MODEL_TAU_JOURS:-14}" \
-#              --root "$OUT" \
-#              --out "$OUT/controle-tau-$(date -u +%F).txt" ;;
-#
-#  Aucun ping de vie, aucune alerte : ce contrôle ne garde rien. Une
-#  semaine sans tau ne perd AUCUNE donnée (tout est en base et dans les
-#  archives, il se rejoue à l'identique) — contrairement à
-#  `bw-model-reduit`, dont chaque nuit manquée est définitive. Lui
-#  câbler une alerte apprendrait à ignorer une alerte.
+#  Reconstituer cet environnement dans l'unité serait un second chemin,
+#  avec tous les défauts d'un second chemin (BUGS.md, 26/08, piège nº 1).
 #
 #  ═══ ET IL EST TROP TÔT ═══
 #
@@ -60,6 +45,9 @@ Wants=network-online.target
 Type=oneshot
 User=debian
 ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh tau
+# ⓘ `run.sh` passe `--out /var/lib/bw-model-verif` comme à tous ses
+# jobs ; `controle_tau.py` en dérive le chemin de son rapport
+# (`controle-tau-<jour>.txt`). Aucun drapeau à ajouter ici.
 # Lecture seule : une requête Supabase filtrée (~120 000 lignes) et
 # 14 jours × 3 flux d'archive. Mesuré le 28/08 sur le VPS : 24 s de bout
 # en bout. 10 min laissent la place à une base lente sans jamais laisser

@@ -216,6 +216,12 @@ MUTATIONS = [
      '            "erreur": erreur,',
      '            "erreur": None,'),
 
+    ("le rapport cesse d'etre ecrit par defaut : la sortie ne vit plus "
+     "que dans le journal systemd, illisible d'une semaine a l'autre",
+     CT, BANC,
+     '    if args.rapport != "-":',
+     '    if args.rapport == "@jamais":'),
+
     ("le compte des objets illisibles ne descend plus dans la phrase "
      "publiee",
      CT, BANC,
