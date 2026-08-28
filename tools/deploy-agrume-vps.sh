@@ -148,8 +148,21 @@ echo "  ✓ 19/19 bancs Python verts sur le VPS"
 # sha256 prouve que les octets sont arrivés, jamais qu'ils tournent.*
 # ⚠️ Mesuré le 27/08 : ces bancs prennent ~25 s de plus sur le VPS.
 # C'est le prix, et il est écrit ici pour qu'il ne surprenne personne.
+# ⚠️ 28/08 (lot L9) — CETTE LISTE EST ÉCRITE À LA MAIN, DONC ELLE SE
+# PÉRIME. Le lot L9 y ajoute \`test_murphy.py\` ; au passage, trois bancs
+# écrits depuis le 27/08 n'y sont TOUJOURS PAS —
+# \`test_controle_tau.py\` et \`test_fraicheur.py\` (lot L8),
+# \`test_sonde_representativite.py\` / \`test_sonde_doublons.py\` /
+# \`test_sonde_chaine_arome.py\` (lots L4/L6/L16, encore hors dépôt).
+# Ils ne sont pas ajoutés ICI parce que ce n'est pas le lot qui les a
+# écrits, et qu'un banc inconnu qui rougirait sur le VPS bloquerait un
+# déploiement sans rapport. ⇒ à trancher hors lot : soit on les ajoute,
+# soit on remplace cette liste par un \`for B in model-verif/test_*.py\`
+# — la seconde ne se périme pas, mais elle embarque tout ce qui
+# ressemble à un banc, y compris ce qui n'y est pas prêt.
 for B in model-verif/test_score.py model-verif/test_inference.py \\
-         model-verif/test_duel.py model-verif/test_collect.py \\
+         model-verif/test_duel.py model-verif/test_murphy.py \\
+         model-verif/test_collect.py \\
          model-verif/test_collect_reduit.py model-verif/test_events.py \\
          model-verif/test_geopair.py model-verif/test_run_selftest.py \\
          model-verif/test_agrume_fcst.py model-verif/test_agrume_pi_fcst.py \\

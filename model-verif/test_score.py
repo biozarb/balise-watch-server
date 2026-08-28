@@ -3397,6 +3397,72 @@ def test_light_scores_bout_en_bout_ne_recalcule_rien():
                   f"({lr['zone_id']}/{lr['model']})", lr[champ], fr[champ])
 
 
+def test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base():
+    print("── L9b : les six sommes de Murphy, clé privée du balise-jour ──")
+    import murphy as MU_                                  # noqa: PLC0415
+    snapshots = {
+        0: [fcst_line("835", "icon_d2", DAY, lambda i: brise(i % 24) * 1.3)],
+        1: [], 2: [],
+    }
+    obs_j = [obs_line("835", DAY, brise)]
+    obs_v = [obs_line("835", DAY - timedelta(days=1), brise)]
+    rows, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, utc_offset_s=7200)
+    r = next(r for r in rows if r["lead_h"] == 6)
+
+    check("chaque balise-jour porte la clé privée `_murphy`",
+          MU_.MURPHY_KEY in r, True)
+    check("… et elle commence bien par `_` (c'est ce qui la tient hors "
+          "de la base)", MU_.MURPHY_KEY.startswith("_"), True)
+    mom = r[MU_.MURPHY_KEY]
+    check("… six sommes, pas les couples", len(mom), 6)
+    check("… dont le n coïncide avec les heures notées de la ligne",
+          mom[0], r["n_hours"])
+    # ⛔ LA VALEUR, RECALCULÉE PAR UN AUTRE CHEMIN : le rapport Σfo/Σoo
+    # d'un modèle qui vaut 1,30 × l'observation doit valoir ~1,30.
+    check("⭐ Σfo/Σo² retrouve le facteur 1,30 du modèle d'essai "
+          "(les sommes disent bien ce qu'elles prétendent)",
+          mom[5] / mom[4], 1.30, 0.02)
+
+    # ⛔ ET ELLE NE PART JAMAIS EN BASE — y compris quand le schéma est
+    # ILLISIBLE. C'est le chemin qui compte : `_pour_la_base` renvoie les
+    # lignes TELLES QUELLES quand `sb.columns()` rend `None`, et une clé
+    # qui n'est jamais une colonne transformerait cette panne bénigne en
+    # `PGRST204` certain, toutes les nuits.
+    class _SbMuet:
+        def columns(self, table):
+            return None
+
+    class _SbConnu:
+        def columns(self, table):
+            return set(rows[0]) - {MU_.MURPHY_KEY}
+
+    for nom, sb in (("schéma ILLISIBLE", _SbMuet()),
+                    ("schéma connu", _SbConnu())):
+        sortie = J._pour_la_base(sb, "model_verif_daily", [dict(r)])
+        check(f"⛔ `_murphy` ne part pas en base ({nom})",
+              MU_.MURPHY_KEY in sortie[0], False)
+        check(f"… et le reste de la ligne est intact ({nom})",
+              sortie[0]["err_vec_med"], r["err_vec_med"])
+
+    # … et le journal ne réclame AUCUN `.sql` pour une clé privée.
+    import contextlib                                      # noqa: PLC0415
+    import io                                              # noqa: PLC0415
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        J._pour_la_base(_SbConnu(), "model_verif_daily", [dict(r)])
+    check("⛔ … et le journal ne nomme aucun `.sql` à jouer pour elle",
+          "supabase_step" in tampon.getvalue(), False)
+
+    # Le cache de rejeu, lui, DOIT la porter : c'est sa raison d'être.
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    J.replay_write(tmp, DAY, rows)
+    relu = J.replay_read(tmp, DAY)
+    check("⭐ le cache de rejeu, lui, porte les six sommes",
+          relu[0][MU_.MURPHY_KEY], rows[0][MU_.MURPHY_KEY])
+    check("… et la formule du cache est bien la 5 (les moments + "
+          "`mse_comb` l'ont fait passer de 4)", J.REPLAY_FORMULA, 5)
+
+
 def test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap():
     print("── L9a : le biais de vitesse et de cap, compagnons du score ──")
     # Cinq balises, cinq jours. Les `bias_ratio` sont choisis pour que la
@@ -3682,6 +3748,8 @@ def main() -> int:
                test_l3_la_p_valeur_arrive_vraiment_du_classement,
                # ── lot L9a (28/08) : le compagnon WMO du score ──
                test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap,
+               # ── lot L9b (28/08) : les six sommes de Murphy ──
+               test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base,
                # ── lot S13.0 : le fichier léger + le résumé des manches ──
                test_light_scores_sous_ensemble_exact,
                test_light_scores_bout_en_bout_ne_recalcule_rien,

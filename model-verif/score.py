@@ -70,6 +70,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import duel as DUEL  # noqa: E402
 import events as EV  # noqa: E402
 import inference as INF  # noqa: E402
+import murphy as MU  # noqa: E402
 import scoring as S  # noqa: E402
 
 DAY_MS = 86_400_000
@@ -230,7 +231,29 @@ REPLAY_SUBDIR = "replay"
 #:     l'antécédent repart à zéro. `--replay-budget 30` une fois (mesuré
 #:     ~35 s par journée sur le VPS, soit ~18 min) plutôt que dix nuits
 #:     à en rattraper trois.
-REPLAY_FORMULA = 4
+#: 5 — lot L9 volets b ET c (28/08) : `daily_rows` porte DEUX choses de
+#:     plus. (b) la clé privée `_murphy` — les six sommes suffisantes
+#:     `[n, Σf, Σo, Σf², Σo², Σfo]` de la vitesse, dont `murphy.py`
+#:     recompose r²/biais conditionnel/biais systématique une fois
+#:     additionnées sur la fenêtre. (c) la colonne `mse_comb` (et son
+#:     `mse_model_comb` apparié) — la référence combinée de Murphy 1992,
+#:     `k·persistance + (1−k)·climatologie`.
+#:     ⛔ UNE SEULE INCRÉMENTATION POUR DEUX VOLETS, ET C'EST UN
+#:     ARBITRAGE. Les deux changent `daily_rows` et partent dans le MÊME
+#:     déploiement : incrémenter deux fois coûterait soixante rejeux
+#:     là où trente suffisent, pour une distinction (« formule 5 sans
+#:     mse_comb ») qui n'a jamais existé sur aucune machine.
+#:     ⚠️ Un cache de formule 4 ne porte NI l'un NI l'autre : réutilisé,
+#:     il donnerait une fenêtre de Murphy où les journées récentes ont
+#:     leurs moments et les anciennes pas — c'est-à-dire un r² calculé
+#:     sur cinq jours pendant qu'on croit en lire trente. Même refus que
+#:     pour les formules 3 et 4.
+#:     ⚠️ Prix connu, identique : `--replay-budget 30` une fois
+#:     (~18 min sur le VPS) plutôt que dix nuits à en rattraper trois.
+#:     ⓘ Et le cache grossit : six nombres de plus par balise-jour. À
+#:     MESURER sur le VPS après le premier rejeu complet, pas à estimer
+#:     ici.
+REPLAY_FORMULA = 5
 
 
 class Abort(Exception):
@@ -1420,6 +1443,24 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 "err_vec_med_corr": _r(err_corr),
                 "mse_model_corr": _r(mse_corr),
                 "bias_n_days": n_bias,
+                # ── lot L9b (28/08) : les six sommes de Murphy ─────────
+                # ⛔ UNE CLÉ PRIVÉE, PAS UNE COLONNE. `[n, Σf, Σo, Σf²,
+                # Σo², Σfo]` sur la VITESSE des heures appariées de cette
+                # journée : de quoi recomposer, une fois ADDITIONNÉES sur
+                # la fenêtre, le r² / biais conditionnel / biais
+                # systématique de Murphy 1988 (cf. `murphy.py`). Six
+                # nombres par balise-jour, jamais les 24 couples.
+                #
+                # Le `_` initial n'est pas cosmétique : c'est ce qui
+                # tient cette clé hors de `_pour_la_base`, qui prendrait
+                # sinon `_murphy` pour une colonne manquante de
+                # `model_verif_daily` et nommerait un `.sql` à jouer
+                # pour une donnée qui n'a rien à faire en base.
+                #
+                # ⚠️ ELLES VOYAGENT DANS LE CACHE DE REJEU, et c'est pour
+                # elles (avec `mse_comb` du volet c) que REPLAY_FORMULA
+                # passe de 4 à 5.
+                MU.MURPHY_KEY: MU.moments(pairs),
             })
 
             # ── détail par tranche de vent OBSERVÉE ──
@@ -4278,6 +4319,57 @@ def _publish_light(st, scores: list[dict], ev_scores: list[dict],
           f"{len(gzip.compress(body)) / 1024:.0f} Ko gzippé)")
 
 
+def _publish_murphy(st, par_modele: list[dict], par_balise: list[dict],
+                    as_of: datetime, dry_run: bool):
+    """Publie `model_murphy.json` — le diagnostic, PAS l'écran principal.
+
+    ⛔ SON PROPRE OBJET, ET C'EST LE POINT. Le prompt du lot dit « une
+    page/bloc de diagnostic, pas l'écran principal ». Trois raisons de
+    ne pas le fondre dans les deux fichiers existants :
+
+    1. La granularité n'est pas la même. `model_scores*.json` publient
+       des CASES (zone × modèle × échéance) ; Murphy publie des
+       BALISES. Les mettre côte à côte inviterait à les joindre, et une
+       décomposition par balise n'est pas une propriété de sa zone.
+    2. Le poids. Une ligne par (balise × modèle × échéance) sur ~1 250
+       balises pèse plusieurs Mo — dans le fichier LÉGER, ce serait la
+       fin du « léger » ; dans le gros, ce serait doubler un objet que
+       l'écran charge à chaque ouverture de fiche.
+    3. Personne ne le lit encore. Un objet séparé se sert à la demande,
+       et le jour où un écran le lira, il ne paiera que lui.
+
+    ⚠️ Même bucket, même clé stable, même cache court que les autres
+    (cf. `_publish`) : aucune règle CORS neuve à poser — vérifié en
+    direct au S13.0, la règle est POSÉE PAR BUCKET et couvre déjà toute
+    clé future.
+    """
+    if st is None or dry_run:
+        print("  ⓘ publication R2 (Murphy) sautée (pas de storage, ou dry-run)")
+        return
+    from storage import CACHE_REECRIT             # type: ignore
+    body = json.dumps({
+        "as_of": as_of.strftime("%Y-%m-%d"),
+        "audience": "beta",
+        "value_key": "speed_kmh",
+        # ⛔ LA RÉFÉRENCE, ÉCRITE DANS L'EN-TÊTE **ET** SUR CHAQUE LIGNE.
+        # `ss` n'est PAS `skill_clim` : l'identité de Murphy ne tient que
+        # contre la climatologie d'ÉCHANTILLON (une constante), quand
+        # `skill_clim` se mesure contre une climatologie HORAIRE, bien
+        # plus dure. Un lecteur qui les comparerait conclurait que le
+        # modèle s'est effondré ou envolé d'une colonne à l'autre.
+        "ss_reference": MU.SS_REFERENCE,
+        "identity": "ss = r2 - bc^2 - bs^2 (Murphy 1988, MWR 116:2417)",
+        "min_pairs": MU.MURPHY_MIN_PAIRS,
+        "min_days": MU.MURPHY_MIN_DAYS,
+        "par_modele": par_modele,
+        "par_balise": par_balise,
+    }, separators=(",", ":")).encode("utf-8")
+    st.put("model_murphy.json", body, cache_control=CACHE_REECRIT)
+    st.bilan()
+    print(f"  → model_murphy.json publié ({len(body) / 1024:.0f} Ko, "
+          f"{len(gzip.compress(body)) / 1024:.0f} Ko gzippé)")
+
+
 # ══════════════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
@@ -4298,6 +4390,26 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
     """
     if not rows:
         return rows
+    # ⛔ LES CLÉS PRIVÉES SORTENT D'ABORD, ET INCONDITIONNELLEMENT
+    # (lot L9b, 28/08). Une clé qui commence par `_` est un champ de
+    # TRANSPORT — `_murphy`, les six sommes de la décomposition, qui
+    # voyagent dans le CACHE DE REJEU et n'ont rien à faire en base
+    # (même patron que les `_fdr_p` du lot L3, popés avant publication).
+    #
+    # ⚠️ AVANT le `if not cols`, et c'est tout l'intérêt de l'ordre.
+    # `sb.columns()` peut rendre `None` (schéma illisible) : la fonction
+    # renvoie alors les lignes TELLES QUELLES. Une clé qui n'est jamais
+    # une colonne transformerait donc cette panne bénigne — un envoi
+    # complet tenté au hasard — en `PGRST204` certain, toutes les nuits.
+    # Le filtre du bas (`k in cols`) ne s'exécute pas sur ce chemin-là.
+    #
+    # ⓘ Et elles ne sont pas SIGNALÉES : imprimer « colonnes pas encore
+    # en base : _murphy — lancer supabase_step… » enverrait Yann jouer
+    # un SQL pour une donnée qui n'a pas à exister en base, chaque nuit,
+    # pour toujours.
+    if any(k.startswith("_") for k in rows[0]):
+        rows = [{k: v for k, v in r.items() if not k.startswith("_")}
+                for r in rows]
     cols = sb.columns(table)
     if not cols:
         return rows
@@ -5167,6 +5279,16 @@ def main() -> int:
         print("     rattachée à son bassin-versant. Les accumulateurs et les")
         print("     scores de zone sont SAUTÉS — pas calculés au hasard.")
         print("     (l'affectation demande le relief ; elle n'est pas dans ce lot)")
+        # ⛔ ET LA DÉCOMPOSITION DE MURPHY AVEC EUX, PARCE QU'ELLE MONTE
+        # SUR LA MÊME FENÊTRE REJOUÉE (lot L9b). Elle ne connaît pourtant
+        # aucune zone : c'est un COUPLAGE DE COÛT, pas de sens, assumé
+        # pour ne pas relire trente journées d'archive une seconde fois.
+        # Le dire ici est la contrepartie — sans cette ligne, un
+        # `model_murphy.json` manquant se lirait comme une panne de
+        # Murphy alors que c'est `station_zone` qui est vide (arbitrage
+        # nº 5 du lot L1, appliqué à l'envers et à découvert).
+        print("     ⚠️ `model_murphy.json` n'est donc pas republié non plus :")
+        print("        il monte sur la fenêtre rejouée, qui n'est pas lue ici.")
     else:
         needed = zone_rows_needed(list(zone_of.values()))
         if needed:
@@ -5271,6 +5393,47 @@ def main() -> int:
             root, day, st, utc_offset_s, args.regime_days, args.replay_budget)
         print(f"  rejeu d'archive : {bilan_replay} en "
               f"{time.monotonic() - t_replay:.1f} s")
+        # ── lot L9b (28/08) : TIMING ou AMPLITUDE, par balise ─────────
+        #
+        # ⚠️ IL MONTE SUR LA FENÊTRE DÉJÀ REJOUÉE, ET C'EST UN ARBITRAGE
+        # OPPOSÉ À CELUI DU DUEL. Le duel (L1) lit sa PROPRE requête,
+        # étroite, pour rester hors du `else: (zone_of non vide)` — il
+        # ne connaît aucune zone et son silence ne devait pas se
+        # confondre avec un défaut de `station_zone`. Murphy, lui, a
+        # besoin des MOMENTS de trente journées d'archive : les relire
+        # par un second chemin doublerait le poste le plus cher du run
+        # (85,6 s mesurées au lot G). Il vit donc ici, sur `units`, et
+        # le prix est nommé : si `station_zone` est vide, le fichier
+        # Murphy ne sort pas — c'est dit en toutes lettres dans la
+        # branche `if not zone_of` ci-dessus.
+        #
+        # ⚠️ SOUS `try`, comme le duel et la pression : un diagnostic ne
+        # fait pas tomber une nuit de notation.
+        t_mur = time.monotonic()
+        try:
+            mur_balises = MU.par_balise(units)
+            mur_modeles = MU.par_modele(mur_balises)
+            n_ok = sum(1 for l in mur_balises if l["reason"] == "ok")
+            print(f"  décomposition de Murphy : {len(mur_balises)} "
+                  f"(balise × modèle × échéance), dont {n_ok} décomposées "
+                  f"({time.monotonic() - t_mur:.1f} s)")
+            if not n_ok and mur_balises:
+                # ⛔ ZÉRO DÉCOMPOSÉE N'EST PAS « TOUT VA BIEN ». C'est le
+                # symptôme d'un cache de rejeu creux (formule qui vient
+                # de changer) ou d'une fenêtre trop courte — et il faut
+                # que le journal le crie, pas qu'il le taise.
+                print(f"  ⚠️ Murphy : AUCUNE ligne décomposée. Cache de "
+                      f"rejeu creux (formule {REPLAY_FORMULA} neuve ?) ou "
+                      f"fenêtre sous {MU.MURPHY_MIN_DAYS} jours / "
+                      f"{MU.MURPHY_MIN_PAIRS} heures.", file=sys.stderr)
+            for l in mur_modeles:
+                print(MU.dire(l))
+            _publish_murphy(st, mur_modeles, mur_balises, as_of, args.dry_run)
+        except Exception as exc:                     # noqa: BLE001
+            print(f"  ⚠️ décomposition de Murphy : {type(exc).__name__} — "
+                  f"{exc}. La notation continue, `model_murphy.json` n'est "
+                  f"pas republié ce soir.", file=sys.stderr)
+
         t_reg = time.monotonic()
         reg_rows = regime_scores(units, as_of, zone_of, kind_of)
         scores += reg_rows
