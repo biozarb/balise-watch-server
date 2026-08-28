@@ -6,6 +6,101 @@
 
 ---
 
+## 28/08/2026 (lot L9) — quatre bancs verts, et c'est la PRODUCTION qui a trouvé les fautes
+
+Le lot publie trois compagnons du score (biais WMO, décomposition de
+Murphy, référence combinée). 36 mutations vues, 963 assertions vertes —
+et les deux défauts qui comptaient sont sortis du contrôle sur les
+archives réelles, pas du banc.
+
+**Piège nº 1 — ⛔⛔ UN PLANCHER D'ÉCHANTILLON COMPTÉ DANS LA MAUVAISE
+UNITÉ, ET QUI PUBLIE SON PROPRE BIAIS.** L'estimation de ρ
+(autocorrélation à 24 h de l'anomalie, le poids de la référence
+combinée) exigeait « 120 couples d'anomalies et 5 journées ». 120
+couples ressemble à un gros échantillon ; il n'en est pas un — les 24
+heures d'une même journée portent PRESQUE LA MÊME anomalie, donc la
+taille d'échantillon EFFECTIVE est le nombre de JOURNÉES. Or le retrait
+des moyennes biaise l'autocorrélation de rang 1 d'environ **−1/N**.
+Mesuré sur 3 725 balises réelles : ρ médian **−0,194** sous 8 journées
+(85 % de négatifs), **+0,082** entre 15 et 21. −0,194 pour cinq
+journées, c'est −1/5 au centième près. *Ce que l'estimateur mesurait
+sur 85 % des balises, c'était lui-même.* Aucun banc ne pouvait le voir :
+la fixture avait 29 journées. ⚠️ Et le sens de l'erreur était le pire
+possible — un ρ trop bas rend la référence plus facile à battre, donc
+le skill publié FLATTEUR. *Un plancher d'échantillon se compte dans
+l'unité où vivent les degrés de liberté, pas dans celle où les données
+sont stockées.*
+
+**Piège nº 2 — LA MÉMOIRE EST UNE PROPRIÉTÉ DU CODE, ET RIEN NE LA
+MESURAIT.** Les six sommes de Murphy étaient attachées à CHAQUE ligne
+de la fenêtre rejouée : ~260 octets × 405 486 balise-jours = **~107 Mo
+au pic**, sur un VPS de 3,8 Go SANS SWAP dont le run de la même nuit
+venait d'être tué par l'OOM killer. Le banc tournait sur 30 lignes et
+ne pouvait rien en dire. Réécrit en accumulateur (les six sommes sont
+ADDITIVES : on les fond au fil de la lecture, la clé ne survit pas à la
+ligne) : ~5 Mo. *Une structure qu'on attache à une ligne se paie autant
+de fois qu'il y a de lignes — et le nombre de lignes de la production
+n'est pas celui du banc.* ⓘ Corollaire trouvé dans la foulée : compter
+les journées avec un `set` de dates aurait coûté ~66 Mo à lui seul et
+annulé l'optimisation. Un compteur suffisait.
+
+**Piège nº 3 — DEUX BANCS DU MÊME DOSSIER, DEUX SIGNATURES DE
+`check`.** `test_score.py` prend `(label, obtenu, attendu)` ;
+`test_inference.py` prend `(label, condition, detail)`. Six assertions
+de ce lot ont été écrites au premier format dans le second banc : elles
+passaient **VERTES** sans rien vérifier, parce que `180.0` est une
+condition vraie. Seules ont rougi celles dont la valeur attendue était
+`None` ou `0.0`. *Une signature qui ressemble à celle du voisin doit
+être rappelée en tête du fichier* — c'est fait dans `test_murphy.py`.
+
+**Piège nº 4 — LE BANC COMPARAIT LA SORTIE À LA CONSTANTE DU CODE.**
+`test_light_scores_sous_ensemble_exact` vérifie que la ligne légère
+porte exactement `J.LIGHT_SCORE_FIELDS` — donc le code testé.
+Retirer un champ du tuple déplace les DEUX côtés de l'égalité et le
+banc reste vert (piège nº 1 de la phase B, dans une variante qu'on ne
+voit pas venir parce que l'assertion a l'air d'une vérification de
+schéma). Les trois champs du lot sont donc aussi nommés À LA MAIN.
+
+**Piège nº 5 — UNE FIXTURE DONT L'ORIGINE N'EST PAS ALIGNÉE SUR
+MINUIT.** L'heure locale se calcule sur le timestamp ABSOLU
+(`(t//1000 + offset)//3600 % 24`). Une origine non alignée décale la
+climatologie d'un cran par rapport aux observations et fabrique une
+anomalie DIURNE identique chaque jour : ρ sortait à 0,981 au lieu de
+0,60. Le banc aurait « prouvé » l'estimateur en mesurant une faute de
+fixture. *Trouvé parce que la valeur attendue était écrite en toutes
+lettres (0,60, injectée) et pas relue du code.*
+
+**Piège nº 6 — UNE PROPRIÉTÉ « PAR CONSTRUCTION » QUI NE L'EST QU'EN
+ESPÉRANCE.** Le `.sql` affirmait d'abord que `mse_comb` devait dominer
+`mse_persist` et `mse_clim` LIGNE À LIGNE, « toute ligne qui la viole
+est un défaut de code ». Faux : le théorème de Murphy donne l'optimum
+en espérance sur l'échantillon d'estimation ; sur UNE journée avec un ρ
+estimé sur trente, le mélange peut être moins bon que l'une de ses
+composantes — mesuré, 5 771 lignes sur 14 737. *Une phrase de
+vérification écrite avant la mesure engage autant qu'un banc, et se
+mute de la même façon.* La requête porte désormais sur les médianes
+(persist 71,5 · clim 60,3 · comb 58,3 — la domination, elle, tient).
+
+**Piège nº 7 — DEUX CAMPAGNES DE MUTATIONS EN PARALLÈLE SUR LES MÊMES
+FICHIERS.** Un premier lancement n'a pas rendu la main dans le délai de
+l'outil ; le processus, lui, tournait toujours. Le relancer a fait
+courir DEUX campagnes qui mutaient et restauraient les mêmes fichiers :
+l'une a laissé une mutation appliquée que l'autre venait de restaurer,
+et le motif suivant est sorti « INTROUVABLE ». *Une campagne de
+mutations est un mutex qui ne dit pas son nom : vérifier qu'aucune ne
+tourne AVANT d'en lancer une, et contrôler l'intégrité (chaque motif
+`avant` présent) après.* Le contrôle existait déjà — c'est lui qui a
+trouvé les deux fichiers restés mutés.
+
+⭐ **Et ce qui a marché** : rejouer la journée du 26/08 EN ENTIER depuis
+les archives R2, sur le Mac, en lecture seule — 49 016 balise-jours.
+*Un banc prouve que l'outil fait ce que son auteur croit ; seule la
+confrontation à la production dit si ce qu'il mesure existe.* Les deux
+pièges nº 1 et nº 2 en sont sortis, et l'identité de Murphy y a été
+vérifiée 47 916 fois (écart max 5·10⁻⁵, c'est-à-dire l'arrondi).
+
+---
+
 ## 28/08/2026 (lot L8) — un préalable impossible, et deux bancs qui comptaient des mots
 
 **Piège nº 1 — ⛔ UN PRÉALABLE EXIGÉ PAR UNE NOTE PEUT ÊTRE IMPOSSIBLE,
