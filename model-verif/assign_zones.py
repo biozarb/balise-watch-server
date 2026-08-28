@@ -40,6 +40,20 @@ import score as J
 #: Les colonnes que `station_zone` accepte (step35 l. 195-212). Tout le
 #: reste du JSON est de l'audit et ne doit PAS partir vers PostgREST, qui
 #: refuse une colonne inconnue — un échec parlant, mais évitable.
+#:
+#: ⚠️ DEUX COLONNES DE LA TABLE SONT VOLONTAIREMENT ABSENTES D'ICI :
+#: `position_suspecte` (étape 42) et `doublon_de` (lot L17, step55).
+#: Elles ne viennent pas de l'affectation géographique — elles viennent
+#: d'inspections humaines et de la sonde de doublons — et ce script ne
+#: doit ni les écrire ni les effacer.
+#: ⭐ Et il ne les efface PAS : `score.Supabase.upsert` envoie
+#: `Prefer: resolution=merge-duplicates`, et PostgREST ne met alors à
+#: jour que les colonnes PRÉSENTES dans le corps. Les ajouter ici à
+#: `None` « pour la forme » les remettrait donc à zéro à chaque
+#: réaffectation de zones, silencieusement, et une déduplication
+#: mesurée sur 21 jours d'archives disparaîtrait sans un message.
+#: *(Relu dans le code le 27/08 ; le contrôle en base est écrit dans la
+#: section VÉRIFICATION de `supabase_step55_lot_l17_doublon_de.sql`.)*
 COLUMNS = (
     "source", "station_id", "zone_id", "basin_id", "basin_uncertain",
     "massif_id", "landform", "dem_alt_m", "tpi_2km_m", "tpi_10km_m",

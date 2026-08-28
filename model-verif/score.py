@@ -2235,6 +2235,60 @@ def zone_id_for(zone: dict) -> str:
     return f"{head}:{zone['landform']}"
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LES DOUBLONS D'INSCRIPTION (lot L17, 27/08/2026)
+# ══════════════════════════════════════════════════════════════════
+
+#: La colonne de `station_zone` qui dit qu'une inscription est la
+#: SECONDE d'un capteur déjà noté ailleurs.
+#:
+#: ⛔ POURQUOI CE GESTE EXISTE — mesuré par le lot L16 sur 21 jours
+#: d'archives et 298 122 balise-jours, pas déduit :
+#:   · 262 paires de balises sont à moins de 300 m ET s'accordent à
+#:     moins d'1 km/h médian sur plus de 120 heures — c'est le même
+#:     capteur, republié par deux réseaux (270 paires
+#:     `pioupiou` ↔ `windsmobi/ffvl`, 47 `metar` ↔ `mf`) ;
+#:   · 79 de plus au même point avec un écart qui s'explique par la
+#:     CHAÎNE (le METAR est publié en nœuds ENTIERS, quantum
+#:     1,852 km/h, sur une moyenne de dix minutes) ;
+#:   · elles pèsent 3,05 à 3,62 % des balise-jours de la fenêtre.
+#:
+#: ⛔ ET CE QUE ÇA COÛTAIT, mesuré en rejouant la nuit DEUX FOIS :
+#:   · **80 à 92 cases publiées n'existaient que grâce à un doublon** —
+#:     `MIN_STATIONS_ZONE` vaut 3, et la troisième station était une
+#:     seconde inscription de la première ;
+#:   · **15 à 16 podiums changeaient** ; `rank_reason = 'ok'` tombe de
+#:     584 à 504 lignes une fois les doublons retirés ;
+#:   · le `n` de 519 à 553 cases était gonflé (médiane +6 %, queue à
+#:     +600 % : une case passait de 84 à 12 balise-jours) ;
+#:   · le `m` de Benjamini-Hochberg (lot L3) passait de 665 à 616.
+#:
+#: ⚠️ ELLE PORTE L'UNITÉ CANONIQUE EN TOUTES LETTRES
+#: (« pioupiou:1494 »), jamais un booléen. Un booléen dirait « celle-ci
+#: est en trop » sans dire de QUI — et une déduplication dont on ne
+#: peut plus retrouver le représentant n'est plus défaisable, ni
+#: relisible dans six mois.
+#:
+#: ⓘ Elle est posée à CÔTÉ de `position_suspecte`, pas à sa place.
+#: Les deux excluent, mais pour deux raisons opposées : l'une dit « je
+#: ne sais pas OÙ est cette balise », l'autre dit « je sais très bien
+#: où elle est — au même endroit qu'une autre ». Les confondre, c'est
+#: se condamner à ne plus savoir laquelle des deux exclusions défaire.
+COL_DOUBLON = "doublon_de"
+
+
+def est_doublon(zone: dict | None) -> bool:
+    """La balise est-elle une SECONDE inscription d'un capteur déjà noté ?
+
+    ⚠️ UN SEUL TEST POUR TROIS APPELANTS (`_case_rows`,
+    `accumulator_updates`, et le filtre du duel dans `main`). Trois
+    `z.get("doublon_de")` semés dans le fichier, c'est trois endroits
+    où la colonne peut être renommée à moitié — et deux d'entre eux
+    continueraient de compter deux fois, sans rien faire rougir.
+    """
+    return bool(zone and zone.get(COL_DOUBLON))
+
+
 def zone_kind_for(zone: dict) -> str:
     """L'échelon auquel appartient RÉELLEMENT le `zone_id` d'une balise.
 
@@ -2902,6 +2956,9 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict]):
     """
     # (zone_id, model, lead, regime, band, metric) → valeurs des balises
     buckets: dict[tuple, list[float]] = defaultdict(list)
+    #: ⚠️ Une liste d'un élément et pas un `int` : le compteur est
+    #: incrémenté dans la boucle, et `nonlocal` n'existe pas ici.
+    n_doublons = [0]
     for b in banded:
         z = zone_of.get(b["key"])
         if z is None or z.get("basin_uncertain"):
@@ -2917,6 +2974,15 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict]):
             # jamais sur le seul écart modèle/nom (14 des 18 grands
             # écarts inspectés étaient de vrais sommets rabotés par la
             # maille — cf. claude/inspection-18-balises-ecart-resultats-10-08.md).
+            continue
+        if est_doublon(z):
+            # ⛔ LA MÉMOIRE LONGUE AUSSI, et ce n'est pas un doublon de
+            # geste. `model_character` accumule sur une demi-vie de
+            # 30 jours : un doublon non écarté ICI continuerait de
+            # peser dans le caractère d'une zone pendant un mois APRÈS
+            # que le classement a cessé de le compter — et personne ne
+            # rapprocherait les deux.
+            n_doublons[0] += 1
             continue
         for zid, _level in fallback_chain(z):
             for metric in METRICS:
@@ -2953,6 +3019,12 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict]):
                 buckets[(zid, b["model"], b["lead_h"], b["regime"],
                          "all", metric)].append(float(v))
 
+    if n_doublons[0]:
+        # Pas de purge silencieuse : une exclusion qui ne se compte pas
+        # devient un fait acquis que personne ne peut plus contester.
+        print(f"  ⓘ accumulateurs : {n_doublons[0]} entrée(s) écartée(s) "
+              f"— seconde inscription d'un capteur déjà noté "
+              f"(`{COL_DOUBLON}`, lot L17)")
     out: list[dict] = []
     for key, values in buckets.items():
         if len(values) < 1:
@@ -3027,6 +3099,19 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
                  "mse_m": [], "mse_r": [], "mse_c": [], "n_hours": 0,
                  # ── lot S2 : la colonne corrigée, À CÔTÉ ─────────────
                  "err_corr": [], "mse_cc": [], "nd": []})
+    #: Balise-jours écartés parce que doublon d'inscription (lot L17).
+    #: ⚠️ DÉCLARÉ ICI, avant la boucle qui l'incrémente — et pas à côté
+    #: de `sous_plancher`, qui vit APRÈS elle.
+    #:
+    #: ⚠️ CE COMPTEUR NE COMPTE PAS « LES DOUBLONS EN BASE ». Il compte
+    #: les balise-jours écartés PAR CE MOTIF-LÀ, parmi ceux qui avaient
+    #: survécu aux exclusions précédentes (zone inconnue,
+    #: `basin_uncertain`, `position_suspecte`). Mesuré sur la production
+    #: le 27/08 : 9 066 ici contre 9 083 balise-jours de doublons dans
+    #: la fenêtre — les 17 manquants étaient déjà écartés pour une autre
+    #: raison. Les deux nombres sont justes ; comparer l'un à l'autre
+    #: comme s'ils disaient la même chose ferait croire à une fuite.
+    n_doublons = 0
     for d in units:
         z = zone_of.get(d["unit"])
         if z is None or z.get("basin_uncertain"):
@@ -3034,6 +3119,18 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         if z.get("position_suspecte"):
             # Même exclusion qu'accumulator_updates — voir le
             # commentaire là-bas (étape 42, 10/08).
+            continue
+        if est_doublon(z):
+            # ⛔ LE GESTE DU LOT L17. Écarter la balise-jour ENTIÈRE,
+            # et pas seulement son rang : c'est le QUORUM
+            # (`MIN_STATIONS_ZONE`, plus bas) qui fabriquait 80 à
+            # 92 cases n'existant que grâce à une seconde inscription.
+            # Poser un `rank_reason` sur la ligne, comme le lot L2 le
+            # fait pour `duplicate_chain`, ne servirait à rien ici :
+            # `duplicate_chain` écarte un MODÈLE, qui a sa propre ligne
+            # de score ; un doublon est une BALISE, et une balise n'a
+            # pas de ligne — elle a un poids dans les cases.
+            n_doublons += 1
             continue
         if d.get("err_vec_med") is None:
             continue
@@ -3190,6 +3287,10 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         rows_by_case_model[(zid, lead, level)][model] = b["rows"]
 
     _apply_rank(by_case, rows_by_case_model)
+    if n_doublons:
+        print(f"  ⓘ {n_doublons} balise-jour(s) écarté(s) : seconde "
+              f"inscription d'un capteur déjà noté (`{COL_DOUBLON}`, "
+              f"lot L17) [{window_kind}/{regime}]")
     if sous_plancher[0] or sous_plancher[1]:
         print(f"  ⓘ skill nul sur {sous_plancher[0]} case(s) "
               f"(persistance) et {sous_plancher[1]} (climatologie) : "
@@ -4921,10 +5022,44 @@ def main() -> int:
         daily_duel = sb.select(
             "model_verif_daily", DUEL.query_duel(depuis_duel),
             order="day,source,station_id,model,lead_h,fcst_src")
+        # ── lot L17 : les doublons d'inscription sortent du duel aussi ─
+        #
+        # ⛔ POURQUOI ICI ET PAS DANS `duel.py`. Le duel lit une requête
+        # ÉTROITE (quatre colonnes, un lead, un réseau) et ne connaît
+        # aucune zone : lui faire lire `station_zone` doublerait sa
+        # requête pour trois paires. Le filtre vit donc chez l'appelant,
+        # qui a déjà la table sous la main.
+        #
+        # ⚠️ ET IL DÉGRADE AU LIEU DE SE TAIRE. `station_zone` vide ⇒
+        # aucun filtre, et le duel tourne QUAND MÊME — c'est l'arbitrage
+        # nº 5 du lot L1 (« le duel ne connaît aucune zone ; l'y coupler
+        # rendrait son silence indistinguable d'un défaut de
+        # `station_zone` »). On ajoute un filtre, pas une dépendance.
+        #
+        # ⚠️ CE FILTRE FAIT UNE MARCHE DANS LA SÉRIE CUMULÉE, et c'est un
+        # arbitrage assumé : mesuré le 27/08, il retire 24 balise-jours
+        # sur 2 947 (0,8 %) et déplace la médiane de −0,0006 à −0,0008,
+        # soit moins que la résolution du tirage. Mieux vaut une petite
+        # marche aujourd'hui qu'un verdict à 40 jours (arbitrage nº 3 du
+        # L1) construit sur des paires comptées deux fois.
+        doublons_duel = {u for u, z in zone_of.items() if est_doublon(z)}
+        if doublons_duel:
+            avant_duel = len(daily_duel)
+            daily_duel = [r for r in daily_duel
+                          if f"{r['source']}:{r['station_id']}"
+                          not in doublons_duel]
+            retires_duel = avant_duel - len(daily_duel)
+        else:
+            retires_duel = 0
         duels_rows = DUEL.duels(daily_duel)
         print(f"  duel apparié ({DUEL.DUEL_VALUE_KEY}, lead "
               f"{DUEL.DUEL_LEAD_H}, {DUEL.DUEL_SOURCE}) : "
-              f"{len(daily_duel)} lignes lues depuis le {depuis_duel}")
+              f"{len(daily_duel)} lignes lues depuis le {depuis_duel}"
+              + (f" ({retires_duel} retirée(s) : doublon d'inscription)"
+                 if retires_duel else
+                 ("" if doublons_duel else
+                  " — ⓘ aucun doublon connu (`station_zone` vide ou "
+                  "`doublon_de` jamais posé) : duel NON filtré")))
         for _d in duels_rows:
             print(DUEL.dire(_d))
             if _d["excluded_duplicates"]:

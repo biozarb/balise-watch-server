@@ -3181,6 +3181,154 @@ def test_l3_la_p_valeur_arrive_vraiment_du_classement():
           rap["brut"]["m"] >= 1, True)
 
 
+def _daily_l17(stations, n_jours=15, err_par_modele=(("icon_d2", 3.0),
+                                                     ("icon_eu", 4.0))):
+    """Des balise-jours réguliers pour `stations` — la scène du L17 ne
+    teste pas le classement, elle teste QUI ENTRE dedans."""
+    daily = []
+    for j in range(n_jours):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for unite in stations:
+            src, sid = unite.split(":", 1)
+            for model, err in err_par_modele:
+                daily.append({
+                    "day": d, "source": src, "station_id": sid,
+                    "model": model, "lead_h": 6, "n_hours": 24,
+                    "err_vec_med": err, "err_vec_rms": err + 1.0,
+                    "mse_model": None, "mse_persist": None,
+                    "mse_clim": None, "err_vec_med_corr": None,
+                    "mse_model_corr": None, "bias_n_days": None,
+                })
+    return daily
+
+
+def _zones_l17(stations, zid="b1:valley", landform="valley"):
+    return {u: {"zone_id": zid, "landform": landform, "basin_id": "b1",
+                "massif_id": "alpes-nord", "basin_uncertain": False}
+            for u in stations}
+
+
+def test_l17_doublon_ecarte_du_classement():
+    """Lot L17 (27/08/2026) — une SECONDE inscription du même capteur ne
+    doit peser ni dans le `n` d'une case, ni dans son QUORUM.
+
+    ⛔ Le quorum est le vrai sujet. `MIN_STATIONS_ZONE` vaut 3 : mesuré
+    sur la production le 27/08, 80 à 92 cases publiées n'avaient leur
+    troisième station que parce qu'elle était le doublon de la première.
+    """
+    print("── lot L17 : le doublon d'inscription sort du classement ──")
+    trois = ["pioupiou:1", "pioupiou:2", "pioupiou:3"]
+    zone_of = _zones_l17(trois)
+    daily = _daily_l17(trois)
+    base = J._case_rows([dict(d, unit=f"{d['source']}:{d['station_id']}")
+                         for d in daily], zone_of, DAY, "rolling15", "all",
+                        J.MIN_STATIONS_ZONE, with_ci=False)
+    check("trois vraies balises : la case est publiée",
+          len({J._cle_de_case(r) for r in base}) > 0, True)
+    n_base = sum(int(r.get("occurrences") or 0) for r in base)
+
+    # ── la MÊME case, mais la troisième est un doublon de la première ──
+    zone_dbl = _zones_l17(trois)
+    zone_dbl["pioupiou:3"]["doublon_de"] = "pioupiou:1"
+    apres = J._case_rows([dict(d, unit=f"{d['source']}:{d['station_id']}")
+                          for d in daily], zone_dbl, DAY, "rolling15", "all",
+                         J.MIN_STATIONS_ZONE, with_ci=False)
+    check("⭐ la case tombe sous le quorum et DISPARAÎT", len(apres), 0)
+
+    # ── quatre vraies + un doublon : la case survit, le `n` est corrigé ──
+    quatre = trois + ["pioupiou:4"]
+    cinq = quatre + ["pioupiou:5"]
+    z5 = _zones_l17(cinq)
+    d5 = _daily_l17(cinq)
+    units5 = [dict(d, unit=f"{d['source']}:{d['station_id']}") for d in d5]
+    avec = J._case_rows(units5, z5, DAY, "rolling15", "all",
+                        J.MIN_STATIONS_ZONE, with_ci=False)
+    z5b = _zones_l17(cinq)
+    z5b["pioupiou:5"]["doublon_de"] = "pioupiou:1"
+    sans = J._case_rows(units5, z5b, DAY, "rolling15", "all",
+                        J.MIN_STATIONS_ZONE, with_ci=False)
+    n_avec = sum(int(r.get("occurrences") or 0) for r in avec
+                 if r["agg_level"] == "basin_landform")
+    n_sans = sum(int(r.get("occurrences") or 0) for r in sans
+                 if r["agg_level"] == "basin_landform")
+    check("la case à 4 vraies balises survit", len(sans) > 0, True)
+    check("⭐ et son `n` perd exactement le cinquième", n_sans * 5, n_avec * 4)
+
+    # ── ⭐ ÉCARTER LE DOUBLON REND EXACTEMENT LA MÊME NUIT QUE SI LA
+    # SECONDE INSCRIPTION N'AVAIT JAMAIS EXISTÉ. C'est l'assertion qui
+    # compte : elle dit que le geste RETIRE, il ne corrige pas.
+    z4 = _zones_l17(quatre)
+    units4 = [dict(d, unit=f"{d['source']}:{d['station_id']}")
+              for d in _daily_l17(quatre)]
+    jamais = J._case_rows(units4, z4, DAY, "rolling15", "all",
+                          J.MIN_STATIONS_ZONE, with_ci=False)
+    def _resume(rows):
+        return sorted((r["zone_id"], r["model"], r["lead_h"], r["agg_level"],
+                       r["occurrences"], r["rank"], r["rank_reason"])
+                      for r in rows)
+    check("⭐ la nuit dédoublonnée == la nuit où le doublon n'existait pas",
+          _resume(sans), _resume(jamais))
+
+    # ⛔ `doublon_de` vide ou absent n'écarte personne : une colonne
+    # jamais posée (le SQL step55 pas encore joué) doit laisser la nuit
+    # EXACTEMENT comme avant.
+    for valeur in (None, "", 0):
+        z = _zones_l17(trois)
+        z["pioupiou:3"]["doublon_de"] = valeur
+        r = J._case_rows([dict(d, unit=f"{d['source']}:{d['station_id']}")
+                          for d in daily], z, DAY, "rolling15", "all",
+                         J.MIN_STATIONS_ZONE, with_ci=False)
+        check(f"`doublon_de = {valeur!r}` n'écarte personne",
+              sum(int(x.get("occurrences") or 0) for x in r), n_base)
+
+    # ⛔ PAS DE PURGE SILENCIEUSE — c'est une règle du chantier, donc
+    # elle se teste. Une exclusion qui ne s'annonce pas devient un fait
+    # acquis que personne ne peut plus contester six mois plus tard.
+    import contextlib, io                                    # noqa: E401
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        J._case_rows([dict(d, unit=f"{d['source']}:{d['station_id']}")
+                      for d in _daily_l17(cinq)], z5b, DAY, "rolling15",
+                     "all", J.MIN_STATIONS_ZONE, with_ci=False)
+    journal = tampon.getvalue()
+    n_attendu = 15 * 2      # 15 jours × 2 modèles pour la balise écartée
+    check("⭐ le journal ANNONCE combien il a écarté",
+          [f"{n_attendu} balise-jour(s) écarté(s)" in journal,
+           J.COL_DOUBLON in journal, "L17" in journal],
+          [True, True, True])
+
+    check("`est_doublon` dit la même chose que les trois appelants",
+          [J.est_doublon(None), J.est_doublon({}),
+           J.est_doublon({"doublon_de": None}),
+           J.est_doublon({"doublon_de": "pioupiou:1"})],
+          [False, False, False, True])
+
+
+def test_l17_doublon_ecarte_des_accumulateurs():
+    """⛔ LA MÉMOIRE LONGUE AUSSI. `model_character` accumule sur une
+    demi-vie de 30 jours : un doublon non écarté là continuerait de
+    peser un mois APRÈS que le classement a cessé de le compter."""
+    print("── lot L17 : le doublon sort aussi des accumulateurs ──")
+    stations = ["pioupiou:1", "pioupiou:2", "pioupiou:3"]
+    banded = [{"key": u, "model": "icon_d2", "lead_h": 6, "regime": "fluxN",
+               "band": "10-20", "errKmh": 3.0 + i}
+              for i, u in enumerate(stations)]
+    zone_of = _zones_l17(stations)
+    avant = J.accumulator_updates(banded, zone_of)
+    z2 = _zones_l17(stations)
+    z2["pioupiou:3"]["doublon_de"] = "pioupiou:1"
+    apres = J.accumulator_updates(banded, z2)
+    med_avant = {(r["zone_id"], r["regime"], r["band"]): r["x"]
+                 for r in avant if r["metric"] == "errKmh"}
+    med_apres = {(r["zone_id"], r["regime"], r["band"]): r["x"]
+                 for r in apres if r["metric"] == "errKmh"}
+    check("⭐ la médiane accumulée change quand le doublon sort",
+          med_avant != med_apres, True)
+    cle = ("b1:valley", "fluxN", "10-20")
+    check("trois balises (3, 4, 5) → médiane 4", med_avant.get(cle), 4.0)
+    check("deux balises (3, 4) → médiane 3,5", med_apres.get(cle), 3.5)
+
+
 def test_light_scores_sous_ensemble_exact():
     print("── S13.0 : le léger est un sous-ensemble exact du gros ──")
     plein = {
@@ -3411,6 +3559,9 @@ def main() -> int:
                test_l2_un_seul_arome_au_classement,
                test_l2_duplicate_chain_sur_le_classement_corrige,
                test_l2_apply_rank_transmet_lexclu_au_corrige,
+               # ── lot L17 (27/08) : les doublons d'inscription ──
+               test_l17_doublon_ecarte_du_classement,
+               test_l17_doublon_ecarte_des_accumulateurs,
                # ── lot L3 (27/08) : multiplicité + gap apparié ──
                test_l3_gap_apparie_bout_en_bout,
                test_l3_fdr_tue_la_limite_et_garde_la_franche,

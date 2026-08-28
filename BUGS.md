@@ -6,6 +6,274 @@
 
 ---
 
+## 28/08/2026 (lot L8) — un préalable impossible, et deux bancs qui comptaient des mots
+
+**Piège nº 1 — ⛔ UN PRÉALABLE EXIGÉ PAR UNE NOTE PEUT ÊTRE IMPOSSIBLE,
+ET C'EST LA DONNÉE QUI LE DIT, PAS LA NOTE.** La note S3 exigeait en
+toutes lettres : *« le tau doit être lu en regardant `run_init` des
+archives `fcst/` ET `fcstreduit/` »*. Or **`collect.py` n'a jamais écrit
+`run_init`** — seul `collect_reduit.py` le fait, depuis le S0.11. La
+consigne demandait donc de comparer un chiffre à un champ qui n'existe
+pas du côté de la population de RÉFÉRENCE. Vérifié deux fois : par
+fouille dans les trois producteurs, puis sur les objets eux-mêmes
+(14 objets `fcst/` lus, **zéro `run_init`**, 7 271 à 9 138 lignes
+muettes par modèle). *Une consigne de méthode se vérifie sur la DONNÉE
+avant d'être implémentée — sinon on écrit un contrôle qui rendra
+« runs identiques » là où la réponse honnête est « je ne sais pas ».*
+⭐ Et le repli qui compte : le troisième état (`non_verifiable`) est
+NOMMÉ, et la phrase de réserve est recopiée sur CHAQUE ligne publiée,
+pas posée une fois en tête du rapport.
+
+**Piège nº 2 — UN BANC QUI COMPTE UN MOT QUE LE REPLI IMPRIME AUSSI
+(piège nº 9 du 26/08, reproduit à l'identique).** La mutation « la
+marche du haut n'est plus calculée » restait VERTE : le banc vérifiait
+que le rapport contenait au moins quatre fois « marche du haut »… et le
+repli `_dire_marche(None)` imprime ces mots lui aussi. *Une assertion
+sur un vocabulaire qu'on contrôle soi-même ne teste rien.* Réécrite sur
+le CONTENU du verdict (le 1ᵉʳ et le 2ᵉ nommés, l'IC du bon côté, le n
+apparié), et sur une fenêtre assez longue pour que le test conclue
+vraiment (12 jours, `MIN_DAYS_BLOCK` en exige 8).
+
+**Piège nº 3 — LE JEU D'ESSAI ÉTAIT IRRÉGULIER DU BON CÔTÉ SEULEMENT.**
+La mutation « le noyau commun n'est appliqué qu'à la POPULATION, pas à
+la RÉFÉRENCE » restait verte : toutes les scènes avaient une référence
+PARFAITE (tous les modèles sur tous les jours), donc l'y apparier ou non
+donnait le même ordre. C'est le piège nº 2 de la phase B (26/08) dans
+une variante qu'on ne voit pas venir : *le jeu doit être irrégulier dans
+la dimension testée — et quand la propriété porte sur DEUX côtés, il
+faut l'irrégularité des deux côtés.* Deux scènes ajoutées (référence
+irrégulière ; calendriers décalés).
+
+**Piège nº 4 — UNE EXCEPTION DE LECTURE QUI EMPORTE TOUT LE
+PRÉALABLE.** Le seau R2 répondait `HTTP 400` (et non 404) sur les
+journées d'avant la naissance de `fcstreduit/`. L'exception remontait
+jusqu'au `try` de `main`, qui abandonnait la vérification `run_init`
+ENTIÈRE — donc les objets parfaitement lisibles des nuits suivantes
+n'étaient jamais regardés, et le rapport annonçait « archives non
+ouvertes » alors qu'elles étaient là. *Une lecture qui échoue est un
+fait du contrôle, pas une panne du contrôle : elle se compte par objet
+et s'imprime.* Et le repli n'est PAS « absent » — un objet qu'on n'a pas
+pu lire n'est pas un objet qui n'existe pas ; trois états, trois noms.
+
+**Piège nº 5 — DEUX CHEMINS D'ENVIRONNEMENT, ET LE MAUVAIS SEAU LU EN
+SILENCE.** Rejouer un job à la main depuis un shell demande TROIS gestes
+que `run.sh` fait et qu'on ne devine pas : sourcer les deux `.env` (ils
+sont en `export VAR=…`, donc illisibles par `EnvironmentFile=` de
+systemd), **exporter `STORAGE_BACKEND=r2`** — sans lui AUCUNE lecture R2
+ne passe — et **réécrire `R2_BUCKET`/`MODEL_VERIF_BUCKET` à
+`model-verif` APRÈS le `source`**, parce que le `.env` partagé pose
+`balise-watch-packs`. *Un environnement reconstitué à la main est un
+second chemin, avec tous les défauts d'un second chemin.* Deux essais
+ont été perdus là-dessus, et le second accusait l'archive.
+
+**Piège nº 6 — UN CHIFFRE D'AMORÇAGE SE REPUBLIE COMME UN RÉSULTAT.**
+L'audit du 26/08 publiait un amorçage « indicatif » (windsmobi 0,733 ·
+aemet 0,667 · mf 0,467 · infoclimat 0,333) en disant qu'il en était un.
+Le contrôle officiel confirme windsmobi et mf **au centième**, et
+DÉMENT les deux autres : infoclimat 0,333 → **+0,600**, aemet 0,667 →
+**+0,333**. *Deux valeurs sur quatre qui coïncident donnent à
+l'ensemble un air de confirmation — c'est exactement ce qui rend un
+amorçage dangereux à citer.*
+
+**Piège nº 7 — RANGER UN MODÈLE SUR SES PROPRES JOURNÉES.** `arome_r2`
+portait 3 671 balise-jours sur 5 journées côté `infoclimat` quand ses
+concurrents en portaient ~1 200 sur 3. Classé ainsi, il finissait
+4ᵉ/6 — et l'audit l'avait lu « dernier ». Ramené aux balise-jours
+communs, il remonte 2ᵉ. *C'est le défaut du §2.5.a de l'audit (deux
+médianes chacune sur sa population), et il ne vit pas que dans une
+case : il vit partout où l'on compare deux séries qui n'ont pas le même
+calendrier.* ⚠️ Corollaire trouvé dans la foulée et qui ne figurait
+dans aucune note : **les deux POPULATIONS comparées doivent elles aussi
+partager leurs journées.** Elles ne partagent aucune balise — c'est leur
+définition — mais un désaccord entre deux SEMAINES n'est pas un
+désaccord entre deux RÉSEAUX.
+
+**Piège nº 8 — DISCIPLINE, ET c'est moi qui l'ai enfreinte.** En
+cherchant la cause du `HTTP 400`, un `echo` de contrôle a imprimé le
+contenu de `~/.balise-watch-r2.env` : `R2_ACCESS_KEY_ID` et
+`R2_SECRET_ACCESS_KEY` sont apparus en clair dans la transcription de
+session. La règle du projet dit « sourcer, jamais afficher », et un
+test de PRÉSENCE (`${v:+DEFINIE}`) suffisait — il était même écrit
+comme ça, et la substitution retombait sur la valeur. *Un test de
+présence qui peut retomber sur la valeur n'est pas un test de
+présence.* ⇒ **les deux clés R2 sont à faire tourner.**
+
+---
+
+## 27/08/2026 (lot L17) — une mutation morte, et un compteur qui ne compte pas ce qu'on croit
+
+**Piège nº 1 — ⛔ UNE MUTATION PLACÉE APRÈS UN `continue` NE MUTE RIEN,
+ET RESTE VERTE POUR LA PIRE DES RAISONS.** Une mutation devait vérifier
+que l'exclusion des doublons couvre TOUS les échelons d'agrégation et
+pas seulement la case fine. Elle injectait la faute dans la boucle
+`fallback_chain` — c'est-à-dire APRÈS le `continue` qui écarte la
+balise, donc dans du code que la balise mutée n'atteint jamais. Le banc
+restait vert, et on l'a d'abord lu comme « le banc ne tient pas cette
+propriété ». *Une mutation verte a deux causes possibles — le banc est
+faible, OU la mutation n'a rien changé — et ce sont deux diagnostics
+opposés. Avant de renforcer un banc, vérifier que la variante mutée
+s'exécute vraiment* (ici : faire porter le motif SUR le `continue`
+lui-même, pour que la faute déplace le flot au lieu de se poser à côté).
+
+**Piège nº 2 — UN COMPTEUR D'EXCLUSION COMPTE CE QUI RESTAIT, PAS CE
+QU'IL Y AVAIT.** Le journal du run annonce « 9 066 balise-jour(s)
+écarté(s) : seconde inscription… » là où la fenêtre porte 9 083
+balise-jours de doublons. L'écart n'est pas une fuite : 17 d'entre eux
+étaient DÉJÀ écartés en amont (zone inconnue, `basin_uncertain`,
+`position_suspecte`), et le compteur est placé après ces filtres-là.
+Les deux nombres sont justes. *Un compteur posé dans une chaîne de
+`continue` mesure « écartés par CE motif, parmi les survivants », jamais
+« présents en base » — et quelqu'un finira par comparer les deux et
+croire à une perte. Le dire dans le commentaire coûte trois lignes ;
+l'expliquer six mois plus tard en coûte une demi-journée.*
+
+**Piège nº 3 — UNE COLONNE QU'UN AUTRE SCRIPT PEUT EFFACER SANS LE
+SAVOIR.** `station_zone` est réécrite en upsert par `assign_zones.py` à
+chaque réaffectation de zones, avec une liste `COLUMNS` explicite.
+`doublon_de` (comme `position_suspecte` avant elle) n'y est pas — et
+c'est ce qui la sauve : `Prefer: resolution=merge-duplicates` ne met à
+jour que les colonnes PRÉSENTES dans le corps. ⚠️ Le réflexe naturel,
+« ajoutons-la à `COLUMNS` avec `None` pour que le jeu de clés soit
+uniforme », la remettrait à zéro à chaque passage, silencieusement, et
+une déduplication mesurée sur 21 jours d'archives disparaîtrait sans un
+message. *Une colonne écrite par un producteur et lue par un autre doit
+porter, à l'endroit du producteur, la raison de son ABSENCE.*
+
+---
+
+## 27/08/2026 (lot L16) — « voisin » à distance nulle, et la même faute d'étiquettes dans un second fichier
+
+**Piège nº 1 — ⛔ UNE CATÉGORIE QUI NE PEUT PAS EXISTER, ET QUI RANGEAIT
+QUARANTE-SEPT PAIRES.** La sonde de doublons classait une paire en
+`doublon` / `voisin` selon son écart, et en `meme_point_incompatible`
+au-delà de 4 km/h. Résultat : deux inscriptions **au même mètre** dont
+les séries diffèrent de 2 km/h étaient rangées « voisin » — c'est-à-dire
+gardées toutes les deux, sous une étiquette qui dit l'inverse de ce
+qu'elles sont. Ce sont les 47 paires `metar` ↔ `mf` : le même mât
+d'aérodrome, publié par Iowa State en **nœuds entiers** (quantum
+1,852 km/h, moyenne 10 min) et par Météo-France autrement. *Il n'y a pas
+de « voisin » à distance nulle : deux inscriptions au même point sont le
+même capteur ou une coordonnée fausse — et un axe de décision doit
+refuser les combinaisons que la physique interdit, pas leur donner un
+nom rassurant.* Fix : une tranche `doublon_probable` entre les deux
+seuils, et un dégât publié en ENCADREMENT (avec et sans) plutôt qu'en
+chiffre unique.
+
+**Piège nº 2 — LA MÊME FAUTE D'ÉTIQUETTES, DEUX FICHIERS, LE MÊME
+JOUR.** L'entrée du lot L6 ci-dessous décrit un profil par distance qui
+s'arrêtait sans le dire, parce que ses étiquettes étaient fabriquées en
+appelant la fonction de rangement (`bande()`, qui range sur `x <= haut`)
+sur les BORNES des bandes. Trois heures plus tard, le tableau croisé du
+L16 sortait avec **deux lignes « ≤ 0.05 » identiques et la colonne
+« ≤ 4 » absente** — le même geste, le même piège, dans un fichier neuf.
+*Une leçon écrite dans BUGS.md ne protège pas le fichier suivant : ce
+qui protège, c'est une FONCTION partagée.* Fix : `etiquettes(bornes)`,
+dérivée des bornes, avec sa mutation et deux assertions qui exigent
+chaque bande une fois et une seule.
+
+**Piège nº 3 — UN COMMENTAIRE QUI S'ATTRIBUE UNE GARANTIE TENUE
+AILLEURS.** `Composantes.unir` choisissait la plus petite racine « pour
+que deux exécutions rendent les mêmes composantes ». Une mutation qui
+retirait ce choix est restée VERTE : la reproductibilité vient des deux
+`sorted()` de `groupes()`, pas de là. *Un commentaire faux sur QUI tient
+une garantie fait chercher au mauvais endroit le jour où elle tombe —
+et il survit d'autant mieux qu'il désigne du code réel.*
+
+**Piège nº 4 — `appliquer_fdr` REND UN DICT PAR FAMILLE, PAS UN DICT DE
+NOMBRES.** Le rapport itérait le niveau du dessus en n'imprimant que les
+valeurs numériques : il affichait donc un titre suivi de RIEN. Pas
+d'erreur, pas de ligne vide visible — juste un bloc absent qu'on prend
+pour « il n'y avait rien à dire ». *Un affichage qui filtre par type
+échoue en silence quand la forme change d'un niveau.*
+
+**Piège nº 5 (banc) — UN SEUIL NE PEUT PAS ROUGIR SI AUCUNE SCÈNE NE LE
+MET EN DANGER.** La mutation « le seuil de distance passe de 0,3 à 3 km »
+laissait le banc VERT : toutes les scènes de « vrai voisinage » avaient
+un écart largement au-dessus du seuil physique, donc elles restaient
+classées « voisin » par l'AUTRE critère. Il a fallu ajouter deux balises
+à 480 m qui s'accordent SOUS le seuil physique — c'est-à-dire le faux
+positif exact que le critère géométrique existe pour éviter. *Pour
+tester un critère parmi plusieurs, il faut une scène où LUI SEUL
+tranche ; sinon on teste la conjonction, et n'importe lequel des membres
+peut être faux sans qu'on le voie.*
+
+---
+
+## 27/08/2026 (lot L6) — un contrôle qui ne pouvait pas échouer, et une méthode appliquée à des réseaux qui se recopient
+
+**Piège nº 1 — UN CONTRÔLE D'IDENTITÉ QUI NE PEUT PAS ÉCHOUER RASSURE
+EXACTEMENT AUTANT QU'UN VRAI.** La sonde de plancher publie un
+« résidu » censé vérifier `persistant² + fluctuant² = quadratique²`
+(König-Huygens), et l'annonce en toutes lettres comme *« le contrôle,
+pas une approximation »*. Il valait `0.00000000` sur toutes les lignes,
+tout le temps — parce que le fluctuant était calculé en le RE-DÉDUISANT
+des deux autres (`ms − pers`). Le résidu était donc nul **par
+construction**, quelle que soit la faute en amont. Trouvé par la
+mutation nº 15 (« le fluctuant devient le total ») qui restait VERTE :
+la seule chose qui pouvait le voir. Fix : le fluctuant est mis en
+commun séparément, pondéré par les heures, et le résidu peut enfin
+rougir. *Un chiffre de contrôle doit avoir un chemin par lequel il
+devient non nul ; s'il n'en a pas, ce n'est pas un contrôle, c'est une
+décoration — et c'est pire que rien, puisqu'on cesse de vérifier à la
+main ce qu'il prétend garantir.*
+
+**Piège nº 2 — UN TABLEAU COMPLET EN APPARENCE, AMPUTÉ DE SA LIGNE LA
+PLUS PEUPLÉE.** Le profil par distance fabriquait ses étiquettes en
+appelant `bande_distance()` sur les BORNES des bandes. Comme cette
+fonction range sur `d <= haut`, `bande_distance(0.3)` rend
+`« 0.0–0.3 »` : la première bande sortait DEUX FOIS (donc écrasée), et
+**la dernière — 2,2–3,0 km, 315 paires sur 833, la plus peuplée du
+jeu — ne sortait pas du tout**. Rien ne manquait à l'œil : cinq
+étiquettes attendues, quatre lignes affichées, aucune erreur. Vu en
+relisant le rapport RÉEL, pas le banc. *Une liste d'étiquettes se
+fabrique depuis les bornes qui la définissent, jamais en rappelant la
+fonction de rangement sur ses propres frontières — c'est là que vivent
+les inégalités larges.* Fix : `_etiquettes_bandes()`, plus une
+assertion qui exige chaque bande une fois et une seule, et la mutation
+qui la fait rougir.
+
+**Piège nº 3 — ⛔ UNE MÉTHODE « RÉSEAU DENSE » APPLIQUÉE À DES RÉSEAUX
+QUI SE RECOPIENT MESURE LA RECOPIE.** La demi-variance des paires
+proches suppose deux capteurs DISTINCTS. Sur les archives réelles,
+**346 paires sur 1 179 (29 %) étaient à moins de 100 m** — c'est-à-dire
+le même capteur republié par deux réseaux : 270 paires
+`pioupiou` ↔ `windsmobi/ffvl` (0,475 km/h d'écart médian), 47
+`metar` ↔ `mf`. Elles tiraient le plancher « inter-réseaux » à
+0,63 km/h, un chiffre parfaitement lisible qui ne disait rien du sujet.
+Et **17 paires de plus y échappaient au-delà de 100 m** parce que les
+deux référentiels ne donnent pas la même coordonnée
+(`pioupiou:1494` ↔ `windsmobi:ffvl-3494`, 111 m, 0,30 km/h d'accord sur
+144 heures). *Avant d'appliquer une méthode qui suppose l'indépendance
+de deux mesures, compter combien de fois la même mesure est inscrite
+deux fois — et le compter dans les DONNÉES, pas dans le référentiel.*
+⚠️ Et la conséquence dépasse ce lot : la clé de `model_verif_daily` est
+`(day, source, station_id, …)`, donc ces balises sont **deux
+balise-jours indépendants pour la base**, alors que l'appariement du
+L1, le `m` de Benjamini-Hochberg du L3 et le bootstrap par blocs
+supposent tous l'indépendance. Non mesuré, à sonder.
+
+**Piège nº 4 — `Supabase.select` NE MET SON `?` QUE S'IL MET SON
+`select`.** `select(table, query)` colle `?select=*` quand la requête
+n'en porte pas — et concatène `query` TELLE QUELLE quand elle en porte
+un. Une requête écrite `"day=eq.…&select=…"` produit alors l'URL
+`model_verif_dailyday=eq.…`, et l'`HTTPError` qui revient se lit comme
+« la table est illisible ». Il faut écrire le `?` soi-même.
+*(`sonde_fdr.py` passe par `_page` et évite le piège sans le nommer.)*
+
+**Piège nº 5 (outillage) — UN BANC DE MUTATIONS TUÉ PAR UN PLAFOND DE
+TEMPS LAISSE LE FICHIER MUTÉ.** L'en-tête des fichiers de mutations
+prévient depuis le lot L3 qu'un processus TUÉ ne passe pas par son
+`finally`. Troisième occurrence le 27/08, et cette fois la cause
+n'était pas une interruption manuelle : `device_bash` (session Cowork)
+**coupe à 45 s**, et 21 mutations en prennent davantage. Le fichier est
+resté avec la mutation nº 21 en place, et le banc suivant a rougi sur
+une faute qu'on venait d'injecter soi-même. *Un garde-fou en `finally`
+ne protège que des sorties par le haut ; contre un plafond de temps, la
+seule défense est de rester SOUS lui — et de vérifier l'intégrité
+après coup (chaque motif `avant` doit être retrouvé dans son fichier).*
+
+---
+
 ## 27/08/2026 (lot L1) — trois instruments qui ne pouvaient pas mesurer ce qu'on leur demandait
 
 **Piège nº 1 — UNE MÉTRIQUE PEUT ÊTRE INCAPABLE DE VOIR UN EFFET, ET
