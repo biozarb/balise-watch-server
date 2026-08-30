@@ -436,7 +436,11 @@ fi
 # fabrique PAS de version « qui saute si numpy est absent » : un job
 # qui se désactive tout seul est un job dont on cesse de lire le
 # journal (règle du lot P).
-if [[ "$MODE" == "agrume" ]] && ! "$PYTHON" -c "import numpy" >/dev/null 2>&1; then
+# ⚠️ `agrume-court` EN A BESOIN AUSSI (lot L10, 30/08) : il relit les
+# mêmes colonnes `.npz`. L'oublier ici aurait rendu exactement ce que
+# ce garde existe pour éviter — une trace d'import à 03:45.
+if [[ "$MODE" == "agrume" || "$MODE" == "agrume-court" ]] \
+   && ! "$PYTHON" -c "import numpy" >/dev/null 2>&1; then
   alerter "$LIBELLE ($MODE)" \
     "numpy absent de $PYTHON — le produit A ne peut pas se relire"
   exit 1
