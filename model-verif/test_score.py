@@ -242,6 +242,249 @@ def test_repli_rang_corr_la_seconde_contrainte_ne_tue_plus_la_nuit():
               len(sb.appels) <= len(J.REPLIS_RANG) + 1, True)
 
 
+
+# ══════════════════════════════════════════════════════════════════
+#  LOT L18 (30/08/2026) — UN SEUL AGRUME AU CLASSEMENT
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ CE QUE CES BANCS DOIVENT TENIR, ET POURQUOI CHACUN EXISTE.
+# Mesuré en base le 30/08 (`as_of = 2026-08-30`) AVANT d'écrire une
+# ligne : `agrume` (AROME 10 m brut) tenait 9 rangs dont UNE première
+# place, `agrume_pi` (le composite servi à l'écran) 5 rangs et aucune.
+# Le podium revenait donc au produit que personne ne reçoit. La
+# décision de Yann du 30/08 le retire du RANG — jamais de la base, où
+# le duel apparié du lot L1 a besoin des deux séries.
+
+def _daily_agrume(zone_of, erreurs, jours=15):
+    """Des balise-jours synthétiques, un modèle par entrée d'`erreurs`."""
+    out = []
+    for j in range(jours):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(830, 836):
+            for model, err in erreurs:
+                out.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": 24, "regime": "fluxN",
+                    "n_hours": 12, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+    return out
+
+
+ZONE_L18 = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                              "basin_id": "b1", "massif_id": "alpes-nord",
+                              "basin_uncertain": False}
+            for i in range(830, 836)}
+
+
+def test_l18_un_seul_agrume_au_classement():
+    """Lot L18 — `agrume` (AROME brut) n'a pas le droit de se classer
+    contre `agrume_pi` (le composite), qui est le produit SERVI.
+    """
+    print("── lot L18 : un seul AGRUME au classement (`serie_temoin`) ──")
+    # ⭐ LE CHIFFRE EST CHOISI POUR REPRODUIRE LE CAS RÉEL DU 30/08 :
+    # `agrume` (3,0) bat NUMÉRIQUEMENT `agrume_pi` (4,0) et prendrait
+    # la 1re place — c'est exactement ce qui se passait en production
+    # sur b44.67_6.61:slope, où le témoin était PREMIER.
+    daily = _daily_agrume(ZONE_L18, (("icon_d2", 5.0),
+                                     (J.AGRUME_MODEL, 3.0),
+                                     (J.AGRUME_PI_MODEL, 4.0)))
+    rows = J.rolling_scores(daily, ZONE_L18, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    check("les trois modèles gardent chacun leur ligne (rien n'est "
+          "supprimé de la base)", sorted(r["model"] for r in fine),
+          sorted(["icon_d2", J.AGRUME_MODEL, J.AGRUME_PI_MODEL]))
+
+    icon = next(r for r in fine if r["model"] == "icon_d2")
+    ag = next(r for r in fine if r["model"] == J.AGRUME_MODEL)
+    pi = next(r for r in fine if r["model"] == J.AGRUME_PI_MODEL)
+
+    check("⭐⭐ le COMPOSITE est 1er (4,0 km/h), alors que le témoin "
+          "(3,0) est numériquement MEILLEUR — il n'a jamais eu le "
+          "droit de concourir", pi["rank"], 1)
+    check("⭐ icon_d2 est 2e (5,0 km/h)", icon["rank"], 2)
+    check("`agrume` n'a AUCUN rang, quel que soit son chiffre",
+          ag["rank"], None)
+    check("… et sa raison le nomme précisément — PAS `duplicate_chain`, "
+          "les deux séries diffèrent par Δ et le duel du L1 le mesure",
+          ag["rank_reason"], J.RANK_REASON_SERIE_TEMOIN)
+    check("⛔ le témoin garde son erreur typique intacte (3,0 km/h) — "
+          "seul le RANG lui est refusé", ag["typical_err_kmh"], 3.0)
+    check("… et son `beats_persist` aussi, calculé contre la "
+          "persistance, pas contre les autres modèles",
+          ag["beats_persist"] is not None, True)
+    check("le composite garde sa vraie raison de classement (« ok »)",
+          pi["rank_reason"], "ok")
+
+
+def test_l18_agrume_seul_concourt_normalement():
+    """Lot L18 — la règle ne mord QUE si les deux séries sont dans la
+    même case. Mesuré le 30/08 : 146 cases ne portent que le témoin (la
+    population du composite est un sous-ensemble strict de la sienne).
+    """
+    print("── lot L18 : seul, `agrume` concourt normalement ──")
+    daily = _daily_agrume(ZONE_L18, (("icon_d2", 5.0),
+                                     (J.AGRUME_MODEL, 3.0)))
+    rows = J.rolling_scores(daily, ZONE_L18, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    ag = next(r for r in fine if r["model"] == J.AGRUME_MODEL)
+    check("⭐ composite absent de la case → `agrume` est 1er, "
+          "normalement, comme `arome_r2` seul au lot L2",
+          (ag["rank"], ag["rank_reason"]), (1, "ok"))
+
+
+def test_l18_les_deux_exclusions_coexistent():
+    """Lot L18 — une case peut porter les DEUX chaînes AROME *et* les
+    DEUX AGRUME. C'est la raison d'être du dictionnaire rendu par
+    `_exclus_du_rang` : n'écarter qu'un seul laisserait un billet de
+    trop au podium, exactement le défaut que le L2 ferme.
+    """
+    print("── lot L18 : les deux règles d'exclusion dans la MÊME case ──")
+    daily = _daily_agrume(ZONE_L18, (("icon_d2", 6.0),
+                                     (J.AROME_HD_MODEL, 5.0),
+                                     (J.AROME_R2_MODEL, 4.5),
+                                     (J.AGRUME_MODEL, 3.0),
+                                     (J.AGRUME_PI_MODEL, 4.0)))
+    rows = J.rolling_scores(daily, ZONE_L18, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"]
+    par = {r["model"]: r for r in fine}
+    check("les cinq lignes existent toujours", len(fine), 5)
+    check("⭐⭐ le composite prend la 1re place (4,0) devant les deux "
+          "écartés, qui sont pourtant meilleurs ou proches",
+          par[J.AGRUME_PI_MODEL]["rank"], 1)
+    check("⛔ `arome_r2` : écarté, motif `duplicate_chain`",
+          (par[J.AROME_R2_MODEL]["rank"],
+           par[J.AROME_R2_MODEL]["rank_reason"]),
+          (None, J.RANK_REASON_DUPLICATE_CHAIN))
+    check("⛔ `agrume` : écarté, motif `serie_temoin` — les deux motifs "
+          "coexistent et ne se recouvrent JAMAIS",
+          (par[J.AGRUME_MODEL]["rank"],
+           par[J.AGRUME_MODEL]["rank_reason"]),
+          (None, J.RANK_REASON_SERIE_TEMOIN))
+    check("⭐ et les admis se classent entre eux sans trou : mfhd 2e, "
+          "icon_d2 3e", (par[J.AROME_HD_MODEL]["rank"],
+                         par["icon_d2"]["rank"]), (2, 3))
+    check("`_exclus_du_rang` rend bien DEUX écartés pour cette case",
+          J._exclus_du_rang([{"model": m} for m in par]),
+          {J.AROME_R2_MODEL: J.RANK_REASON_DUPLICATE_CHAIN,
+           J.AGRUME_MODEL: J.RANK_REASON_SERIE_TEMOIN})
+
+
+def test_l18_le_temoin_voyage_jusquau_corrige():
+    """Lot L18 — la même case n'a pas le droit de dire `serie_temoin`
+    sur le brut et `mixed_population` (ou pire, un rang) sur le
+    corrigé, pour le MÊME modèle. C'est la leçon du L2, reprise.
+    """
+    print("── lot L18 : le témoin voyage jusqu'à la colonne corrigée ──")
+    jours = [f"2026-08-{d:02d}" for d in range(1, 16)]
+    par_modele = {"icon_d2": [], J.AGRUME_MODEL: [], J.AGRUME_PI_MODEL: []}
+    for j in jours:
+        for u in range(6):
+            for m, e, ec in (("icon_d2", 5.0, 5.0),
+                             (J.AGRUME_MODEL, 3.0, 1.0),
+                             (J.AGRUME_PI_MODEL, 4.0, 4.0)):
+                par_modele[m].append({"day": j, "unit": f"p:{u}",
+                                      "err_vec_med": e,
+                                      "err_vec_med_corr": ec})
+    rows = [{"model": "icon_d2", "typical_err_kmh": 5.0,
+             "typical_err_kmh_corr": 5.0, "occurrences": 90, "n_corr": 90},
+            {"model": J.AGRUME_MODEL, "typical_err_kmh": 3.0,
+             "typical_err_kmh_corr": 1.0, "occurrences": 90, "n_corr": 90},
+            {"model": J.AGRUME_PI_MODEL, "typical_err_kmh": 4.0,
+             "typical_err_kmh_corr": 4.0, "occurrences": 90, "n_corr": 90}]
+    exclus = J._exclus_du_rang(rows)
+    check("l'écarté calculé est bien le témoin",
+          exclus, {J.AGRUME_MODEL: J.RANK_REASON_SERIE_TEMOIN})
+    J._apply_rank_corr(rows, par_modele, exclus)
+    icon, ag, pi = rows
+    check("⭐ le composite gagne le corrigé (4,0 contre 5,0) — le "
+          "témoin (1,0, le plus bas des trois) n'a jamais concouru",
+          (pi["rank_reason_corr"], pi["rank_corr"]), ("ok", 1))
+    check("… icon_d2 2e", icon["rank_corr"], 2)
+    check("⛔ le témoin : rang corrigé nul, `serie_temoin` — jamais "
+          "`mixed_population`",
+          (ag["rank_corr"], ag["rank_reason_corr"]),
+          (None, J.RANK_REASON_SERIE_TEMOIN))
+
+
+def test_l18_apply_rank_corr_accepte_encore_une_chaine():
+    """Lot L18 — la compatibilité des bancs du L2 n'est pas un détail :
+    `_apply_rank_corr` reçoit un DICTIONNAIRE depuis `_apply_rank`,
+    mais les bancs du L2 lui passent un NOM DE MODÈLE. Les deux formes
+    doivent produire le même objet, sinon on croit tenir le L2 alors
+    qu'on ne tient plus rien.
+    """
+    print("── lot L18 : `_apply_rank_corr` tient les deux formes ──")
+    def _rows():
+        return [{"model": "icon_d2", "typical_err_kmh": 3.0,
+                 "typical_err_kmh_corr": 3.0, "occurrences": 90, "n_corr": 90},
+                {"model": J.AROME_HD_MODEL, "typical_err_kmh": 5.0,
+                 "typical_err_kmh_corr": 5.0, "occurrences": 90, "n_corr": 90},
+                {"model": J.AROME_R2_MODEL, "typical_err_kmh": 4.5,
+                 "typical_err_kmh_corr": 1.0, "occurrences": 90, "n_corr": 90}]
+    par_modele = {m: [{"day": f"2026-08-{d:02d}", "unit": f"p:{u}",
+                       "err_vec_med": e, "err_vec_med_corr": ec}
+                      for d in range(1, 16) for u in range(6)]
+                  for m, e, ec in (("icon_d2", 3.0, 3.0),
+                                   (J.AROME_HD_MODEL, 5.0, 5.0),
+                                   (J.AROME_R2_MODEL, 4.5, 1.0))}
+    par_chaine, par_dict = _rows(), _rows()
+    J._apply_rank_corr(par_chaine, par_modele, J.AROME_R2_MODEL)
+    J._apply_rank_corr(par_dict, par_modele,
+                       {J.AROME_R2_MODEL: J.RANK_REASON_DUPLICATE_CHAIN})
+    check("⭐ un nom de modèle et un dictionnaire rendent le MÊME objet",
+          [(r["rank_corr"], r["rank_reason_corr"]) for r in par_chaine],
+          [(r["rank_corr"], r["rank_reason_corr"]) for r in par_dict])
+    check("… et c'est bien `duplicate_chain` qui sort de la forme courte",
+          par_chaine[2]["rank_reason_corr"], "duplicate_chain")
+
+
+def test_l18_le_rang_perime_du_temoin_est_efface():
+    """Lot L18 — l'écarté ne se contente pas de « ne pas recevoir » de
+    rang : le sien est EFFACÉ.
+
+    ⛔ POURQUOI CE BANC EXISTE, ET IL A UNE HISTOIRE COURTE. La
+    mutation nº 6 du 30/08 (retirer `r["rank"] = None` de la boucle
+    d'exclusion) laissait le banc VERT : l'écarté n'étant jamais dans
+    `admis`, aucun test ne lui posait de rang, et la ligne de garde ne
+    gardait donc rien d'observable. Une ligne qu'aucune faute ne peut
+    faire rougir est soit morte, soit non tenue — ici elle est vivante,
+    et voici ce qu'elle tient : une ligne qui arrive AVEC un rang (un
+    second passage sur les mêmes objets, un lot futur qui préremplit)
+    doit repartir sans. Sans elle, la case dirait « écartée » et
+    porterait quand même son numéro de podium.
+    """
+    print("── lot L18 : le rang périmé du témoin est bien effacé ──")
+    key = ("b1:valley", 24, "basin_landform")
+    rows = [
+        {"model": "icon_d2", "typical_err_kmh": 5.0, "occurrences": 90,
+         "typical_err_kmh_corr": 5.0, "n_corr": 90},
+        {"model": J.AGRUME_PI_MODEL, "typical_err_kmh": 4.0, "occurrences": 90,
+         "typical_err_kmh_corr": 4.0, "n_corr": 90},
+        # ⭐ LE TÉMOIN ARRIVE AVEC UN RANG — celui qu'il tenait
+        # légitimement avant que le composite n'entre dans la case.
+        {"model": J.AGRUME_MODEL, "typical_err_kmh": 3.0, "occurrences": 90,
+         "typical_err_kmh_corr": 1.0, "n_corr": 90,
+         "rank": 1, "rank_corr": 1, "rank_reason": "ok",
+         "rank_reason_corr": "ok"},
+    ]
+    jours = [f"2026-08-{d:02d}" for d in range(1, 16)]
+    rbcm = {m: [{"day": j, "unit": f"p:{u}", "err_vec_med": e,
+                 "err_vec_med_corr": ec}
+                for j in jours for u in range(6)]
+            for m, e, ec in (("icon_d2", 5.0, 5.0),
+                             (J.AGRUME_PI_MODEL, 4.0, 4.0),
+                             (J.AGRUME_MODEL, 3.0, 1.0))}
+    J._apply_rank({key: rows}, {key: rbcm})
+    temoin = rows[2]
+    check("⭐⭐ le rang que le témoin portait EN ENTRANT est effacé, pas "
+          "seulement « non attribué »", temoin["rank"], None)
+    check("… et son rang corrigé aussi", temoin["rank_corr"], None)
+    check("… et les deux motifs disent `serie_temoin`",
+          (temoin["rank_reason"], temoin["rank_reason_corr"]),
+          (J.RANK_REASON_SERIE_TEMOIN, J.RANK_REASON_SERIE_TEMOIN))
+    check("le composite prend la 1re place", rows[1]["rank"], 1)
+
+
 def test_repli_rang_les_deux_ensembles_admis_disent_le_schema_reel():
     print("── repli : ce que chaque CHECK admet vraiment ──")
     # ⛔ CES DEUX ENSEMBLES SONT UNE LECTURE DU SCHÉMA, pas un choix de
@@ -261,6 +504,21 @@ def test_repli_rang_les_deux_ensembles_admis_disent_le_schema_reel():
     check("… mais PAS `duplicate_chain` : c'est toute l'affaire du 28/08",
           "duplicate_chain" in J.RANK_REASONS_CORR_STEP52, False)
     check("… ni `fdr`", "fdr" in J.RANK_REASONS_CORR_STEP52, False)
+    # ⛔ LOT L18 — ET LA QUESTION S'EST VRAIMENT POSÉE LE 30/08, quand
+    # Yann a joué `supabase_step61_lot_l18_agrume_unique.sql` : fallait-il
+    # basculer ces deux lignes à True ? NON, et pour la raison écrite au
+    # pavé de `RANK_REASONS_STEP40` : ce set n'est PAS « ce que la base
+    # accepte aujourd'hui », c'est la BASELINE du step40. `single_model`
+    # est joué depuis le step42 et n'y est pas davantage. Les élargir
+    # rendrait le repli d'`_upsert_scores` inopérant le jour où une de
+    # ces valeurs serait vraiment refusée — c'est-à-dire exactement
+    # quand on en a besoin. Ils restent donc à False, et c'est un choix,
+    # pas un retard.
+    check("le CHECK de RÉFÉRENCE (step40) n'admet pas `serie_temoin` — "
+          "le step61 est joué, mais ce set est la baseline, comme pour "
+          "`single_model`", "serie_temoin" in J.RANK_REASONS_STEP40, False)
+    check("… ni celui du corrigé (step52)",
+          "serie_temoin" in J.RANK_REASONS_CORR_STEP52, False)
     check("les deux CHECK sont couverts par un repli",
           sorted(p[0] for p in J.REPLIS_RANG),
           ["model_score_zone_rank_reason_check",
@@ -4345,6 +4603,13 @@ def main() -> int:
                test_l2_un_seul_arome_au_classement,
                test_l2_duplicate_chain_sur_le_classement_corrige,
                test_l2_apply_rank_transmet_lexclu_au_corrige,
+               # ── lot L18 (30/08) : un seul AGRUME au classement ──
+               test_l18_un_seul_agrume_au_classement,
+               test_l18_agrume_seul_concourt_normalement,
+               test_l18_les_deux_exclusions_coexistent,
+               test_l18_le_temoin_voyage_jusquau_corrige,
+               test_l18_apply_rank_corr_accepte_encore_une_chaine,
+               test_l18_le_rang_perime_du_temoin_est_efface,
                # ── lot L17 (27/08) : les doublons d'inscription ──
                test_l17_doublon_ecarte_du_classement,
                test_l17_doublon_ecarte_des_accumulateurs,

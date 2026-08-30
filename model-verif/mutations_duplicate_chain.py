@@ -9,6 +9,13 @@ ces fautes rendraient un classement qui a l'air juste : un podium
 complet, aucune exception — et arome_r2 reprenant en silence le billet
 qu'on vient de lui retirer.
 
+⚠️ RÉÉCRIT LE 30/08/2026 (lot L18). `_apply_rank` n'appelle plus
+`_duplicate_chain_excluded` en direct : il passe par `_exclus_du_rang`,
+qui rend un DICTIONNAIRE modèle → motif parce qu'il y a désormais DEUX
+règles d'exclusion. Les motifs de mutation ci-dessous ont suivi le
+code ligne pour ligne — un motif introuvable ne mute rien et ne prouve
+donc rien, ce que le script dit lui-même en rouge.
+
 Restauration en `finally` : le fichier revient à son état d'origine
 même si l'on interrompt.
 
@@ -40,37 +47,37 @@ MUTATIONS = [
     ("l'écarté reste dans le POOL de classement (cases non filtrées) — "
      "il peut redevenir « second » en silence",
      SCORE,
-     '        admis = [r for r in rows if exclu is None or r["model"] != exclu]\n'
+     '        admis = [r for r in rows if r["model"] not in exclus]\n'
      '        cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],\n'
      '                  "occurrences": r["occurrences"]} for r in admis]',
-     '        admis = [r for r in rows if exclu is None or r["model"] != exclu]\n'
+     '        admis = [r for r in rows if r["model"] not in exclus]\n'
      '        cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],\n'
      '                  "occurrences": r["occurrences"]} for r in rows]'),
 
     ("le rang forcé de l'écarté disparaît — il garde son rang d'avant "
      "au lieu de `None`/`duplicate_chain`",
      SCORE,
-     '        if exclu is not None:\n'
-     '            for r in rows:\n'
-     '                if r["model"] == exclu:\n'
-     '                    r["rank_reason"] = RANK_REASON_DUPLICATE_CHAIN\n'
-     '                    r["rank"] = None\n'
-     '        _apply_rank_corr(rows, rbcm, exclu)',
-     '        _apply_rank_corr(rows, rbcm, exclu)'),
+     '        for r in rows:\n'
+     '            motif = exclus.get(r["model"])\n'
+     '            if motif is not None:\n'
+     '                r["rank_reason"] = motif\n'
+     '                r["rank"] = None\n'
+     '        _apply_rank_corr(rows, rbcm, exclus)',
+     '        _apply_rank_corr(rows, rbcm, exclus)'),
 
     ("le classement corrigé ne reçoit jamais l'écarté du brut (repli "
      "sur l'ancien appel à deux arguments)",
      SCORE,
-     '        _apply_rank_corr(rows, rbcm, exclu)',
+     '        _apply_rank_corr(rows, rbcm, exclus)',
      '        _apply_rank_corr(rows, rbcm)'),
 
     # ── le corrigé (_apply_rank_corr) ───────────────────────────────
     ("l'écarté reste dans le POOL du classement corrigé (`chiffrees` "
      "non filtré par `admis`)",
      SCORE,
-     '    admis = [r for r in rows if exclu is None or r["model"] != exclu]\n'
+     '    admis = [r for r in rows if r["model"] not in exclus]\n'
      '    chiffrees = [r for r in admis if r.get("typical_err_kmh") is not None]',
-     '    admis = [r for r in rows if exclu is None or r["model"] != exclu]\n'
+     '    admis = [r for r in rows if r["model"] not in exclus]\n'
      '    chiffrees = [r for r in rows if r.get("typical_err_kmh") is not None]'),
 
     ("le compte « avec corrigé » redevient global — l'écarté peut "
@@ -82,11 +89,11 @@ MUTATIONS = [
     ("le rang corrigé forcé de l'écarté disparaît — il garde ce que la "
      "boucle `admis` (ou le refus mixte) lui a laissé",
      SCORE,
-     '    if exclu is not None:\n'
-     '        for r in rows:\n'
-     '            if r["model"] == exclu:\n'
-     '                r["rank_corr"] = None\n'
-     '                r["rank_reason_corr"] = RANK_REASON_DUPLICATE_CHAIN',
+     '    for r in rows:\n'
+     '        motif = exclus.get(r["model"])\n'
+     '        if motif is not None:\n'
+     '            r["rank_corr"] = None\n'
+     '            r["rank_reason_corr"] = motif',
      '    if False:\n'
      '        pass'),
 ]

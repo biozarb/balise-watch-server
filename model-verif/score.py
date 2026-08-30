@@ -83,6 +83,12 @@ LEAD_BY_OFFSET = {0: 6, 1: 24, 2: 48}
 #: sert ICI qu'à compter des lignes dans le journal : `daily_rows` ne
 #: connaît toujours aucun modèle par son nom, et c'est ce qui a rendu
 #: ce lot court.
+#: ⛔ CE N'EST PLUS VRAI DEPUIS LE LOT L18 (30/08/2026). `_apply_rank`
+#: le nomme désormais pour lui REFUSER le rang quand le composite est
+#: dans la même case : `agrume` est le vent 10 m BRUT du produit A, un
+#: produit que l'écran ne sert à personne (`agrume_fcst.py` le dit en
+#: tête de fichier). Il reste collecté, noté et publié — il ne se
+#: classe plus CONTRE le produit servi.
 AGRUME_MODEL = "agrume"
 
 #: La série composite AROME + AROME-PI (26/08/2026), écrite par
@@ -3781,6 +3787,91 @@ def _duplicate_chain_excluded(rows: list[dict]) -> str | None:
 RANK_REASON_DUPLICATE_CHAIN = "duplicate_chain"
 
 
+#: ⛔ LOT L18 (30/08/2026) — UN SEUL AGRUME AU CLASSEMENT, ET C'EST LE
+#: COMPOSITE. Décision de Yann : « il n'y a qu'un seul AGRUME, composé
+#: d'AROME et d'AROME-PI ; on ne doit afficher que lui dans le scoring ».
+#:
+#: ⛔ POURQUOI IL FALLAIT UN SECOND MOT ET PAS `duplicate_chain`.
+#: `arome_r2` et `meteofrance_arome_france_hd` sont le MÊME modèle lu
+#: par deux chaînes : l'écart entre eux est du bruit de chaîne, et le
+#: mot « doublon » est exact. `agrume` et `agrume_pi` ne sont PAS la
+#: même chose lue deux fois — elles diffèrent par Δ (AROME-PI), et cet
+#: écart est précisément ce que le duel apparié du L1 MESURE. Écrire
+#: « duplicate_chain » sur le témoin dirait au lecteur que les deux
+#: séries sont redondantes, ce qui est faux, et effacerait la seule
+#: raison pour laquelle on les garde toutes les deux.
+#: ⚠️ Comme `duplicate_chain` et `fdr`, ce motif n'est PAS dans le CHECK
+#: de la base tant que `supabase_step61_lot_l18_agrume_unique.sql` n'a
+#: pas été joué : il rejoint d'ici là le repli GÉNÉRIQUE d'`_upsert_scores`
+#: (`RANK_REASONS_STEP40` / `RANK_REASONS_CORR_STEP52`), qui écrit
+#: `null` en base pendant que le JSON publié garde la raison exacte.
+RANK_REASON_SERIE_TEMOIN = "serie_temoin"
+
+
+def _agrume_temoin_excluded(rows: list[dict]) -> str | None:
+    """L'AGRUME à écarter du classement d'une case (lot L18, 30/08/2026).
+
+    ⛔ MESURÉ EN BASE AVANT D'ÉCRIRE UNE LIGNE (`as_of = 2026-08-30`) :
+    `agrume` tenait **1 015 lignes, 9 rangs et UNE première place**,
+    `agrume_pi` **869 lignes et 5 rangs**. Le tableau publiait donc DEUX
+    AGRUME, et celui qui gagnait une case était l'AROME BRUT — le
+    produit que l'écran ne sert à personne. `agrume_fcst.py` l'écrivait
+    déjà en tête de fichier sans qu'on en tire la conséquence : « le
+    score mesurait donc un produit qui n'est servi à personne ».
+
+    ⛔ LA PRIORITÉ EST L'INVERSE DE CELLE DU L2, ET C'EST VOULU. Là-bas
+    la chaîne la plus ANCIENNE garde le rang (`AROME_HD_MODEL`) : entre
+    deux lectures du même modèle, l'ancienneté est le seul départage
+    honnête. Ici l'ancienneté ne décide RIEN — le critère est « qui est
+    le produit SERVI », et c'est le composite, né le 25/08. Le prix est
+    réel et il est écrit : la fenêtre du composite ne portait que
+    5 journées le 30/08 contre 15 au témoin, et elle n'est pleine qu'à
+    l'as_of du 09/09/2026.
+
+    ⓘ L'ÉCARTÉ GARDE TOUT SAUF LE RANG — ses lignes, `typical_err_kmh`,
+    `skill`, `beats_*` — exactement comme `arome_r2` au L2. Le duel
+    apparié du L1 (`duel.py`) a besoin des DEUX séries pour mesurer
+    l'apport de Δ ; un témoin retiré de la base ne mesure plus rien.
+
+    ⓘ SEUL, `agrume` CONTINUE DE CONCOURIR NORMALEMENT. Mesuré le
+    30/08 : 146 cases ne portent que lui — la population du composite
+    est un sous-ensemble strict de la sienne — et il n'y tenait aucun
+    rang ce jour-là. La règle vaut quand même : elle est écrite pour
+    les nuits suivantes, pas pour celle qu'on a sondée.
+    """
+    present = {r["model"] for r in rows}
+    if AGRUME_MODEL in present and AGRUME_PI_MODEL in present:
+        return AGRUME_MODEL
+    return None
+
+
+def _exclus_du_rang(rows: list[dict]) -> dict[str, str]:
+    """Tous les modèles écartés du rang d'une case, motif par motif.
+
+    ⛔ UN DICTIONNAIRE ET NON UNE VALEUR, parce qu'il y a désormais DEUX
+    règles d'exclusion (L2 et L18) et qu'une même case peut parfaitement
+    les déclencher toutes les deux : une case Pioupiou peut porter les
+    deux chaînes AROME *et* les deux AGRUME. Rendre une seule valeur
+    tairait la seconde exclusion sans que rien ne le signale — le podium
+    reprendrait silencieusement un billet en trop, ce qui est exactement
+    le défaut que le L2 a été écrit pour fermer.
+
+    ⚠️ ET LES DEUX MOTIFS RESTENT DISTINCTS. Les fondre sous un mot
+    unique (« doublon ») coûterait ce qui justifie chacun : l'un dit
+    « la même prévision lue deux fois », l'autre « ce n'est pas le
+    produit servi ». Ce ne sont pas les mêmes faits, et un lecteur qui
+    les confond ne peut plus lire le duel du L1.
+    """
+    exclus: dict[str, str] = {}
+    chaine = _duplicate_chain_excluded(rows)
+    if chaine is not None:
+        exclus[chaine] = RANK_REASON_DUPLICATE_CHAIN
+    temoin = _agrume_temoin_excluded(rows)
+    if temoin is not None:
+        exclus[temoin] = RANK_REASON_SERIE_TEMOIN
+    return exclus
+
+
 #: Le motif d'un rang RETIRÉ par le contrôle de multiplicité (lot L3,
 #: 27/08/2026). ⛔ Il ne dit PAS « les modèles se valent » et PAS « pas
 #: assez de recul » : il dit que l'écart, réel et utile pris isolément,
@@ -3837,15 +3928,26 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
     les modèles admis. Ses scores absolus (`typical_err_kmh`, `skill`,
     `beats_*`) ne sont pas touchés : ils viennent de `_case_rows`, pas
     d'ici.
+
+    ⛔ LOT L18 (30/08/2026) — UNE SECONDE EXCLUSION, MÊME MÉCANIQUE.
+    `_exclus_du_rang` remplace l'appel direct à
+    `_duplicate_chain_excluded` et rend un DICTIONNAIRE modèle → motif :
+    une case peut porter les deux chaînes AROME *et* les deux AGRUME, et
+    n'en écarter qu'un seul laisserait un billet de trop au podium. Le
+    second motif est `serie_temoin` — `agrume` (AROME 10 m brut) écarté
+    quand `agrume_pi` (le composite, le produit que l'écran SERT) est
+    dans la même case. ⚠️ La priorité y est l'INVERSE du L2 : ce n'est
+    pas la série la plus ANCIENNE qui garde le rang, c'est celle qui est
+    SERVIE. La raison complète est dans `_agrume_temoin_excluded`.
     """
     for key, rows in by_case.items():
-        exclu = _duplicate_chain_excluded(rows)
-        admis = [r for r in rows if exclu is None or r["model"] != exclu]
+        exclus = _exclus_du_rang(rows)
+        admis = [r for r in rows if r["model"] not in exclus]
         cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],
                   "occurrences": r["occurrences"]} for r in admis]
         rbcm = rows_by_case_model.get(key, {})
-        rbcm_admis = (rbcm if exclu is None
-                      else {m: v for m, v in rbcm.items() if m != exclu})
+        rbcm_admis = ({m: v for m, v in rbcm.items() if m not in exclus}
+                      if exclus else rbcm)
         ranks, reason, verdict = INF.rank_models(cases, rbcm_admis)
         for r in admis:
             r["rank_reason"] = reason
@@ -3872,12 +3974,15 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
         # est publié. Chaque ligne dit sur combien de balise-jours elle
         # partage la météo de ce premier-là.
         _poser_n_comparable(rows, rbcm, admis)
-        if exclu is not None:
-            for r in rows:
-                if r["model"] == exclu:
-                    r["rank_reason"] = RANK_REASON_DUPLICATE_CHAIN
-                    r["rank"] = None
-        _apply_rank_corr(rows, rbcm, exclu)
+        # ⛔ APRÈS le test, jamais avant : la raison rendue par
+        # `rank_models` vaut pour les ADMIS, et l'écarté porte la
+        # sienne — EN PLUS d'elle, pas à sa place (même règle qu'au L2).
+        for r in rows:
+            motif = exclus.get(r["model"])
+            if motif is not None:
+                r["rank_reason"] = motif
+                r["rank"] = None
+        _apply_rank_corr(rows, rbcm, exclus)
 
 
 def _jours_balises(rows_du_modele) -> set:
@@ -3954,7 +4059,7 @@ RANK_REASON_POPULATION_MIXTE = "mixed_population"
 
 def _apply_rank_corr(rows: list[dict],
                      rows_by_model: dict[str, list[dict]],
-                     exclu: str | None = None) -> None:
+                     exclu: "str | dict[str, str] | None" = None) -> None:
     """Le MÊME test apparié, sur l'erreur corrigée du biais de site.
 
     ⭐ POURQUOI CETTE FONCTION EXISTE (25/08/2026). Depuis le S2 la
@@ -3995,7 +4100,16 @@ def _apply_rank_corr(rows: list[dict],
     corrigé (ou sa présence) ne doit pas décider si LES AUTRES peuvent
     être classés sur le corrigé.
     """
-    admis = [r for r in rows if exclu is None or r["model"] != exclu]
+    # ⛔ LOT L18 — `exclu` accepte DEUX formes, et ce n'est pas une
+    # complaisance : les bancs du L2 appellent cette fonction avec un
+    # NOM DE MODÈLE (`J.AROME_R2_MODEL`) et doivent continuer à mesurer
+    # exactement ce qu'ils mesuraient. Une chaîne vaut donc « écarté
+    # pour `duplicate_chain` » ; un dictionnaire porte un motif par
+    # modèle, ce que `_apply_rank` passe désormais.
+    exclus = ({} if exclu is None
+              else {exclu: RANK_REASON_DUPLICATE_CHAIN}
+              if isinstance(exclu, str) else dict(exclu))
+    admis = [r for r in rows if r["model"] not in exclus]
     chiffrees = [r for r in admis if r.get("typical_err_kmh") is not None]
     avec = [r for r in chiffrees if r.get("typical_err_kmh_corr") is not None]
     if not chiffrees or len(avec) != len(chiffrees):
@@ -4009,8 +4123,8 @@ def _apply_rank_corr(rows: list[dict],
                   # absence vaut zéro, donc sous le quorum, donc écartée —
                   # jamais un repli sur `occurrences`, qui compte autre chose.
                   "occurrences": r.get("n_corr") or 0} for r in chiffrees]
-        rbm = (rows_by_model if exclu is None
-               else {m: v for m, v in rows_by_model.items() if m != exclu})
+        rbm = ({m: v for m, v in rows_by_model.items() if m not in exclus}
+               if exclus else rows_by_model)
         ranks, reason, verdict = INF.rank_models(
             cases, rbm,
             err_key="typical_err_kmh_corr", value_key="err_vec_med_corr")
@@ -4029,11 +4143,11 @@ def _apply_rank_corr(rows: list[dict],
             r[FDR_P_CORR] = (verdict.ci.p_value
                              if (verdict is not None
                                  and verdict.ci is not None) else None)
-    if exclu is not None:
-        for r in rows:
-            if r["model"] == exclu:
-                r["rank_corr"] = None
-                r["rank_reason_corr"] = RANK_REASON_DUPLICATE_CHAIN
+    for r in rows:
+        motif = exclus.get(r["model"])
+        if motif is not None:
+            r["rank_corr"] = None
+            r["rank_reason_corr"] = motif
 
 
 def _cle_de_case(r: dict) -> tuple:
@@ -4755,9 +4869,12 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
 #:
 #: ⚠️ CE SET EST DEVENU UN GROS FILET (constat du lot L3, 27/08/2026 —
 #: le journal du L2 demandait de le signaler si L3 rouvrait ce fichier).
-#: QUATRE valeurs vivent aujourd'hui hors de lui : `single_model`
-#: (step42), `partie_manquante` (step48), `duplicate_chain` (step53) et
-#: `fdr` (step54). Le repli de `_upsert_scores` ne se déclenche que si
+#: CINQ valeurs vivent aujourd'hui hors de lui : `single_model`
+#: (step42), `partie_manquante` (step48), `duplicate_chain` (step53),
+#: `fdr` (step54) et, depuis le lot L18 du 30/08, `serie_temoin`
+#: (step61, JOUÉ par Yann le 30/08 — et qui ne rejoint pas ce set pour
+#: autant : voir `single_model`, joué depuis le step42 et absent d'ici
+#: lui aussi. Ce set est la BASELINE, pas l'état du schéma). Le repli de `_upsert_scores` ne se déclenche que si
 #: la base nomme SA contrainte `rank_reason` — donc jamais pour une
 #: raison sans rapport — mais quand il se déclenche, il met à `null`
 #: les QUATRE, y compris celles que la base accepte parfaitement. On
@@ -4776,8 +4893,9 @@ RANK_REASONS_STEP40 = {"ok", "insufficient", "tied", "not_separable",
 #: nuit de plus que l'OOM. `supabase_step52_rank_corr.sql` admet, pour
 #: `rank_reason_corr`, les raisons du step40, plus `single_model`
 #: (step42) et `mixed_population`, qui lui est propre. NI
-#: `duplicate_chain` (lot L2) NI `fdr` (lot L3) n'y sont — et les deux
-#: lots ÉCRIVENT pourtant dans cette colonne (`_apply_rank_corr` pose
+#: `duplicate_chain` (lot L2), NI `fdr` (lot L3), NI `serie_temoin`
+#: (lot L18) n'y sont — et les trois lots ÉCRIVENT pourtant dans cette
+#: colonne (`_apply_rank_corr` pose
 #: `duplicate_chain` sur l'écarté, `appliquer_fdr` pose `fdr` sur la
 #: famille « corrige »).
 #:
@@ -4800,12 +4918,15 @@ REPLIS_RANG = (
      RANK_REASONS_STEP40,
      "supabase_step42_lot_s05.sql (`single_model`), "
      "supabase_step48_lot_s06_collect_part.sql (`partie_manquante`), "
-     "supabase_step53_lot_l2_duplicate_chain.sql (`duplicate_chain`) "
-     "et/ou supabase_step54_lot_l3_fdr.sql (`fdr`)"),
+     "supabase_step53_lot_l2_duplicate_chain.sql (`duplicate_chain`), "
+     "supabase_step54_lot_l3_fdr.sql (`fdr`) et/ou "
+     "supabase_step61_lot_l18_agrume_unique.sql (`serie_temoin`)"),
     ("model_score_zone_rank_reason_corr_check", "rank_reason_corr",
      RANK_REASONS_CORR_STEP52,
      "supabase_step58_rank_reason_corr.sql "
-     "(`duplicate_chain` et `fdr` sur la colonne CORRIGÉE)"),
+     "(`duplicate_chain` et `fdr` sur la colonne CORRIGÉE) et/ou "
+     "supabase_step61_lot_l18_agrume_unique.sql (`serie_temoin`, "
+     "sur les DEUX colonnes)"),
 )
 
 
