@@ -12,12 +12,35 @@
 #    · celle de 08:00 les ÉCRASERA (bucket entièrement mutable), avec un
 #      run 03 Z ou plus frais.
 #
-#  ⇒ La fenêtre du run 00 Z va de ~05:42 à ~08:30 UTC. 06:00 s'y place
-#  avec 18 min de marge après la publication et 2 h 30 avant
-#  l'écrasement. C'est le seul créneau de la journée où l'on peut lire
-#  un run admis (00 Z ou 03 Z) — à 11:00 UTC ce serait du 06 Z ou du
-#  09 Z, qui donnerait à AROME dix heures de fraîcheur d'avance sur les
-#  autres modèles sous le même intitulé « +6 h ».
+#  ⇒ La fenêtre du run 00 Z va de ~05:42 à ~08:30 UTC. C'est le seul
+#  créneau de la journée où l'on peut lire un run admis (00 Z ou 03 Z) —
+#  à 11:00 UTC ce serait du 06 Z ou du 09 Z, qui donnerait à AROME dix
+#  heures de fraîcheur d'avance sur les autres modèles sous le même
+#  intitulé « +6 h ».
+#
+#  ⛔⛔ 06:00 → 07:00 LE 30/08/2026, ET LE « 18 min de marge » CI-DESSUS
+#  ÉTAIT UNE ILLUSION. Il reposait sur UNE observation (le 22/08 : tuiles
+#  écrites 05:34-05:42). Douze mesures prises le 30/08 sur les
+#  horodatages S3 du miroir Météo-France disent autre chose — heure à
+#  laquelle un run devient réellement exploitable, SP1 ∩ IP1 complets :
+#
+#      00 Z : 02:50 · 02:50 · 02:55 · 02:57 · 03:05 · ⛔ 05:44 (le 30/08)
+#      03 Z : 05:40 · 05:40 · 05:41 · 05:46 · 05:46 · 05:49
+#
+#  Le run 03 Z n'est JAMAIS prêt avant 05:40, et au pire à 05:49. Lire à
+#  06:00, c'est lire ONZE MINUTES après — sans la place d'y glisser les
+#  12 à 19 min d'ingestion que l'Action demande. La chaîne ne tenait que
+#  parce que le 00 Z, lui, était prêt vers 03:00 ; le 30/08 il a eu trois
+#  heures de retard et la journée a été perdue.
+#  ⇒ 07:00 : ~45 min après la fin de l'ingestion la plus lente déclenchée
+#  par le filet de 05:55, et encore ~1 h 30 avant l'écrasement de ~08:30.
+#  ⚠️ Entre-temps, un passage programmé qui republierait ne peut pas
+#  nuire : avant ~07:46 le run 06 Z n'a aucun fichier SP1, donc
+#  `pick_run()` retombe sur 03 Z, admis.
+#  ⛔ CETTE HEURE EST BANCÉE AVEC CELLE DU FILET :
+#  `test_filet_arome_wind.py` lit CE fichier et refuse de passer si
+#  l'ingestion la plus lente finit après. Les deux timers ne se
+#  déplacent plus séparément.
 #
 #  ⚠️ ET IL N'EST PAS SERRÉ CONTRE `bw-model-score`, contrairement à
 #  `bw-model-agrume`. L'archive écrite ici à 06:00 le jour J est lue par
@@ -27,7 +50,7 @@
 #  matin.
 #
 #  ⚠️ `Persistent=true` NE SAUVE RIEN ICI, et il faut le savoir. Si le
-#  VPS est éteint à 06:00 et rallumé à 09:00, systemd rattrapera le
+#  VPS est éteint à 07:00 et rallumé à 10:00, systemd rattrapera le
 #  job — mais les tuiles porteront alors le run 06 Z, non admis, et le
 #  job sortira en erreur en DISANT que la journée est perdue. C'est le
 #  bon comportement : mieux vaut une alerte qu'une journée où AROME
@@ -38,7 +61,7 @@
 Description=Balise Watch — flux AROME/R2 pour le scoring
 
 [Timer]
-OnCalendar=*-*-* 06:00:00 UTC
+OnCalendar=*-*-* 07:00:00 UTC
 Persistent=true
 # ⚠️ Plus court que les 120 s des autres timers : la marge après la
 # publication du manifeste (~05:42 Z) est de 18 min, et un délai

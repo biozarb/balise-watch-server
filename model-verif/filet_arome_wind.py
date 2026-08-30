@@ -29,19 +29,41 @@
 #  exactement ce qu'on veut d'un filet : moins de choses qui peuvent
 #  casser que ce qu'il rattrape.
 #
-#  ── POURQUOI 05:00 Z, ET POURQUOI CE N'EST PAS UN CONFORT ────────────
-#  `arome-wind/ingest.py::pick_run()` part de l'heure COURANTE arrondie
-#  au multiple de 3 h inférieur, puis remonte de 3 h en 3 h. Entre
-#  03:00 et 05:59 Z, ses deux premiers candidats sont donc 03 Z et
-#  00 Z — et `arome_fcst.RUNS_ADMIS` les admet TOUS LES DEUX. Sur cette
-#  plage, le tirage NE PEUT PAS mal tomber. À 06:00 Z il basculerait sur
-#  06 Z, non admis.
-#  L'autre borne vient de la durée : l'ingestion a pris 11 min 48 le
-#  28/08 (12 à 19 min sur les runs récents), et `bw-model-arome` lit à
-#  06:00 Z. 05:00 laisse ~45 min de marge.
-#  ⓘ Et c'est l'heure du passage programmé qui MARCHAIT : le pavé de
-#  `bw-model-arome.timer` a mesuré le 22/08 que celui de 05:00 Z retenait
-#  le run 00 Z et écrivait ses tuiles entre 05:34 et 05:42 Z.
+#  ── POURQUOI 05:55 Z — ET POURQUOI 05:00 ÉTAIT UNE ERREUR ────────────
+#  DEUX contraintes, et la première a coûté la journée du 30/08.
+#
+#  ⓵ IL FAUT TIRER APRÈS MÉTÉO-FRANCE. `pick_run()` exige la couverture
+#  SP1 ∩ IP1 : un run dont le SOL est publié mais dont les bundles
+#  ALTITUDE manquent ne compte pas. Relevé le 30/08 sur les
+#  horodatages S3 du miroir, 12 runs sur 6 jours :
+#
+#      run 00 Z  exploitable à 02:50, 02:50, 02:55, 02:57, 03:05
+#                …et le 30/08 à 05:44 (+344 min au lieu de +170/+185)
+#      run 03 Z  exploitable à 05:40, 05:40, 05:41, 05:46, 05:46, 05:49
+#
+#  ⇒ Le pire cas observé est **05:49**. Un filet à 05:00 n'a jamais pu
+#  retenir le run 03 Z — il ne tenait que grâce au 00 Z, prêt vers
+#  03:00. Le 30/08, le 00 Z a eu trois heures de retard : le seul run
+#  complet à 05:00 était le 21 Z de la VEILLE, non admis, et la journée
+#  était perdue alors que le filet avait parfaitement fonctionné
+#  (déclenché 05:00:13, HTTP 204, run #316 en succès).
+#
+#  ⓶ IL FAUT RESTER DANS LA PLAGE OÙ LES DEUX CANDIDATS SONT ADMIS.
+#  `pick_run()` part de l'heure COURANTE arrondie au multiple de 3 h
+#  inférieur, puis remonte de 3 h en 3 h. Entre 03:00 et 05:59 Z, ses
+#  deux premiers candidats sont 03 Z et 00 Z — `arome_fcst.RUNS_ADMIS`
+#  les admet TOUS LES DEUX. À 06:00 Z il basculerait sur 06 Z, non admis.
+#
+#  ⇒ **05:55 Z** : 6 min après le pire cas mesuré, et 4 min avant le
+#  bord de la plage sûre. C'est une fenêtre étroite, et c'est pour ça
+#  qu'elle est bancée (`MF_RUN_UTILISABLE_MAX` ci-dessous).
+#
+#  ⚠️ ET `bw-model-arome` A DÛ RECULER AVEC. Il lisait à 06:00 Z, soit
+#  ONZE MINUTES après la disponibilité du 03 Z le plus tardif : il n'y
+#  avait mathématiquement pas la place d'y glisser 12 à 19 min
+#  d'ingestion. Son timer est passé à 07:00 Z le 30/08 — toujours très
+#  au-dessus de l'écrasement de ~08:30. Les deux horaires ne se
+#  choisissent pas séparément, et le banc les vérifie ENSEMBLE.
 #
 #  ⚠️ HORS DE CETTE PLAGE, ON AVERTIT — ON NE REFUSE PAS. Un filet qui
 #  refuse de partir aurait bloqué le sauvetage du 28/08, qui a été lancé
@@ -82,12 +104,32 @@ CIBLE_DEFAUT = "biozarb/balise-watch-server:arome-wind.yml"
 #: divergent. Le jour où l'un bouge, c'est le banc qui le dit.
 RUNS_ADMIS = (0, 3)
 
-#: Durée d'ingestion observée (min/max sur les runs du 14 au 28/08) et
+#: ⛔ L'HEURE, MESURÉE, À LAQUELLE UN RUN ADMIS EST AU PIRE EXPLOITABLE
+#: (SP1 ∩ IP1 complets). Relevé le 30/08 sur les horodatages S3 du
+#: miroir Météo-France, 12 runs (00 Z et 03 Z) sur 6 jours : le plus
+#: tardif est le 03 Z du 27/08, à 05:49 Z.
+#: ⚠️ CE N'EST PAS UNE MOYENNE, C'EST UN MAXIMUM OBSERVÉ, et sur six
+#: jours seulement. Il n'a aucune valeur de garantie — le 30/08 a
+#: justement montré qu'un run peut prendre trois heures de retard. Il
+#: sert à interdire de REVENIR en arrière : `test_filet_arome_wind.py`
+#: refuse un timer placé avant cette heure. Le jour où l'on relève une
+#: valeur plus tardive, on met CE nombre à jour et le banc redit si
+#: l'horaire tient encore.
+MF_RUN_UTILISABLE_MAX = (5, 49)
+
+#: Marge exigée entre `MF_RUN_UTILISABLE_MAX` et l'heure du timer.
+MARGE_MIN = 5
+
+#: Durée d'ingestion observée (min/max sur les runs du 14 au 30/08) et
 #: heure de lecture par `bw-model-arome`. Servent au message, pas au
 #: calcul — un filet qui refuse de partir parce qu'il est 05:41 serait
 #: une panne de plus, pas une sécurité.
+#: ⚠️ `LECTURE_H` est une COPIE de l'heure du timer `bw-model-arome` :
+#: le banc lit le vrai `.timer` et refuse de passer si les deux
+#: divergent. Sans ça, reculer un timer sans l'autre passerait inaperçu
+#: jusqu'au premier matin perdu.
 INGESTION_MIN_MAX = (12, 19)
-LECTURE_H = 6
+LECTURE_H = 7
 
 
 def runs_candidats(maintenant):

@@ -90,12 +90,18 @@
 #     sur R2. Ici, NON : `arome-wind/ingest.py` réécrit ses tuiles EN
 #     PLACE à chaque run (`CACHE_REECRIT`, « bucket entièrement
 #     mutable »), 8 fois par jour. La grille d'hier n'existe plus. Le
-#     job doit donc lire LE JOUR MÊME, dans la fenêtre où le run 00 Z
+#     job doit donc lire LE JOUR MÊME, dans la fenêtre où un run admis
 #     est en ligne — mesuré le 22/08 : tuiles `sol` écrites à
 #     05:34:38 Z, manifeste à ~05:42 Z, prochain passage de l'Action
 #     à 08:00 Z (`cron: "0 2,5,8,11,14,17,20,23 * * *"`).
-#     ⇒ Timer à 06:00 UTC, 20 min après la publication, 2 h avant
-#     l'écrasement. L'archive de la journée J est prête 22 h avant que
+#     ⇒ Timer à 07:00 UTC. ⛔ IL VALAIT 06:00 JUSQU'AU 30/08, et cette
+#     valeur reposait sur UNE observation. Douze mesures prises le
+#     30/08 sur les horodatages S3 disent que le run 03 Z n'est jamais
+#     exploitable (SP1 ∩ IP1) avant 05:40, au pire 05:49 : lire à 06:00
+#     ne laissait pas la place aux 12-19 min d'ingestion. La chaîne ne
+#     tenait que par le run 00 Z, prêt vers 03:00 — jusqu'au 30/08, où
+#     il a eu trois heures de retard et la journée a été perdue.
+#     Cf. le pavé de `bw-model-arome.timer` et le filet de 05:55 Z. L'archive de la journée J est prête 22 h avant que
 #     `bw-model-score` la lise (03:56 Z le lendemain).
 #     ⚠️ La borne (0, 3) est reprise d'AGRUME et pour la même raison,
 #     qui est un point de COMPARABILITÉ : un run de 15 Z couvrirait

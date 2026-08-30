@@ -14,6 +14,15 @@ d'un seul fichier :
     marge » sortirait de la plage sans que rien ne proteste : le job
     partirait, GitHub répondrait 204, `run.sh` écrirait « OK », et la
     journée serait perdue quand même ;
+ 1 bis. …et il doit tomber APRÈS que Météo-France ait fini de publier.
+    ⛔ CET ACCORD-LÀ A COÛTÉ LA JOURNÉE DU 30/08 : le filet tirait à
+    05:00, or le run 03 Z n'est jamais exploitable avant 05:40 et le
+    00 Z avait ce jour-là trois heures de retard. Tout était vert — le
+    filet, GitHub, l'ingestion — et la journée était perdue. C'est le
+    pire genre de faute : celle où chaque pièce dit « OK » ;
+ 1 ter. les DEUX timers, celui du filet et celui de `bw-model-arome`,
+    doivent rester cohérents. Reculer l'un sans l'autre est
+    exactement ce qui produirait à nouveau le 30/08 ;
  2. `RUNS_ADMIS` est dupliqué dans le filet (il refuse de charger
     `arome_fcst`, donc `boto3`, pour rester increvable). Le jour où
     `arome_fcst.RUNS_ADMIS` bouge, la copie doit hurler ;
@@ -81,6 +90,20 @@ def heure_timer(chemin):
     raise AssertionError(f"aucun OnCalendar dans {chemin}")
 
 
+def delai_aleatoire(chemin):
+    """`RandomizedDelaySec` du timer, en secondes (0 si absent).
+
+    ⓘ Il compte deux fois : il repousse le tir vers le bord de la plage
+    sûre, ET il retarde la fin de l'ingestion. Le 30/08 la fenêtre est
+    devenue assez étroite pour qu'on cesse de le négliger.
+    """
+    for ligne in open(chemin, encoding="utf-8").read().splitlines():
+        ligne = ligne.strip()
+        if ligne.startswith("RandomizedDelaySec="):
+            return int(ligne.split("=", 1)[1].strip())
+    return 0
+
+
 def main():
     racine = os.path.join(_ICI, os.pardir)
     timer = os.path.join(_ICI, "systemd", "bw-filet-arome.timer")
@@ -117,16 +140,39 @@ def main():
     th, tm = heure_timer(timer)
     verifier("⛔ l'heure du VRAI timer tombe dans la plage sûre",
              th in sures, f"OnCalendar {th:02d}:{tm:02d} UTC, sûres {sures}")
+
+    # ⛔ L'ACCORD QUI MANQUAIT LE 30/08, ET QUI A COÛTÉ LA JOURNÉE.
+    # `pick_run()` exige SP1 ∩ IP1 : tirer dans la plage « sûre » ne sert
+    # à rien si Météo-France n'a pas fini de publier. Le seul run complet
+    # à 05:00 ce matin-là était celui de la VEILLE, non admis.
+    mfh, mfm = F.MF_RUN_UTILISABLE_MAX
+    verifier("⛔⛔ le tir a lieu APRÈS la pire publication mesurée de "
+             "Météo-France, marge comprise",
+             th * 60 + tm >= mfh * 60 + mfm + F.MARGE_MIN,
+             f"tir {th:02d}:{tm:02d}, run exploitable au pire "
+             f"{mfh:02d}:{mfm:02d}, marge exigée {F.MARGE_MIN} min")
+    verifier("…et le délai aléatoire du timer ne le repousse pas hors de "
+             "la plage sûre",
+             (th * 60 + tm + delai_aleatoire(timer) // 60) < (max(sures) + 1) * 60,
+             f"+{delai_aleatoire(timer)} s")
     # ⚠️ La borne haute n'est pas la fin de la plage : l'ingestion dure
     # 12-19 min et `bw-model-arome` lit à 06:00 Z. Un timer à 05:50
     # serait « sûr » au sens de pick_run() et arriverait quand même trop
     # tard. C'est un SECOND accord, et il se banche à part.
-    fin = th * 60 + tm + F.INGESTION_MIN_MAX[1]
-    verifier("⛔ …et l'ingestion la plus lente finit AVANT la lecture de "
-             "bw-model-arome",
-             fin < F.LECTURE_H * 60,
+    # ⛔ LECTURE_H est une COPIE : on la confronte au VRAI timer, sinon
+    # reculer un timer sans l'autre passerait inaperçu jusqu'au premier
+    # matin perdu — la faute même du 30/08.
+    timer_arome = os.path.join(_ICI, "systemd", "bw-model-arome.timer")
+    ah, am = heure_timer(timer_arome)
+    verifier("⛔⛔ LECTURE_H est bien l'heure du VRAI bw-model-arome.timer",
+             (ah, am) == (F.LECTURE_H, 0),
+             f"timer {ah:02d}:{am:02d} Z, LECTURE_H {F.LECTURE_H:02d}:00 Z")
+    fin = th * 60 + tm + F.INGESTION_MIN_MAX[1] + delai_aleatoire(timer) // 60
+    verifier("⛔ …et l'ingestion la plus lente finit AVANT cette lecture "
+             "(délai aléatoire du timer compris)",
+             fin < ah * 60 + am,
              f"fin au pire {fin // 60:02d}:{fin % 60:02d} Z, "
-             f"lecture {F.LECTURE_H:02d}:00 Z")
+             f"lecture {ah:02d}:{am:02d} Z")
 
     print("\n── ⛔ Accord nº 3 : run.sh connaît le mode de l'unité ───")
     ex = [l for l in open(service, encoding="utf-8").read().splitlines()

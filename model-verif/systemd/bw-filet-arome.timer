@@ -2,10 +2,27 @@
 #  bw-filet-arome.timer — dans la plage où le tirage ne peut pas mal
 #                         tomber                (lot LW, 28/08/2026)
 #
-#  ⛔ 05:00 Z N'EST PAS UN CONFORT, C'EST UNE PLAGE CALCULÉE.
-#  `arome-wind/ingest.py::pick_run()` (l. 255-259) part de l'heure
-#  courante arrondie au multiple de 3 h inférieur, puis remonte de 3 h
-#  en 3 h. Ses deux premiers candidats sont donc :
+#  ⛔ 05:55 Z N'EST PAS UN CONFORT — ET 05:00 ÉTAIT UNE ERREUR, PAYÉE
+#  LE 30/08. Deux contraintes se referment l'une sur l'autre.
+#
+#  ⓵ TIRER APRÈS MÉTÉO-FRANCE. `pick_run()` exige SP1 ∩ IP1 : le SOL
+#  publié ne suffit pas, il faut les bundles ALTITUDE. Horodatages S3
+#  relevés le 30/08 sur 12 runs / 6 jours — heure à laquelle le run
+#  devient réellement exploitable :
+#
+#      00 Z : 02:50 · 02:50 · 02:55 · 02:57 · 03:05 · ⛔ 05:44 (le 30/08)
+#      03 Z : 05:40 · 05:40 · 05:41 · 05:46 · 05:46 · 05:49
+#
+#  Pire cas observé : **05:49**. Un filet à 05:00 ne pouvait JAMAIS
+#  retenir le 03 Z ; il ne tenait que par le 00 Z. Le 30/08, le 00 Z a
+#  pris trois heures de retard (+344 min contre +170/+185 les cinq jours
+#  d'avant) : à 05:00 le seul run complet était le 21 Z de la VEILLE,
+#  non admis — journée perdue, alors que le filet avait parfaitement
+#  fonctionné (05:00:13, HTTP 204, run #316 en succès).
+#
+#  ⓶ RESTER DANS LA PLAGE OÙ LES DEUX CANDIDATS SONT ADMIS.
+#  `pick_run()` (l. 255-259) part de l'heure courante arrondie au
+#  multiple de 3 h inférieur, puis remonte de 3 h en 3 h :
 #
 #     heure du dispatch │ candidats │ admis par arome_fcst.RUNS_ADMIS ?
 #     ──────────────────┼───────────┼──────────────────────────────────
@@ -13,41 +30,36 @@
 #       03:00 → 05:59   │ 03 Z, 00 Z│ ⭐ LES DEUX — le tirage est sûr
 #       06:00 → 08:59   │ 06 Z, 03 Z│ ⚠️ 06 Z ne l'est pas
 #
-#  ⇒ La plage sûre est 03:00-05:59 Z. La borne haute réelle est plus
-#  basse : l'ingestion prend 12 à 19 min (11 min 48 mesurées le 28/08)
-#  et `bw-model-arome` lit à 06:00 Z. 05:00 laisse ~45 min de marge, et
-#  reste assez tard pour que le run 00 Z soit complet — le pavé de
-#  `bw-model-arome.timer` a mesuré le 22/08 que le passage de 05:00 Z
-#  retenait 00 Z et écrivait ses tuiles entre 05:34 et 05:42 Z.
+#  ⇒ 05:55 : 6 min après le pire cas mesuré, 4 min avant le bord de la
+#  plage. La fenêtre est ÉTROITE et c'est assumé — elle est bancée.
 #
-#  ⛔ CETTE HEURE EST BANCÉE. `test_filet_arome_wind.py` LIT CE FICHIER,
-#  en extrait l'heure d'`OnCalendar`, et refuse de passer si elle sort
-#  de la plage sûre — plage qu'il recalcule lui-même depuis le VRAI
-#  `arome_fcst.RUNS_ADMIS`. Déplacer ce timer à 07:00 « pour laisser de
-#  la marge » casserait le banc, ce qui est exactement ce qu'on veut :
-#  la faute serait invisible autrement, le job sortirait en vert et la
-#  journée serait perdue.
+#  ⛔ CES DEUX HEURES SONT BANCÉES ENSEMBLE.
+#  `test_filet_arome_wind.py` LIT CE FICHIER et celui de
+#  `bw-model-arome`, et refuse de passer si l'une des trois conditions
+#  tombe : le tir est avant `MF_RUN_UTILISABLE_MAX` + marge ; il sort de
+#  la plage sûre (recalculée depuis le VRAI `arome_fcst.RUNS_ADMIS`) ;
+#  ou l'ingestion la plus lente finit après la lecture. Reculer un timer
+#  sans l'autre casse le banc — c'est exactement la faute qu'on ne
+#  voulait plus commettre en silence.
 #
-#  ⚠️ `Persistent=true`, ET ICI IL SAUVE VRAIMENT QUELQUE CHOSE —
-#  contrairement à `bw-model-arome.timer`, dont le pavé explique que le
-#  rattrapage n'y sert à rien. La plage sûre dure trois heures : un VPS
-#  éteint de 04:55 à 05:10 verrait le rattrapage partir à 05:10, encore
-#  largement dans la plage. Un rattrapage TARDIF (après 06:00) est
-#  inutile mais pas nuisible : le script le DIT (« moment non sûr »),
-#  l'archive du jour est déjà lue ou déjà perdue, et les tuiles seront
-#  de toute façon réécrites par le passage suivant.
+#  ⚠️ `Persistent=true`, ET ICI IL SAUVE VRAIMENT QUELQUE CHOSE. La
+#  plage sûre dure trois heures : un VPS éteint de 05:50 à 06:05 verrait
+#  le rattrapage partir tout de suite au retour. Un rattrapage TARDIF
+#  (après 06:00) est inutile mais pas nuisible : le script le DIT
+#  (« moment non sûr »), et les tuiles seront de toute façon réécrites
+#  par le passage suivant.
 #
-#  ⚠️ `RandomizedDelaySec` volontairement modeste : ce job ne frappe
-#  aucun service saturable — un POST par jour sur l'API GitHub — et
-#  chaque seconde de délai est prise sur les 45 min de marge.
+#  ⚠️ `RandomizedDelaySec=60` et plus 120 : le bord de la plage sûre est
+#  à 05:59, il ne reste que 4 minutes à dépenser. Ce job ne frappe aucun
+#  service saturable — un POST par jour sur l'API GitHub.
 # ══════════════════════════════════════════════════════════════════════
 [Unit]
 Description=Balise Watch — filet de déclenchement de l'Action arome-wind
 
 [Timer]
-OnCalendar=*-*-* 05:00:00 UTC
+OnCalendar=*-*-* 05:55:00 UTC
 Persistent=true
-RandomizedDelaySec=120
+RandomizedDelaySec=60
 
 [Install]
 WantedBy=timers.target

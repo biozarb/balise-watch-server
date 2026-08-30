@@ -117,8 +117,11 @@ case "$MODE" in
   # sont RÉÉCRITES EN PLACE toutes les 3 h par l'Action `arome-wind` :
   # il n'existe aucune archive des runs passés. Un run manqué n'est
   # donc pas « à rattraper demain », il est PERDU — d'où l'horaire
-  # serré du timer (06:00 UTC, entre la publication du run 00 Z vers
-  # 05:42 et son écrasement vers 08:30) et d'où l'alerte.
+  # serré du timer (07:00 UTC, entre la disponibilité RÉELLE du dernier
+  # run admis — 05:49 au pire sur 12 mesures du 30/08 — et l'écrasement
+  # de ~08:30) et d'où l'alerte. ⚠️ Il valait 06:00 jusqu'au 30/08 :
+  # onze minutes après le 03 Z le plus tardif, sans la place d'y glisser
+  # l'ingestion. Voir le pavé de `bw-model-arome.timer`.
   arome)          SCRIPT="$ICI/arome_fcst.py";          LIBELLE="flux AROME R2" ;;
   # ⭐ LE FILET SOUS L'ACTION `arome-wind` (lot LW, 28/08/2026).
   # ⛔ SEUL MODE DE CE FICHIER QUI N'ÉCRIT NI NE LIT AUCUNE DONNÉE : il
@@ -237,12 +240,12 @@ elif [[ "$MODE" == "arome" ]]; then
 elif [[ "$MODE" == "filet-arome" ]]; then
   # Un POST de quelques centaines d'octets, `gh_dispatch.TIMEOUT_S` = 30 s.
   # 2 min laissent quatre fois la marge et coupent bien avant que la
-  # fenêtre utile (dispatch à 05:00 Z, lecture à 06:00 Z) se referme.
+  # fenêtre utile (dispatch à 05:55 Z, lecture à 07:00 Z) se referme.
   MAX_MINUTES="${BW_FILET_AROME_MAX_MINUTES:-2}"
   # ⛔ SEUIL_ALERTE=1, COMME `arome` ET POUR LA MÊME RAISON, D'UN CRAN
   # PLUS TÔT DANS LA CHAÎNE. Ce job est la seule chose qui garantit
   # qu'`arome-wind` tournera ce matin ; s'il n'est pas parti, plus rien
-  # ne rattrape la journée, et `arome_fcst.py` ne le dira qu'à 06:00 Z,
+  # ne rattrape la journée, et `arome_fcst.py` ne le dira qu'à 07:00 Z,
   # quand il ne restera plus qu'à constater. Un filet qui tombe doit
   # sonner le matin même, tant qu'un `workflow_dispatch` à la main est
   # encore possible.
@@ -444,7 +447,7 @@ fi
 #
 # ⚠️ CE QU'UN BLOCAGE COÛTE, VÉRIFIÉ ET PAS RECOPIÉ : la notation LIT
 # une archive déjà écrite (`collect` a fini à 03:2x, `arome` tournera à
-# 06:00 — deux jobs séparés, que ceci n'empêche pas) et elle SE REJOUE
+# 07:00 — deux jobs séparés, que ceci n'empêche pas) et elle SE REJOUE
 # (`score.py --day AAAA-MM-JJ`, `accumulate` refuse une journée déjà
 # intégrée, donc le rejeu est idempotent). Un faux positif ici coûte un
 # re-run, pas une nuit. C'est ce qui autorise à le rendre bloquant dès
