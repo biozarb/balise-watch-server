@@ -513,6 +513,22 @@ verifie("p01i" not in C.METAR_CHAMPS,
 # ici, sans troncature ni paraphrase.
 import json                                             # noqa: E402
 
+# ⛔⛔ LE PIÈGE DU 30/08/2026 — UN BANC QUI SE PÉRIME TOUT SEUL, ET QUI
+# BLOQUE LE DÉPLOIEMENT SANS QUE PERSONNE N'AIT RIEN CASSÉ.
+# `windsmobi_stations` écarte les balises dont le dernier relevé passe
+# `WINDSMOBI_HISTORY_MAX_H` (168 h, 7 jours) — une garde contre les
+# stations mortes depuis longtemps, ajoutée au cadrage du 21/08. Or ce
+# référentiel est une réponse RÉELLE recopiée telle quelle, horodatée
+# `1787312400` = 2026-08-21 11:40 Z. Elle a donc franchi la garde le
+# **28/08 à 11:40 Z**, et le banc est rouge depuis — sans qu'une seule
+# ligne de code ait bougé. Découvert le 30/08 : `deploy-agrume-vps.sh`
+# s'est arrêté ICI et n'a rien redémarré, en plein déploiement du L18.
+# ⇒ La date du dernier relevé du RÉFÉRENTIEL devient RELATIVE. Les
+# horodatages de l'HISTORIQUE, eux, ne bougent pas : plusieurs
+# assertions plus bas les nomment un par un (`1787308800`…`1787312400`),
+# et c'est très bien ainsi — eux ne traversent aucune garde de fraîcheur.
+_WM_DERNIER_RELEVE = int(time.time()) - 3600      # il y a une heure
+
 _WM_REFERENTIEL_YVBEACH = json.loads(
     '[{"_id":"yvbeach-yvbeach","alt":430,"loc":{"type":"Point",'
     '"coordinates":[6.714839,46.80541]},"name":"Yvonand plage",'
@@ -520,6 +536,9 @@ _WM_REFERENTIEL_YVBEACH = json.loads(
     '"status":"green","tz":"Europe/Zurich","last":{"_id":1787312400,'
     '"w-dir":253,"w-avg":7.6,"w-max":11.3,"temp":17.4}}]'
 )
+# ⚠️ Le seul champ rendu relatif : celui que la garde de fraîcheur lit.
+# Le reste de la réponse reste recopié au caractère près.
+_WM_REFERENTIEL_YVBEACH[0]["last"]["_id"] = _WM_DERNIER_RELEVE
 _WM_HISTORIC_YVBEACH = json.loads(
     '[{"_id":1787312400,"w-dir":253,"w-avg":7.6,"w-max":11.3,"temp":17.4},'
     '{"_id":1787311800,"w-dir":242,"w-avg":4.1,"w-max":9.7,"temp":17.1},'
@@ -561,13 +580,13 @@ _wm_extra = {
     "holfuy": [
         # station masquée : ne doit jamais entrer dans l'archive
         {"_id": "holfuy-1", "loc": {"coordinates": [6.0, 45.5]}, "alt": 1200,
-         "status": "hidden", "last": {"_id": 1787312400, "w-avg": 3.0}},
+         "status": "hidden", "last": {"_id": _WM_DERNIER_RELEVE, "w-avg": 3.0}},
         # station connue mais qui n'a jamais mesuré de vent
         {"_id": "holfuy-2", "loc": {"coordinates": [6.1, 45.6]}, "alt": 900,
-         "status": "green", "last": {"_id": 1787312400, "w-avg": None}},
+         "status": "green", "last": {"_id": _WM_DERNIER_RELEVE, "w-avg": None}},
         # station hors BBOX de collect.py (BBOX lonMax = 11.0)
         {"_id": "holfuy-3", "loc": {"coordinates": [15.0, 45.6]}, "alt": 500,
-         "status": "green", "last": {"_id": 1787312400, "w-avg": 5.0}},
+         "status": "green", "last": {"_id": _WM_DERNIER_RELEVE, "w-avg": 5.0}},
     ],
 }
 try:
