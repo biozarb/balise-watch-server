@@ -475,19 +475,40 @@ def lire_run_pi(run: str, crier=print):
     return donnees, man
 
 
-def delta_20m(col, pi_donnees, pi_man, crier=print):
+def delta_20m(col, pi_donnees, pi_man, crier=print, *,
+              decalage_h: int = 0, poids: float | None = None):
     """Δ pondéré, par balise du produit A et par HEURE RONDE.
 
     Rend `{k_balise_produit_A: {heure: (w·Δu, w·Δv)}}`, en m/s.
 
     ── LES QUATRE RÈGLES, ET CHACUNE A SA RAISON ──────────────────────
 
-    1. ⛔ **Même run des deux côtés.** L'appelant passe les colonnes PI
-       du run AROME retenu (00 Z ou 03 Z), jamais « le PI le plus
-       frais ». Prendre un PI de 05 Z sur un AROME de 00 Z donnerait à
-       `agrume_pi` cinq heures de fraîcheur que les autres modèles n'ont
-       pas, sous le même intitulé « +6 h » — c'est le refus du lot I
-       (§ `RUNS_ADMIS`), pris par l'autre bout.
+    1. ⛔ **Même run des deux côtés, PAR DÉFAUT.** L'appelant passe les
+       colonnes PI du run AROME retenu (00 Z ou 03 Z), jamais « le PI le
+       plus frais ». Prendre un PI de 05 Z sur un AROME de 00 Z donnerait
+       à `agrume_pi` cinq heures de fraîcheur que les autres modèles
+       n'ont pas, **sous le même intitulé « +6 h »** — c'est le refus du
+       lot I (§ `RUNS_ADMIS`), pris par l'autre bout.
+
+       ⭐ **ET C'EST EXACTEMENT CE QUE LA CLASSE COURTE FAIT — SOUS UN
+       AUTRE INTITULÉ (lot L10, 30/08/2026).** `decalage_h` autorise un
+       run PI PLUS FRAIS que le run AROME, parce que c'est le seul cadre
+       où PI peut gagner et la seule raison d'être de la classe. Relire
+       la phrase du lot I : ce qu'elle refuse n'est pas la fraîcheur,
+       c'est la fraîcheur SERVIE SOUS LE MÊME NOM. La classe courte a sa
+       propre valeur de `lead_h` (`score.LEAD_COURT_*`, négative pour
+       qu'on ne puisse pas la lire comme une échéance) et ses propres
+       noms de série : personne ne la compare au +6 h sans le savoir.
+
+       ⛔⛔ **ET ALORS L'ALIGNEMENT CHANGE DE NATURE.** À `decalage_h = 0`
+       les deux archives partagent leur base de temps, et une échéance
+       de l'une EST une échéance de l'autre. Dès que les runs diffèrent,
+       ce n'est plus vrai : il faut apparier par HEURE VALIDE
+       (`h_pi = h_arome − decalage_h`). Appliquer un Δ échéance à
+       échéance sur deux runs décalés poserait la correction de 10 h Z
+       sur la prévision de 04 h Z — fini, plausible, et faux de six
+       heures. C'est la même classe de faute que l'appariement par rang
+       de la règle 5 ci-dessous, sur l'autre axe.
 
     2. ⛔ **Δ se mesure en 0,025° contre 0,025°** (`MAILLE_DELTA`), même
        si la BASE du score est en 0,01°. Voir la constante : mélanger
@@ -507,6 +528,18 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
        est compté dans le journal. Mettre 0 dirait « PI ne corrige
        rien ici », ce qui est une affirmation ; ne rien poser dit « on
        ne sait pas », ce qui est vrai.
+
+    5. ⛔ **`poids` CONSTANT ou rampe, jamais les deux.** `poids=None`
+       (défaut) garde la rampe `poids_pi`, qui décroît jusqu'à zéro à
+       6 h du run : c'est la règle de l'écran, et la classe +6 h la
+       reprend telle quelle. La classe courte, elle, passe un poids
+       CONSTANT (décision Q7 de Yann : deux sous-séries, w = 1 et
+       w = 0,5). ⚠️ La rampe y serait absurde : à ces échéances elle
+       vaut zéro ou presque, et la série publierait de l'AROME pur sous
+       une étiquette PI — le défaut que la Q7 ferme.
+       ⓘ Quand la rampe s'applique avec un décalage, elle est évaluée
+       sur l'échéance **PI** (`h_pi`), pas sur celle d'AROME : c'est la
+       fraîcheur de PI qu'elle décrit, pas celle de l'autre.
     """
     if MAILLE_DELTA != "0025":
         raise Abort(f"maille de Δ inattendue : {MAILLE_DELTA!r}")
@@ -555,7 +588,12 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
 
     out: dict[int, dict[int, tuple[float, float]]] = {}
     n_hors_pi = n_repli = 0
-    heures = sorted({m // 60 for m in pi_min if m % 60 == 0})
+    # ⛔ `heures` est indexée sur AROME (c'est la clé que `lignes()`
+    # relira comme un `step`), et chacune est l'image d'une échéance PI
+    # décalée de `decalage_h`. À décalage nul, la liste est identique à
+    # celle d'avant le lot L10 — le comportement de la classe +6 h ne
+    # bouge pas d'une heure, et un banc l'exige.
+    heures = sorted({m // 60 + decalage_h for m in pi_min if m % 60 == 0})
 
     for k, b in enumerate(col.balises):
         if b.get("source") not in SOURCE_NOTEE:
@@ -566,7 +604,10 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
             continue
         par_heure: dict[int, tuple[float, float]] = {}
         for h in heures:
-            w = poids_pi(h * 60)
+            # `h` est l'échéance AROME ; `h_pi` la même HEURE VALIDE vue
+            # depuis le run PI. Ils ne coïncident qu'à décalage nul.
+            h_pi = h - decalage_h
+            w = poids_pi(h_pi * 60) if poids is None else poids
             if w <= 0.0:
                 # τ = 6 h : la rampe est arrivée à zéro. Δ y serait
                 # multiplié par 0 — autant ne pas le calculer, et
@@ -575,7 +616,9 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
             i_step = col.i_step.get(h)
             if i_step is None:
                 continue                       # AROME n'a pas cette heure
-            i_min = pi_min.index(h * 60)
+            if h_pi * 60 not in pi_min:
+                continue                       # PI n'a pas cette heure
+            i_min = pi_min.index(h_pi * 60)
             u_pi = float(pi_donnees[iu_pi, j_pi, i_min, kpi])
             v_pi = float(pi_donnees[iv_pi, j_pi, i_min, kpi])
             u_ar = float(bloc_ar[k, iu_ar, j_ar, i_step])
@@ -602,7 +645,9 @@ def delta_20m(col, pi_donnees, pi_man, crier=print):
 
     crier(f"  Δ(20 m) PI−AROME : {len(out)} balises appariées, "
           f"{n_hors_pi} hors couverture PI, {n_repli} heures repliées "
-          f"sur AROME faute d'une valeur des deux côtés")
+          f"sur AROME faute d'une valeur des deux côtés"
+          + (f" · décalage PI−AROME {decalage_h:+d} h" if decalage_h else "")
+          + (f" · poids constant {poids}" if poids is not None else ""))
     return out
 
 

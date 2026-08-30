@@ -79,6 +79,37 @@ DAY_MS = 86_400_000
 #: Classe d'échéance ← nombre de jours entre le snapshot et la journée notée.
 LEAD_BY_OFFSET = {0: 6, 1: 24, 2: 48}
 
+#: ⛔ LA CLASSE COURTE (lot L10, 30/08/2026) — DEUX ÉTIQUETTES, ET
+#: ELLES SONT NÉGATIVES EXPRÈS.
+#:
+#: Le cadre 2 ne note pas un HORIZON, il note un INSTANT DE DÉCISION :
+#: « ce que tu pouvais savoir à T ». Les six heures qu'il note sont à
+#: +1 … +6 h de T, donc l'échéance moyenne vaut ~3,5 h et elle vit dans
+#: `lead_exact_h`, comme partout ailleurs. Il fallait néanmoins une
+#: valeur de `lead_h` pour CLÉER la classe (décision Q2 de Yann : une
+#: nouvelle valeur + CHECK élargi, jamais un nouveau nom de modèle sous
+#: `lead_h = 6` — « un avantage silencieux sous le même intitulé »,
+#: refusé le 13/08).
+#:
+#: ⛔ POURQUOI PAS 3, NI 1, NI 0. N'importe quel petit entier POSITIF se
+#: lirait comme une échéance et s'alignerait, dans un tableau, à côté de
+#: 6, 24 et 48 comme s'il était de la même famille. Il ne l'est pas :
+#: ces trois-là disent « à combien d'heures », celle-ci dit « depuis
+#: quel instant ». Un entier NÉGATIF est impossible à confondre avec une
+#: échéance, et c'est exactement le service qu'on lui demande.
+#:
+#: ⚠️ ET DEUX VALEURS, PAS UNE. Les deux instants T ne sont pas
+#: interchangeables : le matin et l'après-midi n'ont ni le même régime,
+#: ni le même run disponible. Les fondre sous une seule clé mélangerait
+#: deux runs dans une même journée-balise — et la clé primaire de
+#: `model_verif_daily` (`day, source, station_id, model, lead_h,
+#: fcst_src`) ne le permettrait qu'au prix d'un `fetched_at` unique pour
+#: deux runs, c'est-à-dire d'un `lead_exact_h` FAUX sur la moitié des
+#: heures.
+LEAD_COURT_MATIN = -1
+LEAD_COURT_APREM = -2
+LEADS_COURTS = (LEAD_COURT_MATIN, LEAD_COURT_APREM)
+
 #: Le modèle maison, lu dans un flux à part (lot I, 13/08/2026). Il ne
 #: sert ICI qu'à compter des lignes dans le journal : `daily_rows` ne
 #: connaît toujours aucun modèle par son nom, et c'est ce qui a rendu
@@ -101,6 +132,26 @@ AGRUME_MODEL = "agrume"
 #: le journal — `daily_rows` ne connaît toujours aucun modèle par son
 #: nom, et c'est ce qui rend ce branchement court.
 AGRUME_PI_MODEL = "agrume_pi"
+
+#: ⛔ LES DEUX SOUS-SÉRIES DE LA CLASSE COURTE (lot L10, décision Q7 de
+#: Yann du 30/08) — le MÊME composite, à deux poids de Δ.
+#:
+#: `w = 1` sert le plus frais tel quel ; `w = 0,5` sert la moyenne des
+#: deux, que la phase B mesure comme l'optimum hors échantillon (gain
+#: +0,08 à +0,15 km/h, appris sur huit journées d'août seulement).
+#: ⛔ AUCUNE DES DEUX N'EST CLASSÉE, et c'est le fond de la décision :
+#: choisir maintenant reviendrait à deviner sur huit journées, et
+#: publier les deux au classement ferait concourir un produit contre
+#: lui-même. Elles sont NOTÉES — donc lisibles dans la feuille de
+#: fiabilité, avec leurs erreurs absolues — et le tableau tranchera sur
+#: plusieurs semaines. Le motif est `RANK_REASON_SERIE_EN_ESSAI`.
+#: ⚠️ La rampe `poids_pi` ne s'applique PAS ici : à ces échéances elle
+#: servirait de l'AROME pur sous une étiquette PI (§3.3 de la
+#: conception). Le poids est CONSTANT sur les six heures, et il est
+#: dans le nom de la série.
+AGRUME_COURT_W1 = "agrume_court_w1"
+AGRUME_COURT_W05 = "agrume_court_w05"
+MODELES_COURTS = (AGRUME_COURT_W1, AGRUME_COURT_W05)
 
 #: Les deux chaînes qui lisent le MÊME modèle AROME (lot L2, 27/08/2026)
 #: — `meteofrance_arome_france_hd` via Open-Meteo, `arome_r2` via nos
@@ -1135,6 +1186,27 @@ def fcst_agrume_key(day: datetime) -> str:
     return f"fcstagrume/{day:%Y/%m}/fcstagrume_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def fcst_agrume_court_key(day: datetime) -> str:
+    """Le flux de la CLASSE COURTE (lot L10, 30/08/2026) — encore un
+    préfixe à part, et pour la troisième fois la même raison.
+
+    ⚠️ POURQUOI PAS DANS `fcstagrume/`. Ce serait la tentation : même
+    producteur apparent, même journée, même format. Mais ce sont DEUX
+    JOBS, et le second réécrirait la clé du premier. `fcstagrume_{J}`
+    porte l'archive de la classe +6 h ; si le job de la classe courte
+    échouait au milieu de son écriture sur la MÊME clé, il emporterait
+    une archive déjà bonne. C'est le raisonnement du lot I mot pour mot
+    (« se donner un moyen de perdre l'irremplaçable en réécrivant le
+    rejouable »), appliqué une fois de plus.
+
+    ⓘ Le flux porte le jour NOTÉ, comme `fcstagrume` : la classe courte
+    reconstitue après coup ce qui était disponible aux deux instants T
+    de la journée J, et l'écrit sous J.
+    """
+    return ("fcstagrumecourt/%s/fcstagrumecourt_%s.ndjson.gz"
+            % (day.strftime("%Y/%m"), day.strftime("%Y-%m-%d")))
+
+
 def fcst_arome_key(day: datetime) -> str:
     """Le flux AROME lu sur R2 (lot S0.5, 22/08) — un préfixe à part,
     exactement pour les mêmes raisons que `fcstagrume`.
@@ -1330,6 +1402,11 @@ def snapshot_rows_et_bilan(root: pathlib.Path, day: datetime,
     rows, bilan = fcst_parties(root, day, storage)
     return (rows
             + read_ndjson(root, fcst_agrume_key(day), storage)
+            # ⛔ LOT L10 — la classe courte, dans son propre flux. Une
+            # archive absente est le cas NORMAL tant que le job n'est
+            # pas installé : `read_ndjson` rend une liste vide, et rien
+            # d'autre du chemin ne change.
+            + read_ndjson(root, fcst_agrume_court_key(day), storage)
             + read_ndjson(root, fcst_arome_key(day), storage)
             # ⛔ LE FLUX DU GROUPE RÉDUIT EST LU EN DERNIER, ET IL PORTE
             # UN VRAI `aloft_speed` (ECMWF à 850 hPa). `daily_rows`
@@ -1487,8 +1564,21 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
     #: (modèle, échéance) → (pente, cap, balise) du dernier échantillon,
     #: la matière du témoin ci-dessous.
     dernier_prior: dict[tuple, tuple] = {}
-    for offset, lead_h in LEAD_BY_OFFSET.items():
+    for offset, lead_defaut in LEAD_BY_OFFSET.items():
         for row in snapshots.get(offset, []):
+            # ⛔ LOT L10 (30/08/2026) — L'ÉCHÉANCE PEUT VENIR DE LA LIGNE.
+            # Jusqu'ici `lead_h` se DÉDUISAIT de l'écart en jours entre
+            # le fichier de snapshot et la journée notée. La classe
+            # courte casse cette déduction : ses lignes vivent dans le
+            # snapshot du jour même (offset 0, donc « +6 h ») alors
+            # qu'elles notent tout autre chose.
+            # ⚠️ ET AUCUN NOM DE MODÈLE ICI. Le branchement aurait pu
+            # tester `row["model"]` ; il aurait alors fallu l'étendre à
+            # chaque série neuve, et `daily_rows` se serait mis à
+            # connaître les modèles par leur nom — ce que ce fichier
+            # refuse depuis le lot I. C'est la LIGNE qui déclare son
+            # échéance, ou personne.
+            lead_h = row.get("lead_h", lead_defaut)
             key = f"{row['source']}:{row['station_id']}"
             obs = obs_by_st.get(key)
             if not obs:
@@ -1670,6 +1760,18 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                     "dirOffset": S.median(offs),
                     "mseModel": bmm, "msePersist": bmr,
                 })
+    # ⛔ LOT L10 — LA CLASSE COURTE NE NOURRIT PAS LA MÉMOIRE DU
+    # CARACTÈRE, et c'est un refus, pas un oubli. `banded` alimente
+    # `model_character`, une moyenne exponentielle de TROIS MOIS qui dit
+    # « ce modèle sous-estime le vent fort dans cette vallée ». Y verser
+    # deux sous-séries encore EN ESSAI (le poids n'est pas tranché,
+    # décision Q7) écrirait une mémoire longue pour des séries qui
+    # peuvent disparaître dans quelques semaines — et il faudrait alors
+    # la nettoyer, ce que personne ne sait faire.
+    # ⓘ Conséquence heureuse : le CHECK `lead_h` de `model_character`
+    # n'a pas besoin d'être élargi. Une contrainte qu'on laisse étroite
+    # est une décision qui se défend toute seule.
+    banded = [b for b in banded if b["lead_h"] not in LEADS_COURTS]
     return rows, banded
 
 
@@ -3028,6 +3130,15 @@ def event_rows(day: datetime, snapshots: dict[int, list[dict]],
     fcst: dict[tuple, list[tuple[str, list[EV.WindEvent]]]] = defaultdict(list)
     for offset, lead_h in LEAD_BY_OFFSET.items():
         for row in snapshots.get(offset, []):
+            # ⛔ LOT L10 — LA CLASSE COURTE NE PRODUIT PAS D'ÉVÉNEMENTS,
+            # et c'est un refus, pas un oubli. Les événements (`pod`,
+            # `far`, `csi`, `timing_med_min`) se comptent sur une
+            # JOURNÉE de prévision ; six heures autour d'un instant de
+            # décision n'en font pas une. Les laisser entrer publierait
+            # un taux de fausse alerte calculé sur un sixième de la
+            # matière, sous le même nom que les autres.
+            if row.get("lead_h") is not None:
+                continue
             key = f"{row['source']}:{row['station_id']}"
             if key not in obs_by_st:
                 continue
@@ -3808,6 +3919,20 @@ RANK_REASON_DUPLICATE_CHAIN = "duplicate_chain"
 RANK_REASON_SERIE_TEMOIN = "serie_temoin"
 
 
+#: ⛔ LOT L10 (30/08/2026) — « NOTÉE, PAS CLASSÉE », et il fallait un
+#: mot pour ça aussi. Les deux sous-séries de la classe courte ne sont
+#: pas écartées parce qu'une autre série les remplace (`serie_temoin`),
+#: ni parce qu'elles doublonnent une chaîne (`duplicate_chain`) : elles
+#: sont écartées parce que LA QUESTION QU'ELLES POSENT N'EST PAS ENCORE
+#: TRANCHÉE. Le tableau de fiabilité les compare pendant des semaines,
+#: et le jour où le poids est choisi, la gagnante rejoint le classement
+#: — ce motif disparaîtra de lui-même.
+#: ⚠️ Réutiliser un des deux autres motifs aurait été plus court et
+#: aurait menti sur les trois : « doublon », « témoin » et « en essai »
+#: décrivent trois situations qu'un lecteur doit pouvoir distinguer.
+RANK_REASON_SERIE_EN_ESSAI = "serie_en_essai"
+
+
 def _agrume_temoin_excluded(rows: list[dict]) -> str | None:
     """L'AGRUME à écarter du classement d'une case (lot L18, 30/08/2026).
 
@@ -3869,6 +3994,13 @@ def _exclus_du_rang(rows: list[dict]) -> dict[str, str]:
     temoin = _agrume_temoin_excluded(rows)
     if temoin is not None:
         exclus[temoin] = RANK_REASON_SERIE_TEMOIN
+    # ⛔ LOT L10 — les sous-séries en essai, TOUJOURS, sans condition de
+    # présence d'une autre série. Les deux règles ci-dessus disent « pas
+    # celle-ci PUISQUE celle-là est là » ; celle-ci dit « pas encore »,
+    # et ça ne dépend de personne d'autre.
+    for r in rows:
+        if r["model"] in MODELES_COURTS:
+            exclus[r["model"]] = RANK_REASON_SERIE_EN_ESSAI
     return exclus
 
 
@@ -3943,6 +4075,21 @@ def _apply_rank(by_case: dict[tuple, list[dict]],
     for key, rows in by_case.items():
         exclus = _exclus_du_rang(rows)
         admis = [r for r in rows if r["model"] not in exclus]
+        if not admis:
+            # ⛔ LOT L10 — UNE CASE OÙ PLUS PERSONNE N'EST ADMIS, ET CE
+            # N'EST PAS UN CAS TORDU : c'est le cas NORMAL de la classe
+            # courte, dont les deux seules séries sont en essai. Sans ce
+            # garde-fou, on demanderait à `rank_models` de classer une
+            # liste VIDE — et ce qu'il en rendrait n'est pas une réponse
+            # à une question posée. Les motifs d'exclusion sont déjà sur
+            # les lignes (boucle plus bas) ; il n'y a rien d'autre à
+            # écrire, et surtout pas une raison de classement inventée.
+            for r in rows:
+                r["rank"] = None
+                r["rank_reason"] = exclus[r["model"]]
+                r["rank_corr"] = None
+                r["rank_reason_corr"] = exclus[r["model"]]
+            continue
         cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],
                   "occurrences": r["occurrences"]} for r in admis]
         rbcm = rows_by_case_model.get(key, {})
@@ -4869,12 +5016,13 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
 #:
 #: ⚠️ CE SET EST DEVENU UN GROS FILET (constat du lot L3, 27/08/2026 —
 #: le journal du L2 demandait de le signaler si L3 rouvrait ce fichier).
-#: CINQ valeurs vivent aujourd'hui hors de lui : `single_model`
+#: SIX valeurs vivent aujourd'hui hors de lui : `single_model`
 #: (step42), `partie_manquante` (step48), `duplicate_chain` (step53),
-#: `fdr` (step54) et, depuis le lot L18 du 30/08, `serie_temoin`
-#: (step61, JOUÉ par Yann le 30/08 — et qui ne rejoint pas ce set pour
-#: autant : voir `single_model`, joué depuis le step42 et absent d'ici
-#: lui aussi. Ce set est la BASELINE, pas l'état du schéma). Le repli de `_upsert_scores` ne se déclenche que si
+#: `fdr` (step54), `serie_temoin` (step61, lot L18) et `serie_en_essai`
+#: (step62, lot L10). ⚠️ Les deux dernières ont beau être JOUÉES, elles
+#: ne rejoignent pas ce set : voir `single_model`, joué depuis le step42
+#: et absent d'ici lui aussi. Ce set est la BASELINE du step40, pas
+#: l'état du schéma. Le repli de `_upsert_scores` ne se déclenche que si
 #: la base nomme SA contrainte `rank_reason` — donc jamais pour une
 #: raison sans rapport — mais quand il se déclenche, il met à `null`
 #: les QUATRE, y compris celles que la base accepte parfaitement. On
@@ -4894,8 +5042,8 @@ RANK_REASONS_STEP40 = {"ok", "insufficient", "tied", "not_separable",
 #: `rank_reason_corr`, les raisons du step40, plus `single_model`
 #: (step42) et `mixed_population`, qui lui est propre. NI
 #: `duplicate_chain` (lot L2), NI `fdr` (lot L3), NI `serie_temoin`
-#: (lot L18) n'y sont — et les trois lots ÉCRIVENT pourtant dans cette
-#: colonne (`_apply_rank_corr` pose
+#: (lot L18), NI `serie_en_essai` (lot L10) n'y sont — et les quatre
+#: lots ÉCRIVENT pourtant dans cette colonne (`_apply_rank_corr` pose
 #: `duplicate_chain` sur l'écarté, `appliquer_fdr` pose `fdr` sur la
 #: famille « corrige »).
 #:
@@ -4920,14 +5068,69 @@ REPLIS_RANG = (
      "supabase_step48_lot_s06_collect_part.sql (`partie_manquante`), "
      "supabase_step53_lot_l2_duplicate_chain.sql (`duplicate_chain`), "
      "supabase_step54_lot_l3_fdr.sql (`fdr`) et/ou "
-     "supabase_step61_lot_l18_agrume_unique.sql (`serie_temoin`)"),
+     "supabase_step61_lot_l18_agrume_unique.sql (`serie_temoin`) "
+     "et/ou supabase_step62_lot_l10_classe_courte.sql "
+     "(`serie_en_essai`, plus les deux `lead_h` négatifs)"),
     ("model_score_zone_rank_reason_corr_check", "rank_reason_corr",
      RANK_REASONS_CORR_STEP52,
      "supabase_step58_rank_reason_corr.sql "
      "(`duplicate_chain` et `fdr` sur la colonne CORRIGÉE) et/ou "
      "supabase_step61_lot_l18_agrume_unique.sql (`serie_temoin`, "
-     "sur les DEUX colonnes)"),
+     "sur les DEUX colonnes) et/ou "
+     "supabase_step62_lot_l10_classe_courte.sql (`serie_en_essai`)"),
 )
+
+
+#: Le CHECK que la classe courte franchit — et le `.sql` qui le désarme.
+#: ⛔ POURQUOI CE REPLI EXISTE, ET IL A DEUX PRÉCÉDENTS EXACTS. Le lot G
+#: a ajouté trois `rank_reason` que le CHECK refusait ; le lot L2 en a
+#: ajouté un de plus dans la colonne CORRIGÉE. Les deux fois, un HTTP 400
+#: sur un upsert a fait perdre LA NUIT ENTIÈRE — pas la colonne, la nuit.
+#: Le lot L10 ajoute deux `lead_h` NÉGATIFS, et cette fois ce n'est même
+#: pas une colonne annexe : `lead_h` est dans la CLÉ PRIMAIRE de
+#: `model_verif_daily`.
+#:
+#: ⛔⛔ ET C'EST POURQUOI CE REPLI-CI ÉCARTE DES LIGNES AU LIEU DE TAIRE
+#: UNE COLONNE. Le repli de `_upsert_scores` met la valeur refusée à
+#: `null` ; ici c'est impossible — `lead_h` est `not null` et fait partie
+#: de la clé. On ÉCARTE donc les lignes de la classe courte, et on
+#: envoie les autres. Le prix est nommé : cette nuit-là, la classe
+#: courte n'existe pas. C'est le bon prix — elle est en essai, les trois
+#: classes d'échéance sont le produit.
+REPLI_LEAD_DAILY = (
+    "model_verif_daily_lead_h_check", "lead_h",
+    "supabase_step62_lot_l10_classe_courte.sql (les deux `lead_h` "
+    "négatifs de la classe courte)")
+
+
+def _upsert_daily(sb, rows: list[dict]) -> int:
+    """`model_verif_daily`, avec un repli sur le CHECK de `lead_h`.
+
+    ⚠️ LES ÉCHÉANCES ADMISES SE LISENT SUR `LEAD_BY_OFFSET`, pas sur une
+    liste recopiée : le jour où une quatrième classe d'horizon naîtra,
+    elle sera admise ici sans que personne ait à y penser, et les seules
+    lignes écartées resteront celles qui déclarent une échéance que la
+    base ne connaît pas.
+    """
+    cle = "day,source,station_id,model,lead_h,fcst_src"
+    try:
+        return sb.upsert("model_verif_daily", rows, cle)
+    except Abort as exc:
+        nom, colonne, quoi_jouer = REPLI_LEAD_DAILY
+        if nom not in str(exc):
+            raise
+        admises = set(LEAD_BY_OFFSET.values())
+        gardees = [r for r in rows if r.get(colonne) in admises]
+        refusees = sorted({str(r.get(colonne)) for r in rows
+                           if r.get(colonne) not in admises})
+        print(f"  ⚠️ {colonne} : {', '.join(refusees)} refusé(s) par le "
+              f"CHECK en base → {len(rows) - len(gardees)} ligne(s) "
+              f"ÉCARTÉE(S) cette nuit (la clé primaire porte `lead_h`, "
+              f"on ne peut pas le taire). Jouer {quoi_jouer}.",
+              file=sys.stderr)
+        if not gardees:
+            raise
+        return sb.upsert("model_verif_daily", gardees, cle)
 
 
 def _upsert_scores(sb, rows: list[dict]) -> int:
@@ -5652,8 +5855,7 @@ def main() -> int:
     if part_temoin:
         print(f"  ⛔ témoin du corrigé : {part_temoin['texte']}")
     if rows:
-        n = sb.upsert("model_verif_daily", _pour_la_base(sb, "model_verif_daily", rows),
-                      "day,source,station_id,model,lead_h,fcst_src")
+        n = _upsert_daily(sb, _pour_la_base(sb, "model_verif_daily", rows))
         print(f"  → model_verif_daily : {n} lignes")
     # ⚠️ Le cache de rejeu est alimenté PAR CE CALCUL-CI, pas par un
     # second. La journée notée ce soir entre donc dans la fenêtre du

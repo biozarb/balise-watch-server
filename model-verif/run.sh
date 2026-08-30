@@ -57,8 +57,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau|filet-arome) ;;
-  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|arome|tau|filet-arome" >&2
+  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|arome|tau|filet-arome) ;;
+  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|arome|tau|filet-arome" >&2
      exit 2 ;;
 esac
 
@@ -112,6 +112,16 @@ case "$MODE" in
                   LIBELLE="score modeles (groupe reduit - candidates)" ;;
   garde-fou-r2)   SCRIPT="$ICI/../tools/audit_r2.py";   LIBELLE="garde-fou R2" ;;
   agrume)         SCRIPT="$ICI/agrume_fcst.py";         LIBELLE="flux AGRUME" ;;
+  # ⭐ LA CLASSE COURTE (lot L10, 30/08/2026) — « ce que tu pouvais
+  # savoir à l'instant T ». Deux instants de décision (06:50 et 12:50 Z,
+  # MESURÉS et non choisis), six heures rondes après chacun, et le
+  # meilleur produit réellement disponible à T.
+  # ⛔ IL DOIT TOURNER APRÈS MINUIT ET AVANT `score`, comme `agrume` :
+  # il reconstitue la journée ÉCOULÉE. Et il ne peut pas remonter loin —
+  # les colonnes AROME sont purgées de R2 au bout d'une semaine, donc un
+  # rejeu plus ancien ne PEUT pas savoir ce qui était disponible à T. Il
+  # le dit et n'écrit rien, plutôt que de deviner.
+  agrume-court)   SCRIPT="$ICI/agrume_court.py";        LIBELLE="classe courte AGRUME" ;;
   # ⚠️ CE MODE-CI N'ARCHIVE PAS HIER, IL ARCHIVE AUJOURD'HUI, et c'est
   # la seule différence de fond avec `agrume`. Les tuiles `arome/sol`
   # sont RÉÉCRITES EN PLACE toutes les 3 h par l'Action `arome-wind` :

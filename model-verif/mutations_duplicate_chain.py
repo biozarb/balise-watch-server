@@ -21,7 +21,9 @@ même si l'on interrompt.
 
     python3 mutations_duplicate_chain.py
 """
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -47,10 +49,8 @@ MUTATIONS = [
     ("l'écarté reste dans le POOL de classement (cases non filtrées) — "
      "il peut redevenir « second » en silence",
      SCORE,
-     '        admis = [r for r in rows if r["model"] not in exclus]\n'
      '        cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],\n'
      '                  "occurrences": r["occurrences"]} for r in admis]',
-     '        admis = [r for r in rows if r["model"] not in exclus]\n'
      '        cases = [{"model": r["model"], "typical_err_kmh": r["typical_err_kmh"],\n'
      '                  "occurrences": r["occurrences"]} for r in rows]'),
 
@@ -99,6 +99,27 @@ MUTATIONS = [
 ]
 
 
+def _env_sans_pyc() -> dict:
+    """L'environnement du banc, SANS écriture ni lecture de bytecode.
+
+    ⛔⛔ LE PIÈGE, TROUVÉ LE 30/08/2026 SUR LE LOT L10, ET IL REND UNE
+    MUTATION MENTEUSE. `HEURES_CIBLES = 6` muté en `= 7` fait EXACTEMENT
+    la même longueur de fichier ; si la restauration retombe dans la même
+    SECONDE, l'horodatage ne bouge pas non plus. Python juge son cache
+    `__pycache__` sur (mtime, taille) : il a donc rechargé le bytecode
+    MUTÉ pour les trois mutations suivantes, qui ont rougi — mais pour la
+    faute de la précédente. Trois lignes vertes qui ne prouvaient rien.
+    ⇒ `-B` (ne pas écrire) et `PYTHONDONTWRITEBYTECODE` (pour les
+    sous-processus), plus le ménage ci-dessous. Une mutation qui ne peut
+    pas prouver ce qu'elle affirme est pire qu'une mutation absente.
+    """
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    for p in ICI.rglob("__pycache__"):
+        shutil.rmtree(p, ignore_errors=True)
+    return env
+
+
 def joue() -> int:
     rouges = 0
     for i, (nom, fichier, avant, apres) in enumerate(MUTATIONS, 1):
@@ -111,8 +132,9 @@ def joue() -> int:
             continue
         try:
             fichier.write_text(origine.replace(avant, apres, 1), encoding="utf-8")
-            r = subprocess.run([sys.executable, str(ICI / "test_score.py")],
-                               capture_output=True, text=True, cwd=ICI)
+            r = subprocess.run([sys.executable, "-B", str(ICI / "test_score.py")],
+                               capture_output=True, text=True, cwd=ICI,
+                               env=_env_sans_pyc())
             if r.returncode == 0:
                 print(f"  ❌ {i:>2}. {nom}\n       LE BANC RESTE VERT — "
                       f"il ne tient pas cette propriété.")

@@ -1,0 +1,27 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-agrume-court.timer — entre le flux AGRUME et la notation
+#
+#  ⛔⛔ PROPOSÉ, PAS INSTALLÉ. Voir le `.service`.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — classe courte AGRUME (cadre 2)
+
+[Timer]
+# 03:45 UTC : après `bw-model-agrume` (03:35), avant la notation
+# (03:55). ⓘ La marge est plus MINCE que celle du flux +6 h, et il faut
+# le savoir : ce job fait jusqu'à quatre lectures R2 de colonnes (deux
+# instants T × AROME + PI) là où l'autre en fait deux. S'il déborde sur
+# la notation, la journée est simplement notée sans classe courte —
+# aucune autre série n'en souffre, et le rattrapage est un
+# `run.sh agrume-court --day …` tant que la journée est dans la semaine
+# de rétention R2.
+OnCalendar=*-*-* 03:45:00 UTC
+# ⚠️ `Persistent=true` a ici une valeur RÉELLE, contrairement au flux
+# +6 h : passé sept jours, la journée manquée n'est plus rattrapable du
+# tout (les colonnes AROME sont purgées). Un VPS éteint une semaine
+# perdrait ces journées définitivement.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

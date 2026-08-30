@@ -485,6 +485,278 @@ def test_l18_le_rang_perime_du_temoin_est_efface():
     check("le composite prend la 1re place", rows[1]["rank"], 1)
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LOT L10 (30/08/2026) — LA CLASSE COURTE, CÔTÉ SCORING
+# ══════════════════════════════════════════════════════════════════
+#
+# ⛔ Le collecteur a son propre banc (`test_agrume_court.py`). Ici on
+# tient les TROIS choses que `score.py` doit faire de ses lignes :
+#   · les noter sous LEUR échéance, pas sous celle du snapshot ;
+#   · ne JAMAIS leur donner de rang, sans tomber pour autant ;
+#   · les tenir hors des événements, qui se comptent sur une journée.
+
+def _ligne_courte(station, model, lead, jour, fetched_h=6):
+    """Une ligne de la classe courte : six heures, et rien d'autre."""
+    row = fcst_line(station, model, jour, lambda i: brise(i % 24))
+    for i in range(len(row["speed"])):
+        # Les heures cibles de T = 06:50 Z : 07…12 Z, et elles seules.
+        if not 7 <= i <= 12:
+            row["speed"][i] = None
+            row["dir"][i] = None
+    row["lead_h"] = lead
+    # Q5 — la fraîcheur du MODÈLE : l'heure du run PI (06 Z), donc une
+    # échéance moyenne de 3,5 h sur les heures 07…12.
+    row["fetched_at"] = jour.replace(hour=fetched_h, minute=0,
+                                     tzinfo=timezone.utc).isoformat()
+    return row
+
+
+def test_l10_la_ligne_porte_son_echeance():
+    """Lot L10 — une ligne qui déclare `lead_h` est notée SOUS CE
+    `lead_h`, pas sous celui que l'écart de jours ferait deviner.
+    """
+    print("── lot L10 : l'échéance vient de la ligne, pas de l'offset ──")
+    snapshots = {
+        0: [fcst_line("835", "icon_d2", DAY, lambda i: brise(i % 24),
+                      aloft=(40.0, 350.0)),
+            _ligne_courte("835", J.AGRUME_COURT_W1, J.LEAD_COURT_MATIN, DAY),
+            _ligne_courte("835", J.AGRUME_COURT_W05, J.LEAD_COURT_MATIN, DAY)],
+    }
+    obs_j = [obs_line("835", DAY, brise)]
+    obs_v = [obs_line("835", DAY - timedelta(days=1), brise)]
+    rows, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, utc_offset_s=7200)
+    par = {r["model"]: r for r in rows}
+    check("⭐ la sous-série w=1 est notée sous l'étiquette de la classe "
+          "courte, PAS sous « +6 h »",
+          par[J.AGRUME_COURT_W1]["lead_h"], J.LEAD_COURT_MATIN)
+    check("… la sous-série w=0,5 aussi",
+          par[J.AGRUME_COURT_W05]["lead_h"], J.LEAD_COURT_MATIN)
+    check("⛔ et `icon_d2`, qui ne déclare rien, garde le +6 h de "
+          "l'offset — le comportement d'avant le lot ne bouge pas",
+          par["icon_d2"]["lead_h"], 6)
+    check("la classe courte ne note que ses SIX heures",
+          par[J.AGRUME_COURT_W1]["n_hours"], 6)
+    check("⭐ son échéance réelle moyenne vaut 3,5 h — les heures 07…12 "
+          "vues depuis le run PI de 06 Z (Q5 : fraîcheur du MODÈLE)",
+          abs(par[J.AGRUME_COURT_W1]["lead_exact_h"] - 3.5) < 0.35,
+          True)
+
+    # ⛔ ET LA MÉMOIRE DU CARACTÈRE RESTE INTACTE. `banded` alimente
+    # `model_character`, une moyenne exponentielle de trois mois : deux
+    # sous-séries encore en essai n'y écrivent rien.
+    _, banded = J.daily_rows(DAY, snapshots, obs_j, obs_v, utc_offset_s=7200)
+    check("⛔ aucune ligne de la classe courte dans les accumulateurs de "
+          "caractère", [b for b in banded if b["lead_h"] in J.LEADS_COURTS],
+          [])
+    check("⭐ … alors que `icon_d2`, lui, y est bien (le banc n'est pas "
+          "vide)", any(b["model"] == "icon_d2" for b in banded), True)
+
+
+def test_l10_notees_jamais_classees():
+    """Lot L10 — les deux sous-séries sont NOTÉES et jamais CLASSÉES,
+    et une case où plus personne n'est admis ne fait pas tomber la nuit.
+    """
+    print("── lot L10 : notées, jamais classées ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(830, 836):
+            for model, err in ((J.AGRUME_COURT_W1, 3.0),
+                               (J.AGRUME_COURT_W05, 4.0)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": J.LEAD_COURT_MATIN,
+                    "regime": "fluxN", "n_hours": 6, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+    # ⛔ LE CAS QUI AURAIT FAIT TOMBER LA NUIT : les DEUX séries de la
+    # case sont écartées, donc `admis` est vide. Sans le garde-fou, on
+    # demanderait à `rank_models` de classer une liste vide.
+    rows = J.rolling_scores(daily, zone_of, DAY)
+    fine = [r for r in rows if r["zone_id"] == "b1:valley"
+            and r["window_kind"] == "rolling15"]
+    check("les deux sous-séries ont bien leur ligne (elles sont NOTÉES)",
+          sorted(r["model"] for r in fine),
+          sorted([J.AGRUME_COURT_W1, J.AGRUME_COURT_W05]))
+    par = {r["model"]: r for r in fine}
+    check("⭐ w=1 porte son erreur typique (3,0 km/h) — la feuille de "
+          "fiabilité peut la lire",
+          par[J.AGRUME_COURT_W1]["typical_err_kmh"], 3.0)
+    check("… et w=0,5 la sienne (4,0)",
+          par[J.AGRUME_COURT_W05]["typical_err_kmh"], 4.0)
+    check("⛔ AUCUN rang, alors que w=1 bat w=0,5 de 25 %",
+          [par[m]["rank"] for m in (J.AGRUME_COURT_W1, J.AGRUME_COURT_W05)],
+          [None, None])
+    check("… et le motif dit « en essai », pas « doublon » ni « témoin »",
+          {par[m]["rank_reason"] for m in par}, {"serie_en_essai"})
+    check("le classement CORRIGÉ dit la même chose sur la même case",
+          {par[m]["rank_reason_corr"] for m in par}, {"serie_en_essai"})
+    check("l'échéance publiée est celle de la classe courte",
+          {r["lead_h"] for r in fine}, {J.LEAD_COURT_MATIN})
+
+
+def test_l10_les_evenements_ignorent_la_classe_courte():
+    """Lot L10 — six heures autour d'un instant de décision ne font pas
+    une journée : la classe courte ne produit pas d'événements.
+    """
+    print("── lot L10 : la classe courte ne produit pas d'événements ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in ("835", "836")}
+
+    def monte(h):
+        return 2.0 if h < 10 else 25.0
+
+    snapshots = {0: []}
+    for st in ("835", "836"):
+        snapshots[0].append(fcst_line(st, "icon_d2", DAY,
+                                      lambda i: monte(i % 24)))
+        court = fcst_line(st, J.AGRUME_COURT_W1, DAY, lambda i: monte(i % 24))
+        court["lead_h"] = J.LEAD_COURT_MATIN
+        snapshots[0].append(court)
+    obs_j = [obs_line(st, DAY, monte) for st in ("835", "836")]
+
+    rows, _ = J.event_rows(DAY, snapshots, obs_j, zone_of, 7200)
+    modeles = {r["model"] for r in rows}
+    check("⭐ le banc n'est pas vide : `icon_d2` produit bien des "
+          "événements sur cette matière", "icon_d2" in modeles, True)
+    check("⛔ et la classe courte, sur EXACTEMENT le même vent, n'en "
+          "produit aucun", J.AGRUME_COURT_W1 in modeles, False)
+
+
+def test_l10_on_ne_classe_pas_une_case_vide():
+    """Lot L10 — une case dont TOUTES les séries sont écartées n'est
+    jamais soumise au test apparié.
+
+    ⛔ POURQUOI CE BANC EXISTE, ET IL A UNE HISTOIRE COURTE. La
+    mutation nº 11 du 30/08 (retirer le garde-fou `if not admis`)
+    laissait le banc VERT : `rank_models` accepte une liste vide sans
+    broncher, et les motifs d'exclusion sont posés juste après de toute
+    façon. La ligne ne gardait donc rien d'OBSERVABLE dans la sortie —
+    or ce qu'elle garde n'est pas une valeur, c'est un GESTE : on ne
+    pose pas une question à un test quand il n'y a personne à comparer.
+    Un jour où `rank_models` lèvera sur une liste vide (ou rendra un
+    verdict poli sur rien du tout), c'est la nuit entière qui tombera
+    pour une case que personne ne publie. On tient donc l'appel.
+    """
+    print("── lot L10 : on ne soumet jamais une case vide au test ──")
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(830, 836):
+            # La case COURTE : deux séries, toutes deux en essai.
+            for model, err in ((J.AGRUME_COURT_W1, 3.0),
+                               (J.AGRUME_COURT_W05, 4.0)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": J.LEAD_COURT_MATIN,
+                    "regime": "fluxN", "n_hours": 6, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+            # ⭐ Et une case ORDINAIRE à côté, pour que ce banc ne
+            # puisse pas être vert en ne mesurant rien du tout.
+            for model, err in (("icon_d2", 3.0),
+                               ("meteofrance_arome_france_hd", 5.0)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": 6, "regime": "fluxN",
+                    "n_hours": 12, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+
+    appels = []
+    vrai = J.INF.rank_models
+
+    def espion(cases, *a, **kw):
+        appels.append(list(cases))
+        return vrai(cases, *a, **kw)
+
+    J.INF.rank_models = espion
+    try:
+        J.rolling_scores(daily, zone_of, DAY)
+    finally:
+        J.INF.rank_models = vrai
+
+    check("⭐ le banc n'est pas vide : des cases NON vides ont bien été "
+          "soumises au test", any(appels), True)
+    check("⛔ et AUCUNE case vide ne l'a été",
+          [c for c in appels if not c], [])
+
+
+def test_l10_le_lead_refuse_ecarte_les_lignes_pas_la_nuit():
+    """Lot L10 — un `lead_h` que la base ne connaît pas encore écarte
+    les lignes de la classe courte, jamais la nuit entière.
+
+    ⛔ DEUX PRÉCÉDENTS EXACTS, ET ILS ONT COÛTÉ DEUX NUITS. Le lot G a
+    ajouté trois `rank_reason` refusées ; le lot L2 en a ajouté une dans
+    la colonne corrigée. Les deux fois, un HTTP 400 a emporté la nuit
+    entière. Ici c'est pire sur le papier : `lead_h` est dans la CLÉ
+    PRIMAIRE, donc on ne peut pas le taire — on écarte les lignes.
+    ⚠️ Ce banc existe parce que le job `agrume_court` peut être lancé À
+    LA MAIN avant que Yann n'ait joué `supabase_step62`. « Le timer
+    n'est pas installé » n'est pas une protection.
+    """
+    print("── lot L10 : un lead refusé n'emporte pas la nuit ──")
+    import contextlib, io as _io
+    def _lignes():
+        return [{"day": "2026-08-29", "source": "pioupiou",
+                 "station_id": "835", "model": "icon_d2", "lead_h": 6,
+                 "fcst_src": "own_archive"},
+                {"day": "2026-08-29", "source": "pioupiou",
+                 "station_id": "835", "model": "icon_d2", "lead_h": 24,
+                 "fcst_src": "own_archive"},
+                {"day": "2026-08-29", "source": "pioupiou",
+                 "station_id": "835", "model": J.AGRUME_COURT_W1,
+                 "lead_h": J.LEAD_COURT_MATIN, "fcst_src": "own_archive"},
+                {"day": "2026-08-29", "source": "pioupiou",
+                 "station_id": "835", "model": J.AGRUME_COURT_W05,
+                 "lead_h": J.LEAD_COURT_APREM, "fcst_src": "own_archive"}]
+
+    rows = _lignes()
+    sb = _SbRefuse(["model_verif_daily_lead_h_check"])
+    with contextlib.redirect_stderr(_io.StringIO()) as err:
+        n = J._upsert_daily(sb, rows)
+    check("⭐ la nuit passe : les deux classes d'horizon sont écrites",
+          n, 2)
+    envoyees = [r["lead_h"] for r in sb.appels[-1]]
+    check("… et ce sont bien celles-là", sorted(envoyees), [6, 24])
+    check("⛔ les lignes de la classe courte sont ÉCARTÉES, pas tues — "
+          "`lead_h` est dans la clé primaire",
+          [r for r in sb.appels[-1] if r["lead_h"] < 0], [])
+    check("deux tentatives d'upsert, pas une", len(sb.appels), 2)
+    check("le journal nomme le `.sql` à jouer",
+          "supabase_step62_lot_l10_classe_courte.sql" in err.getvalue(), True)
+    check("… et dit COMBIEN de lignes ont été écartées",
+          "2 ligne(s) ÉCARTÉE(S)" in err.getvalue(), True)
+
+    # ⛔ UNE CONTRAINTE QU'ON NE SAIT PAS DÉSARMER PASSE À TRAVERS —
+    # un repli qui avale tout ferait disparaître les vraies pannes.
+    try:
+        J._upsert_daily(_SbRefuse(["model_verif_daily_pkey"]), _lignes())
+        check("une contrainte inconnue doit RE-LEVER", "passé", "Abort")
+    except J.Abort as exc:
+        check("une contrainte inconnue re-lève telle quelle",
+              "model_verif_daily_pkey" in str(exc), True)
+
+    # ⛔ ET SI TOUT EST REFUSÉ, ON LÈVE. Un upsert vide « réussirait »
+    # en écrivant zéro ligne, et la nuit se croirait passée.
+    seules = [r for r in _lignes() if r["lead_h"] < 0]
+    try:
+        with contextlib.redirect_stderr(_io.StringIO()):
+            J._upsert_daily(_SbRefuse(["model_verif_daily_lead_h_check"]),
+                            seules)
+        check("un lot ENTIÈREMENT refusé doit lever", "passé", "Abort")
+    except J.Abort:
+        check("⛔ un lot entièrement refusé lève — un upsert vide se "
+              "lirait comme une nuit réussie", True, True)
+
+
 def test_repli_rang_les_deux_ensembles_admis_disent_le_schema_reel():
     print("── repli : ce que chaque CHECK admet vraiment ──")
     # ⛔ CES DEUX ENSEMBLES SONT UNE LECTURE DU SCHÉMA, pas un choix de
@@ -4610,6 +4882,12 @@ def main() -> int:
                test_l18_le_temoin_voyage_jusquau_corrige,
                test_l18_apply_rank_corr_accepte_encore_une_chaine,
                test_l18_le_rang_perime_du_temoin_est_efface,
+               # ── lot L10 (30/08) : la classe courte ──
+               test_l10_la_ligne_porte_son_echeance,
+               test_l10_notees_jamais_classees,
+               test_l10_les_evenements_ignorent_la_classe_courte,
+               test_l10_on_ne_classe_pas_une_case_vide,
+               test_l10_le_lead_refuse_ecarte_les_lignes_pas_la_nuit,
                # ── lot L17 (27/08) : les doublons d'inscription ──
                test_l17_doublon_ecarte_du_classement,
                test_l17_doublon_ecarte_des_accumulateurs,
