@@ -152,6 +152,10 @@ echo "  ✓ 19/19 bancs Python verts sur le VPS"
 # PÉRIME. Le lot L9 y ajoute \`test_murphy.py\` ; au passage, trois bancs
 # écrits depuis le 27/08 n'y sont TOUJOURS PAS —
 # \`test_controle_tau.py\` et \`test_fraicheur.py\` (lot L8),
+# ⓘ 30/08 — le lot L10 a ajouté le SIEN (\`test_agrume_court.py\`) plutôt
+# que de laisser la liste se périmer d'un cran de plus. La dette de fond
+# (une liste écrite à la main) reste entière ; elle est juste moins
+# grande d'un banc.
 # \`test_sonde_representativite.py\` / \`test_sonde_doublons.py\` /
 # \`test_sonde_chaine_arome.py\` (lots L4/L6/L16, encore hors dépôt).
 # Ils ne sont pas ajoutés ICI parce que ce n'est pas le lot qui les a
@@ -166,7 +170,8 @@ for B in model-verif/test_score.py model-verif/test_inference.py \\
          model-verif/test_collect_reduit.py model-verif/test_events.py \\
          model-verif/test_geopair.py model-verif/test_run_selftest.py \\
          model-verif/test_agrume_fcst.py model-verif/test_agrume_pi_fcst.py \\
-         model-verif/test_arome_fcst.py model-verif/test_sonde_delta_10m.py; do
+         model-verif/test_arome_fcst.py model-verif/test_sonde_delta_10m.py \\
+         model-verif/test_agrume_court.py; do
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
 done
@@ -186,7 +191,7 @@ done
 echo "  · model-verif/test_scoring.py --unit-only"
 echo "    ⚠️ parité TypeScript NON jouée (procédure manuelle, cf. en-tête du banc)"
 "\$PY" model-verif/test_scoring.py --unit-only || exit 1
-echo "  ✓ 13/13 bancs model-verif verts sur le VPS"
+echo "  ✓ 14/14 bancs model-verif verts sur le VPS"
 
 # ⛔ 27/08 — CELUI-CI N'EST PAS EN PYTHON, ET C'EST PRÉCISÉMENT
 # POURQUOI IL EST ICI. Ce qui a rempli la boîte de Yann la nuit du 26
