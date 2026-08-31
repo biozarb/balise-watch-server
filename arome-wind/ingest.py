@@ -476,7 +476,8 @@ def _ms(u, v):
     # entrée ne change rien à la douceur du champ interpolé.
     return round(spd), round(drc)
 
-def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None):
+def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None,
+                sortie_vitesses=None, entree_vitesses=None):
     """Construit les WindGrid par tuile 2° pour un (kind, level) donné.
     uv_by_step: {step: (U_values, V_values)}. Retourne {(tLat,tLon): dict WindGrid}.
     orog (grille ALT uniquement, cf. load_orography) : grille d'élévation AROME
@@ -494,10 +495,34 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
     c'est ce qui garde `times[]` aligné entre les deux tuiles et laisse
     le curseur horaire fonctionner sans décalage d'index. La liste des
     échéances où la rafale existe VRAIMENT est écrite à part
-    (`gustTimes`), pour que le client le DISE plutôt que le devine."""
+    (`gustTimes`), pour que le client le DISE plutôt que le devine.
+
+    ── `sortie_vitesses` / `entree_vitesses` (31/08/2026, lot « écart ») ──
+    La tuile RAFALE porte aussi le vent MOYEN (`speedMean`), pour que le
+    client puisse montrer l'écart moyen/rafale — l'anneau ou la flèche
+    fantôme — SANS charger la tuile sol. Charger les deux rouvrirait
+    exactement ce que l'arbitrage A1 avait fermé : deux fichiers, donc
+    deux runs possibles (piège du manifeste du 22/08).
+
+    ⭐ Et il n'est PAS recalculé : la passe SOL vient de le calculer pour
+    chaque point. `sortie_vitesses` collecte, dans l'ordre des points, le
+    triplet (lat, lon, liste speed) ; `entree_vitesses` le relit dans le
+    MÊME ordre. Les deux passes appellent `sample_indices(meta, STEP_SOL)`
+    avec la même meta et la même BBOX : l'ordre est déterministe. Les
+    listes sont PARTAGÉES, pas copiées — la tuile rafale référence l'objet
+    de la tuile sol, donc ~15 Mo de pointeurs et pas 800 Mo de doublons.
+    C'est ce qui permet de libérer `u`/`v` avant la passe rafale et de
+    tenir le pic mémoire d'aujourd'hui.
+    ⚠️ L'appariement se VÉRIFIE point par point sur (lat, lon), et lève
+    plutôt que d'écrire un `speedMean` décalé d'un point : un vent moyen
+    pris chez le voisin serait invisible à l'écran et faux partout."""
     pts = sample_indices(meta, step_deg)
+    if entree_vitesses is not None and len(entree_vitesses) != len(pts):
+        raise SystemExit(f"speedMean : {len(entree_vitesses)} points collectés à la "
+                         f"passe SOL contre {len(pts)} ici — les deux passes ne "
+                         f"parcourent pas la même grille, on n'écrit rien.")
     tiles = {}
-    for idx, lat, lon in pts:
+    for n, (idx, lat, lon) in enumerate(pts):
         tLat = math.floor(lat / TILE_DEG) * TILE_DEG
         tLon = math.floor(lon / TILE_DEG) * TILE_DEG
         g = tiles.get((tLat, tLon))
@@ -514,6 +539,15 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
             sp, dr = _ms(U[idx], V[idx])
             speed.append(sp); dir_.append(dr)
         pt = dict(lat=lat, lon=lon, speed=speed, dir=dir_)
+        if sortie_vitesses is not None:
+            sortie_vitesses.append((lat, lon, speed))
+        if entree_vitesses is not None:
+            mlat, mlon, mspeed = entree_vitesses[n]
+            if mlat != lat or mlon != lon:
+                raise SystemExit(f"speedMean : point {n} desapparie "
+                                 f"({mlat},{mlon}) contre ({lat},{lon}) — on n'ecrit "
+                                 f"pas un vent moyen pris chez le voisin.")
+            pt["speedMean"] = mspeed        # MEME objet liste que la tuile sol
         if orog is not None:
             e = elev_at(orog, lat, lon)
             if e is not None:
@@ -595,15 +629,23 @@ def main():
     # (×1,40 sur les échéances). Le nombre d'OBJETS est inchangé — c'est
     # justement pourquoi une dérive d'horizon ne se verrait PAS dans le
     # compteur d'écritures, et pourquoi `mo_par_run` doit suivre à la main.
-    # ⚠️ 31/08/2026 (lot rafale) : 505 -> 568 objets et 825 -> 1 450 Mo.
+    # ⚠️ 31/08/2026 (lot rafale) : 505 -> 568 objets et 825 -> 1 680 Mo.
     # Le préfixe `arome/rafale/` ajoute 63 tuiles par run (même tuilage
-    # 2°, même BBOX que le sol) et ~624 Mo stationnaires.
+    # 2°, même BBOX que le sol) et ~853 Mo stationnaires.
     # Le chiffre de stockage vient du modèle de taille VALIDÉ le 31/08 à
     # 0,1 % près sur les tuiles de production :
-    #     1 872 801 points × (30 + 44 × 2,98 o/gust + 44 × 3,91 o/dir)
-    #   = 624 Mo   (le même modèle prédit 607 Mo pour `arome/sol`, mesuré
+    #     1 872 801 points × (30 + 44 × 2,98 o/gust + 44 × 3,91 o/dir
+    #                            + 44 × 2,78 o/speedMean)
+    #   = 853 Mo   (le même modèle prédit 607 Mo pour `arome/sol`, mesuré
     #               606,3 Mo — c'est ce qui autorise à s'en servir ici
     #               plutôt que d'écrire d'abord et de regarder ensuite).
+    # ⓘ `speedMean` (+229 Mo) : le vent MOYEN dans la tuile rafale, pour
+    # que le client montre l'écart moyen/rafale en ne chargeant QU'UN
+    # fichier. Charger les deux aurait rouvert le piège des deux runs que
+    # l'arbitrage A1 venait de fermer — et coûté 18 Mo au pilote au lieu
+    # de 5,6. Aucun téléchargement ni décodage en plus : la valeur est
+    # déjà calculée par la passe SOL, et la LISTE est partagée, pas
+    # recopiée.
     # ⓘ La direction EST stockée dans la tuile rafale (arbitrage A1 de
     # Yann, 31/08) : ~320 Mo de plus que de l'emprunter à la tuile sol,
     # mais la tuile rafale se suffit alors à elle-même — un seul fichier
@@ -614,7 +656,7 @@ def main():
     # de 1 M — sans effet, mais la ligne journalisée ci-dessous le montre
     # au run près plutôt que de le laisser deviner.
     plafond = verifier_dimensionnement("arome-wind", objets_par_run=568,
-                                       runs_par_jour=8, mo_par_run=1450)
+                                       runs_par_jour=8, mo_par_run=1680)
     STORE = Storage("arome-wind", "WIND_GRID_BUCKET", "wind-grid", plafond)
 
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
@@ -647,15 +689,24 @@ def main():
     # parfaitement valide, juste plus courte d'une heure.
     steps, times = steps_times(run, data)
     uv = {s: (data["u"][s], data["v"][s]) for s in steps}
-    for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "sol", None, STEP_SOL).items():
+    # `vitesses_moyennes` : les listes `speed` de la passe SOL, collectées
+    # dans l'ordre des points, pour que la tuile RAFALE porte le vent moyen
+    # sans le recalculer et sans le dupliquer (cf. build_grids).
+    vitesses_moyennes = []
+    for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "sol", None, STEP_SOL,
+                                          sortie_vitesses=vitesses_moyennes).items():
         grid["fetchedAt"] = int(time.time() * 1000)
         sb_upload(f"{MODEL_DIR}/sol/{tLat}_{tLon}.json",
                   json.dumps(grid, separators=(",", ":")).encode())
         total += 1
     manifest["solTimes"] = times
     print(f"  {len(times)} échéances, tuiles téléversées (cumul {total})")
-    del data, uv        # libéré AVANT de construire les tuiles rafale :
-                        # les deux jeux ne coexistent jamais en mémoire.
+    del data, uv        # ⭐ libéré AVANT de construire les tuiles rafale :
+                        # les composantes u/v (~1,8 Go) partent, seules les
+                        # listes de vitesses déjà calculées restent (~0,8 Go,
+                        # et ce sont les MÊMES objets que ceux qu'on vient
+                        # d'écrire). Les deux jeux de tuiles ne coexistent
+                        # jamais.
 
     # ── RAFALE 10 m (SP1, max_10efg/max_10nfg) — 31/08/2026 ───────────
     # Tuiles SÉPARÉES (`arome/rafale/`), arbitrage de Yann du 31/08 : la
@@ -677,7 +728,8 @@ def main():
                   f"écrit à ces index (jamais un repli sur le vent moyen)")
         uvg = {s: (ge[s], gn[s]) for s in gust_steps}
         for (tLat, tLon), grid in build_grids(uvg, meta, steps, times,
-                                              "rafale", None, STEP_SOL).items():
+                                              "rafale", None, STEP_SOL,
+                                              entree_vitesses=vitesses_moyennes).items():
             # `gustTimes` : la liste des échéances RENSEIGNÉES, portée par
             # la tuile elle-même. C'est ce qui permet au client de DIRE
             # « pas de rafale à cette échéance » au lieu de laisser une
@@ -685,6 +737,11 @@ def main():
             # dire sans relire le manifeste, donc sans jamais pouvoir
             # apparier deux runs différents.
             grid["gustTimes"] = gust_times
+            # ⓘ Chaque point porte aussi `speedMean` (cf. build_grids) :
+            # c'est ce qui permet au client de montrer l'ÉCART moyen /
+            # rafale — l'anneau ou la flèche fantôme — en ne chargeant
+            # QU'UN fichier. Deux fichiers auraient rouvert le risque
+            # d'apparier deux runs.
             grid["fetchedAt"] = int(time.time() * 1000)
             sb_upload(f"{MODEL_DIR}/rafale/{tLat}_{tLon}.json",
                       json.dumps(grid, separators=(",", ":")).encode())

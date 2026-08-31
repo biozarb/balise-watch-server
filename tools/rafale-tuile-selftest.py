@@ -131,7 +131,15 @@ def main():
         gust_times = [times[i] for i, s in enumerate(steps) if s in gust_steps]
         uvg = {s: (gust["e"][s], gust["n"][s]) for s in gust_steps}
 
-        tuiles = ingest.build_grids(uvg, meta, steps, times, "rafale", None, ingest.STEP_SOL)
+        # La passe SOL d'abord : elle collecte les vitesses moyennes que la
+        # passe RAFALE doit porter (`speedMean`), exactement comme main().
+        uvm = {s: (data["u"][s], data["v"][s]) for s in steps}
+        vitesses = []
+        t_moy = ingest.build_grids(uvm, meta, steps, times, "sol", None,
+                                   ingest.STEP_SOL, sortie_vitesses=vitesses)
+        moy = next(iter(t_moy.values()))
+        tuiles = ingest.build_grids(uvg, meta, steps, times, "rafale", None,
+                                    ingest.STEP_SOL, entree_vitesses=vitesses)
         tuile = next(iter(tuiles.values()))
         tuile["gustTimes"] = gust_times
         print(f"\nTuile construite : {len(tuile['points'])} points, "
@@ -189,10 +197,43 @@ def main():
                  "direction de la rafale = convention météo (d'où vient le vent)",
                  f"attendu {dir_attendu}°, écrit {pt['dir'][i3]}°")
 
-        # ── 4. Ce que le pilote lira : l'ordre de grandeur ────────────
-        uvm = {s: (data["u"][s], data["v"][s]) for s in steps}
-        t_moy = ingest.build_grids(uvm, meta, steps, times, "sol", None, ingest.STEP_SOL)
-        moy = next(iter(t_moy.values()))
+        # ── 4. `speedMean` : le vent moyen DU MÊME POINT ──────────────
+        # C'est ce que lisent l'anneau et la flèche fantôme. Un decalage
+        # d'un point ne se verrait PAS a l'ecran et serait faux partout.
+        verifier(all("speedMean" in p for p in tuile["points"]),
+                 "chaque point de la tuile rafale porte `speedMean`")
+        desapparies = [(a["lat"], a["lon"]) for a, b in zip(tuile["points"], moy["points"])
+                       if a["lat"] != b["lat"] or a["lon"] != b["lon"]
+                       or a["speedMean"] is not b["speed"]]
+        verifier(not desapparies,
+                 "`speedMean` est le MÊME objet liste que le `speed` de la tuile sol, "
+                 "au même (lat, lon)",
+                 f"{len(tuile['points'])} points vérifiés"
+                 + (f" | DÉSAPPARIÉS : {desapparies[:3]}" if desapparies else ""))
+        verifier(all(p["speedMean"][i3] is not None and p["speed"][i3] is not None
+                     and p["speedMean"][i3] <= p["speed"][i3] + 1
+                     for p in tuile["points"]),
+                 "la rafale est ≥ au vent moyen partout (tolérance 1 km/h d'arrondi)")
+
+        # ── 5. La flèche fantôme s'appuie sur la direction de la RAFALE.
+        # La tuile ne porte pas la direction du vent moyen (ce serait
+        # +172 Mo). Est-ce défendable ? Mesuré plutôt que supposé :
+        ecarts_dir = []
+        for p, m in zip(tuile["points"], moy["points"]):
+            a, b = p["dir"][i3], m["dir"][i3]
+            if a is None or b is None:
+                continue
+            e = abs((a - b + 180) % 360 - 180)
+            ecarts_dir.append(e)
+        ecarts_dir.sort()
+        med = ecarts_dir[len(ecarts_dir) // 2]
+        p90 = ecarts_dir[int(len(ecarts_dir) * .9)]
+        verifier(med <= 15,
+                 "direction rafale ≈ direction du vent moyen — la flèche fantôme peut "
+                 "porter les deux longueurs sur UN seul axe",
+                 f"écart médian {med}° · p90 {p90}° (n = {len(ecarts_dir)})")
+
+        # ── 6. Ce que le pilote lira : l'ordre de grandeur ────────────
         paires = [(m["speed"][i3], g["speed"][i3])
                   for m, g in zip(moy["points"], tuile["points"])
                   if m["speed"] and g["speed"][i3]]
