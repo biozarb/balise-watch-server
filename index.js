@@ -1853,8 +1853,11 @@ const GUST_FRONT_SHADOW = process.env.GUST_FRONT_SHADOW !== '0';
 const GUST_FRONT_CYCLE_MS = MF_OBS_POLL_MS;
 /** Un événement sans nouvelle détection au-delà de ce délai est clos. */
 const GF_EVENT_STALE_MS = 30 * 60 * 1000;
-/** Au-delà, un `watch` jamais confirmé est déclaré faux positif. */
-const GF_WATCH_EXPIRY_MS = 2 * 60 * 60 * 1000;
+// ⚠️ GF_WATCH_EXPIRY_MS (2 h) a été RETIRÉ le 31/08/2026. Il servait à
+// décider si une veille close était un faux positif — mais la durée du
+// silence ne dit rien de ça : une veille encore au statut `watch` n'a
+// par construction jamais été confirmée par la mesure, quelle que soit
+// la vitesse à laquelle elle s'est tue. Cf. gfCloseStaleEvent.
 /** ETA en deçà de laquelle un événement confirmé devient « imminent ». */
 const GF_IMMINENT_MS = 60 * 60 * 1000;
 
@@ -2137,6 +2140,13 @@ async function gustFrontCycle() {
     if (!res.front) {
       await gfCloseStaleEvent(now);
       await gfSweepOrphans(now);
+      // Après le balayage, jamais avant : la réconciliation ne juge que
+      // des épisodes CLOS, et c'est gfSweepOrphans qui vient d'en clore.
+      // Placée ici — dans la branche « rien détecté » — parce que c'est
+      // là qu'on a du temps : pendant un front, le cycle a mieux à faire
+      // que de recompter le mois écoulé. Sa propre cadence (1 h) fait le
+      // reste.
+      await gfReconcile(now);
       // Rafraîchi MÊME sans détection : c'est ce qui fait apparaître un
       // événement saisi à la main par un admin, et disparaître un
       // événement qu'on vient de clore.
@@ -2205,7 +2215,34 @@ async function gustFrontCycle() {
     const promoting = reuse && gfActiveEvent.status === 'watch';
     if (promoting) {
       eventPayload.source = 'merged';   // annoncé par le modèle, confirmé par la mesure
-      console.log(`🌬️ Veille modèle ${gfActiveEvent.id} CONFIRMÉE par la mesure`);
+
+      // ── Ne pas effacer ce qu'on vient de prouver (31/08/2026) ────
+      // `raw` était REMPLACÉ en entier par les champs de la mesure, si
+      // bien que `raw.model_run` disparaissait au moment précis où il
+      // devenait intéressant : impossible de dire ensuite QUEL run avait
+      // vu venir le front. On garde donc la provenance modèle à part,
+      // sous un préfixe qui dit d'où elle vient — les champs de la
+      // mesure restent en clair, ce sont eux qui décrivent l'épisode
+      // maintenant.
+      const avant = gfActiveEvent.announcedRaw || {};
+      eventPayload.raw.announced_model_run = avant.model_run ?? null;
+      eventPayload.raw.announced_grid_points = avant.grid_points ?? null;
+      eventPayload.raw.announced_span_km = avant.span_km ?? null;
+      eventPayload.raw.announced_departments = avant.departments ?? null;
+
+      // Le lien prévu→mesuré, EN BASE et non plus seulement en RAM.
+      // Auto-référence : cet épisode est à la fois l'annonce et sa
+      // confirmation. `gfReconcile` distinguera ce cas (promotion en
+      // direct, fiable) d'un appariement fait après coup.
+      eventPayload.announced_event_id = gfActiveEvent.id;
+      // L'écart avec `created_at` EST le préavis réellement offert au
+      // pilote — la seule mesure honnête de ce qu'apporte le Lot A.
+      eventPayload.confirmed_at = new Date(now).toISOString();
+
+      console.log(`🌬️ Veille modèle ${gfActiveEvent.id} CONFIRMÉE par la mesure`
+        + (gfActiveEvent.announcedAt
+          ? ` — préavis ${Math.round((now - gfActiveEvent.announcedAt) / 60000)} min`
+          : ''));
     }
     let eventId;
     if (reuse) {
@@ -2367,12 +2404,20 @@ async function gfModelCycle(now) {
     if (gfActiveEvent) {
       await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`, payload);
       gfActiveEvent.lastDetectionAt = now;
+      // Rafraîchie à chaque cycle : si la mesure confirme tout à l'heure,
+      // c'est la DERNIÈRE version annoncée qu'on voudra comparer.
+      gfActiveEvent.announcedRaw = payload.raw;
     } else {
       const created = await sbInsertReturning('gust_front_events', payload);
       if (!created?.id) return m;
       gfActiveEvent = {
         id: created.id, status: 'watch', createdAt: now,
         lastDetectionAt: now, intensity: [],
+        // Gardés pour la promotion : ce que le modèle disait, et quand
+        // il l'a dit. Sans ça, le préavis réellement offert au pilote
+        // n'est plus calculable une fois l'épisode devenu `merged`.
+        announcedAt: now,
+        announcedRaw: payload.raw,
       };
       console.log(`🌬️ VEILLE MODÈLE — front annoncé (${m.stationCount} points, ${Math.round(m.speedKmh)} km/h au ${Math.round(m.bearing)}°, ${m.kind}) — événement ${created.id}`);
     }
@@ -2440,10 +2485,26 @@ async function gfSweepOrphans(now) {
     // `is_manual=is.false` est indispensable : un événement saisi par un
     // admin n'est JAMAIS rafraîchi par le détecteur, ce balayage le
     // tuerait donc dans la minute.
+    //
+    // ⚠️ DEUX patches depuis le 31/08/2026, et pas un seul. Ce balayage
+    // écrivait `expired` sur TOUT ce qui traînait, veilles et fronts
+    // mesurés confondus. Or les deux mots ne veulent pas dire la même
+    // chose : `expired` = annoncé et jamais vu, donc un faux positif ;
+    // `passed` = mesuré, et sorti du réseau. Confondre les deux revenait
+    // à compter comme fausses alertes des fronts qui avaient bel et bien
+    // traversé (5 `mf_network / expired` en base au 30/08), et rendait
+    // le compteur de faux positifs du §8.2 inexploitable dans les deux
+    // sens à la fois — cf. gfCloseStaleEvent, même erreur en miroir.
+    const marque = new Date(now).toISOString();
     await sbPatch(
       'gust_front_events',
-      `status=in.(watch,confirmed,downgraded)&updated_at=lt.${cutoff}&is_manual=is.false`,
-      { status: 'expired', updated_at: new Date(now).toISOString() },
+      `status=eq.watch&updated_at=lt.${cutoff}&is_manual=is.false`,
+      { status: 'expired', updated_at: marque },
+    );
+    await sbPatch(
+      'gust_front_events',
+      `status=in.(confirmed,downgraded)&updated_at=lt.${cutoff}&is_manual=is.false`,
+      { status: 'passed', updated_at: marque },
     );
     // Les événements manuels, eux, s'effacent une heure après la fin de
     // leur fenêtre annoncée — sinon ils resteraient à l'écran jusqu'à ce
@@ -2482,6 +2543,95 @@ async function gfSweepOrphans(now) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  RÉCONCILIATION PRÉVU ↔ MESURÉ (Lot 3, 31/08/2026)
+//
+//  Répond aux deux questions de Yann : « combien de fronts prévus se
+//  sont passés » et « combien de fronts mesurés avaient été prévus ».
+//
+//  ⚠️ CE JOB TRAVAILLE SUR LA BASE, PAS SUR LA RAM, et c'est tout son
+//  intérêt. Le seul lien prévu→mesuré existant (`source = 'merged'`)
+//  dépendait de `gfActiveEvent`, une variable en mémoire : le free tier
+//  Render s'endort et redémarre, et au réveil la mesure crée un
+//  événement neuf au lieu de promouvoir la veille. Le lien était alors
+//  perdu POUR TOUJOURS, sans que rien ne le signale. Résultat mesuré sur
+//  le mois du 31/07 au 30/08 : UN SEUL `merged` en base, alors que le
+//  recoupement géométrique rejoué a posteriori en trouve quatre.
+//
+//  Ici, l'appariement se refait à froid, aussi souvent qu'on veut, sur
+//  des données qui survivent aux redémarrages. Un épisode mal apparié
+//  se corrige au passage suivant ; un épisode raté pendant une panne se
+//  rattrape dès que la panne est finie.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Cadence : ces verdicts ne sont pas urgents, et chaque passe lit
+ *  l'historique récent en entier. Une fois par heure suffit largement
+ *  pour un phénomène qui produit ~50 épisodes par mois. */
+const GF_RECONCILE_MS = 60 * 60 * 1000;
+/** Profondeur relue à chaque passe. 21 jours : assez pour rattraper une
+ *  longue panne de la réconciliation, et borné pour que le coût de la
+ *  requête ne grandisse jamais avec l'historique. */
+const GF_RECONCILE_LOOKBACK_MS = 21 * 24 * 60 * 60 * 1000;
+
+let gfLastReconcileAt = 0;
+let gfLastReconcileCount = 0;
+let gfReconcileError = null;
+
+async function gfReconcile(now, opts = {}) {
+  if (!opts.force && now - gfLastReconcileAt < GF_RECONCILE_MS) return;
+  gfLastReconcileAt = now;
+  try {
+    const depuis = new Date(now - GF_RECONCILE_LOOKBACK_MS).toISOString();
+    // On relit TOUT l'historique récent, y compris les épisodes déjà
+    // jugés : un verdict `non_realise` rendu hier peut devenir `realise`
+    // aujourd'hui si la mesure correspondante n'était pas encore close
+    // au moment du passage précédent. Ne relire que les non-jugés
+    // figerait ces erreurs-là définitivement.
+    const rows = await sbGet('gust_front_events',
+      'select=id,source,status,created_at,updated_at,eta_start,eta_end,corridor,'
+      + `is_manual,verdict,announced_event_id,confirmed_at&created_at=gte.${depuis}`
+      + '&order=created_at.asc&limit=2000');
+    if (!Array.isArray(rows)) {
+      // Colonnes absentes = supabase_step63 pas encore joué. On le dit
+      // UNE fois et on s'arrête là : le détecteur continue de tourner
+      // exactement comme avant, on ne sait simplement pas compter.
+      const msg = 'colonnes de verdict absentes (supabase_step63 non joué ?)';
+      if (gfReconcileError !== msg) console.warn(`🌬️ réconciliation : ${msg}`);
+      gfReconcileError = msg;
+      return;
+    }
+
+    const events = rows.map(r => ({
+      ...r,
+      corridor: r.corridor?.coordinates?.[0] ?? null,
+    }));
+    const updates = gf.gfMatchEpisodes(events);
+
+    for (const u of updates) {
+      const patch = { verdict: u.verdict, verdict_at: new Date(now).toISOString() };
+      if (u.announced_event_id !== undefined) patch.announced_event_id = u.announced_event_id;
+      // ⚠️ `updated_at` n'est VOLONTAIREMENT pas touché : c'est lui qui
+      // décide de la clôture et de la purge des épisodes. Rendre un
+      // verdict ne doit pas rajeunir un épisode clos, sinon la
+      // réconciliation empêcherait à jamais sa propre purge.
+      await sbPatch('gust_front_events', `id=eq.${u.id}`, patch);
+    }
+
+    gfLastReconcileCount = updates.length;
+    gfReconcileError = null;
+    if (updates.length) {
+      const parType = updates.reduce((a, u) => {
+        a[u.verdict] = (a[u.verdict] || 0) + 1; return a;
+      }, {});
+      console.log(`🌬️ Réconciliation : ${updates.length} verdict(s) — `
+        + Object.entries(parType).map(([k, v]) => `${k} ${v}`).join(', '));
+    }
+  } catch (e) {
+    gfReconcileError = e.message;
+    console.error('gfReconcile error:', e.message);
+  }
+}
+
 /**
  * Au démarrage, reprendre l'épisode en cours plutôt que d'en créer un
  * doublon. Complément indispensable du balayage ci-dessus : sans lui, un
@@ -2492,7 +2642,7 @@ async function gfAdoptActiveEvent() {
   if (!GUST_FRONT_ENABLED) return;
   try {
     const rows = await sbGet('gust_front_events',
-      'select=id,status,updated_at,max_gust_kmh&status=in.(watch,confirmed,downgraded)&is_manual=is.false&order=updated_at.desc&limit=1');
+      'select=id,status,created_at,updated_at,max_gust_kmh,raw&status=in.(watch,confirmed,downgraded)&is_manual=is.false&order=updated_at.desc&limit=1');
     const row = Array.isArray(rows) ? rows[0] : null;
     if (!row) return;
     const age = Date.now() - new Date(row.updated_at).getTime();
@@ -2503,6 +2653,14 @@ async function gfAdoptActiveEvent() {
       createdAt: Date.now(),
       lastDetectionAt: new Date(row.updated_at).getTime(),
       intensity: [],
+      // Repris de la BASE et non de la RAM (31/08/2026) : c'est
+      // précisément le redémarrage Render qui faisait perdre le lien
+      // prévu→mesuré. Une veille adoptée après réveil garde donc sa date
+      // d'annonce et sa provenance modèle, et peut encore être promue en
+      // `merged` avec un préavis juste.
+      announcedAt: row.status === 'watch'
+        ? new Date(row.created_at).getTime() : null,
+      announcedRaw: row.status === 'watch' ? (row.raw || {}) : null,
     };
     console.log(`🌬️ Épisode ${row.id} (${row.status}) repris après redémarrage`);
   } catch (e) {
@@ -2521,8 +2679,22 @@ async function gfCloseStaleEvent(now) {
   // c'est important de le nommer ainsi : c'est cette comptabilité qui
   // permettra de dire si le détecteur tient l'objectif de ≤ 1 faux
   // positif par mois de saison avant d'ouvrir aux utilisateurs.
-  const status = gfActiveEvent.status === 'watch' && silent > GF_WATCH_EXPIRY_MS
-    ? 'expired' : 'passed';
+  //
+  // ⚠️ CORRIGÉ LE 31/08/2026. La condition portait AUSSI sur la durée du
+  // silence (`silent > GF_WATCH_EXPIRY_MS`), si bien qu'une veille
+  // silencieuse depuis 30 min mais moins de 2 h était close en
+  // `passed` — « le front est passé » — alors qu'elle n'avait JAMAIS
+  // été mesurée. Or le silence d'une veille modèle dure typiquement le
+  // temps d'un cycle de grille : 15 des 17 veilles en base au 30/08
+  // étaient dans ce cas, donc 15 faux positifs comptés comme des fronts
+  // réalisés. Le compteur censé mesurer la qualité du détecteur mesurait
+  // exactement son contraire.
+  //
+  // Le critère juste n'a rien à voir avec la durée : une veille encore
+  // au statut `watch` n'a par construction jamais été confirmée par la
+  // mesure (une confirmation l'aurait passée en `confirmed`, et sa
+  // source en `merged`). C'est donc TOUJOURS un `expired`.
+  const status = gfActiveEvent.status === 'watch' ? 'expired' : 'passed';
   await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`,
     { status, updated_at: new Date(now).toISOString() });
   console.log(`🌬️ Événement ${gfActiveEvent.id} clos (${status})`);
@@ -4259,6 +4431,57 @@ app.get('/gust-front/health', (req, res) => {
     },
   });
 });
+// ── /gust-front/verification (Lot 3, 31/08/2026) ───────────────────
+//  Les deux taux demandés par Yann, et rien d'autre :
+//   · réalisation  — sur les fronts ANNONCÉS, combien ont été mesurés ;
+//   · anticipation — sur les fronts MESURÉS, combien avaient été annoncés.
+//
+//  Toujours rendus AVEC leurs effectifs. « 22 % » sur 18 épisodes et
+//  « 22 % » sur 1 800 ne se lisent pas de la même façon, et le premier ne
+//  se lit pas du tout — c'est exactement le piège dans lequel on tomberait
+//  en affichant ces chiffres à un pilote après trois semaines de saison.
+//
+//  `caveats` n'est pas de la décoration : tant que `gfActiveEvent` est un
+//  singleton, aucune veille modèle n'est créée pendant qu'un front mesuré
+//  est suivi. Des veilles qui auraient pu être confirmées n'existent donc
+//  pas en base, et le taux d'anticipation est un PLANCHER. Servir le
+//  chiffre sans cette phrase reviendrait à faire lire une mauvaise
+//  nouvelle sur le modèle là où il n'y a qu'un artefact d'architecture.
+app.get('/gust-front/verification', async (req, res) => {
+  const jours = Math.min(365, Math.max(1, Number(req.query.days) || 90));
+  try {
+    const depuis = new Date(Date.now() - jours * 24 * 3600 * 1000).toISOString();
+    const rows = await sbGet('gust_front_events',
+      'select=id,source,status,created_at,verdict,announced_event_id,confirmed_at,'
+      + `is_manual,max_gust_kmh,raw&created_at=gte.${depuis}&order=created_at.desc&limit=2000`);
+    if (!Array.isArray(rows)) {
+      return res.json({ available: false,
+        reason: 'colonnes de verdict absentes (supabase_step63 non joué ?)' });
+    }
+    const rates = gf.gfVerificationRates(rows);
+    res.json({
+      available: true,
+      days: jours,
+      since: depuis,
+      ...rates,
+      reconcile: {
+        lastAt: gfLastReconcileAt || null,
+        lastCount: gfLastReconcileCount,
+        error: gfReconcileError,
+      },
+      caveats: [
+        'gfActiveEvent est un singleton : aucune veille modèle n\'est créée pendant '
+        + 'qu\'un front mesuré est suivi. Le taux d\'anticipation est un PLANCHER.',
+        'Appariement par recouvrement des couloirs et fenêtre ±2 h (erreur usuelle '
+        + 'd\'AROME sur le déclenchement convectif).',
+        'Les épisodes saisis à la main par un admin sont exclus des deux taux.',
+      ],
+    });
+  } catch (e) {
+    res.status(500).json({ available: false, reason: e.message });
+  }
+});
+
 app.get('/vapid-public-key', (req, res) => res.json({ key: VAPID_PUB }));
 
 // ── Étape 13 (19/07/2026) — Grille de vent (calque carte "champ de vent") ──

@@ -1063,6 +1063,235 @@ function packModelFront(f, now) {
   };
 }
 
+// ═══════════════════════════════════════════════════════════════════
+//  LOT 3 — COMPTABILITÉ PRÉVU ↔ MESURÉ (31/08/2026)
+//
+//  Question Yann : « combien de fronts qui ont été prévus par les
+//  modèles se sont passés, et combien de fronts qui ont été mesurés
+//  avaient été prévus ? »
+//
+//  Deux taux, et ils ne sont PAS l'inverse l'un de l'autre :
+//   · RÉALISATION  — annoncés qui ont été mesurés / annoncés. Mesure les
+//     fausses alertes du modèle.
+//   · ANTICIPATION — mesurés qui avaient été annoncés / mesurés. Mesure
+//     les fronts que le modèle n'a pas vus venir.
+//  Un détecteur peut être excellent sur l'un et mauvais sur l'autre.
+//
+//  ⚠️ Tout ce qui suit est PUR : aucune I/O, aucune notion de Supabase.
+//  C'est délibéré, et ce n'est pas de l'esthétique — l'appariement était
+//  jusqu'ici implicite, fait en RAM par `gfActiveEvent`, donc perdu à
+//  chaque redémarrage du free tier Render et invérifiable. Écrit ici, il
+//  se rejoue sur l'archive et se teste sans base.
+// ═══════════════════════════════════════════════════════════════════
+
+/** Deux segments [p1,p2] et [p3,p4] se croisent-ils ? */
+function segmentsCroisent(p1, p2, p3, p4) {
+  const d = (a, b, c) => (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  const d1 = d(p3, p4, p1), d2 = d(p3, p4, p2);
+  const d3 = d(p1, p2, p3), d4 = d(p1, p2, p4);
+  return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+}
+
+/**
+ * Deux couloirs se recouvrent-ils ?
+ *
+ * Test exact pour des polygones simples, et non un échantillonnage :
+ * un sommet de l'un dans l'autre, ou deux arêtes qui se croisent. Un
+ * échantillonnage raterait le cas où deux couloirs se croisent en X sans
+ * qu'aucun sommet ne tombe dans l'autre — c'est-à-dire exactement la
+ * situation d'un front annoncé et d'un front mesuré qui se rejoignent
+ * perpendiculairement, celle qu'on cherche à reconnaître.
+ */
+function gfRingsOverlap(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length < 3 || b.length < 3) return false;
+  for (const [x, y] of a) if (pointInRing(x, y, b)) return true;
+  for (const [x, y] of b) if (pointInRing(x, y, a)) return true;
+  for (let i = 0; i < a.length; i++) {
+    const a1 = a[i], a2 = a[(i + 1) % a.length];
+    for (let j = 0; j < b.length; j++) {
+      if (segmentsCroisent(a1, a2, b[j], b[(j + 1) % b.length])) return true;
+    }
+  }
+  return false;
+}
+
+/** Un épisode issu (au moins en partie) d'une annonce modèle. */
+function gfEstAnnonce(e) { return e.source === 'model' || e.source === 'merged'; }
+/** Un épisode réellement observé par un réseau de mesure. */
+function gfEstMesure(e) {
+  return e.source === 'mf_network' || e.source === 'merged' || e.source === 'pioupiou';
+}
+
+/**
+ * Tolérance sur le calage horaire, dans les deux sens.
+ *
+ * 2 h, et ce n'est pas un réglage libre : c'est le chiffre que la spec
+ * du Lot A écrit déjà noir sur blanc (« AROME se trompe couramment d'une
+ * à deux heures sur le déclenchement convectif »), et c'est la raison
+ * pour laquelle une veille modèle ne déclenche AUCUN push. Apparier plus
+ * serré reviendrait à compter comme « non réalisé » un front qui s'est
+ * bel et bien produit, avec le retard qu'on savait d'avance.
+ */
+const GF_MATCH_TOLERANCE_MS = 2 * 60 * 60 * 1000;
+
+/** Fenêtre pendant laquelle un épisode peut être apparié. */
+function gfFenetre(e, toleranceMs) {
+  const t = v => (v == null ? null : (typeof v === 'number' ? v : Date.parse(v)));
+  const debuts = [t(e.eta_start), t(e.created_at)].filter(Number.isFinite);
+  const fins = [t(e.eta_end), t(e.updated_at)].filter(Number.isFinite);
+  if (!debuts.length || !fins.length) return null;
+  return [Math.min(...debuts) - toleranceMs, Math.max(...fins) + toleranceMs];
+}
+
+/**
+ * Apparie les épisodes ANNONCÉS et MESURÉS, et rend le verdict de
+ * chacun. Fonction pure : on lui donne des épisodes, elle rend la liste
+ * des changements à écrire.
+ *
+ * Vocabulaire du verdict, volontairement unique pour les deux
+ * populations — `realise` veut TOUJOURS dire « l'annonce et la mesure se
+ * sont rejointes » :
+ *  · `realise`     — annoncé puis mesuré (des deux côtés de la paire) ;
+ *  · `non_realise` — annoncé, jamais mesuré → fausse alerte du modèle ;
+ *  · `non_prevu`   — mesuré sans annonce → le modèle ne l'a pas vu venir.
+ *
+ * Un épisode `merged` est les deux à la fois : il a été promu sur place,
+ * l'appariement n'a rien à retrouver.
+ *
+ * ⚠️ Les épisodes MANUELS sont écartés : ce sont des saisies humaines,
+ * pas des sorties de détecteur. Les compter fausserait les deux taux —
+ * dans le sens flatteur, en plus.
+ */
+function gfMatchEpisodes(events, opts = {}) {
+  const tol = opts.toleranceMs ?? GF_MATCH_TOLERANCE_MS;
+  const clos = new Set(opts.closedStatuses ?? ['passed', 'expired', 'cancelled']);
+
+  const utiles = (events || []).filter(e => e && !e.is_manual && e.source !== 'manual');
+  const annonces = utiles.filter(gfEstAnnonce);
+  const mesures = utiles.filter(gfEstMesure);
+
+  const updates = new Map();
+  const poser = (id, champs) => {
+    updates.set(id, { ...(updates.get(id) || { id }), ...champs });
+  };
+
+  for (const a of annonces) {
+    // Un épisode encore vivant n'a pas de verdict : le rendre
+    // maintenant serait faux une fois sur deux.
+    if (!clos.has(a.status)) continue;
+
+    if (a.source === 'merged') {
+      // Promu sur place : l'annonce et la mesure sont la même ligne.
+      poser(a.id, { verdict: 'realise', announced_event_id: a.id });
+      continue;
+    }
+
+    const fa = gfFenetre(a, tol);
+    const debutA = Date.parse(a.created_at);
+    const trouve = fa && mesures.find(m => {
+      if (m.id === a.id) return false;
+      const fm = gfFenetre(m, 0);
+      if (!fm) return false;
+      // ⚠️ UNE PRÉVISION PARLE AVANT. Trouvé en rejouant les 48 épisodes
+      // du 31/07 au 30/08 : sans cette ligne, une veille écrite à 00:05
+      // était comptée comme la « réalisation » d'un front mesuré à
+      // 19:41 la veille — parce que les deux fenêtres, élargies de ±2 h,
+      // finissaient par se toucher. Un modèle qui annonce ce que le
+      // réseau a déjà vu n'a rien anticipé du tout, et le compter
+      // gonflerait le taux de réalisation dans le sens flatteur.
+      // Contrainte volontairement stricte : elle ne peut que baisser les
+      // deux taux, jamais les monter.
+      if (!(debutA < Date.parse(m.created_at))) return false;
+      // Recouvrement des fenêtres, puis des géométries. L'ordre compte :
+      // le test temporel est deux comparaisons, le test géométrique est
+      // quadratique sur les sommets.
+      if (fm[1] < fa[0] || fm[0] > fa[1]) return false;
+      return gfRingsOverlap(a.corridor, m.corridor);
+    });
+
+    if (trouve) {
+      poser(a.id, { verdict: 'realise' });
+      // Le lien va du MESURÉ vers l'ANNONCÉ : c'est le sens qui permet
+      // de répondre « ce front, l'avait-on vu venir ? » sans jointure
+      // inverse.
+      poser(trouve.id, { verdict: 'realise', announced_event_id: a.id });
+    } else {
+      poser(a.id, { verdict: 'non_realise' });
+    }
+  }
+
+  for (const m of mesures) {
+    if (!clos.has(m.status)) continue;
+    if (m.source === 'merged') continue;              // déjà traité ci-dessus
+    if (updates.has(m.id)) continue;                  // apparié à l'instant
+    if (m.announced_event_id) {                       // apparié lors d'un passage précédent
+      poser(m.id, { verdict: 'realise' });
+      continue;
+    }
+    poser(m.id, { verdict: 'non_prevu' });
+  }
+
+  // On ne réécrit que ce qui change réellement : la réconciliation
+  // tourne en boucle, et repatcher 500 lignes identiques toutes les
+  // heures serait du bruit en base comme dans les journaux.
+  const avant = new Map(utiles.map(e => [e.id, e]));
+  return [...updates.values()].filter(u => {
+    const e = avant.get(u.id);
+    if (!e) return false;
+    const memeVerdict = e.verdict === u.verdict;
+    const memeLien = u.announced_event_id === undefined
+      || e.announced_event_id === u.announced_event_id;
+    return !(memeVerdict && memeLien);
+  });
+}
+
+/**
+ * Les deux taux, calculés sur une liste d'épisodes déjà jugés.
+ *
+ * Rend les EFFECTIFS avec les taux, et jamais un pourcentage seul :
+ * « 22 % » sur 18 épisodes et « 22 % » sur 1 800 ne se lisent pas de la
+ * même façon, et le premier ne se lit pas du tout.
+ */
+function gfVerificationRates(events) {
+  const utiles = (events || []).filter(e => e && !e.is_manual && e.source !== 'manual');
+
+  const annonces = utiles.filter(e => gfEstAnnonce(e) && e.verdict);
+  const realises = annonces.filter(e => e.verdict === 'realise');
+
+  const mesures = utiles.filter(e => gfEstMesure(e) && e.verdict);
+  const anticipes = mesures.filter(e => e.announced_event_id);
+
+  const taux = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
+
+  // Préavis réellement offert : de l'annonce à la première confirmation.
+  const preavis = utiles
+    .map(e => {
+      if (!e.confirmed_at || !e.created_at) return null;
+      const c = typeof e.created_at === 'number' ? e.created_at : Date.parse(e.created_at);
+      const k = typeof e.confirmed_at === 'number' ? e.confirmed_at : Date.parse(e.confirmed_at);
+      const min = Math.round((k - c) / 60000);
+      return Number.isFinite(min) && min >= 0 ? min : null;
+    })
+    .filter(v => v != null)
+    .sort((a, b) => a - b);
+
+  return {
+    announced: { total: annonces.length, realised: realises.length,
+                 rate: taux(realises.length, annonces.length) },
+    measured: { total: mesures.length, anticipated: anticipes.length,
+                rate: taux(anticipes.length, mesures.length) },
+    leadTimeMin: {
+      count: preavis.length,
+      median: preavis.length ? preavis[Math.floor(preavis.length / 2)] : null,
+      max: preavis.length ? preavis[preavis.length - 1] : null,
+    },
+    /** Épisodes clos pas encore jugés — non nul durablement = la
+     *  réconciliation ne tourne pas. */
+    pending: utiles.filter(e => !e.verdict
+      && ['passed', 'expired', 'cancelled'].includes(e.status)).length,
+  };
+}
+
 /** État de santé du détecteur — consommé par /gust-front/health. */
 function gfHealth(now = Date.now()) {
   let samples = 0, newest = 0;
@@ -1103,6 +1332,10 @@ module.exports = {
   buildFronts,
   gfClusterSpatial,
   gfDistKm,
+  gfRingsOverlap,
+  gfMatchEpisodes,
+  gfVerificationRates,
+  GF_MATCH_TOLERANCE_MS,
   etaAt,
   pointInRing,
   angDiff,
