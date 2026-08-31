@@ -15,6 +15,12 @@ Sortie par (kind, level, tuile), format IDENTIQUE à l'ancienne route
 /wind-grid (cf. web/src/types/openmeteo.ts, interface WindGrid) : côté client,
 seule l'URL source change.
 
+31/08/2026 — TROISIÈME préfixe : `arome/rafale/{tLat}_{tLon}.json`, la
+rafale 10 m (max sur l'heure écoulée), en tuiles SÉPARÉES du vent sol.
+Même forme, même tuilage, mêmes `times[]` ; un champ de plus,
+`gustTimes`, qui dit à quelles échéances la rafale existe (elle est
+absente à τ = 0). Cf. GUST_SN plus bas.
+
 Stockage (03/08/2026) : l'upload passe par `tools/storage.py`, un seul
 module pour les 5 chaînes, avec deux implémentations derrière la même
 signature. La destination se choisit par variable d'environnement :
@@ -121,6 +127,32 @@ TILE_DEG   = 2                      # cf. WIND_GRID_TILE_DEG
 # tuiles n'existent plus (404 silencieux, calque vide en haut de gamme).
 LEVELS     = [1000, 950, 925, 900, 850, 800, 700]  # cf. WIND_GRID_LEVELS
 MODEL_KEY  = "meteofrance_seamless" # clé "model" écrite dans le JSON (AROME)
+
+# ── RAFALE 10 m (31/08/2026) ──────────────────────────────────────────
+# Les DEUX COMPOSANTES du vecteur rafale, dans le MÊME paquet SP1 que
+# 10u/10v : déjà téléchargées à chaque run, jusqu'ici vues par
+# `parse_grib` puis jetées par `sol_want`. Zéro téléchargement, zéro
+# requête, zéro quota en plus (mesuré le 31/08, cf. la note de
+# faisabilité `rafale-sur-le-calque-vent-sol-faisabilite-31-08.md`).
+#
+# ⚠️ Ce n'est PAS `max_i10fg` (le scalaire de la grille 0025 que lit
+# AGRUME) : la grille 001 publie les composantes. Vérifié avant d'écrire
+# une ligne de code — `hypot(max_10efg, max_10nfg)` contre `max_i10fg`
+# du 0025, n = 18 981 points : médiane d'écart 0,00 km/h, ratio médian
+# 1,000. Ce sont bien les composantes du VECTEUR, donc `_ms()` s'applique
+# tel quel et la DIRECTION de la rafale est disponible (le 0025 ne la
+# donne pas).
+#
+# ⛔ DEUX LIMITES QUI DOIVENT ÊTRE ÉCRITES DANS L'UI, PAS DÉCOUVERTES À
+#    L'ÉCRAN (cf. `gustTimes` plus bas et les locales du client) :
+#    1. `stepType = max`, `stepRange = 2-3` → c'est le MAXIMUM SUR
+#       L'HEURE ÉCOULÉE, pas la valeur à l'instant. Le pilote qui lit
+#       14:00 lit le max de 13:00 à 14:00.
+#    2. ABSENTE à τ = 0 : le fichier 00H ne porte que `2t 2r 10u 10v`.
+#       La première échéance n'a donc PAS de rafale — on écrit `null`,
+#       JAMAIS un repli sur le vent moyen (règle du 28/08 : un `gust`
+#       qui vaudrait le `speed` serait une rafale FABRIQUÉE).
+GUST_SN    = ("max_10efg", "max_10nfg")   # composantes est / nord
 
 # Élévation du sol par nœud de la grille ALT (retour Yann 21/07/2026) —
 # sert au masquage "façon météo-parapente" côté client (une flèche dont le
@@ -309,9 +341,28 @@ def files_for(ref, pkg, grid):
 def _norm_lon(x):
     return x - 360 if x > 180 else x
 
-def parse_grib(path, want):
+def parse_grib(path, want, dtype=None):
     """want(shortName, typeOfLevel, level) -> clé de collecte (ou None pour ignorer).
-    Retourne ({clé: {step: values}}, meta_grille). meta = grille commune AROME."""
+    Retourne ({clé: {step: values}}, meta_grille). meta = grille commune AROME.
+
+    `dtype` (31/08/2026, lot rafale) — type de stockage des valeurs
+    décodées. `None` = comportement d'origine, eccodes rend du float64 :
+    c'est ce que reçoivent la grille ALT et l'orographie, INCHANGÉES.
+
+    ⚠️ Ce paramètre existe pour la MÉMOIRE, pas pour la précision. Mesuré
+    le 31/08 sur la grille réelle : AROME 001 fait Ni=2801 × Nj=1791 =
+    5 016 591 points, soit **40,1 Mo par champ décodé en float64** et
+    20,1 Mo en float32. La branche SOL en garde 44 échéances × 2
+    composantes (u/v) ; la rafale en ajoute 2 de plus (est/nord). En
+    float64 les quatre champs pèseraient ~7,1 Go de pic contre ~3,5 Go
+    aujourd'hui — sur un runner GitHub, c'est le genre de marge qu'on ne
+    prend pas au hasard. En float32 les QUATRE tiennent dans les ~3,5 Go
+    d'aujourd'hui : le lot rafale n'augmente donc pas le pic mémoire du
+    run, et il n'a pas fallu re-télécharger SP1 une seconde fois pour ça.
+    ⓘ Perte de précision : ~1e-5 m/s sur une composante de vent, alors
+    que `_ms()` arrondit à l'ENTIER de km/h juste après. NaN et la
+    sentinelle 9999 traversent float32 à l'identique — le garde-fou de
+    `_ms()` fonctionne pareil."""
     out, meta = {}, None
     with open(path, "rb") as f:
         while True:
@@ -335,7 +386,12 @@ def parse_grib(path, want):
                             di=codes_get(gid, "iDirectionIncrementInDegrees"),
                             dj=codes_get(gid, "jDirectionIncrementInDegrees"),
                             jScan=codes_get(gid, "jScansPositively"))
-                    out.setdefault(key, {})[step] = codes_get_values(gid)
+                    vals = codes_get_values(gid)
+                    # Cast IMMÉDIAT, message par message : convertir après
+                    # coup ferait cohabiter les deux copies et annulerait
+                    # tout le bénéfice.
+                    out.setdefault(key, {})[step] = (
+                        vals if dtype is None else vals.astype(dtype, copy=False))
             codes_release(gid)
     return out, meta
 
@@ -425,7 +481,20 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
     uv_by_step: {step: (U_values, V_values)}. Retourne {(tLat,tLon): dict WindGrid}.
     orog (grille ALT uniquement, cf. load_orography) : grille d'élévation AROME
     pour attacher `elev` à chaque point (masquage sous-relief côté client,
-    retour Yann 21/07)."""
+    retour Yann 21/07).
+
+    ⛔ 31/08/2026 (lot rafale) — `uv_by_step` peut désormais NE PAS avoir
+    une échéance de `steps` : la rafale AROME est absente à τ = 0 (mesuré,
+    le fichier 00H ne porte que `2t 2r 10u 10v`). On écrit alors `null` /
+    `null` à cet index, JAMAIS une valeur empruntée. C'est la règle
+    arbitrée le 28/08 pour la coupe, reprise telle quelle : le pilote lit
+    un blanc, pas un chiffre pris ailleurs. Un repli sur le vent moyen
+    fabriquerait une rafale — la faute du 24/08.
+    ⓘ `steps` reste la série SOL COMPLÈTE, y compris pour la rafale :
+    c'est ce qui garde `times[]` aligné entre les deux tuiles et laisse
+    le curseur horaire fonctionner sans décalage d'index. La liste des
+    échéances où la rafale existe VRAIMENT est écrite à part
+    (`gustTimes`), pour que le client le DISE plutôt que le devine."""
     pts = sample_indices(meta, step_deg)
     tiles = {}
     for idx, lat, lon in pts:
@@ -438,7 +507,10 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
                 tileLat=tLat, tileLon=tLon, times=times, points=[])
         speed, dir_ = [], []
         for s in steps:
-            U, V = uv_by_step[s]
+            pair = uv_by_step.get(s)
+            if pair is None:
+                speed.append(None); dir_.append(None); continue   # cf. τ=0 ci-dessus
+            U, V = pair
             sp, dr = _ms(U[idx], V[idx])
             speed.append(sp); dir_.append(dr)
         pt = dict(lat=lat, lon=lon, speed=speed, dir=dir_)
@@ -481,12 +553,12 @@ STORE = None
 def sb_upload(path, body, cache_control=CACHE_REECRIT):
     return STORE.put(path, body, cache_control=cache_control)
 
-def merge_parse(files, want):
+def merge_parse(files, want, dtype=None):
     merged, meta = {}, None
     for key in files:
         p = download_tmp(key)
         try:
-            part, m = parse_grib(p, want)
+            part, m = parse_grib(p, want, dtype)
             meta = meta or m
             for k, byhstep in part.items():
                 merged.setdefault(k, {}).update(byhstep)
@@ -523,8 +595,26 @@ def main():
     # (×1,40 sur les échéances). Le nombre d'OBJETS est inchangé — c'est
     # justement pourquoi une dérive d'horizon ne se verrait PAS dans le
     # compteur d'écritures, et pourquoi `mo_par_run` doit suivre à la main.
-    plafond = verifier_dimensionnement("arome-wind", objets_par_run=505,
-                                       runs_par_jour=8, mo_par_run=825)
+    # ⚠️ 31/08/2026 (lot rafale) : 505 -> 568 objets et 825 -> 1 450 Mo.
+    # Le préfixe `arome/rafale/` ajoute 63 tuiles par run (même tuilage
+    # 2°, même BBOX que le sol) et ~624 Mo stationnaires.
+    # Le chiffre de stockage vient du modèle de taille VALIDÉ le 31/08 à
+    # 0,1 % près sur les tuiles de production :
+    #     1 872 801 points × (30 + 44 × 2,98 o/gust + 44 × 3,91 o/dir)
+    #   = 624 Mo   (le même modèle prédit 607 Mo pour `arome/sol`, mesuré
+    #               606,3 Mo — c'est ce qui autorise à s'en servir ici
+    #               plutôt que d'écrire d'abord et de regarder ensuite).
+    # ⓘ La direction EST stockée dans la tuile rafale (arbitrage A1 de
+    # Yann, 31/08) : ~320 Mo de plus que de l'emprunter à la tuile sol,
+    # mais la tuile rafale se suffit alors à elle-même — un seul fichier
+    # chargé par mode, et le risque de mélanger deux runs (piège du
+    # manifeste du 22/08) DISPARAÎT au lieu d'être à gérer côté client.
+    # Facture : 0 $ (palier gratuit 10 Go) ; hors palier, 0,010 $/mois.
+    # ⓘ Écritures : +63/run = +504/jour, ~15 k/mois de plus sur un palier
+    # de 1 M — sans effet, mais la ligne journalisée ci-dessous le montre
+    # au run près plutôt que de le laisser deviner.
+    plafond = verifier_dimensionnement("arome-wind", objets_par_run=568,
+                                       runs_par_jour=8, mo_par_run=1450)
     STORE = Storage("arome-wind", "WIND_GRID_BUCKET", "wind-grid", plafond)
 
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
@@ -535,10 +625,26 @@ def main():
 
     # ── SOL (10 m) : paquet SP1, variables 10u/10v ────────────────────
     print("SOL (SP1, 10 m) :")
-    sol_want = lambda sn, tol, lvl: sn if (sn in ("10u", "10v")
-                                           and tol == "heightAboveGround") else None
-    data, meta = merge_parse(files_for(ref, "SP1", GRID_SOL), sol_want)
-    data = {("u" if k == "10u" else "v"): v for k, v in data.items()}
+    # 31/08/2026 — le MÊME `want` ramène désormais aussi les deux
+    # composantes de la rafale (cf. GUST_SN en tête de fichier). Elles
+    # traversaient déjà `parse_grib` : la seule chose qui change est
+    # qu'on cesse de les jeter. Un SEUL téléchargement de SP1, comme
+    # avant. `float32` : cf. la docstring de `parse_grib` — c'est ce qui
+    # permet de tenir les QUATRE champs dans le pic mémoire des deux
+    # d'aujourd'hui.
+    sol_want = lambda sn, tol, lvl: (sn if (tol == "heightAboveGround"
+                                            and (sn in ("10u", "10v") or sn in GUST_SN))
+                                     else None)
+    brut, meta = merge_parse(files_for(ref, "SP1", GRID_SOL), sol_want, "float32")
+    data = {("u" if k == "10u" else "v"): v for k, v in brut.items() if k in ("10u", "10v")}
+    gust = {("e" if k == GUST_SN[0] else "n"): v for k, v in brut.items() if k in GUST_SN}
+    del brut
+    # ⛔ `steps_times` sur `data` SEUL, et surtout PAS sur la rafale : il
+    # prend l'INTERSECTION des échéances de tout ce qu'on lui passe. La
+    # rafale n'existant pas à τ = 0, lui passer `gust` ferait disparaître
+    # la première échéance du calque VENT MOYEN — un calque amputé par
+    # l'ajout d'un autre. Le piège est silencieux : la grille resterait
+    # parfaitement valide, juste plus courte d'une heure.
     steps, times = steps_times(run, data)
     uv = {s: (data["u"][s], data["v"][s]) for s in steps}
     for (tLat, tLon), grid in build_grids(uv, meta, steps, times, "sol", None, STEP_SOL).items():
@@ -548,6 +654,56 @@ def main():
         total += 1
     manifest["solTimes"] = times
     print(f"  {len(times)} échéances, tuiles téléversées (cumul {total})")
+    del data, uv        # libéré AVANT de construire les tuiles rafale :
+                        # les deux jeux ne coexistent jamais en mémoire.
+
+    # ── RAFALE 10 m (SP1, max_10efg/max_10nfg) — 31/08/2026 ───────────
+    # Tuiles SÉPARÉES (`arome/rafale/`), arbitrage de Yann du 31/08 : la
+    # tuile vent sol ne grossit pas d'un octet, et seul le pilote qui
+    # bascule le switch paie le téléchargement. Mêmes `times[]`, même
+    # tuilage 2°, même BBOX, même arrondi entier que `_ms()` — donc le
+    # client n'a rien de nouveau à savoir lire.
+    print("RAFALE (SP1, 10 m, max sur l'heure écoulée) :")
+    if "e" in gust and "n" in gust:
+        ge, gn = gust["e"], gust["n"]
+        # Échéances où la rafale existe VRAIMENT (τ = 0 en est absente).
+        # Sous-ensemble de `steps` : on n'invente pas une échéance que le
+        # calque moyen n'a pas non plus.
+        gust_steps = [s for s in steps if s in ge and s in gn]
+        gust_times = [times[i] for i, s in enumerate(steps) if s in gust_steps]
+        manquantes = [s for s in steps if s not in gust_steps]
+        if manquantes:
+            print(f"  ⓘ pas de rafale aux échéances {manquantes} → `null` "
+                  f"écrit à ces index (jamais un repli sur le vent moyen)")
+        uvg = {s: (ge[s], gn[s]) for s in gust_steps}
+        for (tLat, tLon), grid in build_grids(uvg, meta, steps, times,
+                                              "rafale", None, STEP_SOL).items():
+            # `gustTimes` : la liste des échéances RENSEIGNÉES, portée par
+            # la tuile elle-même. C'est ce qui permet au client de DIRE
+            # « pas de rafale à cette échéance » au lieu de laisser une
+            # carte vide que le pilote lirait comme une panne — et de le
+            # dire sans relire le manifeste, donc sans jamais pouvoir
+            # apparier deux runs différents.
+            grid["gustTimes"] = gust_times
+            grid["fetchedAt"] = int(time.time() * 1000)
+            sb_upload(f"{MODEL_DIR}/rafale/{tLat}_{tLon}.json",
+                      json.dumps(grid, separators=(",", ":")).encode())
+            total += 1
+        # Annoncé AUSSI dans le manifeste : le client lit `gustTimes` dans
+        # la tuile (ci-dessus), mais l'exploitant, `audit_r2.py` et le
+        # prochain qui ouvre ce fichier doivent voir le préfixe exister
+        # sans avoir à deviner son nom.
+        manifest["gustPrefix"] = f"{MODEL_DIR}/rafale"
+        manifest["gustTimes"] = gust_times
+        print(f"  {len(gust_times)}/{len(times)} échéances renseignées, "
+              f"tuiles téléversées (cumul {total})")
+    else:
+        # Pas de repli, pas de tuile écrite : mieux vaut un calque qui
+        # n'apparaît pas qu'un calque qui montre autre chose que la
+        # rafale. Les tuiles du run précédent restent en place.
+        print(f"  ⚠️ composantes {GUST_SN} absentes de SP1 — aucune tuile "
+              f"rafale écrite pour ce run")
+    del gust
 
     # ── ALTITUDE : paquet IP1, u/v par niveau de pression ─────────────
     # IP1 téléchargé/parsé UNE SEULE fois pour TOUS les niveaux (fichiers
