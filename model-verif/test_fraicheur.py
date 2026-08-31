@@ -32,6 +32,7 @@ Usage :
 """
 from __future__ import annotations
 
+import pathlib
 import sys
 
 import collect as C
@@ -281,7 +282,18 @@ check("le budget réservé par ce flux n'a pas changé (5 + 4 = 9)",
 
 print("\n── 9. collect.py est CÂBLÉ (pas seulement importable) ─────────")
 
-src = open("collect.py", encoding="utf-8").read()
+# ⛔ LE CHEMIN EST RÉSOLU DEPUIS CE FICHIER, PAS DEPUIS LE `cwd`
+# (31/08/2026). Les IMPORTS de ce banc marchent partout — Python met le
+# dossier du script en tête de `sys.path` — mais cette LECTURE-ci
+# dépendait du répertoire courant, et personne ne s'en apercevait tant
+# que le banc n'était lancé que depuis `model-verif/`.
+# ⚠️ Trouvé le 31/08 en l'ajoutant à la liste du déploiement, qui lance
+# les bancs depuis la RACINE du dépôt sur le VPS : vert sur le Mac,
+# `FileNotFoundError: collect.py` sur le VPS. Le déploiement s'est
+# arrêté et n'a rien redémarré — le garde-fou a fait exactement son
+# travail, et il a révélé un banc qui n'était pas portable.
+src = (pathlib.Path(__file__).resolve().parent / "collect.py").read_text(
+    encoding="utf-8")
 check("collect appelle bien la sonde partagée",
       "FR.sonde_fraicheur(" in src)
 check("⭐ il la sonde sur `modeles_passe`, pas sur MODELS "
