@@ -1841,6 +1841,10 @@ async function refreshMeteoFranceData() {
 //  personne ne lit la troisième.
 // ═══════════════════════════════════════════════════════════════════
 const gf = require('./gust-front');
+// « Ce front, il est où ? » — contours départementaux embarqués, cf.
+// departements.js. Chargés paresseusement : aucun coût tant qu'aucun
+// front n'est détecté.
+const dep = require('./departements');
 
 const GUST_FRONT_ENABLED = process.env.GUST_FRONT_ENABLED === '1';
 /** Shadow mode ACTIF par défaut : il faut poser explicitement =0 pour ouvrir les push. */
@@ -2143,6 +2147,11 @@ async function gustFrontCycle() {
     }
 
     const f = res.front;
+    // « Où ça ? » (31/08/2026) — les départements du couloir, complétés
+    // par ceux des stations franchies. Calculé ICI et écrit en base :
+    // le client n'a ainsi aucun contour à embarquer, et la réponse est
+    // identique pour tous les pilotes, quel que soit leur appareil.
+    const geo = dep.departementsConcernes(f.corridor, f.detections);
     const eventPayload = {
       source: 'mf_network',
       kind: 'outflow',
@@ -2167,6 +2176,10 @@ async function gustFrontCycle() {
         span_km: Math.round(f.spanKm ?? 0),
         rescued_count: f.rescuedCount ?? 0,
         group_count: res.groupCount ?? 1,
+        // Départements concernés — le « où » que le bandeau ne disait pas.
+        departments: geo.departements,
+        departments_coverage: geo.coverage,
+        departments_origin: geo.origin,
         r2: f.r2,
         publication_latency_min: Math.round(f.publicationLatencyMs / 60000),
         stations_evaluated: res.evaluated,
@@ -2308,6 +2321,10 @@ async function gfModelCycle(now) {
     if (!res.front) return null;
 
     const m = res.front;
+    // Côté modèle, les « points franchis » sont des points de grille et
+    // non des stations : ils complètent le couloir exactement de la même
+    // façon (cf. departements.js), sans que rien ne change ici.
+    const geo = dep.departementsConcernes(m.corridor, m.detections);
 
     // Un épisode déjà CONFIRMÉ par la mesure prime : on ne le rétrograde
     // pas vers une géométrie de prévision, moins précise. On rend quand
@@ -2335,6 +2352,9 @@ async function gfModelCycle(now) {
         // jusqu'à 1 547 km d'axe avant le regroupement spatial.
         span_km: Math.round(m.spanKm ?? 0),
         group_count: res.groupCount ?? 1,
+        departments: geo.departements,
+        departments_coverage: geo.coverage,
+        departments_origin: geo.origin,
         r2: m.r2,
         shadow: GUST_FRONT_SHADOW,
         forecast_lines: m.forecastLines.map(l => ({
@@ -4207,6 +4227,10 @@ app.get('/gust-front/health', (req, res) => {
     activeEventId: gfActiveEvent?.id ?? null,
     activeEventStatus: gfActiveEvent?.status ?? null,
     detector: gf.gfHealth(now),
+    // Contours départementaux : `count: 0` = fichier absent ou illisible,
+    // donc des fronts publiés sans numéro de département. Silencieux côté
+    // pilote, d'où l'intérêt de le voir ici.
+    departements: dep.departementsCharges(),
     // Regroupement spatial (31/08/2026) — cf. les compteurs déclarés
     // avec gfActiveEvent. `scatteredTotal` qui monte vite = rayon de
     // liaison trop serré ; `multiFrontTotal` > 0 = des fronts simultanés
