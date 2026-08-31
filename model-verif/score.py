@@ -110,6 +110,30 @@ LEAD_COURT_MATIN = -1
 LEAD_COURT_APREM = -2
 LEADS_COURTS = (LEAD_COURT_MATIN, LEAD_COURT_APREM)
 
+#: ⛔ LA CLASSE AU QUART D'HEURE (lot L11, 31/08/2026) — deux étiquettes
+#: de plus, NÉGATIVES pour la même raison, et DISTINCTES de celles de la
+#: classe courte pour une raison qui lui est propre.
+#:
+#: Ces lignes notent les MÊMES deux instants de décision (06:50 et
+#: 12:50 Z) que la classe courte, mais pas les mêmes échéances : `:15`,
+#: `:30` et `:45`, jamais l'heure ronde. Les fondre sous `−1`/`−2`
+#: mettrait DEUX PAS DE TEMPS sous une seule étiquette — c'est
+#: exactement la variante (b) refusée en Q2 le 30/08 (« un avantage
+#: silencieux sous le même intitulé »), prise par l'autre bout : ici ce
+#: ne serait pas la fraîcheur qui se cacherait, ce serait la RÉSOLUTION,
+#: et un lecteur du tableau de fiabilité ne pourrait plus dire lequel
+#: des deux pas il regarde.
+#: ⓘ Décision de Yann du 31/08 (question « clé SQL » du lot L11).
+LEAD_QUART_MATIN = -3
+LEAD_QUART_APREM = -4
+LEADS_QUARTS = (LEAD_QUART_MATIN, LEAD_QUART_APREM)
+
+#: ⛔ TOUTES LES ÉTIQUETTES D'INSTANT DE DÉCISION, en un seul endroit.
+#: Les trois lieux qui doivent les écarter (le caractère, le classement,
+#: le repli d'upsert) lisent CELLE-CI. Trois listes recopiées, c'est
+#: trois occasions d'en oublier une le jour d'une quatrième classe.
+LEADS_INSTANT_T = LEADS_COURTS + LEADS_QUARTS
+
 #: Le modèle maison, lu dans un flux à part (lot I, 13/08/2026). Il ne
 #: sert ICI qu'à compter des lignes dans le journal : `daily_rows` ne
 #: connaît toujours aucun modèle par son nom, et c'est ce qui a rendu
@@ -153,6 +177,46 @@ AGRUME_COURT_W1 = "agrume_court_w1"
 AGRUME_COURT_W05 = "agrume_court_w05"
 MODELES_COURTS = (AGRUME_COURT_W1, AGRUME_COURT_W05)
 
+#: ⛔⛔ LES TROIS SOUS-SÉRIES DE LA CLASSE AU QUART D'HEURE (lot L11,
+#: 31/08/2026), ET LA PREMIÈRE EST UN TÉMOIN, PAS UN CONCURRENT.
+#:
+#: La réserve de la phase B, écrite le 26/08 et jamais refermée depuis :
+#: « c'est à :15, :30 et :45 que le composite justifie son existence —
+#: là, l'alternative n'est pas AROME, c'est AROME *interpolé* ». Aucune
+#: classe du dispositif ne notait cet AROME interpolé. Sans lui, la
+#: classe au quart d'heure publierait deux composites que rien ne
+#: permettrait de comparer à quoi que ce soit : elle mesurerait, sans
+#: rien répondre.
+#:
+#: `agrume_quart_w0` EST cet AROME interpolé, et ses valeurs aux quarts
+#: d'heure sont FABRIQUÉES — 0,31 m/s d'erreur d'interpolation en
+#: médiane, 1,08 au q90, mesurés contre PI (`composite.arome_interpole`,
+#: qui le dit lui-même). ⛔ C'est précisément pour ça qu'il est publié :
+#: le coût de l'interpolation est ce que le composite prétend faire
+#: mieux, et on ne peut pas le lire s'il n'est pas noté. Chaque ligne
+#: porte `agrume_quart_base_interpolee = true` pour qu'aucune relecture
+#: ne puisse le confondre avec une mesure.
+#:
+#: ⚠️ AUCUNE des trois n'échappe à l'interpolation, et il ne faut PAS
+#: lire « part fabriquée = 1 − w » : la valeur servie vaut
+#: `AROME₁₀ⁱⁿᵗ + w·kz·(PI₂₀ − AROME₂₀ⁱⁿᵗ)`, donc à `w = 1` il reste le
+#: résidu `AROME₁₀ⁱⁿᵗ − kz·AROME₂₀ⁱⁿᵗ`. Ce qui change avec `w`, c'est le
+#: poids donné au seul terme dont la moitié est native.
+#:
+#: ⛔ AUCUNE des trois ne se classe (`RANK_REASON_SERIE_EN_ESSAI`, comme
+#: au L10) : faire concourir un témoin fabriqué contre le produit qu'il
+#: sert à juger n'aurait aucun sens dans un classement public.
+AGRUME_QUART_W0 = "agrume_quart_w0"
+AGRUME_QUART_W1 = "agrume_quart_w1"
+AGRUME_QUART_W05 = "agrume_quart_w05"
+MODELES_QUARTS = (AGRUME_QUART_W0, AGRUME_QUART_W1, AGRUME_QUART_W05)
+
+#: Le pas de la classe au quart d'heure, en secondes. ⓘ Il n'est PAS
+#: recopié dans `agrume_quart.py` : c'est lui qui l'importe d'ici, comme
+#: `agrume_fcst` importe déjà `STEP_S`. Deux écritures d'un même pas,
+#: c'est une demi-fenêtre appariée sur l'un et des heures sur l'autre.
+PAS_QUART_S = 900
+
 #: Les deux chaînes qui lisent le MÊME modèle AROME (lot L2, 27/08/2026)
 #: — `meteofrance_arome_france_hd` via Open-Meteo, `arome_r2` via nos
 #: propres tuiles `arome/sol` relues sur R2 (lot S0.5). L'écart de
@@ -169,6 +233,44 @@ AROME_R2_MODEL = "arome_r2"
 #: En dessous, l'agrégat est du bruit : une balise qui n'a émis que
 #: trois heures ne dit rien de la qualité d'un modèle sur la journée.
 MIN_HOURS_DAILY = 6
+
+#: ⛔ LE PLANCHER APPARTIENT AU PAS DE LA SÉRIE (lot L11, 31/08/2026),
+#: comme la demi-fenêtre — et pour une raison qui se voit en une ligne :
+#: `MIN_HOURS_DAILY = 6` sur une classe qui vise 15 échéances serait
+#: 2,5 fois plus laxiste que sur une classe qui en vise 6. Une balise
+#: notée sur 6 points parmi 15 entrerait dans le même tableau qu'une
+#: balise notée sur 15, avec le même intitulé et rien pour le dire.
+#:
+#: ⚠️ 13 SUR 15, ET C'EST LA TRANSPOSITION EXACTE DU CHOIX DE YANN.
+#: Il a tranché « 18 sur 21 » le 31/08, sur le périmètre de 21 points
+#: qu'il a ensuite réduit aux 15 quarts seuls : 18/21 = 85,7 %, et
+#: 13/15 = 86,7 % — le même niveau d'exigence, transposé plutôt que
+#: redécidé. MESURÉ par la sonde du L11 sur vingt jours : **93,8 %** des
+#: balise-jour-T tiennent 13/15 à ±7 min (témoin : la classe horaire
+#: tient son 6/6 dans 97,9 %).
+#:
+#: ⭐ CONSÉQUENCE ASSUMÉE, ET C'EST UN RETRAIT PAR LA RÈGLE. Les 39
+#: balises `aemet` de la population reportent une fois par heure, à
+#: l'heure ronde : la sonde mesure **0,0 %** de fenêtres non vides aux
+#: quarts d'heure. Elles tombent sous ce plancher et ne publient rien
+#: dans cette classe — sans qu'un seul nom de réseau soit écrit dans le
+#: code (VÉRIFIÉ sur la production le 31/08 : 39 servies, 0 notées). Un
+#: cas particulier nommé aurait été une règle de plus à maintenir, et
+#: une règle qu'un sixième réseau aurait prise en défaut.
+PLANCHER_PAR_PAS = {3600: MIN_HOURS_DAILY, 900: 13}
+
+
+def plancher_du_pas(step_s: int) -> int:
+    """Le nombre minimal d'échéances appariées pour qu'une balise-jour
+    entre dans le tableau, pour une série de pas `step_s`.
+
+    ⚠️ Un pas inconnu retombe sur `MIN_HOURS_DAILY` : c'est le
+    comportement d'avant ce lot, donc aucune série existante ne change
+    de population. Le prix est nommé — une classe neuve à un pas non
+    déclaré serait notée avec le plancher de l'heure ronde, ce qui est
+    laxiste mais visible, plutôt que refusée, ce qui coûterait une nuit.
+    """
+    return PLANCHER_PAR_PAS.get(int(step_s), MIN_HOURS_DAILY)
 
 #: Balises minimales dans une case avant de publier un score de zone.
 MIN_STATIONS_ZONE = 3
@@ -1186,6 +1288,19 @@ def fcst_agrume_key(day: datetime) -> str:
     return f"fcstagrume/{day:%Y/%m}/fcstagrume_{day:%Y-%m-%d}.ndjson.gz"
 
 
+def fcst_agrume_quart_key(day: datetime) -> str:
+    """Le flux de la CLASSE AU QUART D'HEURE (lot L11, 31/08/2026).
+
+    ⓘ Quatrième préfixe, quatrième fois le même raisonnement que le lot
+    I : `fcstagrume_{J}` porte la classe +6 h, `fcstagrumecourt_{J}` la
+    classe courte, celui-ci la classe au quart d'heure. Trois jobs, trois
+    clés — un job qui échoue au milieu de son écriture n'emporte que sa
+    propre archive, jamais celle d'un autre.
+    """
+    return (f"fcstagrumequart/{day:%Y/%m}/"
+            f"fcstagrumequart_{day:%Y-%m-%d}.ndjson.gz")
+
+
 def fcst_agrume_court_key(day: datetime) -> str:
     """Le flux de la CLASSE COURTE (lot L10, 30/08/2026) — encore un
     préfixe à part, et pour la troisième fois la même raison.
@@ -1407,6 +1522,11 @@ def snapshot_rows_et_bilan(root: pathlib.Path, day: datetime,
             # pas installé : `read_ndjson` rend une liste vide, et rien
             # d'autre du chemin ne change.
             + read_ndjson(root, fcst_agrume_court_key(day), storage)
+            # ⛔ LOT L11 — la classe au quart d'heure, encore un flux à
+            # part, et pour la quatrième fois la même raison : deux jobs
+            # ne partagent pas une clé d'archive, sinon celui qui échoue
+            # au milieu emporte l'archive de l'autre.
+            + read_ndjson(root, fcst_agrume_quart_key(day), storage)
             + read_ndjson(root, fcst_arome_key(day), storage)
             # ⛔ LE FLUX DU GROUPE RÉDUIT EST LU EN DERNIER, ET IL PORTE
             # UN VRAI `aloft_speed` (ECMWF à 850 hPa). `daily_rows`
@@ -1591,8 +1711,22 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
             sub_t = [times[i] for i in idx]
             sub_s = [(row.get("speed") or [None] * len(times))[i] for i in idx]
             sub_d = [(row.get("dir") or [None] * len(times))[i] for i in idx]
-            pairs = S.pair_series(sub_t, sub_s, sub_d, obs)
-            if len(pairs) < MIN_HOURS_DAILY:
+            # ⛔ LOT L11 (31/08/2026) — LA DEMI-FENÊTRE ET LE PLANCHER
+            # VIENNENT DU PAS DÉCLARÉ PAR LA LIGNE, jamais d'un nom de
+            # modèle. Même règle que l'échéance au lot L10 : c'est la
+            # LIGNE qui déclare ce qu'elle est, ou personne. Une série
+            # au quart d'heure appariée avec la demi-fenêtre de l'heure
+            # ronde (±20 min contre un pas de 15) compterait chaque
+            # relevé dans TROIS points : le test apparié perdrait son
+            # indépendance et les `n_obs` publiés seraient faux, sans
+            # qu'aucun chiffre n'ait l'air anormal.
+            # ⓘ `step_s = 3600` rend exactement les valeurs d'avant ce
+            # lot (±20 min, plancher 6) : aucune série existante ne
+            # change de population, et un banc l'exige.
+            pas_s = int(row.get("step_s") or 3600)
+            pairs = S.pair_series(sub_t, sub_s, sub_d, obs,
+                                  S.demi_fenetre(pas_s))
+            if len(pairs) < plancher_du_pas(pas_s):
                 continue
 
             # La persistance a besoin de la VEILLE : sans elle, le skill
@@ -1771,7 +1905,7 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
     # ⓘ Conséquence heureuse : le CHECK `lead_h` de `model_character`
     # n'a pas besoin d'être élargi. Une contrainte qu'on laisse étroite
     # est une décision qui se défend toute seule.
-    banded = [b for b in banded if b["lead_h"] not in LEADS_COURTS]
+    banded = [b for b in banded if b["lead_h"] not in LEADS_INSTANT_T]
     return rows, banded
 
 
@@ -3998,8 +4132,13 @@ def _exclus_du_rang(rows: list[dict]) -> dict[str, str]:
     # présence d'une autre série. Les deux règles ci-dessus disent « pas
     # celle-ci PUISQUE celle-là est là » ; celle-ci dit « pas encore »,
     # et ça ne dépend de personne d'autre.
+    # ⓘ LOT L11 : les trois sous-séries du quart d'heure rejoignent les
+    # deux du L10 dans la même règle — dont le TÉMOIN `agrume_quart_w0`,
+    # qui est de l'AROME interpolé, c'est-à-dire une valeur fabriquée.
+    # Le classer contre le produit qu'il sert à juger n'aurait aucun
+    # sens, et le publier au classement en aurait encore moins.
     for r in rows:
-        if r["model"] in MODELES_COURTS:
+        if r["model"] in MODELES_COURTS or r["model"] in MODELES_QUARTS:
             exclus[r["model"]] = RANK_REASON_SERIE_EN_ESSAI
     return exclus
 
@@ -5100,7 +5239,9 @@ REPLIS_RANG = (
 REPLI_LEAD_DAILY = (
     "model_verif_daily_lead_h_check", "lead_h",
     "supabase_step62_lot_l10_classe_courte.sql (les deux `lead_h` "
-    "négatifs de la classe courte)")
+    "négatifs de la classe courte) puis "
+    "supabase_step63_lot_l11_classe_quart.sql (les deux du quart "
+    "d'heure)")
 
 
 def _upsert_daily(sb, rows: list[dict]) -> int:

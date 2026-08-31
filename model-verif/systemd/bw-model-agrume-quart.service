@@ -1,0 +1,72 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-agrume-quart.service — LA CLASSE AU QUART D'HEURE
+#                                            (lot L11, 31/08/2026)
+#
+#  ⛔⛔ CETTE UNITÉ N'EST PAS INSTALLÉE. Elle est PROPOSÉE. Installer un
+#  timer inédit reste une action de Yann, à la main, une fois — comme
+#  pour toutes les autres unités de ce dossier.
+#
+#  Ce qu'elle ferait : la MÊME question que la classe courte — « ce que
+#  tu pouvais savoir à 06:50 et 12:50 Z » — posée aux seules échéances
+#  :15, :30 et :45, jamais l'heure ronde ; et l'archiver dans
+#  `fcstagrumequart/…`, que `bw-model-score` relira ensuite.
+#
+#  ⚠️ POURQUOI ELLE EST SÉPARÉE DE `bw-model-agrume-court`, ALORS
+#  QU'ELLE LIT EXACTEMENT LES MÊMES RUNS. Les fusionner économiserait
+#  quatre lectures R2 par nuit — c'est un vrai coût, et il est nommé
+#  ci-dessous. Mais les deux classes se taisent pour des raisons
+#  DIFFÉRENTES : la classe horaire tombe quand aucun run n'était posé à
+#  T, celle-ci tombe en plus quand PI ne porte pas les quarts. Un job
+#  commun ferait mourir la classe horaire pour une panne du quart
+#  d'heure, alors que la première est la plus avancée des deux.
+#
+#  ⚠️ IL LIT `balise-watch-grids`, pas `model-verif` — même piège que
+#  `bw-model-agrume`, même garde (`bucket_r2()`).
+#  ⚠️ Il exige numpy et boto3, du venv désigné par BW_PYTHON.
+#
+#  ⛔ IL NE PEUT PAS REMONTER LOIN, pour la même raison que la classe
+#  courte : les colonnes AROME sont purgées de R2 au bout d'une
+#  semaine. Le job le dit et n'écrit rien plutôt que de deviner.
+#
+#  ⛔ ET IL EXIGE `supabase_step63_lot_l11_classe_quart.sql`. Sans lui,
+#  la base refuse `lead_h` −3/−4 : le repli de `score._upsert_daily`
+#  ÉCARTE alors les lignes de cette classe et laisse passer les autres
+#  — la nuit n'est pas perdue, et le journal nomme le `.sql` à jouer.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — classe au quart d'heure AGRUME (:15/:30/:45)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/README.md
+After=network-online.target
+Wants=network-online.target
+# Après la classe courte, non par dépendance de données (les deux flux
+# sont indépendants et le restent) mais pour ne pas lire R2 en même
+# temps qu'elle. Avant la notation, jamais après.
+After=bw-model-agrume.service
+After=bw-model-agrume-court.service
+Before=bw-model-score.service
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh agrume-quart
+TimeoutStartSec=15min
+Nice=10
+
+# ── Cloisonnement, calqué sur bw-model-agrume-court.service ──────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-agrume-quart.timer — entre la classe courte et la notation
+#
+#  ⛔⛔ PROPOSÉ, PAS INSTALLÉ. Voir le `.service`.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — classe au quart d'heure AGRUME
+
+[Timer]
+# 03:50 UTC : après `bw-model-agrume` (03:35) et `bw-model-agrume-court`
+# (03:45, mesuré à 7 s le 31/08), avant la notation (03:55).
+# ⚠️ LA MARGE EST MINCE ET IL FAUT LE SAVOIR : ce job fait les MÊMES
+# quatre lectures R2 de colonnes que la classe courte (deux instants T
+# × AROME + PI), donc la nuit en fait huit là où elle en faisait quatre.
+# S'il déborde sur la notation, la journée est simplement notée sans la
+# classe au quart d'heure — aucune autre série n'en souffre, et le
+# rattrapage est un `run.sh agrume-quart --day …` tant que la journée
+# est dans la semaine de rétention R2.
+OnCalendar=*-*-* 03:50:00 UTC
+# ⚠️ `Persistent=true` a une valeur RÉELLE ici : passé sept jours, la
+# journée manquée n'est plus rattrapable du tout.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

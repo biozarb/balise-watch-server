@@ -56,6 +56,78 @@ from typing import Iterable, Sequence
 #: — condition d'indépendance du test apparié.
 OBS_HALF_WINDOW_MS = 20 * 60 * 1000
 
+#: ⛔⛔ LOT L11 (31/08/2026) — LA DEMI-FENÊTRE APPARTIENT AU PAS DE LA
+#: SÉRIE, ET L'INVARIANT QUI LA GOUVERNE EST ARITHMÉTIQUE.
+#:
+#:      Deux échéances consécutives séparées de `pas`, chacune agrégeant
+#:      les relevés d'une fenêtre CENTRÉE de demi-largeur `demi`, ne
+#:      partagent aucun relevé si et seulement si :
+#:
+#:                          2 × demi  <  pas
+#:
+#: C'est, mot pour mot, la raison écrite trois lignes plus haut pour
+#: ±20 min contre un pas de 60 min (40 < 60 ✅). Elle n'a jamais été
+#: autre chose qu'un CAS PARTICULIER de cet invariant — on le nomme, et
+#: il devient vérifiable au lieu d'être un commentaire.
+#:
+#: ⛔ ±20 min sur un pas de 15 min donnerait 40 > 15 : chaque relevé
+#: compterait dans TROIS points, le test apparié perdrait l'indépendance
+#: qui le rend licite, et les `n_obs` publiés seraient faux — sans
+#: qu'aucun chiffre n'ait l'air anormal (audit §3.4, réserve §6.1 de la
+#: conception du cadre court).
+#:
+#: ⚠️ CHAQUE ENTRÉE EST UN ARBITRAGE MESURÉ, PAS LE RÉSULTAT D'UNE
+#: FORMULE. Une formule (« la moitié du pas, moins une marge ») rendrait
+#: 6,5 min à 900 s, et ce n'est pas ce que la sonde du L11 a mesuré sur
+#: vingt jours d'archives et 1 104 balises : ±7 min sert **14 quarts sur
+#: 15** à 93,0 % des balise-jour-T, contre 89,0 % à ±5 min, et le gain
+#: s'arrête là (±7 min 29 s ne rend que 93,2 % en ne laissant que DEUX
+#: secondes de marge sur l'invariant). Le chiffre vient de la mesure ;
+#: la table le rend lisible ; l'assertion ci-dessous rend impossible
+#: d'en écrire un qui casse l'indépendance.
+DEMI_FENETRE_MS = {
+    3600: OBS_HALF_WINDOW_MS,
+    900: 7 * 60 * 1000,
+}
+
+for _pas_s, _demi_ms in DEMI_FENETRE_MS.items():
+    # ⛔ À L'IMPORT, ET C'EST VOULU. Un invariant vérifié au premier
+    # appel se vérifie la nuit où le job tourne ; celui-ci se vérifie au
+    # premier `import scoring`, donc dans le banc le plus anodin du
+    # dépôt. Une table qui casse l'indépendance ne peut pas atteindre la
+    # production.
+    assert 2 * _demi_ms < _pas_s * 1000, (
+        f"demi-fenêtre ±{_demi_ms / 60000:.1f} min sur un pas de "
+        f"{_pas_s / 60:.0f} min : 2×demi ≥ pas, deux échéances "
+        f"consécutives partageraient des relevés et le test apparié "
+        f"perdrait son indépendance")
+del _pas_s, _demi_ms
+
+
+def demi_fenetre(step_s: int) -> int:
+    """La demi-fenêtre d'agrégation (ms) pour une série de pas `step_s`.
+
+    ⛔ POURQUOI CETTE FONCTION EXISTE PLUTÔT QU'UN NOM DE MODÈLE. La
+    règle du lot I tient toujours : `score.daily_rows` ne connaît aucun
+    modèle par son nom, et le lot L10 l'a rappelée en faisant DÉCLARER
+    son échéance par la ligne plutôt qu'en testant `row["model"]`. La
+    demi-fenêtre suit la même règle : c'est le PAS de la série qui la
+    décide, et le pas est écrit dans la ligne (`step_s`). Une série
+    neuve au quart d'heure est donc appariée correctement sans que
+    personne ait à penser à elle.
+
+    ⚠️ UN PAS INCONNU N'EST PAS UNE ERREUR — il est SERVI, mais jamais
+    au-delà de ce que l'invariant autorise. Lever ici ferait tomber une
+    nuit entière pour une série expérimentale ; rendre ±20 min par
+    défaut casserait l'indépendance en silence, ce qui est pire. On rend
+    donc la plus grande demi-fenêtre admissible, plafonnée à celle de
+    l'heure ronde.
+    """
+    connu = DEMI_FENETRE_MS.get(int(step_s))
+    if connu is not None:
+        return connu
+    return max(0, min(OBS_HALF_WINDOW_MS, (int(step_s) * 1000) // 2 - 60_000))
+
 #: Sous ce vent, la girouette raconte n'importe quoi (même seuil que
 #: `HEADING_MIN_WIND_KMH` de lib/config.ts).
 DIR_MIN_WIND_KMH = 5.0

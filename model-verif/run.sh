@@ -57,8 +57,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|arome|tau|filet-arome) ;;
-  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|arome|tau|filet-arome" >&2
+  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome) ;;
+  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome" >&2
      exit 2 ;;
 esac
 
@@ -122,6 +122,14 @@ case "$MODE" in
   # rejeu plus ancien ne PEUT pas savoir ce qui était disponible à T. Il
   # le dit et n'écrit rien, plutôt que de deviner.
   agrume-court)   SCRIPT="$ICI/agrume_court.py";        LIBELLE="classe courte AGRUME" ;;
+  # LOT L11 — la MÊME question que la classe courte, aux seules
+  # échéances :15/:30/:45. Mêmes contraintes d'horaire, mêmes
+  # colonnes relues, même impossibilité de remonter loin : il doit
+  # tourner après minuit et avant `score`.
+  # ⚠️ IL EST INDÉPENDANT DE `agrume-court` — l'un peut se taire
+  # (retard PI) sans que l'autre n'ait à se taire, et les faire
+  # dépendre l'un de l'autre coûterait deux classes pour une panne.
+  agrume-quart)   SCRIPT="$ICI/agrume_quart.py";        LIBELLE="classe au quart d'heure AGRUME" ;;
   # ⚠️ CE MODE-CI N'ARCHIVE PAS HIER, IL ARCHIVE AUJOURD'HUI, et c'est
   # la seule différence de fond avec `agrume`. Les tuiles `arome/sol`
   # sont RÉÉCRITES EN PLACE toutes les 3 h par l'Action `arome-wind` :
@@ -439,7 +447,12 @@ fi
 # ⚠️ `agrume-court` EN A BESOIN AUSSI (lot L10, 30/08) : il relit les
 # mêmes colonnes `.npz`. L'oublier ici aurait rendu exactement ce que
 # ce garde existe pour éviter — une trace d'import à 03:45.
-if [[ "$MODE" == "agrume" || "$MODE" == "agrume-court" ]] \
+# ⚠️ ET `agrume-quart` AUSSI (lot L11, 31/08) : troisième mode à
+# relire les `.npz`. Le L10 a découvert que ce garde ne couvrait que
+# `agrume` ; l'étendre à la main une troisième fois est fragile, mais
+# la liste est ici et elle est LUE — un `case` de plus l'aurait cachée.
+if [[ "$MODE" == "agrume" || "$MODE" == "agrume-court" \
+      || "$MODE" == "agrume-quart" ]] \
    && ! "$PYTHON" -c "import numpy" >/dev/null 2>&1; then
   alerter "$LIBELLE ($MODE)" \
     "numpy absent de $PYTHON — le produit A ne peut pas se relire"

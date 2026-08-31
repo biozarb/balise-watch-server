@@ -95,7 +95,7 @@ MUTATIONS = [
      "le poids tout seul, sur quelques journées",
      SCORE, BANC_SCORE,
      '    for r in rows:\n'
-     '        if r["model"] in MODELES_COURTS:\n'
+     '        if r["model"] in MODELES_COURTS or r["model"] in MODELES_QUARTS:\n'
      '            exclus[r["model"]] = RANK_REASON_SERIE_EN_ESSAI',
      '    pass'),
 
@@ -138,7 +138,7 @@ MUTATIONS = [
     ("la classe courte nourrit la MÉMOIRE DU CARACTÈRE — une moyenne "
      "exponentielle de trois mois écrite pour des séries encore en essai",
      SCORE, BANC_SCORE,
-     '    banded = [b for b in banded if b["lead_h"] not in LEADS_COURTS]',
+     '    banded = [b for b in banded if b["lead_h"] not in LEADS_INSTANT_T]',
      '    banded = list(banded)'),
 
     ("la classe courte entre dans les ÉVÉNEMENTS — un taux de fausse "
