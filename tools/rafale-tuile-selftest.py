@@ -210,10 +210,38 @@ def main():
                  "au même (lat, lon)",
                  f"{len(tuile['points'])} points vérifiés"
                  + (f" | DÉSAPPARIÉS : {desapparies[:3]}" if desapparies else ""))
-        verifier(all(p["speedMean"][i3] is not None and p["speed"][i3] is not None
-                     and p["speedMean"][i3] <= p["speed"][i3] + 1
-                     for p in tuile["points"]),
-                 "la rafale est ≥ au vent moyen partout (tolérance 1 km/h d'arrondi)")
+        # ⛔ « La rafale est ≥ au vent moyen PARTOUT » était l'assertion
+        # d'origine. Elle est FAUSSE, et c'est le run de production du
+        # 31/08 qui l'a montré : sur une tuile réelle (1 720 000 valeurs),
+        # 0,425 % des points ont un vent moyen SUPÉRIEUR à la rafale.
+        #
+        # Ce n'est pas un désappariement — le contrôle juste au-dessus
+        # vérifie que `speedMean` EST la liste de la tuile sol au même
+        # point. C'est le modèle : `max_10efg/nfg` est un DIAGNOSTIC de
+        # rafale, une paramétrisation distincte du vent instantané à 10 m,
+        # et les deux ne sont pas contraints l'un par l'autre. La signature
+        # le confirme — écart médian 1 km/h (donc l'arrondi à l'entier),
+        # p90 2 km/h, et les rares gros écarts se concentrent en HAUTE
+        # MONTAGNE à la bascule du soir (19-20 h). Un désappariement, lui,
+        # frapperait au hasard et fort.
+        #
+        # On garde donc un invariant qui a du SENS : les inversions doivent
+        # rester rares et petites. Si elles devenaient fréquentes ou
+        # grosses, ce serait le signe d'un vrai défaut d'appariement.
+        # ⓘ Côté client, `frac` est borné à 1 (WindGridLayer) : l'anneau
+        # s'affiche plein et le repère au bout de la flèche, ce qui se lit
+        # « la rafale n'ajoute rien ici » — ce que dit le modèle.
+        inversions = [(p["speedMean"][i3], p["speed"][i3]) for p in tuile["points"]
+                      if p["speedMean"][i3] is not None and p["speed"][i3] is not None
+                      and p["speedMean"][i3] > p["speed"][i3]]
+        n_cmp = sum(1 for p in tuile["points"]
+                    if p["speedMean"][i3] is not None and p["speed"][i3] is not None)
+        taux = 100 * len(inversions) / max(n_cmp, 1)
+        pire = max((m - g for m, g in inversions), default=0)
+        verifier(taux < 2 and pire <= 5,
+                 "les inversions (vent moyen > rafale) restent rares et petites — "
+                 "diagnostic de rafale distinct du vent instantané, PAS un désappariement",
+                 f"{taux:.2f} % des valeurs, écart max {pire} km/h")
 
         # ── 5. La flèche fantôme s'appuie sur la direction de la RAFALE.
         # La tuile ne porte pas la direction du vent moyen (ce serait
