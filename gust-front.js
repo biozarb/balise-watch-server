@@ -1115,6 +1115,57 @@ function gfRingsOverlap(a, b) {
   return false;
 }
 
+// ── Rattachement d'un front à un épisode déjà suivi (31/08/2026) ────
+//  Le serveur peut suivre plusieurs épisodes à la fois depuis la levée
+//  du singleton `gfActiveEvent`. À chaque cycle il faut donc décider, pour
+//  chaque front reconstruit, s'il PROLONGE un épisode existant ou s'il en
+//  ouvre un nouveau.
+//
+//  Pur, et rangé ici et non dans index.js, pour deux raisons : c'est
+//  testable sans base, et surtout c'est LE MÊME test de recouvrement que
+//  celui de la comptabilité (`gfRingsOverlap`). Deux façons différentes
+//  de décider « est-ce le même front ? » finiraient par diverger, et
+//  l'écart se lirait comme une incohérence des chiffres.
+
+/** Centre approximatif d'un anneau — départage deux épisodes qui
+ *  recouvrent tous les deux le front qu'on cherche à rattacher. */
+function gfRingCenter(ring) {
+  if (!Array.isArray(ring) || !ring.length) return null;
+  let x = 0, y = 0;
+  for (const [lon, lat] of ring) { x += lon; y += lat; }
+  return { lon: x / ring.length, lat: y / ring.length };
+}
+
+/**
+ * L'épisode de `episodes` que ce couloir prolonge, ou null.
+ *
+ * Rattachement par RECOUVREMENT DES COULOIRS, et non par proximité d'un
+ * point : un front est une ligne qui avance, sa géométrie à t et à
+ * t+6 min se recouvre largement alors que son barycentre s'est déplacé
+ * de plusieurs kilomètres. Comparer des centres perdrait le suivi d'un
+ * front rapide, et le couperait en deux épisodes.
+ *
+ * `claimed` : les épisodes déjà rattachés à un autre front DU MÊME
+ * CYCLE. Sans ce jeu, deux fronts voisins pourraient revendiquer le même
+ * épisode et se réécrire l'un l'autre — le défaut du singleton, en plus
+ * petit.
+ */
+function gfPickEpisodeFrom(episodes, ring, opts = {}) {
+  const claimed = opts.claimed ?? new Set();
+  const filtre = opts.filter ?? null;
+  const centre = gfRingCenter(ring);
+  let best = null, bestDist = Infinity;
+  for (const ep of episodes || []) {
+    if (!ep || claimed.has(ep.id)) continue;
+    if (filtre && !filtre(ep)) continue;
+    if (!gfRingsOverlap(ring, ep.corridor)) continue;
+    const c = gfRingCenter(ep.corridor);
+    const d = (centre && c) ? Math.hypot(centre.lon - c.lon, centre.lat - c.lat) : 0;
+    if (d < bestDist) { best = ep; bestDist = d; }
+  }
+  return best;
+}
+
 /** Un épisode issu (au moins en partie) d'une annonce modèle. */
 function gfEstAnnonce(e) { return e.source === 'model' || e.source === 'merged'; }
 /** Un épisode réellement observé par un réseau de mesure. */
@@ -1333,6 +1384,8 @@ module.exports = {
   gfClusterSpatial,
   gfDistKm,
   gfRingsOverlap,
+  gfRingCenter,
+  gfPickEpisodeFrom,
   gfMatchEpisodes,
   gfVerificationRates,
   GF_MATCH_TOLERANCE_MS,

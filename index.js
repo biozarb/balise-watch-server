@@ -1864,7 +1864,115 @@ const GF_IMMINENT_MS = 60 * 60 * 1000;
 /** Positions des balises Pioupiou, alimentées par pollAndNotify (zéro requête ajoutée). */
 const gfBeaconPositions = new Map(); // id -> { lat, lon, nom }
 
-let gfActiveEvent = null;      // { id, status, lastDetectionAt, createdAt, intensity: [] }
+// ═══════════════════════════════════════════════════════════════════
+//  ÉPISODES SUIVIS — pluriel depuis le 31/08/2026
+//
+//  ⚠️ C'ÉTAIT UNE VARIABLE UNIQUE (`gfActiveEvent`), donc il ne pouvait
+//  y avoir qu'UN SEUL front de rafales vivant à la fois EN FRANCE. Un
+//  orage dans les Alpes et un autre en Aquitaine le même soir étaient
+//  fusionnés dans le même événement : la mesure du second « raffinait »
+//  l'épisode du premier, en écrasant sa géométrie. Le pilote aquitain
+//  recevait une ETA calculée dans les Alpes.
+//
+//  Le regroupement spatial du même jour a rendu le défaut visible — le
+//  détecteur reconstruit désormais plusieurs fronts par cycle, et le
+//  compteur `multiFrontTotal` existait précisément pour compter ceux
+//  qu'on jetait. Il est aussi ce qui rendait le taux d'anticipation du
+//  lot 3 ininterprétable : pendant qu'un front mesuré était suivi,
+//  AUCUNE veille modèle n'était créée, donc des veilles qui auraient pu
+//  être confirmées n'existaient pas en base.
+//
+//  ── COMMENT ON RATTACHE UNE DÉTECTION À UN ÉPISODE ───────────────
+//  Par RECOUVREMENT DES COULOIRS, et pas par proximité d'un point : un
+//  front est une ligne qui avance, sa géométrie à t et à t+6 min se
+//  recouvre largement, alors que son barycentre s'est déplacé de
+//  plusieurs kilomètres. C'est le même test exact que celui du lot 3
+//  (`gfRingsOverlap`), et c'est voulu — deux façons différentes de
+//  décider « est-ce le même front ? » finiraient par diverger.
+// ═══════════════════════════════════════════════════════════════════
+
+/** id → { id, status, source, createdAt, lastDetectionAt, intensity[],
+ *         corridor, announcedAt, announcedRaw }. */
+const gfActiveEvents = new Map();
+
+// ── Plafonds, et pourquoi il en faut DEUX ──────────────────────────
+//  Garde-fou d'abord : un jour de traîne active, le détecteur peut
+//  produire beaucoup de groupes cohérents, et publier vingt épisodes
+//  noierait le bandeau et le calque. Refuser d'afficher est toujours
+//  préférable à afficher n'importe quoi (§8).
+//
+//  ⚠️ Mais UN SEUL plafond partagé serait pire que le mal. La veille
+//  modèle tourne AVANT la détection mesurée dans le cycle : six veilles
+//  rempliraient le budget avant que la mesure n'ait écrit une ligne, et
+//  tout front MESURÉ dans un secteur que le modèle n'avait pas annoncé
+//  se verrait refuser son épisode. Or c'est le pire cas possible : seule
+//  la mesure pousse (une veille ne réveille personne), et un outflow que
+//  le modèle n'a pas vu venir est exactement ce pour quoi ce détecteur
+//  existe. Deux budgets séparés, donc, et la mesure est toujours servie.
+/** Épisodes MESURÉS (confirmed / downgraded / merged) suivis en même temps. */
+const GF_MAX_ACTIVE_EVENTS = 6;
+/** Veilles MODÈLE (`watch`) suivies en même temps. Plus bas : elles ne
+ *  poussent pas, et une carte couverte de couloirs prévus se lit mal. */
+const GF_MAX_ACTIVE_WATCHES = 3;
+/**
+ * Plafond DUR de la Map, vérifié à chaque création en plus des deux
+ * budgets ci-dessus.
+ *
+ * ⚠️ Les deux budgets seuls ne bornent RIEN, et ça ne se voit pas :
+ * une PROMOTION fait migrer un épisode de `watch` vers `confirmed` sans
+ * passer par une création. Elle libère donc un créneau de veille, que le
+ * modèle remplit au cycle suivant, veille qui pourra être promue à son
+ * tour… La Map grossit indéfiniment par ce chemin, et les deux filets
+ * de sécurité lâchent précisément là : `gfRefreshActiveCache` cesse
+ * d'élaguer dès que sa lecture est tronquée, et `gfAdoptActiveEvent`
+ * abandonne les surnuméraires au redémarrage — des bandeaux figés, le
+ * défaut d'origine, un jour de traîne où l'on en a le plus besoin.
+ *
+ * Avec ce plafond, une promotion ne fait que RENOMMER un épisode déjà
+ * compté : `count(mesurés)` peut monter au-delà de 6, ce qui est
+ * légitime — ce sont des fronts réels, et une promotion signifie que le
+ * modèle avait raison.
+ */
+const GF_MAX_EPISODES = GF_MAX_ACTIVE_EVENTS + GF_MAX_ACTIVE_WATCHES;
+
+/**
+ * Combien d'épisodes ENCORE VIVANTS sont des veilles (`true`) ou des
+ * mesures.
+ *
+ * ⚠️ Sur les vivants, pas sur toute la Map : `gfCloseStaleEvent` ne
+ * tourne qu'APRÈS la boucle de publication, si bien qu'un épisode qui
+ * vient de franchir ses 30 min de silence occuperait encore son créneau
+ * pendant tout le cycle où il va être clos — et un front réellement
+ * nouveau serait refusé alors que la place était libre.
+ */
+function gfCountEpisodes(veilles, now = Date.now()) {
+  let n = 0;
+  for (const e of gfLiveEpisodes(now)) {
+    if ((e.status === 'watch') === veilles) n++;
+  }
+  return n;
+}
+
+/** Épisodes encore rafraîchis, du plus récemment vu au plus ancien. */
+function gfLiveEpisodes(now) {
+  return [...gfActiveEvents.values()]
+    .filter(e => now - e.lastDetectionAt < GF_EVENT_STALE_MS)
+    .sort((a, b) => b.lastDetectionAt - a.lastDetectionAt);
+}
+
+/**
+ * L'épisode suivi que ce couloir prolonge, s'il existe.
+ *
+ * La décision elle-même vit dans `gust-front.js` (`gfPickEpisodeFrom`,
+ * pure et testable) ; ici on ne fait que lui fournir les épisodes encore
+ * vivants. Le test de recouvrement est LE MÊME que celui de la
+ * comptabilité du lot 3 — deux façons différentes de décider « est-ce le
+ * même front ? » finiraient par diverger.
+ */
+function gfPickEpisode(ring, now, claimed = new Set(), filtre = null) {
+  return gf.gfPickEpisodeFrom(gfLiveEpisodes(now), ring, { claimed, filter: filtre });
+}
+
 let gfLastCycleAt = 0;         // dernière tentative
 let gfLastCycleOkAt = 0;       // dernier cycle SANS erreur
 let gfLastReason = null;       // pourquoi aucun front (diagnostic)
@@ -1887,6 +1995,10 @@ let gfLastFrontCount = 0;
 let gfScatteredTotal = 0;
 let gfRescuedTotal = 0;
 let gfMultiFrontTotal = 0;
+/** Fronts reconstruits mais non publiés faute de place. S'il monte, le
+ *  plafond est trop bas — et ce n'est PAS une panne, d'où un compteur à
+ *  part de `gfLastError`. */
+let gfCappedTotal = 0;
 
 /**
  * Cache RAM des événements vivants, servi tel quel par
@@ -1903,9 +2015,38 @@ let gfActiveCache = { events: [], fetchedAt: 0 };
 
 async function gfRefreshActiveCache() {
   try {
+    // La limite doit couvrir les épisodes du détecteur ET les saisies
+    // manuelles d'un admin, qui vivent dans la même table. À 5 — la
+    // valeur d'avant la levée du singleton — un plafond de 6 épisodes
+    // détectés aurait tronqué la carte en silence.
     const events = await sbGet('gust_front_events',
-      'select=*&status=in.(watch,confirmed,downgraded)&order=updated_at.desc&limit=5');
-    if (!Array.isArray(events) || !events.length) {
+      'select=*&status=in.(watch,confirmed,downgraded)&order=updated_at.desc'
+      + `&limit=${GF_MAX_EPISODES + 4}`);
+    if (!Array.isArray(events)) return;
+
+    // ── La BASE fait autorité sur les épisodes suivis (31/08/2026) ──
+    // Cette lecture est la seule vue complète de ce qui est réellement
+    // vivant. On en profite pour élaguer la RAM : un épisode annulé par
+    // un admin, purgé, ou expiré par le balayage doit disparaître de
+    // `gfActiveEvents`, sinon il continue de CAPTER par recouvrement
+    // tous les fronts de son secteur — qui n'ouvrent alors jamais leur
+    // propre épisode, et deviennent invisibles sur la carte. Le
+    // singleton avait le même défaut, mais il était global donc criant ;
+    // avec plusieurs épisodes il serait local à un secteur, donc muet.
+    //
+    // Élagage seulement si on a vu TOUTE la liste : une réponse
+    // tronquée par `limit` supprimerait des épisodes bien vivants.
+    if (events.length < GF_MAX_EPISODES + 4) {
+      const vivants = new Set(events.map(e => e.id));
+      for (const id of [...gfActiveEvents.keys()]) {
+        if (!vivants.has(id)) {
+          console.log(`🌬️ épisode ${id} disparu de la base — retiré du suivi`);
+          gfActiveEvents.delete(id);
+        }
+      }
+    }
+
+    if (!events.length) {
       gfActiveCache = { events: [], fetchedAt: Date.now() };
       return;
     }
@@ -2095,8 +2236,22 @@ function gfBuildPush(level, event, etaMs, beaconName) {
  * Cycle complet : détecter, persister, cibler, notifier.
  * Ne jette jamais — une exception ici ne doit pas emporter la boucle MF.
  */
+let gfCycleRunning = false;
+
 async function gustFrontCycle() {
   if (!GUST_FRONT_ENABLED) return;
+  // ⚠️ Garde de réentrance (31/08/2026). `setInterval` relance toutes les
+  // 6 min sans attendre le cycle précédent. Avec le singleton, un cycle
+  // faisait une poignée d'aller-retours Supabase ; il peut désormais en
+  // faire dix fois plus (jusqu'à neuf épisodes, chacun avec ses
+  // détections, ses ETA et ses push). Deux exécutions concurrentes
+  // partageraient `gfActiveEvents` avec chacune son `claimed` : deux
+  // épisodes créés pour un même front, deux clôtures en parallèle.
+  if (gfCycleRunning) {
+    console.warn('🌬️ cycle précédent encore en cours — celui-ci est sauté');
+    return;
+  }
+  gfCycleRunning = true;
   gfLastCycleAt = Date.now();
   try {
     const now = Date.now();
@@ -2107,13 +2262,19 @@ async function gustFrontCycle() {
     // couloir annoncé, et elle crée l'événement `watch` que la mesure
     // viendra ensuite confirmer plutôt que d'en créer un second.
     await gfLoadModelGrid();
-    const modelFront = await gfModelCycle(now);
+    const modelFronts = await gfModelCycle(now);
 
     const stationMeta = new Map(
       mfStationsList.map(s => [s.id, { lat: s.lat, lon: s.lon, nom: s.nom }])
     );
+    // A priori modèle : l'UNION des veilles en cours, pas seulement la
+    // plus étayée. Depuis que plusieurs veilles peuvent coexister
+    // (31/08/2026), n'en passer qu'une reviendrait à rendre la mesure
+    // plus sensible dans un couloir et pas dans les autres, sans raison.
     const res = gf.gfDetect(stationMeta, now, gfPublicationLatencyMs, {
-      priorCorridor: modelFront ? modelFront.contains : null,
+      priorCorridor: modelFronts.length
+        ? ((lat, lon) => modelFronts.some(m => m.contains(lat, lon)))
+        : null,
     });
     gfLastReason = res.front ? null : res.reason;
 
@@ -2129,12 +2290,12 @@ async function gustFrontCycle() {
     gfLastFrontCount = res.fronts?.length ?? 0;
     if (res.reason === 'scattered') gfScatteredTotal++;
     if (res.rescuedCount) gfRescuedTotal += res.rescuedCount;
-    // Plusieurs fronts simultanés sont désormais RECONSTRUITS, mais un
-    // seul est encore publié (l'épisode suivi est un singleton, cf.
-    // gfActiveEvent). On le trace pour savoir si ça arrive vraiment.
+    // Plusieurs fronts simultanés sont reconstruits ET PUBLIÉS depuis le
+    // 31/08/2026 (levée du singleton `gfActiveEvent`). Le compteur reste :
+    // il dit à quelle fréquence la situation se présente réellement.
     if ((res.fronts?.length ?? 0) > 1) {
       gfMultiFrontTotal++;
-      console.log(`🌬️ ${res.fronts.length} fronts simultanés reconstruits — un seul publié (le plus étayé, ${res.front.stationCount} stations)`);
+      console.log(`🌬️ ${res.fronts.length} fronts simultanés`);
     }
 
     if (!res.front) {
@@ -2156,13 +2317,118 @@ async function gustFrontCycle() {
       return;
     }
 
-    const f = res.front;
-    // « Où ça ? » (31/08/2026) — les départements du couloir, complétés
-    // par ceux des stations franchies. Calculé ICI et écrit en base :
-    // le client n'a ainsi aucun contour à embarquer, et la réponse est
-    // identique pour tous les pilotes, quel que soit leur appareil.
-    const geo = dep.departementsConcernes(f.corridor, f.detections);
-    const eventPayload = {
+    // ── Publication : UN ÉPISODE PAR FRONT ────────────────────────
+    // Le détecteur peut rendre plusieurs fronts cohérents et disjoints
+    // (Alpes et Aquitaine le même soir). Chacun devient — ou prolonge —
+    // son propre épisode. `claimed` empêche deux fronts du même cycle de
+    // revendiquer le même épisode et de s'écraser l'un l'autre.
+    // ⚠️ ORDRE : les fronts qui PROLONGENT un épisode déjà suivi passent
+    // devant les nouveaux. `res.fronts` est trié par étayage, pas par
+    // ancienneté de suivi : sur une journée à beaucoup de groupes, un
+    // épisode suivi depuis vingt minutes pourrait sortir du plafond
+    // pendant deux cycles, être clos en `passed` faute de rafraîchi,
+    // puis revenir — et comme la déduplication de push est par
+    // `event_id`, tous les pilotes du couloir seraient RE-NOTIFIÉS pour
+    // le même front. Un front déjà suivi ne perd donc jamais sa place.
+    //
+    // La partition RÉSERVE au fur et à mesure (`pris`) : sans ça, deux
+    // fronts recouvrant le même épisode seraient tous deux classés
+    // « suivis », le second consommerait un créneau de création avant la
+    // file des nouveaux, et les deux épisodes se disputeraient ensuite le
+    // même secteur d'un cycle à l'autre — leurs historiques d'intensité
+    // mélangeraient alors deux fronts physiques, donc leur rétrogradation.
+    const claimed = new Set();
+    const pris = new Set();
+    const suivis = [], nouveaux = [];
+    for (const front of res.fronts) {
+      const ep = gfPickEpisode(front.corridor, now, pris);
+      if (ep) { pris.add(ep.id); suivis.push(front); } else nouveaux.push(front);
+    }
+
+    // `echecs` compte les ÉCHECS D'ÉCRITURE, jamais les refus de plafond :
+    // un plafond atteint est le fonctionnement prévu, et le confondre
+    // avec une panne gèlerait `lastOkAt` pendant toute une journée de
+    // traîne — en rendant du même coup un vrai échec indiscernable.
+    let echecs = 0, plafonnes = 0;
+    for (const front of [...suivis, ...nouveaux]) {
+      const r = await gfPublishMeasuredFront(front, res, now, claimed);
+      if (r?.failed) echecs++;
+      else if (r?.capped) plafonnes++;
+    }
+    if (plafonnes) gfCappedTotal += plafonnes;
+
+    // Clôture APRÈS la publication, et désormais dans cette branche
+    // AUSSI : avec plusieurs épisodes vivants, un front peut très bien
+    // continuer pendant qu'un autre s'éteint. L'ancien code, mono-épisode,
+    // ne clôturait que dans la branche « rien détecté » — il n'y avait
+    // rien d'autre à clore.
+    await gfCloseStaleEvent(now);
+    await gfSweepOrphans(now);
+
+    // Cache AVANT le push : si l'envoi échoue, les pilotes doivent
+    // malgré tout voir le front sur la carte. (Le push lui-même est
+    // envoyé par gfPublishMeasuredFront, épisode par épisode.)
+    await gfRefreshActiveCache();
+
+    // ⚠️ Un cycle où un front n'a PAS pu être écrit n'est pas un cycle
+    // sain. Avant l'extraction, l'échec d'écriture sortait du cycle et
+    // `gfLastError` survivait jusqu'à l'écran de santé ; depuis, le
+    // `return` ne sort plus que de la sous-fonction, et la fin du cycle
+    // effaçait l'erreur en la déclarant OK. L'écran admin aurait montré
+    // « tout va bien » pendant qu'un front réel n'existait nulle part.
+    if (echecs) {
+      gfLastError = `${echecs} front(s) non publié(s)`;
+      console.error(`🌬️ ${echecs} front(s) reconstruits mais NON écrits en base`);
+    } else {
+      gfLastCycleOkAt = now;
+      gfLastError = null;
+    }
+  } catch (e) {
+    gfLastError = e.message;
+    console.error('gustFrontCycle error:', e.message);
+  } finally {
+    // `finally` et non la fin du `try` : la branche « rien détecté »
+    // sort par un `return`, et une exception sort par le `catch`. Un
+    // verrou qu'on oublie de rendre sur un seul de ces chemins arrête le
+    // détecteur pour de bon, en silence.
+    gfCycleRunning = false;
+  }
+}
+
+/**
+ * Écrit UN front mesuré : crée ou prolonge son épisode, remplace ses
+ * détections et ses ETA, et pousse s'il y a lieu.
+ *
+ * Extrait de `gustFrontCycle` le 31/08/2026 en levant le singleton
+ * `gfActiveEvent` — c'est le corps qui était en ligne, rendu appelable
+ * une fois par front.
+ *
+ * Rend l'identifiant de l'épisode touché (null en cas d'échec), pour que
+ * l'appelant le retire du jeu des épisodes disponibles et compte les
+ * fronts non publiés.
+ *
+ * ⚠️ SON PROPRE try/catch. Avant l'extraction il n'y avait qu'un front,
+ * donc « échec du front » et « échec du cycle » étaient la même chose.
+ * Ce n'est plus vrai : une erreur réseau sur le premier front ne doit pas
+ * emporter la publication des suivants, ni la clôture des épisodes
+ * éteints, ni le rafraîchissement du cache que les pilotes lisent.
+ */
+async function gfPublishMeasuredFront(f, res, now, claimed) {
+  try {
+    return await gfPublishMeasuredFrontInner(f, res, now, claimed);
+  } catch (e) {
+    console.error('gfPublishMeasuredFront error:', e.message);
+    return { failed: true };
+  }
+}
+
+async function gfPublishMeasuredFrontInner(f, res, now, claimed) {
+  // « Où ça ? » (31/08/2026) — les départements du couloir, complétés
+  // par ceux des stations franchies. Calculé ICI et écrit en base :
+  // le client n'a ainsi aucun contour à embarquer, et la réponse est
+  // identique pour tous les pilotes, quel que soit leur appareil.
+  const geo = dep.departementsConcernes(f.corridor, f.detections);
+  const eventPayload = {
       source: 'mf_network',
       kind: 'outflow',
       status: 'confirmed', // détection MESURÉE : confirmé d'emblée (§4.4)
@@ -2201,20 +2467,25 @@ async function gustFrontCycle() {
       },
     };
 
-    // Un front détecté alors qu'un épisode est déjà suivi le raffine ;
-    // il n'en crée pas un second. C'est toute la différence entre une
-    // photo par cycle et un objet suivi (§4.2).
-    //
-    // Cas particulier §4.4 : si l'épisode suivi est une VEILLE MODÈLE
-    // (`watch`), la mesure ne crée pas un événement concurrent — elle
-    // PROMEUT celui-là en `confirmed`, et ses géométries mesurées
-    // remplacent les géométries prévues. C'est le moment où « il va
-    // peut-être se passer quelque chose » devient « c'est en train
-    // d'arriver, voici où et quand ».
-    const reuse = gfActiveEvent && (now - gfActiveEvent.lastDetectionAt) < GF_EVENT_STALE_MS;
-    const promoting = reuse && gfActiveEvent.status === 'watch';
-    if (promoting) {
-      eventPayload.source = 'merged';   // annoncé par le modèle, confirmé par la mesure
+  // Un front détecté alors qu'un épisode couvre DÉJÀ CE SECTEUR le
+  // raffine ; il n'en crée pas un second. C'est toute la différence
+  // entre une photo par cycle et un objet suivi (§4.2).
+  //
+  // ⚠️ « Ce secteur » et non « l'épisode en cours » : jusqu'au
+  // 31/08/2026 il n'y avait qu'un épisode possible, donc tout front
+  // mesuré raffinait le seul qui existât — même à 700 km de lui.
+  // L'appariement se fait désormais par recouvrement des couloirs.
+  //
+  // Cas particulier §4.4 : si l'épisode rattaché est une VEILLE MODÈLE
+  // (`watch`), la mesure ne crée pas un événement concurrent — elle
+  // PROMEUT celui-là en `confirmed`, et ses géométries mesurées
+  // remplacent les géométries prévues. C'est le moment où « il va
+  // peut-être se passer quelque chose » devient « c'est en train
+  // d'arriver, voici où et quand ».
+  let ep = gfPickEpisode(f.corridor, now, claimed);
+  const promoting = !!ep && ep.status === 'watch';
+  if (promoting) {
+    eventPayload.source = 'merged';   // annoncé par le modèle, confirmé par la mesure
 
       // ── Ne pas effacer ce qu'on vient de prouver (31/08/2026) ────
       // `raw` était REMPLACÉ en entier par les champs de la mesure, si
@@ -2224,7 +2495,7 @@ async function gustFrontCycle() {
       // sous un préfixe qui dit d'où elle vient — les champs de la
       // mesure restent en clair, ce sont eux qui décrivent l'épisode
       // maintenant.
-      const avant = gfActiveEvent.announcedRaw || {};
+      const avant = ep.announcedRaw || {};
       eventPayload.raw.announced_model_run = avant.model_run ?? null;
       eventPayload.raw.announced_grid_points = avant.grid_points ?? null;
       eventPayload.raw.announced_span_km = avant.span_km ?? null;
@@ -2234,112 +2505,174 @@ async function gustFrontCycle() {
       // Auto-référence : cet épisode est à la fois l'annonce et sa
       // confirmation. `gfReconcile` distinguera ce cas (promotion en
       // direct, fiable) d'un appariement fait après coup.
-      eventPayload.announced_event_id = gfActiveEvent.id;
+      eventPayload.announced_event_id = ep.id;
       // L'écart avec `created_at` EST le préavis réellement offert au
       // pilote — la seule mesure honnête de ce qu'apporte le Lot A.
       eventPayload.confirmed_at = new Date(now).toISOString();
 
-      console.log(`🌬️ Veille modèle ${gfActiveEvent.id} CONFIRMÉE par la mesure`
-        + (gfActiveEvent.announcedAt
-          ? ` — préavis ${Math.round((now - gfActiveEvent.announcedAt) / 60000)} min`
+      console.log(`🌬️ Veille modèle ${ep.id} CONFIRMÉE par la mesure`
+        + (ep.announcedAt
+          ? ` — préavis ${Math.round((now - ep.announcedAt) / 60000)} min`
           : ''));
-    }
-    let eventId;
-    if (reuse) {
-      eventId = gfActiveEvent.id;
-      await sbPatch('gust_front_events', `id=eq.${eventId}`, eventPayload);
-    } else {
-      const created = await sbInsertReturning('gust_front_events', eventPayload);
-      eventId = created?.id;
-      if (!eventId) { gfLastError = 'insert_failed'; return; }
-      gfActiveEvent = { id: eventId, status: 'confirmed', createdAt: now, intensity: [] };
-      console.log(`🌬️ Front de rafales détecté (${f.stationCount} stations, ${Math.round(f.speedKmh)} km/h au ${Math.round(f.bearing)}°) — événement ${eventId}`);
-    }
-    gfActiveEvent.lastDetectionAt = now;
-    gfActiveEvent.status = eventPayload.status;
 
-    // Essoufflement : trois cycles d'affilée d'intensité décroissante →
-    // on RÉTROGRADE plutôt que de maintenir une alerte pour un front qui
-    // meurt en route. Bandeau atténué, et surtout aucun nouveau push.
-    gfActiveEvent.intensity.push(f.maxGustKmh ?? 0);
-    if (gfActiveEvent.intensity.length > 4) gfActiveEvent.intensity.shift();
-    const ints = gfActiveEvent.intensity;
-    if (ints.length >= 4 && ints[0] > ints[1] && ints[1] > ints[2] && ints[2] > ints[3]) {
-      await sbPatch('gust_front_events', `id=eq.${eventId}`,
-        { status: 'downgraded', updated_at: new Date(now).toISOString() });
-      gfActiveEvent.status = 'downgraded';
-    }
-
-    // Détections élémentaires : remplacées à chaque cycle (l'ajustement
-    // est recalculé en entier, garder les anciennes ferait doublon).
-    await sbDelete('gust_front_detections', `event_id=eq.${eventId}`);
-    await sbInsert('gust_front_detections', res.detections.map(d => ({
-      event_id: eventId,
-      source: 'mf_station',
-      station_id: d.id,
-      station_name: d.nom,
-      lat: d.lat, lon: d.lon,
-      detected_at: new Date(d.t).toISOString(),
-      delta_pressure_hpa: d.deltaPressureHpa,
-      delta_speed_kmh: d.deltaSpeedKmh,
-      delta_heading_deg: d.deltaHeadingDeg,
-      delta_temp_c: d.deltaTempC,
-      gust_kmh: d.gustKmh,
-      score: d.score,
-    })));
-
-    // ETA par balise du couloir.
-    const positions = gfAllPositions();
-    const targets = [];
-    for (const p of positions.values()) {
-      if (!f.contains(p.lat, p.lon)) continue;
-      const eta = f.etaFor(p.lat, p.lon);
-      if (eta < now - 30 * 60 * 1000) continue; // déjà franchie il y a longtemps
-      targets.push({
-        event_id: eventId,
-        station_id: p.id,
-        station_name: p.nom,
-        source: p.source,
-        lat: p.lat, lon: p.lon,
-        eta_at: new Date(eta).toISOString(),
-        // ±15 min tant qu'aucune balise locale n'a confirmé le passage
-        // (§4.2). Resserré à ±5 min par le Lot C, plus tard.
-        eta_window_minutes: 15,
-        expected_gust_kmh: f.maxGustKmh,
-        passed_at: eta <= now ? new Date(eta).toISOString() : null,
-      });
-    }
-    await sbDelete('gust_front_targets', `event_id=eq.${eventId}`);
-    await sbInsert('gust_front_targets', targets);
-
-    // Bornes de la fenêtre annoncée : de la première à la dernière
-    // arrivée encore à venir dans le couloir.
-    const future = targets.filter(t => new Date(t.eta_at).getTime() > now)
-      .map(t => new Date(t.eta_at).getTime()).sort((a, b) => a - b);
-    if (future.length) {
-      await sbPatch('gust_front_events', `id=eq.${eventId}`, {
-        eta_start: new Date(future[0] - 15 * 60000).toISOString(),
-        eta_end: new Date(future[future.length - 1] + 15 * 60000).toISOString(),
-      });
-    }
-
-    // Cache AVANT le push : si l'envoi échoue, les pilotes doivent
-    // malgré tout voir le front sur la carte.
-    await gfRefreshActiveCache();
-
-    await gfNotify(eventId, targets, now);
-
-    gfLastCycleOkAt = now;
-    gfLastError = null;
-  } catch (e) {
-    gfLastError = e.message;
-    console.error('gustFrontCycle error:', e.message);
+    // Gardés pour les cycles SUIVANTS : cf. juste en dessous.
+    ep.mergedFields = {
+      announced_model_run: eventPayload.raw.announced_model_run,
+      announced_grid_points: eventPayload.raw.announced_grid_points,
+      announced_span_km: eventPayload.raw.announced_span_km,
+      announced_departments: eventPayload.raw.announced_departments,
+    };
+    ep.mergedAnnouncedId = ep.id;
+    ep.mergedConfirmedAt = eventPayload.confirmed_at;
+  } else if (ep && ep.source === 'merged') {
+    // ⚠️ UNE PROMOTION NE DURAIT QU'UN CYCLE. `promoting` n'est vrai que
+    // pendant le cycle où la veille bascule ; au suivant l'épisode est
+    // `confirmed`, donc le payload repartait sur `source: 'mf_network'`
+    // et le PATCH ÉCRASAIT `merged`. Or `merged` est la seule marque
+    // d'une promotion en direct : l'épisode le mieux anticipé de tous
+    // repassait ensuite en `non_prevu` dans la comptabilité, et la
+    // provenance modèle disparaissait avec le `raw` remplacé.
+    eventPayload.source = 'merged';
+    Object.assign(eventPayload.raw, ep.mergedFields || {});
+    if (ep.mergedAnnouncedId) eventPayload.announced_event_id = ep.mergedAnnouncedId;
+    if (ep.mergedConfirmedAt) eventPayload.confirmed_at = ep.mergedConfirmedAt;
   }
+
+  let eventId;
+  if (ep) {
+    eventId = ep.id;
+    const ok = await sbPatch('gust_front_events', `id=eq.${eventId}`, eventPayload);
+    if (!ok) {
+      // L'épisode n'est peut-être plus là (annulé par un admin, purgé) :
+      // le garder en RAM le ferait capter indéfiniment tous les fronts de
+      // son secteur, qui n'ouvriraient alors jamais leur propre épisode.
+      // On le lâche ; le cycle suivant en créera un neuf s'il y a lieu.
+      console.error(`🌬️ épisode ${eventId} : PATCH refusé — abandonné en RAM`);
+      gfActiveEvents.delete(eventId);
+      return { failed: true };
+    }
+  } else {
+    // Plafond appliqué à la CRÉATION, jamais au rafraîchissement : un
+    // épisode déjà suivi doit pouvoir continuer de l'être, sans quoi il
+    // serait clos puis recréé, et re-notifié (cf. l'ordre de publication
+    // dans gustFrontCycle). Budget des MESURÉS uniquement : les veilles
+    // modèle ont le leur, elles ne peuvent pas affamer la mesure.
+    if (gfCountEpisodes(false, now) >= GF_MAX_ACTIVE_EVENTS
+      || gfActiveEvents.size >= GF_MAX_EPISODES) {
+      console.warn(`🌬️ plafond atteint (${gfCountEpisodes(false, now)} mesurés, `
+        + `${gfActiveEvents.size} épisodes) — front de ${f.stationCount} stations non publié`);
+      return { capped: true };
+    }
+    const created = await sbInsertReturning('gust_front_events', eventPayload);
+    eventId = created?.id;
+    if (!eventId) return { failed: true };
+    ep = { id: eventId, status: 'confirmed', source: 'mf_network',
+           createdAt: now, intensity: [], corridor: f.corridor };
+    gfActiveEvents.set(eventId, ep);
+    console.log(`🌬️ Front de rafales détecté (${f.stationCount} stations, ${Math.round(f.speedKmh)} km/h au ${Math.round(f.bearing)}°, ${geo.departements.slice(0, 3).map(d => d.code).join('/') || 'hors France'}) — événement ${eventId}`);
+  }
+  // ⚠️ RÉSERVÉ ICI, et pas au retour de la fonction. L'épisode existe
+  // désormais en base ; si la suite (détections, ETA, push) jette, le
+  // try/catch enveloppant rendrait un échec, l'appelant n'aurait pas
+  // marqué l'épisode comme pris, et un second front du même cycle
+  // recouvrant le même couloir viendrait l'ÉCRASER — le défaut même que
+  // `claimed` existe pour empêcher. On réserve dès que l'écriture est
+  // acquise, comme le fait déjà gfPublishModelFront.
+  claimed.add(eventId);
+
+  ep.lastDetectionAt = now;
+  ep.status = eventPayload.status;
+  ep.source = eventPayload.source;
+  // Le couloir MESURÉ devient la référence de rattachement : au cycle
+  // suivant, c'est lui — et non la géométrie prévue par le modèle — qui
+  // dira si un front est le même. Sans cette ligne, un épisode promu
+  // continuerait de se comparer au couloir modèle, plus large et moins
+  // précis, et pourrait avaler un front voisin sans rapport.
+  ep.corridor = f.corridor;
+
+  // Essoufflement : trois cycles d'affilée d'intensité décroissante →
+  // on RÉTROGRADE plutôt que de maintenir une alerte pour un front qui
+  // meurt en route. Bandeau atténué, et surtout aucun nouveau push.
+  ep.intensity.push(f.maxGustKmh ?? 0);
+  if (ep.intensity.length > 4) ep.intensity.shift();
+  const ints = ep.intensity;
+  if (ints.length >= 4 && ints[0] > ints[1] && ints[1] > ints[2] && ints[2] > ints[3]) {
+    await sbPatch('gust_front_events', `id=eq.${eventId}`,
+      { status: 'downgraded', updated_at: new Date(now).toISOString() });
+    ep.status = 'downgraded';
+  }
+
+  // Détections élémentaires : remplacées à chaque cycle (l'ajustement
+  // est recalculé en entier, garder les anciennes ferait doublon).
+  //
+  // ⚠️ `f.detections` et NON `res.detections` : depuis le 31/08/2026 une
+  // passe peut rendre plusieurs fronts, et `res.detections` ne porte que
+  // celles du plus étayé. Les écrire pour chaque épisode attribuerait à
+  // un front aquitain les stations franchies dans les Alpes.
+  await sbDelete('gust_front_detections', `event_id=eq.${eventId}`);
+  await sbInsert('gust_front_detections', (f.detections || []).map(d => ({
+    event_id: eventId,
+    source: 'mf_station',
+    station_id: d.id,
+    station_name: d.nom,
+    lat: d.lat, lon: d.lon,
+    detected_at: new Date(d.t).toISOString(),
+    delta_pressure_hpa: d.deltaPressureHpa,
+    delta_speed_kmh: d.deltaSpeedKmh,
+    delta_heading_deg: d.deltaHeadingDeg,
+    delta_temp_c: d.deltaTempC,
+    gust_kmh: d.gustKmh,
+    score: d.score,
+  })));
+
+  // ETA par balise du couloir.
+  const positions = gfAllPositions();
+  const targets = [];
+  for (const p of positions.values()) {
+    if (!f.contains(p.lat, p.lon)) continue;
+    const eta = f.etaFor(p.lat, p.lon);
+    if (eta < now - 30 * 60 * 1000) continue; // déjà franchie il y a longtemps
+    targets.push({
+      event_id: eventId,
+      station_id: p.id,
+      station_name: p.nom,
+      source: p.source,
+      lat: p.lat, lon: p.lon,
+      eta_at: new Date(eta).toISOString(),
+      // ±15 min tant qu'aucune balise locale n'a confirmé le passage
+      // (§4.2). Resserré à ±5 min par le Lot C, plus tard.
+      eta_window_minutes: 15,
+      expected_gust_kmh: f.maxGustKmh,
+      passed_at: eta <= now ? new Date(eta).toISOString() : null,
+    });
+  }
+  await sbDelete('gust_front_targets', `event_id=eq.${eventId}`);
+  await sbInsert('gust_front_targets', targets);
+
+  // Bornes de la fenêtre annoncée : de la première à la dernière
+  // arrivée encore à venir dans le couloir.
+  const future = targets.filter(t => new Date(t.eta_at).getTime() > now)
+    .map(t => new Date(t.eta_at).getTime()).sort((a, b) => a - b);
+  if (future.length) {
+    await sbPatch('gust_front_events', `id=eq.${eventId}`, {
+      eta_start: new Date(future[0] - 15 * 60000).toISOString(),
+      eta_end: new Date(future[future.length - 1] + 15 * 60000).toISOString(),
+    });
+  }
+
+  // Push ciblé sur CET épisode. La déduplication vit en base
+  // (`gust_front_notifications`, une ligne par événement et par compte),
+  // donc deux fronts simultanés donnent bien deux notifications à un
+  // pilote concerné par les deux — ce qui est le comportement juste : ce
+  // sont deux phénomènes différents, avec deux heures d'arrivée.
+  await gfNotify(eventId, targets, now);
+
+  return { id: eventId };
 }
 
 /**
- * Lot A — veille modèle. Crée ou rafraîchit un événement `watch`, et
- * renvoie le front annoncé pour que la détection mesurée s'en serve
+ * Lot A — veille modèle. Crée ou rafraîchit les événements `watch`, et
+ * renvoie les fronts annoncés pour que la détection mesurée s'en serve
  * comme a priori.
  *
  * ⚠️ AUCUN PUSH ici, jamais. Une veille modèle s'affiche (bandeau
@@ -2349,24 +2682,82 @@ async function gustFrontCycle() {
  * régulières, et après deux d'entre elles plus personne ne lit la
  * troisième. Le push reste l'apanage du front MESURÉ (§8, décision Yann
  * du 31/07/2026).
+ *
+ * Rend un TABLEAU depuis le 31/08/2026 : plusieurs veilles peuvent
+ * coexister sur des secteurs disjoints, exactement comme plusieurs
+ * fronts mesurés.
  */
 async function gfModelCycle(now) {
-  if (!gfModelGrid) return null;
+  if (!gfModelGrid) return [];
   try {
     const res = gf.gfDetectModel(gfModelGrid, now);
     gfModelLastReason = res.front ? null : res.reason;
-    if (!res.front) return null;
+    if (!res.fronts?.length) return [];
 
-    const m = res.front;
+    // Même ordre que côté mesure : ce qui prolonge un épisode suivi
+    // passe devant ce qui en ouvrirait un nouveau, pour qu'une veille en
+    // cours ne se fasse jamais évincer par le plafond au profit d'une
+    // veille neuve mieux étayée.
+    const pris = new Set();
+    const suivies = [], neuves = [];
+    for (const m of res.fronts) {
+      const ep = gfPickEpisode(m.corridor, now, pris);
+      if (ep) { pris.add(ep.id); suivies.push(m); } else neuves.push(m);
+    }
+
+    const claimed = new Set();
+    const rendus = [...suivies, ...neuves];
+    for (const m of rendus) {
+      await gfPublishModelFront(m, res, now, claimed);
+    }
+    // Rendus TOUS, même ceux que le plafond a empêché de publier : ils
+    // servent d'a priori à la détection mesurée, ce qui ne coûte rien et
+    // rend justement la mesure plus sensible là où on n'a pas pu écrire.
+    return rendus;
+  } catch (e) {
+    console.error('gfModelCycle error:', e.message);
+    return [];
+  }
+}
+
+/**
+ * Écrit UNE veille modèle : crée ou rafraîchit son épisode `watch`, et
+ * ses ETA par balise.
+ *
+ * Extrait de `gfModelCycle` le 31/08/2026, avec la levée du singleton.
+ */
+async function gfPublishModelFront(m, res, now, claimed) {
+  try {
     // Côté modèle, les « points franchis » sont des points de grille et
     // non des stations : ils complètent le couloir exactement de la même
     // façon (cf. departements.js), sans que rien ne change ici.
     const geo = dep.departementsConcernes(m.corridor, m.detections);
 
-    // Un épisode déjà CONFIRMÉ par la mesure prime : on ne le rétrograde
-    // pas vers une géométrie de prévision, moins précise. On rend quand
-    // même le couloir modèle, il reste utile comme a priori.
-    if (gfActiveEvent && gfActiveEvent.status !== 'watch') return m;
+    // Un épisode déjà CONFIRMÉ PAR LA MESURE sur ce secteur prime : on
+    // ne le rétrograde pas vers une géométrie de prévision, moins
+    // précise. Le couloir modèle reste utile comme a priori, il est
+    // rendu par l'appelant dans tous les cas.
+    //
+    // ⚠️ « sur ce secteur » : avant le 31/08/2026, la présence d'un
+    // SEUL front mesuré n'importe où en France empêchait la création de
+    // TOUTE veille modèle ailleurs. C'est la raison principale pour
+    // laquelle le taux d'anticipation du lot 3 est un plancher — des
+    // veilles qui auraient pu être confirmées n'ont jamais existé.
+    //
+    // ⚠️ On ne RÉSERVE PAS l'épisode mesuré trouvé ici. Réserver n'aurait
+    // aucun sens — personne n'écrit dessus dans cette branche — et ça
+    // cassait le cas de deux veilles recouvrant le même front mesuré : la
+    // seconde ne voyait plus l'épisode (exclu par `claimed`), ne trouvait
+    // aucune veille, et CRÉAIT un couloir prévu par-dessus un secteur déjà
+    // confirmé par la mesure. Cette veille-là n'étant jamais confirmable
+    // (la mesure du secteur appartient déjà à l'autre épisode), elle
+    // finissait en `expired` — un faux positif fabriqué, dans le compteur
+    // même qui sert d'objectif au §8.2.
+    const dejaMesure = gfPickEpisode(m.corridor, now, claimed,
+      e => e.status !== 'watch');
+    if (dejaMesure) return;
+
+    let ep = gfPickEpisode(m.corridor, now, claimed, e => e.status === 'watch');
 
     const payload = {
       source: 'model',
@@ -2401,26 +2792,49 @@ async function gfModelCycle(now) {
       },
     };
 
-    if (gfActiveEvent) {
-      await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`, payload);
-      gfActiveEvent.lastDetectionAt = now;
+    if (ep) {
+      const ok = await sbPatch('gust_front_events', `id=eq.${ep.id}`, payload);
+      // Même raison que côté mesure : un épisode dont la ligne a disparu
+      // capterait sinon indéfiniment les veilles de son secteur.
+      if (!ok) { gfActiveEvents.delete(ep.id); return; }
+      ep.lastDetectionAt = now;
+      ep.corridor = m.corridor;
       // Rafraîchie à chaque cycle : si la mesure confirme tout à l'heure,
       // c'est la DERNIÈRE version annoncée qu'on voudra comparer.
-      gfActiveEvent.announcedRaw = payload.raw;
+      ep.announcedRaw = payload.raw;
     } else {
+      // Budget PROPRE aux veilles : il borne la création, pas le suivi,
+      // et surtout il ne mord pas sur celui des fronts mesurés — une
+      // journée à beaucoup de veilles ne doit pas empêcher d'ouvrir
+      // l'épisode d'un outflow que le modèle n'avait pas vu venir. Le
+      // plafond dur de la Map s'y ajoute : c'est LUI qui coupe la boucle
+      // veille → promotion → veille décrite avec GF_MAX_EPISODES.
+      //
+      // Refus COMPTÉ et journalisé, comme côté mesure : sans ça,
+      // GF_MAX_ACTIVE_WATCHES serait un réglage qu'aucun chiffre ne
+      // permettrait jamais de juger.
+      if (gfCountEpisodes(true, now) >= GF_MAX_ACTIVE_WATCHES
+        || gfActiveEvents.size >= GF_MAX_EPISODES) {
+        gfCappedTotal++;
+        console.warn(`🌬️ plafond atteint (${gfCountEpisodes(true, now)} veilles, `
+          + `${gfActiveEvents.size} épisodes) — veille de ${m.stationCount} points non publiée`);
+        return;
+      }
       const created = await sbInsertReturning('gust_front_events', payload);
-      if (!created?.id) return m;
-      gfActiveEvent = {
-        id: created.id, status: 'watch', createdAt: now,
-        lastDetectionAt: now, intensity: [],
+      if (!created?.id) return;
+      ep = {
+        id: created.id, status: 'watch', source: 'model', createdAt: now,
+        lastDetectionAt: now, intensity: [], corridor: m.corridor,
         // Gardés pour la promotion : ce que le modèle disait, et quand
         // il l'a dit. Sans ça, le préavis réellement offert au pilote
         // n'est plus calculable une fois l'épisode devenu `merged`.
         announcedAt: now,
         announcedRaw: payload.raw,
       };
-      console.log(`🌬️ VEILLE MODÈLE — front annoncé (${m.stationCount} points, ${Math.round(m.speedKmh)} km/h au ${Math.round(m.bearing)}°, ${m.kind}) — événement ${created.id}`);
+      gfActiveEvents.set(ep.id, ep);
+      console.log(`🌬️ VEILLE MODÈLE — front annoncé (${m.stationCount} points, ${Math.round(m.speedKmh)} km/h au ${Math.round(m.bearing)}°, ${m.kind}, ${geo.departements.slice(0, 3).map(d => d.code).join('/') || 'hors France'}) — événement ${created.id}`);
     }
+    claimed.add(ep.id);
 
     // ETA par balise, comme pour la mesure — mais fenêtre BEAUCOUP plus
     // large : ±45 min contre ±15. Le modèle ne sait pas faire mieux, et
@@ -2433,7 +2847,7 @@ async function gfModelCycle(now) {
       const eta = m.etaFor(p.lat, p.lon);
       if (eta < now) continue;
       targets.push({
-        event_id: gfActiveEvent.id,
+        event_id: ep.id,
         station_id: p.id, station_name: p.nom, source: p.source,
         lat: p.lat, lon: p.lon,
         eta_at: new Date(eta).toISOString(),
@@ -2442,21 +2856,18 @@ async function gfModelCycle(now) {
         passed_at: null,
       });
     }
-    await sbDelete('gust_front_targets', `event_id=eq.${gfActiveEvent.id}`);
+    await sbDelete('gust_front_targets', `event_id=eq.${ep.id}`);
     await sbInsert('gust_front_targets', targets);
 
     const future = targets.map(t => new Date(t.eta_at).getTime()).sort((a, b) => a - b);
     if (future.length) {
-      await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`, {
+      await sbPatch('gust_front_events', `id=eq.${ep.id}`, {
         eta_start: new Date(future[0] - 45 * 60000).toISOString(),
         eta_end: new Date(future[future.length - 1] + 45 * 60000).toISOString(),
       });
     }
-
-    return m;
   } catch (e) {
-    console.error('gfModelCycle error:', e.message);
-    return null;
+    console.error('gfPublishModelFront error:', e.message);
   }
 }
 
@@ -2464,9 +2875,9 @@ async function gfModelCycle(now) {
  * Balayage des événements ORPHELINS, indépendant de l'état RAM.
  *
  * ⚠️ Défaut trouvé le 31/07/2026 en relisant le cycle de vie avant
- * l'ouverture à tous. `gfActiveEvent` vit en RAM. Or le free tier Render
- * s'endort et redémarre régulièrement : au réveil, `gfActiveEvent` est
- * null, le cycle crée donc un NOUVEL événement — pendant que l'ancien
+ * l'ouverture à tous. Les épisodes suivis vivent en RAM. Or le free tier
+ * Render s'endort et redémarre régulièrement : au réveil la carte des
+ * épisodes est vide, le cycle crée donc un NOUVEL événement — pendant que l'ancien
  * reste `watch` pour toujours, puisque gfCloseStaleEvent ne sait clore
  * que celui qu'il a en mémoire.
  *
@@ -2641,37 +3052,72 @@ async function gfReconcile(now, opts = {}) {
 async function gfAdoptActiveEvent() {
   if (!GUST_FRONT_ENABLED) return;
   try {
+    // TOUS les épisodes vivants, et non plus le dernier (31/08/2026,
+    // levée du singleton). Un redémarrage au milieu d'une soirée à deux
+    // fronts en adoptait un et abandonnait l'autre, qui restait ensuite
+    // `confirmed` jusqu'à ce que le balayage l'expire — un bandeau figé
+    // chez tous les pilotes du secteur, sans que rien ne le rafraîchisse.
     const rows = await sbGet('gust_front_events',
-      'select=id,status,created_at,updated_at,max_gust_kmh,raw&status=in.(watch,confirmed,downgraded)&is_manual=is.false&order=updated_at.desc&limit=1');
-    const row = Array.isArray(rows) ? rows[0] : null;
-    if (!row) return;
-    const age = Date.now() - new Date(row.updated_at).getTime();
-    if (age > GF_EVENT_STALE_MS) return;   // le balayage s'en chargera
-    gfActiveEvent = {
-      id: row.id,
-      status: row.status,
-      createdAt: Date.now(),
-      lastDetectionAt: new Date(row.updated_at).getTime(),
-      intensity: [],
-      // Repris de la BASE et non de la RAM (31/08/2026) : c'est
-      // précisément le redémarrage Render qui faisait perdre le lien
-      // prévu→mesuré. Une veille adoptée après réveil garde donc sa date
-      // d'annonce et sa provenance modèle, et peut encore être promue en
-      // `merged` avec un préavis juste.
-      announcedAt: row.status === 'watch'
-        ? new Date(row.created_at).getTime() : null,
-      announcedRaw: row.status === 'watch' ? (row.raw || {}) : null,
-    };
-    console.log(`🌬️ Épisode ${row.id} (${row.status}) repris après redémarrage`);
+      'select=id,source,status,created_at,updated_at,corridor,raw'
+      + '&status=in.(watch,confirmed,downgraded)&is_manual=is.false'
+      + `&order=updated_at.desc&limit=${GF_MAX_EPISODES}`);
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      const age = Date.now() - new Date(row.updated_at).getTime();
+      if (age > GF_EVENT_STALE_MS) continue;   // le balayage s'en chargera
+      gfActiveEvents.set(row.id, {
+        id: row.id,
+        status: row.status,
+        source: row.source,
+        createdAt: Date.now(),
+        lastDetectionAt: new Date(row.updated_at).getTime(),
+        intensity: [],
+        // Le couloir est indispensable au rattachement : sans lui, un
+        // épisode adopté ne recouvrirait rien et le cycle suivant en
+        // créerait un doublon juste à côté.
+        corridor: row.corridor?.coordinates?.[0] ?? null,
+        // Repris de la BASE et non de la RAM (31/08/2026) : c'est
+        // précisément le redémarrage Render qui faisait perdre le lien
+        // prévu→mesuré. Une veille adoptée après réveil garde donc sa
+        // date d'annonce et sa provenance modèle, et peut encore être
+        // promue en `merged` avec un préavis juste.
+        announcedAt: row.status === 'watch'
+          ? new Date(row.created_at).getTime() : null,
+        announcedRaw: row.status === 'watch' ? (row.raw || {}) : null,
+        // Un épisode déjà PROMU garde sa provenance modèle dans son
+        // `raw` : on la relit, sinon le premier PATCH après redémarrage
+        // réécrirait `raw` en entier et l'effacerait — précisément la
+        // perte que la promotion s'était donné le mal de conserver.
+        mergedFields: row.source === 'merged' ? {
+          announced_model_run: row.raw?.announced_model_run ?? null,
+          announced_grid_points: row.raw?.announced_grid_points ?? null,
+          announced_span_km: row.raw?.announced_span_km ?? null,
+          announced_departments: row.raw?.announced_departments ?? null,
+        } : null,
+      });
+      console.log(`🌬️ Épisode ${row.id} (${row.status}) repris après redémarrage`);
+    }
   } catch (e) {
     console.error('gfAdoptActiveEvent error:', e.message);
   }
 }
 
-/** Clôt l'épisode suivi quand plus rien ne le confirme. */
+/**
+ * Clôt les épisodes que plus rien ne confirme.
+ *
+ * Boucle depuis le 31/08/2026 : avec plusieurs épisodes vivants, l'un
+ * peut s'éteindre pendant qu'un autre continue. Le mono-épisode d'avant
+ * n'avait qu'un cas à traiter, et n'était appelé que dans la branche
+ * « rien détecté » du cycle — il l'est désormais dans les deux.
+ */
 async function gfCloseStaleEvent(now) {
-  if (!gfActiveEvent) return;
-  const silent = now - gfActiveEvent.lastDetectionAt;
+  for (const ep of [...gfActiveEvents.values()]) {
+    await gfCloseEpisode(ep, now);
+  }
+}
+
+async function gfCloseEpisode(ep, now) {
+  const silent = now - ep.lastDetectionAt;
   if (silent < GF_EVENT_STALE_MS) return;
 
   // `passed` = le front a bien traversé et il est sorti du réseau.
@@ -2694,11 +3140,11 @@ async function gfCloseStaleEvent(now) {
   // au statut `watch` n'a par construction jamais été confirmée par la
   // mesure (une confirmation l'aurait passée en `confirmed`, et sa
   // source en `merged`). C'est donc TOUJOURS un `expired`.
-  const status = gfActiveEvent.status === 'watch' ? 'expired' : 'passed';
-  await sbPatch('gust_front_events', `id=eq.${gfActiveEvent.id}`,
+  const status = ep.status === 'watch' ? 'expired' : 'passed';
+  await sbPatch('gust_front_events', `id=eq.${ep.id}`,
     { status, updated_at: new Date(now).toISOString() });
-  console.log(`🌬️ Événement ${gfActiveEvent.id} clos (${status})`);
-  gfActiveEvent = null;
+  console.log(`🌬️ Événement ${ep.id} clos (${status})`);
+  gfActiveEvents.delete(ep.id);
 }
 
 /**
@@ -2717,19 +3163,52 @@ async function gfCloseStaleEvent(now) {
  * veille MODÈLE (`status = 'watch'`, source `model`). Seul un front
  * mesuré déclenche une notification — cf. gfModelCycle.
  */
+/** Tables de comptes lues une fois par cycle, cf. gfNotify. */
+let gfAudience = { at: 0, data: null };
+const GF_AUDIENCE_TTL_MS = 2 * 60 * 1000;
+
+async function gfLoadAudience() {
+  if (gfAudience.data && Date.now() - gfAudience.at < GF_AUDIENCE_TTL_MS) {
+    return gfAudience.data;
+  }
+  const [watchedRows, favRows, survRows, deviceRows] = await Promise.all([
+    sbGet('user_watched', 'select=user_id,beacon_id,nom'),
+    sbGet('user_favorites', 'select=user_id,beacon_id,beacon_nom'),
+    sbGet('user_surveillance', 'select=user_id,sig_gust_front'),
+    sbGet('user_devices', 'select=*'),
+  ]);
+  const data = { watchedRows, favRows, survRows, deviceRows };
+  // ⚠️ ON NE MET PAS EN CACHE UN ÉCHEC. `sbGet` ne jette pas sur une
+  // erreur HTTP : il rend l'objet d'erreur PostgREST, que les gardes
+  // `Array.isArray` de gfNotify transformeraient en audience VIDE.
+  // Mémorisé deux minutes, ça voudrait dire : aucun push, pour aucun
+  // front, sans une ligne de journal. On rend la donnée telle quelle
+  // pour ce front-ci, et le suivant réessaiera.
+  if ([watchedRows, favRows, survRows, deviceRows].every(Array.isArray)) {
+    gfAudience = { at: Date.now(), data };
+  } else {
+    console.error('🌬️ audience push illisible — aucun destinataire ce cycle');
+  }
+  return data;
+}
+
 async function gfNotify(eventId, targets, now) {
   if (GUST_FRONT_SHADOW) return;
   if (!targets.length) return;
 
   const etaByStation = new Map(targets.map(t => [t.station_id, t]));
 
-  const [watchedRows, favRows, survRows, deviceRows, notifRows] = await Promise.all([
-    sbGet('user_watched', 'select=user_id,beacon_id,nom'),
-    sbGet('user_favorites', 'select=user_id,beacon_id,beacon_nom'),
-    sbGet('user_surveillance', 'select=user_id,sig_gust_front'),
-    sbGet('user_devices', 'select=*'),
-    sbGet('gust_front_notifications', `select=user_id,level&event_id=eq.${eventId}`),
-  ]);
+  // ⚠️ L'AUDIENCE EST MUTUALISÉE ENTRE ÉPISODES (31/08/2026). Quatre de
+  // ces cinq lectures ne dépendent pas de l'événement : ce sont les
+  // tables de comptes, lues SANS filtre. Depuis la levée du singleton,
+  // gfNotify est appelée une fois par front — six fronts simultanés
+  // auraient donc rejoué six fois `user_devices` en entier, toutes les
+  // 6 min. Le TTL couvre un cycle, pas plus : une balise ajoutée
+  // pendant un front est prise au cycle suivant, ce qui est déjà la
+  // granularité du détecteur.
+  const { watchedRows, favRows, survRows, deviceRows } = await gfLoadAudience();
+  const notifRows = await sbGet('gust_front_notifications',
+    `select=user_id,level&event_id=eq.${eventId}`);
 
   // Pas de ligne = pref absente : on retombe sur le défaut `true` du
   // schéma, cohérent avec le reste des prefs flightwatch.
@@ -4396,17 +4875,26 @@ app.get('/gust-front/health', (req, res) => {
     lastReason: gfLastReason,
     lastError: gfLastError,
     publicationLatencyMin: Math.round(gfPublicationLatencyMs / 60000),
-    activeEventId: gfActiveEvent?.id ?? null,
-    activeEventStatus: gfActiveEvent?.status ?? null,
+    // Conservés au singulier pour les clients déjà déployés : le plus
+    // récemment rafraîchi. `activeEvents` est la vraie réponse depuis la
+    // levée du singleton (31/08/2026).
+    activeEventId: gfLiveEpisodes(now)[0]?.id ?? null,
+    activeEventStatus: gfLiveEpisodes(now)[0]?.status ?? null,
+    activeEvents: gfLiveEpisodes(now).map(e => ({
+      id: e.id, status: e.status, source: e.source,
+      ageMin: Math.round((now - e.lastDetectionAt) / 60000),
+    })),
+    maxActiveEvents: GF_MAX_ACTIVE_EVENTS,
+    maxActiveWatches: GF_MAX_ACTIVE_WATCHES,
     detector: gf.gfHealth(now),
     // Contours départementaux : `count: 0` = fichier absent ou illisible,
     // donc des fronts publiés sans numéro de département. Silencieux côté
     // pilote, d'où l'intérêt de le voir ici.
     departements: dep.departementsCharges(),
     // Regroupement spatial (31/08/2026) — cf. les compteurs déclarés
-    // avec gfActiveEvent. `scatteredTotal` qui monte vite = rayon de
-    // liaison trop serré ; `multiFrontTotal` > 0 = des fronts simultanés
-    // existent réellement et l'épisode singleton en cache un.
+    // avec gfActiveEvents. `scatteredTotal` qui monte vite = rayon de
+    // liaison trop serré ; `multiFrontTotal` = fréquence réelle des
+    // situations à plusieurs fronts, désormais toutes publiées.
     clustering: {
       radiusKm: gf.GF_CLUSTER_RADIUS_KM,
       modelRadiusKm: gf.GF_MODEL_CLUSTER_RADIUS_KM,
@@ -4418,6 +4906,7 @@ app.get('/gust-front/health', (req, res) => {
       scatteredTotal: gfScatteredTotal,
       rescuedTotal: gfRescuedTotal,
       multiFrontTotal: gfMultiFrontTotal,
+      cappedTotal: gfCappedTotal,
     },
     // Lot A — état de la veille modèle. Distinct du détecteur mesuré :
     // les deux peuvent tomber en panne indépendamment, et une grille
@@ -4441,10 +4930,11 @@ app.get('/gust-front/health', (req, res) => {
 //  se lit pas du tout — c'est exactement le piège dans lequel on tomberait
 //  en affichant ces chiffres à un pilote après trois semaines de saison.
 //
-//  `caveats` n'est pas de la décoration : tant que `gfActiveEvent` est un
-//  singleton, aucune veille modèle n'est créée pendant qu'un front mesuré
-//  est suivi. Des veilles qui auraient pu être confirmées n'existent donc
-//  pas en base, et le taux d'anticipation est un PLANCHER. Servir le
+//  `caveats` n'est pas de la décoration. Jusqu'au 31/08/2026, un seul
+//  épisode pouvait vivre à la fois en France : aucune veille modèle
+//  n'était créée pendant qu'un front mesuré était suivi, donc des veilles
+//  qui auraient pu être confirmées n'existent pas en base. Le singleton
+//  est levé, mais l'historique déjà écrit ne se rattrape pas — servir le
 //  chiffre sans cette phrase reviendrait à faire lire une mauvaise
 //  nouvelle sur le modèle là où il n'y a qu'un artefact d'architecture.
 app.get('/gust-front/verification', async (req, res) => {
@@ -4470,10 +4960,20 @@ app.get('/gust-front/verification', async (req, res) => {
         error: gfReconcileError,
       },
       caveats: [
-        'gfActiveEvent est un singleton : aucune veille modèle n\'est créée pendant '
-        + 'qu\'un front mesuré est suivi. Le taux d\'anticipation est un PLANCHER.',
+        // ⚠️ Le singleton a été levé le 31/08/2026 : plusieurs épisodes
+        // peuvent désormais coexister, et une veille modèle est créée
+        // même pendant qu'un front mesuré est suivi ailleurs. Mais les
+        // épisodes ANTÉRIEURS à cette date ont été produits sous
+        // l'ancien régime, et rien ne peut les rattraper — la réserve
+        // reste vraie pour eux, et disparaîtra d'elle-même quand la
+        // fenêtre de lecture ne les contiendra plus.
+        `Épisodes antérieurs au 31/08/2026 : produits quand un seul front `
+        + `pouvait vivre à la fois en France. Aucune veille modèle n'était créée `
+        + `pendant qu'un front mesuré était suivi, donc leur taux d'anticipation `
+        + `est un PLANCHER.`,
         'Appariement par recouvrement des couloirs et fenêtre ±2 h (erreur usuelle '
-        + 'd\'AROME sur le déclenchement convectif).',
+        + 'd\'AROME sur le déclenchement convectif), et l\'annonce doit précéder '
+        + 'la mesure.',
         'Les épisodes saisis à la main par un admin sont exclus des deux taux.',
       ],
     });

@@ -60,6 +60,53 @@ check('deux couloirs croisés en X se reconnaissent (aucun sommet dedans)',
 check('un anneau dégénéré ne fait pas d’appariement',
   gf.gfRingsOverlap(boite(5, 45), [[5, 45], [5, 46]]) === false);
 
+// ── Rattachement d'un front à un épisode suivi ─────────────────────
+// C'est le mécanisme qui remplace le singleton `gfActiveEvent` : à
+// chaque cycle, chaque front reconstruit prolonge un épisode existant ou
+// en ouvre un nouveau. Une erreur ici, et deux orages sans rapport
+// repartagent le même événement — exactement le défaut qu'on corrige.
+{
+  const alpes = { id: 'ALPES', status: 'confirmed', corridor: boite(6, 45.3) };
+  const aquitaine = { id: 'AQUI', status: 'confirmed', corridor: boite(-0.5, 44.2) };
+  const eps = [alpes, aquitaine];
+
+  check('un front alpin retrouve l’épisode alpin',
+    gf.gfPickEpisodeFrom(eps, boite(6.2, 45.4))?.id === 'ALPES');
+  check('un front aquitain retrouve l’épisode aquitain',
+    gf.gfPickEpisodeFrom(eps, boite(-0.3, 44.3))?.id === 'AQUI');
+  // LE cas qui motivait tout : avant le 31/08, ce front breton aurait
+  // « raffiné » le seul épisode existant, en écrasant sa géométrie.
+  check('un front breton n’en retrouve aucun et ouvrira le sien',
+    gf.gfPickEpisodeFrom(eps, boite(-2.5, 48.2)) === null);
+
+  // Deux fronts du même cycle ne peuvent pas revendiquer le même
+  // épisode : le second doit en ouvrir un nouveau.
+  const pris = new Set(['ALPES']);
+  check('un épisode déjà revendiqué ce cycle n’est pas réattribué',
+    gf.gfPickEpisodeFrom(eps, boite(6.2, 45.4), { claimed: pris }) === null);
+
+  // Le filtre sert à distinguer promotion (une veille) et cohabitation
+  // (un épisode déjà mesuré, que le modèle ne doit pas rétrograder).
+  const veille = { id: 'VEILLE', status: 'watch', corridor: boite(3, 47) };
+  const mesure = { id: 'MESURE', status: 'confirmed', corridor: boite(3, 47) };
+  check('le filtre « veille » ne rend que la veille',
+    gf.gfPickEpisodeFrom([veille, mesure], boite(3, 47),
+      { filter: e => e.status === 'watch' })?.id === 'VEILLE');
+  check('le filtre « déjà mesuré » ne rend que la mesure',
+    gf.gfPickEpisodeFrom([veille, mesure], boite(3, 47),
+      { filter: e => e.status !== 'watch' })?.id === 'MESURE');
+
+  // Deux épisodes recouvrent le front : le plus proche gagne, sinon le
+  // rattachement dépendrait de l'ordre de la liste.
+  const proche = { id: 'PROCHE', status: 'confirmed', corridor: boite(5.1, 45) };
+  const loin = { id: 'LOIN', status: 'confirmed', corridor: boite(4.0, 45) };
+  check('à recouvrement égal, l’épisode le plus proche gagne',
+    gf.gfPickEpisodeFrom([loin, proche], boite(5.2, 45))?.id === 'PROCHE');
+
+  check('un épisode sans couloir ne capte rien',
+    gf.gfPickEpisodeFrom([{ id: 'X', corridor: null }], boite(5, 45)) === null);
+}
+
 // ── Appariement ────────────────────────────────────────────────────
 // Nominal : une veille, puis une mesure au même endroit deux heures
 // après. Elle s'est produite.
