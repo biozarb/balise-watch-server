@@ -156,14 +156,34 @@ echo "  ✓ 19/19 bancs Python verts sur le VPS"
 # que de laisser la liste se périmer d'un cran de plus. La dette de fond
 # (une liste écrite à la main) reste entière ; elle est juste moins
 # grande d'un banc.
+# ⓘ 31/08 — le lot L11 fait de même avec \`test_agrume_quart.py\`. ⛔ Et
+# ce banc-ci a une raison de plus d'être joué ICI : il contient la
+# NON-RÉGRESSION de la demi-fenêtre et du plancher de l'heure ronde
+# (\`scoring.demi_fenetre(3600)\` = ±20 min, \`plancher_du_pas(3600)\` = 6).
+# Une divergence entre le venv du VPS et celui du Mac sur ces deux
+# valeurs changerait la population de TOUTES les séries en silence — et
+# c'est exactement le genre de chose qu'un sha256 ne voit pas.
 # \`test_sonde_representativite.py\` / \`test_sonde_doublons.py\` /
 # \`test_sonde_chaine_arome.py\` (lots L4/L6/L16, encore hors dépôt).
-# Ils ne sont pas ajoutés ICI parce que ce n'est pas le lot qui les a
-# écrits, et qu'un banc inconnu qui rougirait sur le VPS bloquerait un
-# déploiement sans rapport. ⇒ à trancher hors lot : soit on les ajoute,
-# soit on remplace cette liste par un \`for B in model-verif/test_*.py\`
-# — la seconde ne se périme pas, mais elle embarque tout ce qui
-# ressemble à un banc, y compris ce qui n'y est pas prêt.
+# ⭐ 31/08 — LA DETTE EST RÉGLÉE À MOITIÉ, SUR DÉCISION DE YANN, et la
+# moitié qui reste a une raison PRÉCISE, pas un oubli de plus :
+#   · \`test_controle_tau.py\` (112 assertions) et \`test_fraicheur.py\`
+#     (51) sont AJOUTÉS. Les deux ont été rejoués verts avant l'ajout —
+#     on n'ajoute pas un banc à la liste du déploiement sans l'avoir vu
+#     passer, sinon le premier déploiement d'après casse pour une raison
+#     sans rapport, exactement ce que l'alinéa ci-dessus redoutait.
+#   · ⛔ \`test_sonde_representativite.py\`, \`test_sonde_doublons.py\` et
+#     \`test_sonde_chaine_arome.py\` NE SONT PAS ajoutés, et pas par
+#     prudence : **ils ne sont pas dans le dépôt**, non plus que les
+#     sondes qu'ils testent (lots L4/L6/L16, \`git ls-files\` le dit).
+#     Les mettre dans cette liste ferait dépendre le déploiement de
+#     fichiers que seul le Mac possède — un déploiement qui passe chez
+#     soi et casse chez le suivant. Il faut d'abord les COMMITER ; c'est
+#     un geste des lots L4/L6/L16, pas de celui-ci.
+# ⇒ reste ouvert : remplacer cette liste par un
+# \`for B in model-verif/test_*.py\` — elle ne se périmerait plus, mais
+# elle embarquerait tout ce qui ressemble à un banc, y compris ce qui
+# n'y est pas prêt.
 for B in model-verif/test_score.py model-verif/test_inference.py \\
          model-verif/test_duel.py model-verif/test_murphy.py \\
          model-verif/test_collect.py \\
@@ -171,7 +191,10 @@ for B in model-verif/test_score.py model-verif/test_inference.py \\
          model-verif/test_geopair.py model-verif/test_run_selftest.py \\
          model-verif/test_agrume_fcst.py model-verif/test_agrume_pi_fcst.py \\
          model-verif/test_arome_fcst.py model-verif/test_sonde_delta_10m.py \\
-         model-verif/test_agrume_court.py; do
+         model-verif/test_agrume_court.py \\
+         model-verif/test_agrume_quart.py \\
+         model-verif/test_controle_tau.py \\
+         model-verif/test_fraicheur.py; do
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
 done
