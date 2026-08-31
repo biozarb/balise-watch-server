@@ -1,4 +1,12 @@
 [Unit]
+# bw-deploy: ne-pas-installer
+#   ⓘ Lu par `tools/deploy-agrume-vps.sh` (§2 bis, lot LD du 31/08/2026).
+#   Sans cette ligne, le contrôle « dépôt ↔ /etc » signalerait cette unité
+#   comme MANQUANTE à chaque déploiement — alors que son absence est la
+#   décision, écrite juste en dessous. Un contrôle qui crie au loup quatre
+#   fois par passage se fait ignorer, et c'est ce silence-là qui a laissé
+#   six unités disparaître. ⛔ Retirer cette ligne le jour où l'unité est
+#   installée pour de bon — pas avant, pas après.
 # ══════════════════════════════════════════════════════════════════════
 #  bw-model-collect-p2 — la SECONDE passe de la collecte de prévisions
 #                                       (lot S0.6, 22/08/2026)

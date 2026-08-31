@@ -6,6 +6,94 @@
 
 ---
 
+## 31/08/2026 (lot LD) — le vérificateur portait l'angle mort de ce qu'il vérifiait
+
+Six fichiers d'unité systemd (`bw-model-tau`, `bw-model-agrume-court`,
+`bw-model-agrume-quart` — les trois derniers lots qui en ont écrit une)
+n'étaient jamais arrivés sur le VPS. Trois semaines. Zéro voyant rouge.
+
+**Piège nº 1 — ⛔⛔ UN CONTRÔLE QUI PARTAGE LE FILTRE DE CE QU'IL
+CONTRÔLE NE PEUT PAS, PAR CONSTRUCTION, VOIR LA FAUTE QU'IL EXISTE POUR
+VOIR.** Le rsync de `model-verif/` portait
+`--include '*.py' --include '*.sh' --exclude '*'` : un `.service` ne
+partait jamais. Et le contrôle sha256 du §2, censé attraper exactement
+ça, cherchait lui aussi `-name '*.py' -o -name '*.sh'`. Mesuré avant
+correction : **le contrôle rendait « ✅ identique des deux côtés » sur
+162 fichiers pendant que DIX manquaient** (les six unités, trois
+fichiers de `model-verif/latence/`, `traces/sonde_rafale_infoclimat.py`)
+et que cinq fichiers de code de `traces/` avaient un mois de retard.
+*Un vérificateur doit regarder PLUS LARGE que le geste qu'il vérifie —
+sinon il ne mesure que sa propre cécité, et il la certifie.* ⇒ Une SEULE
+liste d'exclusions (`BW_EXCLUS`), lue par le rsync ET par le `find`, et
+un banc qui vérifie motif par motif qu'elle est bien lue des deux côtés.
+⚠️ C'est la TROISIÈME fois que la même leçon revient sur ce script
+(26/08 matin : `model-verif/` absent du rsync ; 26/08 soir : le fix qui
+l'y met ne copie rien) — chaque fois d'un cran plus haut. « Un correctif
+se vérifie par son EFFET » ne suffit pas : encore faut-il que le
+contrôle qui mesure l'effet ne soit pas taillé dans le même patron que
+le geste.
+
+**Piège nº 2 — UN MOTIF D'EXCLUSION À CHEMIN N'AGIT QUE D'UN CÔTÉ, ET
+C'EST LE BANC QUI L'A TROUVÉ, PAS LA RELECTURE.** Écrit
+`'traces/traces_cache'`, le motif est ACTIF pour `find` (dont la racine
+est le dépôt) et INERTE pour rsync (dont la racine est le dossier
+transféré, `traces/`) : tout le cache d'exécution partait sur le VPS
+pendant que le contrôle l'ignorait — les deux filtres divergeaient à
+nouveau, dans le correctif lui-même. *Deux outils qui partagent une
+liste doivent partager sa SÉMANTIQUE, pas seulement ses valeurs.* Fix :
+tout motif est un NOM, et un garde refuse au démarrage tout motif
+contenant un `/` — plutôt que de le laisser passer en silence, ce qui
+est exactement la faute d'origine.
+
+**Piège nº 3 — UNE ASSERTION QUI NE DISCRIMINE PAS RESTE VERTE SOUS SA
+PROPRE MUTATION.** Le banc vérifiait que `poller.sh` gardait son bit
+`+x` après transport ; la mutation qui retire `-p` du rsync l'a laissé
+VERT. Raison : sur un fichier NEUF, rsync applique l'umask et non un
+644 — le `+x` survit. La différence entre `-av` et `-rtv` ne se voit que
+sur un fichier **déjà présent de l'autre côté**, c'est-à-dire sur le VPS,
+tous les jours. *Un banc doit tester l'état où la propriété est en
+danger, pas celui où elle est vraie gratuitement* — et c'est la
+mutation, pas la relecture, qui a fait la différence.
+
+**Piège nº 4 — ⛔ « INSTALLÉE ≠ DÉPÔT » N'EST PAS TOUJOURS UNE FAUTE, ET
+UN CONTRÔLE QUI L'IGNORE SE FAIT DÉSARMER.** Deux unités du dépôt
+(`bw-model-collect-p2`, `bw-model-tau`) ne doivent PAS être installées,
+et leur en-tête le dit en toutes lettres avec la raison. Un contrôle
+naïf « absente de /etc ⇒ rouge » rougirait quatre fois dès son premier
+passage — et un contrôle qui crie au loup à chaque déploiement finit
+ignoré, c'est-à-dire dans l'état exact où six unités ont disparu. Fix :
+un marqueur lisible par machine, `# bw-deploy: ne-pas-installer`, dans
+l'en-tête. ⚠️ Et son revers, bancé : le marqueur ne vaut que pour une
+ABSENCE. Posé sur une unité vivante, il éteindrait le contrôle dessus —
+d'où un verdict `MARQUEUR_PÉRIMÉ` qui le signale.
+
+**Piège nº 5 — CE QU'ON NE PEUT PAS LIRE N'EST PAS VERT, IL EST
+INCONNU.** Cinq unités installées sont en `-rw------- root` : illisibles
+sans sudo, donc non comparables. Elles sont comptées à part, nommées à
+chaque passage, jamais fondues dans le « tout est vert » (règle du lot
+L8). ⓘ Et quand la date d'installation précède celle du dépôt, on le DIT
+sans refuser — la date est un indice, les octets sont hors de portée :
+c'est ainsi que `balise-entretien.service`, installée le 09/08 pour un
+dépôt du 22/08, est enfin signalée par une machine et non par hasard.
+
+**⛔⛔ Et ce que la sonde a trouvé en chemin, qui vaut plus que les six
+unités.** `traces/` n'était déployé par RIEN — ni ce script, ni un cron
+(il n'y en a pas), ni un checkout (`git` n'est pas installé sur le VPS).
+La copie de production de `traces/infoclimat/poller.sh` datait du 03/08
+**17:24**, c'est-à-dire d'AVANT le commit `7d75039` du même jour à
+**20:54** : « les alertes étaient muettes — deux variables au nom
+inexistant ». Le poller de production lisait donc `BW_PING_FAIL_URL` et
+`BW_MAIL_TO` ; relevé dans `~/.balise-watch-alertes.env` (noms seuls) :
+**les deux sont ABSENTES**. *Le correctif qui rendait l'alerting audible
+n'est jamais parti, et pendant 28 jours ce poller — qui tourne toutes
+les 5 minutes — n'avait aucun canal d'alerte vivant.* Il n'a jamais
+échoué, donc personne n'a rien vu : c'est la définition de la panne
+qu'on ne voit pas le jour où on la fait. *Un dossier que rien ne déploie
+ne se signale jamais tout seul ; il faut aller compter ce qui est
+DEHORS du périmètre, pas seulement vérifier ce qui est dedans.*
+
+---
+
 ## 28/08/2026 (lot L9) — quatre bancs verts, et c'est la PRODUCTION qui a trouvé les fautes
 
 Le lot publie trois compagnons du score (biais WMO, décomposition de
