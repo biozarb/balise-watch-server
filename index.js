@@ -1866,6 +1866,21 @@ let gfLastError = null;
 let gfModelLastReason = null;  // pourquoi aucun front ANNONCÉ (diagnostic)
 let gfLastPurgeAt = 0;         // purge des épisodes anciens, au plus 1×/h
 
+// ── Diagnostic du regroupement spatial (31/08/2026) ────────────────
+//  Le détecteur reconstruit désormais un front PAR groupe cohérent au
+//  lieu d'un plan unique sur toute la France. Ces compteurs sont ce qui
+//  permettra de régler GF_CLUSTER_RADIUS_KM sur des chiffres plutôt que
+//  sur une impression : combien de cycles refusés pour dispersion,
+//  combien de stations repêchées, et combien de fois plusieurs fronts
+//  ont coexisté (ce que l'épisode singleton ne sait pas encore publier).
+let gfLastGroupCount = 0;
+let gfLastOrphanCount = 0;
+let gfLastRescuedCount = 0;
+let gfLastFrontCount = 0;
+let gfScatteredTotal = 0;
+let gfRescuedTotal = 0;
+let gfMultiFrontTotal = 0;
+
 /**
  * Cache RAM des événements vivants, servi tel quel par
  * /gust-front/active. Rafraîchi UNE fois par cycle de détection, donc
@@ -2095,6 +2110,26 @@ async function gustFrontCycle() {
     });
     gfLastReason = res.front ? null : res.reason;
 
+    // Diagnostic du regroupement spatial (31/08/2026). `scattered` est
+    // le motif de silence qu'on veut pouvoir suivre dans le temps : il
+    // dit qu'il y avait bien des stations franchies, mais aucune qui
+    // forme un ensemble cohérent. Si ce compteur s'envole, c'est que
+    // GF_CLUSTER_RADIUS_KM est trop serré — et c'est la seule façon de
+    // le savoir autrement qu'en regardant un mois d'archive à la main.
+    gfLastGroupCount = res.groupCount ?? 0;
+    gfLastOrphanCount = res.orphanCount ?? 0;
+    gfLastRescuedCount = res.rescuedCount ?? 0;
+    gfLastFrontCount = res.fronts?.length ?? 0;
+    if (res.reason === 'scattered') gfScatteredTotal++;
+    if (res.rescuedCount) gfRescuedTotal += res.rescuedCount;
+    // Plusieurs fronts simultanés sont désormais RECONSTRUITS, mais un
+    // seul est encore publié (l'épisode suivi est un singleton, cf.
+    // gfActiveEvent). On le trace pour savoir si ça arrive vraiment.
+    if ((res.fronts?.length ?? 0) > 1) {
+      gfMultiFrontTotal++;
+      console.log(`🌬️ ${res.fronts.length} fronts simultanés reconstruits — un seul publié (le plus étayé, ${res.front.stationCount} stations)`);
+    }
+
     if (!res.front) {
       await gfCloseStaleEvent(now);
       await gfSweepOrphans(now);
@@ -2125,6 +2160,13 @@ async function gustFrontCycle() {
       raw: {
         thresholds_version: f.thresholdsVersion,
         station_count: f.stationCount,
+        // Emprise réelle du groupe de stations (31/08/2026) : c'est le
+        // chiffre qui manquait pour voir, en base, qu'un « front »
+        // s'étalait sur 742 km. Et `rescued_count` dit combien de ses
+        // stations n'ont été retenues qu'au seuil abaissé de voisinage.
+        span_km: Math.round(f.spanKm ?? 0),
+        rescued_count: f.rescuedCount ?? 0,
+        group_count: res.groupCount ?? 1,
         r2: f.r2,
         publication_latency_min: Math.round(f.publicationLatencyMs / 60000),
         stations_evaluated: res.evaluated,
@@ -2289,6 +2331,10 @@ async function gfModelCycle(now) {
         thresholds_version: m.thresholdsVersion,
         model_run: gfModelRun,
         grid_points: m.stationCount,
+        // cf. la même remarque côté mesure : les veilles modèle allaient
+        // jusqu'à 1 547 km d'axe avant le regroupement spatial.
+        span_km: Math.round(m.spanKm ?? 0),
+        group_count: res.groupCount ?? 1,
         r2: m.r2,
         shadow: GUST_FRONT_SHADOW,
         forecast_lines: m.forecastLines.map(l => ({
@@ -4161,6 +4207,22 @@ app.get('/gust-front/health', (req, res) => {
     activeEventId: gfActiveEvent?.id ?? null,
     activeEventStatus: gfActiveEvent?.status ?? null,
     detector: gf.gfHealth(now),
+    // Regroupement spatial (31/08/2026) — cf. les compteurs déclarés
+    // avec gfActiveEvent. `scatteredTotal` qui monte vite = rayon de
+    // liaison trop serré ; `multiFrontTotal` > 0 = des fronts simultanés
+    // existent réellement et l'épisode singleton en cache un.
+    clustering: {
+      radiusKm: gf.GF_CLUSTER_RADIUS_KM,
+      modelRadiusKm: gf.GF_MODEL_CLUSTER_RADIUS_KM,
+      rescueRadiusKm: gf.GF_RESCUE_RADIUS_KM,
+      lastGroups: gfLastGroupCount,
+      lastFronts: gfLastFrontCount,
+      lastOrphans: gfLastOrphanCount,
+      lastRescued: gfLastRescuedCount,
+      scatteredTotal: gfScatteredTotal,
+      rescuedTotal: gfRescuedTotal,
+      multiFrontTotal: gfMultiFrontTotal,
+    },
     // Lot A — état de la veille modèle. Distinct du détecteur mesuré :
     // les deux peuvent tomber en panne indépendamment, et une grille
     // modèle périmée ne se voit pas autrement.

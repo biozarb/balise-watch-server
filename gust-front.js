@@ -48,7 +48,11 @@ const GF_CLUSTER_WINDOW_MIN = 90;
 //  sur l'archive MF 6 min (§8.2). Toute modification doit s'accompagner
 //  d'un incrément de GF_THRESHOLDS_VERSION, sans quoi deux campagnes de
 //  calibration ne sont plus comparables entre elles.
-const GF_THRESHOLDS_VERSION = 'v1-2026-07-31';
+// v2 (31/08/2026) : ajout du regroupement SPATIAL et du repêchage local.
+// Aucun seuil de station n'a bougé, mais l'ENSEMBLE des stations retenues
+// pour un front change — donc les épisodes v1 et v2 ne sont pas
+// comparables, et c'est précisément ce que cette version sert à dire.
+const GF_THRESHOLDS_VERSION = 'v2-2026-08-31';
 const GF_DP_HPA = 0.7;      // saut de pression sur GF_JUMP_WINDOW_MIN
 const GF_DTHETA_DEG = 40;   // bascule de direction
 const GF_DFF_KMH = 20;      // saut de rafale
@@ -64,6 +68,49 @@ const GF_GUST_MIN_KMH = 45; // un front de rafales sans rafale n'existe pas
 // ── Garde-fous sur le front reconstruit ────────────────────────────
 /** En deçà, ce n'est pas une ligne cohérente mais du bruit corrélé. */
 const GF_MIN_STATIONS = 4;
+
+// ── Regroupement SPATIAL (31/08/2026) ──────────────────────────────
+//  ⚠️ Défaut trouvé le 31/08/2026, en cherchant pourquoi le bandeau ne
+//  dit jamais OÙ est le front (retour Yann : « beaucoup de pilotes
+//  pensent que c'est proche d'eux »).
+//
+//  Le regroupement des passages était UNIQUEMENT TEMPOREL : toutes les
+//  stations franchies dans GF_CLUSTER_WINDOW_MIN étaient ajustées par un
+//  SEUL plan spatio-temporel, où qu'elles soient en France. Relevé sur
+//  les 30 épisodes mesurés du 31/07 au 30/08 : emprise médiane 203 km,
+//  maximum 742 km, et des épisodes dont les stations tombaient en Corse,
+//  à Nice ET en Alsace. Le bandeau ne pouvait pas dire où était le front
+//  pour une raison simple : l'objet lui-même n'était nulle part.
+//
+//  Pire que l'affichage : dans 8 des 10 cas les plus dispersés, il y
+//  avait un noyau cohérent de 3 stations PLUS une station isolée à
+//  300–700 km. Comme il faut 4 points pour qu'un plan ait un degré de
+//  liberté, c'est cette station lointaine qui faisait franchir le
+//  minimum — donc qui donnait la vitesse, le cap et toutes les ETA. Elle
+//  ne validait rien, elle corrompait la géométrie.
+//
+//  D'où : on regroupe d'abord dans l'ESPACE (liaison simple), puis on
+//  ajuste un plan PAR groupe. Un front réellement continu — une ligne
+//  d'orages, un front froid synoptique de 1 500 km — reste un seul
+//  groupe, parce que ses points se touchent de proche en proche. Deux
+//  orages sans rapport ne se rejoignent plus jamais.
+/** Distance de liaison de proche en proche. 150 km : le réseau MF est
+ *  au pas de ~30 km, une ligne d'orages réelle est donc chaînée sans
+ *  peine, alors que Corse↔continent (~180 km), Nice↔Alsace (~500 km) ou
+ *  Rennes↔Landes (~500 km) sont séparés. */
+const GF_CLUSTER_RADIUS_KM = 150;
+/** Un noyau de cette taille est cohérent mais insuffisant pour ajuster
+ *  un plan vérifiable : il ouvre droit au REPÊCHAGE ci-dessous. */
+const GF_RESCUE_MIN_CORE = 3;
+/** Voisinage dans lequel on relit les stations au seuil abaissé quand un
+ *  noyau incomplet existe. Même raisonnement que le couloir d'une veille
+ *  modèle (GF_SCORE_MIN_PRIOR) : à 100 km de trois stations qui viennent
+ *  de montrer une signature franche, dans la même fenêtre de 90 min, une
+ *  signature partielle est bien moins susceptible d'être une
+ *  coïncidence qu'ailleurs. On récupère ainsi le front local au lieu de
+ *  le perdre — sans jamais aller chercher le point à 400 km qui, lui,
+ *  n'est probablement pas le même front. */
+const GF_RESCUE_RADIUS_KM = 100;
 /** Vitesses physiquement plausibles pour un outflow (§2). */
 const GF_SPEED_MIN_KMH = 20;
 const GF_SPEED_MAX_KMH = 110;
@@ -322,6 +369,58 @@ function gfStationPassage(id, arr, now, scoreMin = GF_SCORE_MIN) {
 //  Étage 2 — reconstruction du front
 // ═══════════════════════════════════════════════════════════════════
 
+/** Distance approchée entre deux points (km), projection plane locale.
+ *  Suffisante ici : on compare des distances à un seuil de 150 km, pas
+ *  de navigation à faire. */
+function gfDistKm(a, b) {
+  const dLat = (b.lat - a.lat) * KM_PER_DEG_LAT;
+  const dLon = (b.lon - a.lon) * KM_PER_DEG_LAT
+    * Math.cos(((a.lat + b.lat) / 2 * Math.PI) / 180);
+  return Math.hypot(dLat, dLon);
+}
+
+/**
+ * Regroupement spatial par LIAISON SIMPLE (single-link) : deux points
+ * appartiennent au même groupe s'il existe une chaîne de points
+ * successivement distants de moins de `radiusKm`.
+ *
+ * Le choix de la liaison simple n'est pas un détail d'implémentation,
+ * c'est la propriété qu'on veut : un front est un objet ALLONGÉ. Un
+ * critère de compacité (k-means, diamètre maximal) couperait en deux une
+ * ligne d'orages de 400 km, qui est pourtant un seul front. La liaison
+ * simple, elle, suit la ligne aussi loin qu'elle se prolonge et ne
+ * franchit jamais un vide de plus de `radiusKm`.
+ *
+ * Groupes rendus triés du plus fourni au moins fourni.
+ */
+function gfClusterSpatial(points, radiusKm = GF_CLUSTER_RADIUS_KM) {
+  const n = points.length;
+  if (n === 0) return [];
+  if (!(radiusKm > 0)) return [points.slice()];
+
+  const label = new Array(n).fill(-1);
+  const groups = [];
+  for (let i = 0; i < n; i++) {
+    if (label[i] >= 0) continue;
+    const g = groups.length;
+    label[i] = g;
+    const group = [points[i]];
+    const queue = [i];
+    while (queue.length) {
+      const k = queue.pop();
+      for (let j = 0; j < n; j++) {
+        if (label[j] >= 0) continue;
+        if (gfDistKm(points[k], points[j]) > radiusKm) continue;
+        label[j] = g;
+        group.push(points[j]);
+        queue.push(j);
+      }
+    }
+    groups.push(group);
+  }
+  return groups.sort((a, b) => b.length - a.length);
+}
+
 /**
  * Ajuste le PLAN spatio-temporel t = a + b·x + c·y sur les stations
  * franchies (moindres carrés ordinaires).
@@ -435,6 +534,47 @@ function buildFront(stations, now, opts = {}) {
     reason: null,
     count: used.length,
   };
+}
+
+/**
+ * Reconstruction MULTI-GROUPES : regroupe d'abord dans l'espace, puis
+ * ajuste un plan indépendant par groupe.
+ *
+ * Deux orages sans rapport donnent donc deux fronts (ou aucun), jamais
+ * un front moyen qui ne serait chez personne. Les groupes trop petits
+ * pour un ajustement vérifiable sont rendus à part dans `orphans` : ils
+ * ne sont PAS jetés silencieusement — c'est là que se trouvent les
+ * noyaux de 3 stations qu'on cherche à repêcher (cf.
+ * GF_RESCUE_RADIUS_KM), et c'est aussi la statistique qui dira si le
+ * rayon de liaison est bien réglé.
+ *
+ * Rendu trié : le front le plus étayé d'abord (nombre de stations, puis
+ * qualité de l'ajustement).
+ */
+function buildFronts(stations, now, opts = {}) {
+  const minPoints = opts.minPoints ?? GF_MIN_STATIONS;
+  const radiusKm = opts.clusterRadiusKm ?? GF_CLUSTER_RADIUS_KM;
+  const groups = gfClusterSpatial(stations, radiusKm);
+
+  const fronts = [];
+  const orphans = [];
+  const reasons = [];
+  for (const g of groups) {
+    if (g.length < minPoints) { orphans.push(g); continue; }
+    const built = buildFront(g, now, opts);
+    if (built.front) fronts.push(built.front);
+    else { orphans.push(g); reasons.push(built.reason); }
+  }
+  fronts.sort((a, b) => (b.used.length - a.used.length) || (b.r2 - a.r2));
+
+  // `scattered` est un motif de silence À PART ENTIÈRE, distinct de
+  // `not_enough_stations` : il dit qu'il y avait bien assez de stations
+  // franchies, mais qu'aucune ne formait un ensemble cohérent. Les
+  // confondre masquerait exactement le défaut qu'on vient de corriger.
+  const reason = fronts.length ? null
+    : (reasons[0] ?? (groups.length > 1 ? 'scattered' : 'not_enough_stations'));
+
+  return { fronts, orphans, groups: groups.length, reason };
 }
 
 /**
@@ -570,49 +710,124 @@ function gfDetect(stationMeta, now, publicationLatencyMs = 0, opts = {}) {
     if (s) detections.push({ ...s, lat: meta.lat, lon: meta.lon, nom: meta.nom || id });
   }
 
-  const built = buildFront(detections, now);
-  if (!built.front) {
-    return { front: null, detections, reason: built.reason, evaluated };
+  // ── Repêchage local (31/08/2026) ─────────────────────────────────
+  // Un noyau de 3 stations cohérentes est une information, pas du
+  // bruit : c'est simplement un point de trop peu pour qu'un plan soit
+  // vérifiable. Plutôt que de le jeter — ou pire, de le compléter avec
+  // la première station franchie à 400 km, ce que faisait l'ancien
+  // regroupement purement temporel — on relit son VOISINAGE au seuil
+  // abaissé. Même raisonnement que le couloir d'une veille modèle.
+  const rescued = gfRescueNeighbours(detections, stationMeta, now, opts);
+  for (const r of rescued) detections.push(r);
+
+  const built = buildFronts(detections, now, opts);
+  if (!built.fronts.length) {
+    return {
+      front: null, fronts: [], detections, reason: built.reason, evaluated,
+      loweredCount, rescuedCount: rescued.length,
+      groupCount: built.groups, orphanCount: built.orphans.length,
+    };
   }
 
-  const f = built.front;
+  const fronts = built.fronts.map(f => packMeasuredFront(f, now, publicationLatencyMs));
+
+  return {
+    // `front` reste le front le plus étayé : les appelants qui n'en
+    // traitent qu'un seul gardent le comportement le plus défendable.
+    front: fronts[0],
+    fronts,
+    detections: built.fronts[0].used,
+    reason: null,
+    evaluated,
+    loweredCount,
+    rescuedCount: rescued.length,
+    groupCount: built.groups,
+    orphanCount: built.orphans.length,
+  };
+}
+
+/**
+ * Relit les stations VOISINES d'un noyau incomplet, au seuil abaissé.
+ *
+ * Ne s'applique qu'aux groupes qui ont déjà GF_RESCUE_MIN_CORE stations
+ * franchies au seuil plein et qui n'atteignent pas le minimum : ailleurs,
+ * abaisser le seuil serait de la crédulité pure. Ici, l'a priori est
+ * local et daté — trois stations à moins de 150 km les unes des autres
+ * viennent de montrer une signature franche dans la même fenêtre de
+ * 90 min — et c'est exactement la situation où une signature partielle
+ * chez le voisin cesse d'être une coïncidence plausible.
+ *
+ * Les stations ainsi récupérées sont marquées `rescued: true` : elles
+ * pèsent sur la confiance (cf. packMeasuredFront) et restent traçables.
+ */
+function gfRescueNeighbours(detections, stationMeta, now, opts = {}) {
+  if (!detections.length) return [];
+  const radiusKm = opts.rescueRadiusKm ?? GF_RESCUE_RADIUS_KM;
+  const minCore = opts.rescueMinCore ?? GF_RESCUE_MIN_CORE;
+  const minPoints = opts.minPoints ?? GF_MIN_STATIONS;
+  const scoreMin = opts.rescueScoreMin ?? GF_SCORE_MIN_PRIOR;
+  if (!(radiusKm > 0) || minCore >= minPoints) return [];
+
+  const cores = gfClusterSpatial(detections, opts.clusterRadiusKm ?? GF_CLUSTER_RADIUS_KM)
+    .filter(g => g.length >= minCore && g.length < minPoints);
+  if (!cores.length) return [];
+
+  const known = new Set(detections.map(d => d.id));
+  const found = [];
+  for (const [id, arr] of gfHistory) {
+    if (known.has(id)) continue;
+    const meta = stationMeta.get(id);
+    if (!meta || !Number.isFinite(meta.lat) || !Number.isFinite(meta.lon)) continue;
+    if (!cores.some(g => g.some(p => gfDistKm(p, meta) <= radiusKm))) continue;
+    const s = gfStationPassage(id, arr, now, scoreMin);
+    if (!s) continue;
+    known.add(id);
+    found.push({ ...s, lat: meta.lat, lon: meta.lon, nom: meta.nom || id, rescued: true });
+  }
+  return found;
+}
+
+/** Met un front mesuré reconstruit sous la forme attendue par index.js. */
+function packMeasuredFront(f, now, publicationLatencyMs = 0) {
   const maxGust = Math.max(...f.used.map(s => s.gustKmh || 0));
   const maxJump = Math.max(...f.used.map(s => s.deltaPressureHpa || 0));
   // Calculé UNE fois : `contains` est appelé une fois par balise
   // favorite de chaque compte, recalculer le polygone à chaque appel
   // serait gratuit en résultat et coûteux en CPU sur le poll.
   const ring = corridorPolygon(f, now);
+  const rescuedCount = f.used.filter(s => s.rescued).length;
 
   return {
-    front: {
-      speedKmh: f.speedKmh,
-      bearing: f.bearing,
-      confidence: confidenceOf(f, f.used.length),
-      stationCount: f.used.length,
-      r2: f.r2,
-      maxGustKmh: Number.isFinite(maxGust) ? maxGust : null,
-      maxPressureJumpHpa: Number.isFinite(maxJump) ? maxJump : null,
-      line: frontLineAt(f, now),
-      corridor: ring,
-      // Positions successives à +30 / +60 / +90 min — la carte les
-      // affiche en traits atténués (§5.2) : c'est ce qui permet au
-      // pilote de voir venir, plutôt que de lire une heure abstraite.
-      forecastLines: [30, 60, 90].map(min => ({
-        offsetMin: min,
-        line: frontLineAt(f, now + min * 60000),
-      })),
-      thresholdsVersion: GF_THRESHOLDS_VERSION,
-      publicationLatencyMs,
-      // Conservé pour permettre à index.js de calculer les ETA sans
-      // refaire de géométrie.
-      _internal: f,
-      etaFor: (lat, lon) => etaAt(f, lat, lon, publicationLatencyMs),
-      contains: (lat, lon) => pointInRing(lon, lat, ring),
-    },
+    speedKmh: f.speedKmh,
+    bearing: f.bearing,
+    // Un front qui ne tient debout que grâce à des stations repêchées au
+    // seuil abaissé est réel, mais moins établi : −8 par station
+    // repêchée. On ne cache pas d'où vient le quatrième point.
+    confidence: Math.max(40, confidenceOf(f, f.used.length) - 8 * rescuedCount),
+    stationCount: f.used.length,
+    rescuedCount,
+    spanKm: f.used.reduce((m, a) => Math.max(
+      m, ...f.used.map(b => gfDistKm(a, b))), 0),
+    r2: f.r2,
+    maxGustKmh: Number.isFinite(maxGust) ? maxGust : null,
+    maxPressureJumpHpa: Number.isFinite(maxJump) ? maxJump : null,
+    line: frontLineAt(f, now),
+    corridor: ring,
+    // Positions successives à +30 / +60 / +90 min — la carte les
+    // affiche en traits atténués (§5.2) : c'est ce qui permet au
+    // pilote de voir venir, plutôt que de lire une heure abstraite.
+    forecastLines: [30, 60, 90].map(min => ({
+      offsetMin: min,
+      line: frontLineAt(f, now + min * 60000),
+    })),
+    thresholdsVersion: GF_THRESHOLDS_VERSION,
+    publicationLatencyMs,
     detections: f.used,
-    reason: null,
-    evaluated,
-    loweredCount,
+    // Conservé pour permettre à index.js de calculer les ETA sans
+    // refaire de géométrie.
+    _internal: f,
+    etaFor: (lat, lon) => etaAt(f, lat, lon, publicationLatencyMs),
+    contains: (lat, lon) => pointInRing(lon, lat, ring),
   };
 }
 
@@ -647,6 +862,15 @@ const GF_MODEL_MIN_POINTS = 12;
 /** Un front met ~8 h à traverser la France : la fenêtre de regroupement
  *  doit couvrir ça, sans quoi on découperait un seul front en morceaux. */
 const GF_MODEL_CLUSTER_MIN = 12 * 60;
+/** Rayon de liaison spatiale sur la grille (31/08/2026). La grille est
+ *  au pas de 0,25° (~28 km en latitude, ~19 km en longitude à 46°N) :
+ *  100 km tolère donc un trou de 3 à 5 mailles. Un front réel — même un
+ *  front froid synoptique de 1 500 km — est une ligne CONTINUE de points
+ *  déclenchés, il reste un seul groupe. Deux foyers convectifs séparés
+ *  par 300 km de rien ne sont plus ajustés par le même plan : c'est
+ *  exactement ce qui produisait les veilles de 1 500 km d'axe relevées
+ *  en base entre le 31/07 et le 30/08/2026. */
+const GF_MODEL_CLUSTER_RADIUS_KM = 100;
 /** Garde-fou convectif (§4.1) : sans instabilité ni pluie, ce n'est pas
  *  un outflow d'orage mais probablement un front froid synoptique. */
 const GF_MODEL_CAPE_MIN = 300;
@@ -764,20 +988,45 @@ function gfDetectModel(grid, now, opts = {}) {
     }
   }
 
-  const built = buildFront(candidates, now, {
+  const built = buildFronts(candidates, now, {
     clusterWindowMin: GF_MODEL_CLUSTER_MIN,
     anchor: 'earliest',
     minPoints: GF_MODEL_MIN_POINTS,
+    clusterRadiusKm: opts.clusterRadiusKm ?? GF_MODEL_CLUSTER_RADIUS_KM,
   });
-  if (!built.front) {
+  if (!built.fronts.length) {
     // `r2` est remonté même en échec : c'est LE chiffre que l'étape 10
     // compare d'un niveau à l'autre, et un `poor_fit` sans son R² ne dit
-    // pas si le fit a raté de peu ou de tout.
-    return { front: null, reason: built.reason, candidates,
-             count: built.count, r2: built.r2 ?? null };
+    // pas si le fit a raté de peu ou de tout. Le plus gros groupe est
+    // rejoué SANS regroupement pour que ce R² reste comparable d'une
+    // campagne à l'autre — il documente le refus, il ne l'annule pas.
+    const biggest = built.orphans[0] || candidates;
+    const probe = buildFront(biggest, now, {
+      clusterWindowMin: GF_MODEL_CLUSTER_MIN,
+      anchor: 'earliest',
+      minPoints: 4,
+    });
+    return { front: null, fronts: [], reason: built.reason, candidates,
+             count: probe.count ?? built.orphans.length,
+             r2: probe.front ? probe.front.r2 : (probe.r2 ?? null),
+             groupCount: built.groups };
   }
 
-  const f = built.front;
+  const fronts = built.fronts.map(f => packModelFront(f, now));
+  return {
+    // Comme pour la mesure : `front` reste la veille la plus étayée,
+    // `fronts` porte toutes celles qui tiennent debout séparément.
+    front: fronts[0],
+    fronts,
+    candidates: built.fronts[0].used,
+    reason: null,
+    groupCount: built.groups,
+    orphanCount: built.orphans.length,
+  };
+}
+
+/** Met une veille modèle reconstruite sous la forme attendue par index.js. */
+function packModelFront(f, now) {
   const maxGust = Math.max(...f.used.map(s => s.gustKmh || 0));
   const convectiveShare = f.used.filter(s => s.convective).length / f.used.length;
   // Typage : si la majorité des points franchis n'a ni instabilité ni
@@ -788,30 +1037,29 @@ function gfDetectModel(grid, now, opts = {}) {
 
   const ring = corridorPolygon(f, now);
   return {
-    front: {
-      speedKmh: f.speedKmh,
-      bearing: f.bearing,
-      // Confiance plafonnée : c'est une PRÉVISION. Même parfaitement
-      // ajustée, elle ne peut pas prétendre au même crédit qu'une mesure.
-      confidence: Math.min(60, confidenceOf(f, f.used.length)),
-      stationCount: f.used.length,
-      r2: f.r2,
-      kind,
-      maxGustKmh: Number.isFinite(maxGust) ? maxGust : null,
-      maxPressureJumpHpa: null,
-      line: frontLineAt(f, now),
-      corridor: ring,
-      forecastLines: [60, 120, 180].map(min => ({
-        offsetMin: min,
-        line: frontLineAt(f, now + min * 60000),
-      })),
-      thresholdsVersion: GF_THRESHOLDS_VERSION,
-      _internal: f,
-      etaFor: (lat, lon) => etaAt(f, lat, lon, 0),
-      contains: (lat, lon) => pointInRing(lon, lat, ring),
-    },
-    candidates: f.used,
-    reason: null,
+    speedKmh: f.speedKmh,
+    bearing: f.bearing,
+    // Confiance plafonnée : c'est une PRÉVISION. Même parfaitement
+    // ajustée, elle ne peut pas prétendre au même crédit qu'une mesure.
+    confidence: Math.min(60, confidenceOf(f, f.used.length)),
+    stationCount: f.used.length,
+    spanKm: f.used.reduce((m, a) => Math.max(
+      m, ...f.used.map(b => gfDistKm(a, b))), 0),
+    r2: f.r2,
+    kind,
+    maxGustKmh: Number.isFinite(maxGust) ? maxGust : null,
+    maxPressureJumpHpa: null,
+    line: frontLineAt(f, now),
+    corridor: ring,
+    forecastLines: [60, 120, 180].map(min => ({
+      offsetMin: min,
+      line: frontLineAt(f, now + min * 60000),
+    })),
+    thresholdsVersion: GF_THRESHOLDS_VERSION,
+    detections: f.used,
+    _internal: f,
+    etaFor: (lat, lon) => etaAt(f, lat, lon, 0),
+    contains: (lat, lon) => pointInRing(lon, lat, ring),
   };
 }
 
@@ -852,6 +1100,9 @@ module.exports = {
   gfScoreAtSample,
   gfStationPassage,
   buildFront,
+  buildFronts,
+  gfClusterSpatial,
+  gfDistKm,
   etaAt,
   pointInRing,
   angDiff,
@@ -859,4 +1110,8 @@ module.exports = {
   GF_THRESHOLDS_VERSION,
   GF_CORRIDOR_HOURS,
   GF_MIN_STATIONS,
+  GF_CLUSTER_RADIUS_KM,
+  GF_MODEL_CLUSTER_RADIUS_KM,
+  GF_RESCUE_RADIUS_KM,
+  GF_RESCUE_MIN_CORE,
 };
