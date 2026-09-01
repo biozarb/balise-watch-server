@@ -329,6 +329,17 @@ dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG";
 # shellcheck source=/dev/null
 [[ -f "$ALERTES_FILE" ]] && source "$ALERTES_FILE"
 
+# ── L'avertissement de configuration SORT du journal (lot LV, 01/09) ──
+# ⛔ Sans ce fichier, « PERSONNE NE SURVEILLE » n'allait que dans
+# `journalctl`, que RIEN ne lit sur cette machine (mesuré le 01/09 :
+# 0 logcheck, aucune crontab, OnFailure= sur 0 des 31 unités). La
+# confrontation a crié 20 jours d'affilée sans atteindre personne.
+# ⚠️ Le repli est une fonction VIDE, et c'est délibéré : un runner de
+# production ne doit pas mourir parce qu'un fichier d'outillage manque.
+# Le `dire` d'origine, lui, reste en place quoi qu'il arrive.
+# shellcheck source=/dev/null
+if [ -r "$ICI/../tools/bw_avertir_config.sh" ]; then . "$ICI/../tools/bw_avertir_config.sh"; else bw_avertir_config() { :; }; fi
+
 alerter() {
   local sujet="$1" corps="$2"
   dire "ALERTE — $sujet : $corps"
@@ -596,6 +607,7 @@ if (( code == 0 )); then
     # surveillé. La panne ne se verrait qu'au moment où l'on irait
     # chercher des chiffres qui n'existent pas.
     dire "⚠️ $PING_VAR absente de $ALERTES_FILE — PERSONNE NE SURVEILLE CE JOB"
+    bw_avertir_config "$PING_VAR" "$ALERTES_FILE" "bw-model-$MODE" "CE JOB ($MODE)"
   fi
   dire "run $MODE OK en ${duree}s"
   exit 0

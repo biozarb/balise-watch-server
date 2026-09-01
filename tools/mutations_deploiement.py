@@ -103,8 +103,12 @@ MUTATIONS = [
     ("⛔ une unité ILLISIBLE (0600 root) est comptée VERTE — on affirme "
      "identique ce qu'on n'a pas pu lire ; la réserve du L8 tombe",
      DEPLOY,
-     "    ILLISIBLE) if [ -n \"$mt\" ]",
-     "    ILLISIBLE) printf 'IDENTIQUE'; return 0\n               if [ -n \"$mt\" ]"),
+     "    ILLISIBLE) if [ -n \"$taille\" ]",
+     "    ILLISIBLE) printf 'IDENTIQUE'; return 0\n               if [ -n \"$taille\" ]"),
+    # ⓘ 01/09 (lot LV) — LE MOTIF A DÛ ÊTRE RÉÉCRIT, et c'est le garde
+    # « MOTIF INTROUVABLE » qui l'a exigé : la branche ILLISIBLE teste
+    # désormais la TAILLE avant la date. Une mutation dont le motif ne
+    # mord plus ne prouve rien ; elle doit rougir bruyamment, pas passer.
 
     ("⛔ une unité installée qui DIFFÈRE du dépôt passe pour identique",
      DEPLOY,

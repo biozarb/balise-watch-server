@@ -40,6 +40,17 @@ AUDIT_FILE="${BW_R2_AUDIT_ENV:-$HOME/.balise-watch-r2-audit.env}"
 
 # shellcheck source=/dev/null
 [ -r "$ALERTES_FILE" ] && . "$ALERTES_FILE"
+
+# ── L'avertissement de configuration SORT du journal (lot LV, 01/09) ──
+# ⛔ Sans ce fichier, « PERSONNE NE SURVEILLE » n'allait que dans
+# `journalctl`, que RIEN ne lit sur cette machine (mesuré le 01/09 :
+# 0 logcheck, aucune crontab, OnFailure= sur 0 des 31 unités). La
+# confrontation a crié 20 jours d'affilée sans atteindre personne.
+# ⚠️ Le repli est une fonction VIDE, et c'est délibéré : un runner de
+# production ne doit pas mourir parce qu'un fichier d'outillage manque.
+# Le `dire` d'origine, lui, reste en place quoi qu'il arrive.
+# shellcheck source=/dev/null
+if [ -r "$ICI/../tools/bw_avertir_config.sh" ]; then . "$ICI/../tools/bw_avertir_config.sh"; else bw_avertir_config() { :; }; fi
 PING="${BW_AGRUME_CONFRONTATION_PING_URL:-}"
 
 dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
@@ -52,6 +63,7 @@ pinguer() {
 
 if [ -z "$PING" ]; then
   dire "⚠️ BW_AGRUME_CONFRONTATION_PING_URL absente de $ALERTES_FILE — PERSONNE NE SURVEILLE CETTE CHAÎNE"
+  bw_avertir_config BW_AGRUME_CONFRONTATION_PING_URL "$ALERTES_FILE" bw-agrume-confronter-quotidien "CETTE CHAINE (confrontation quotidienne)"
 fi
 
 if [ ! -r "$AUDIT_FILE" ]; then

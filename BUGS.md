@@ -6,6 +6,90 @@
 
 ---
 
+## 01/09/2026 (lot LV) — l'oreille existait, mais par accident
+
+Cinq runners criaient « PERSONNE NE SURVEILLE » depuis des semaines.
+Relevé sur les 29 jours de journal du VPS (persistant, un seul boot
+depuis le 03/08) : **315 cris, sept variables**, dont
+`BW_AGRUME_CONFRONTATION_PING_URL` **vingt jours d'affilée** — et le job
+tournait tous les jours comme si de rien n'était.
+
+**Piège nº 1 — ⛔⛔ « IL MANQUE UNE OREILLE » ÉTAIT LE MAUVAIS
+DIAGNOSTIC, ET LE BON EST PIRE.** Sur les sept variables, **cinq ont été
+réparées, quatre le jour même**, et aucune réparation n'est tracée nulle
+part. Le canal fonctionnait donc — quand un humain travaillait ce
+jour-là sur cette chaîne-là. Quand personne n'y travaillait, le cri est
+parti vingt jours dans le vide. *Ce n'était pas un canal manquant :
+c'était un canal dont la fiabilité était celle de l'attention d'une
+personne, et ce genre de canal rend un taux de réussite de 71 % qui
+ressemble à un dispositif qui marche.* ⇒ La comparaison qui tranche
+n'est pas « ça a été réparé ou non » mais **« qui l'a réparé, et
+est-ce reproductible »**. Personne ne savait répondre.
+
+**Piège nº 2 — ⛔⛔ LA CAUSE MÉCANIQUE ÉTAIT À DIX LIGNES, DANS LE MÊME
+FICHIER.** L'avertissement passait par `dire` (→ stdout → journal) et
+jamais par `alerter` (→ e-mail, webhook, journald `-p err`). La fonction
+qui sait parler DEHORS était juste au-dessus. Et rien, sur cette
+machine, ne lit le journal — vérifié : **0 paquet logcheck/logwatch,
+aucune crontab, `OnFailure=` déclaré sur 0 des 31 unités installées**.
+*Un avertissement qui ne va que dans `journalctl` est exactement aussi
+muet que pas d'avertissement — sauf qu'il donne l'impression d'exister.*
+⚠️ Et le corollaire, trouvé en écrivant le correctif : **trois des cinq
+runners n'avaient pas d'`alerter` du tout**, seulement un `pinguer` qui
+ne fait rien quand l'URL manque — or l'URL qui manque EST le sujet de
+l'avertissement. Un dispositif d'alerte ne doit pas dépendre de ce qu'il
+surveille ; celui-ci dépendait de ce dont il annonçait l'absence.
+
+**Piège nº 3 — UN GARDE-FOU QUI CRIE TROP FORT SE FAIT DÉSARMER, DONC
+LE JETON EST LA MOITIÉ DU CORRECTIF.** Câblé sans retenue, le nouveau
+canal aurait envoyé **283 e-mails pour le seul poller** et 20 pour la
+confrontation. Un cri par variable et par jour — et **le jeton s'écrit
+APRÈS l'envoi**, pour que le dispositif échoue OUVERT : un état d'alerte
+cassé rend bruyant, jamais muet. Les deux mutations correspondantes
+(jeton permanent · jeton écrit avant) sont vues par le banc.
+
+**Piège nº 4 — ⛔ ONZE VARIABLES SUR DIX-NEUF NE SE GREPENT PAS.**
+`model-verif/run.sh` CONSTRUIT le nom de son check à partir du mode.
+Chercher des noms littéraux en rate onze d'un coup — c'est arrivé à la
+sonde du 31/08, qui n'en a vu que huit. L'inventaire
+(`tools/bw_inventaire_alertes.sh`) énumère donc les MODES et rejoue la
+translittération ; le banc va plus loin et **extrait la ligne
+`PING_VAR=` de `run.sh` pour l'exécuter**, de sorte qu'un `tr` modifié
+là-bas et pas ici rougit au lieu de diverger en silence.
+
+**Piège nº 5 — UNE MUTATION QUI NE MORD PAS PROUVE ZÉRO, ET DEUX
+L'ONT MONTRÉ.** (a) « garder les commentaires » restait VERT : les deux
+noms morts du 03/08 sont cités entre accents graves, sans `$`, donc le
+motif ne les prend de toute façon pas. La propriété qu'on voulait était
+plus large — *du code MIS EN COMMENTAIRE n'est plus du code* — et il a
+fallu une fixture pour la tester, aucun runner réel ne la portant.
+(b) « retirer le nom du sujet de l'e-mail » restait VERT parce que le
+corps le portait encore ; or c'est la ligne de SUJET qu'on lit dans une
+boîte de réception. *Une assertion trop large est verte pour une raison
+qui n'est pas celle qu'on croit.*
+
+**Piège nº 6 — ⛔ LE MODE 0600 DE CINQ UNITÉS NE PROTÉGEAIT RIEN, ET
+LA PREUVE TIENT DANS UNE MTIME.** Aucune ne porte d'`Environment=`, ni
+d'`EnvironmentFile=`, ni de secret dans son `ExecStart`. Le mode n'est
+pas choisi, il est **hérité de la source par `cp`** — et
+`balise-entretien.service` (0600) et `bw-model-collect.service` (0644)
+portent dans /etc la **même mtime à la nanoseconde**
+(2026-08-09 10:52:57.703437985) : une seule commande, deux modes, donc
+deux sources de modes différents. *Le dépôt portait encore HUIT fichiers
+d'unité en 600 : le stock d'unités illisibles grandissait tout seul, une
+par installation.* ⇒ `chmod 644`, et le déploiement REFUSE désormais de
+partir si une unité du dépôt n'est pas en 644.
+⭐ Corollaire utile : **la taille se lit sans droit de lecture**, le
+sha256 non. Elle ne prouve pas l'égalité des octets et n'entre donc
+jamais dans les verts (règle du L8), mais elle transforme « je ne sais
+rien » en « très probablement conforme » — et pour
+`balise-entretien.service`, les 3 542 o installés sont EXACTEMENT la
+taille du blob git du commit `7c49711` (09/08 10:49:43), unité installée
+3 min 14 s plus tard, seul commit depuis ne touchant que des
+commentaires. *La réserve du lot LD se lève sans jamais appeler sudo.*
+
+---
+
 ## 31/08/2026 (lot LD) — le vérificateur portait l'angle mort de ce qu'il vérifiait
 
 Six fichiers d'unité systemd (`bw-model-tau`, `bw-model-agrume-court`,

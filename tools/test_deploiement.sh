@@ -244,6 +244,31 @@ check "D8  ⛔ un illisible n'est JAMAIS compté IDENTIQUE" \
 check "D9  état inconnu → INCONNU (jamais silencieux)" \
       "$(bw_verdict_unite "$U/normale.service" '' '' '')" "INCONNU"
 
+# ⭐⭐ LOT LV, 01/09 — CE QU'ON PEUT DIRE D'UN FICHIER ILLISIBLE.
+# La taille se lit sans le droit de lecture ; le sha256, non. Ces quatre
+# assertions gardent la frontière : la taille ALLÈGE la réserve, elle ne
+# la lève pas — un illisible n'entre jamais dans les verts.
+TL_N=$(bw_taille "$U/normale.service")
+check "D10 ⭐ illisible + taille IDENTIQUE au dépôt → NON_VERIFIABLE_TAILLE_OK" \
+      "$(bw_verdict_unite "$U/normale.service" ILLISIBLE 99999999999 '' "$TL_N")" "NON_VERIFIABLE_TAILLE_OK"
+check "D11 ⭐ illisible + taille DIFFÉRENTE → NON_VERIFIABLE_ECART (l'écart est réel)" \
+      "$(bw_verdict_unite "$U/normale.service" ILLISIBLE 99999999999 '' "$((TL_N+542))")" "NON_VERIFIABLE_ECART"
+check "D12 ⛔ taille identique ne vaut PAS identique : ça reste une réserve" \
+      "$( [ "$(bw_verdict_unite "$U/normale.service" ILLISIBLE 1 '' "$TL_N")" = IDENTIQUE ] && echo faute || echo non)" "non"
+check "D13 ⓘ sans taille relevée, on retombe sur l'ancien verdict (rétro-compatible)" \
+      "$(bw_verdict_unite "$U/normale.service" ILLISIBLE 1 '')" "NON_VERIFIABLE_ANCIENNE"
+check "D14 ⛔ une taille DIFFÉRENTE prime sur la date : elle prouve plus" \
+      "$(bw_verdict_unite "$U/normale.service" ILLISIBLE 1 '' "$((TL_N+1))")" "NON_VERIFIABLE_ECART"
+
+# ⭐ D15 — LE CAS RÉEL, REJOUÉ SUR LE VRAI FICHIER. `balise-entretien.service`
+# installée fait 3 542 o ; c'est EXACTEMENT la taille du blob git au commit
+# 7c49711 (09/08 10:49:43), et l'unité a été installée à 10:52:57. Le seul
+# commit depuis ne touche que des commentaires. Le contrôle doit donc
+# NOMMER l'écart, pas le taire — et ne pas le confondre avec un identique.
+check "D15 ⭐ le cas balise-entretien.service (3 542 o installés) → ECART nommé" \
+      "$(bw_verdict_unite "traces/entretien/balise-entretien.service" ILLISIBLE 1754729577 '' 3542)" \
+      "NON_VERIFIABLE_ECART"
+
 # ══════════════════════════════════════════════════════════════════════
 # E. LES CIBLES — le nom que porte chaque fichier DANS /etc.
 # ══════════════════════════════════════════════════════════════════════

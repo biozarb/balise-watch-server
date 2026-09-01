@@ -36,6 +36,12 @@ CONTROLE_SEUL=0
 cd "$ICI" || { echo "❌ dépôt introuvable : $ICI" >&2; exit 1; }
 
 dire()  { printf '\n▶ %s\n' "$*"; }
+# ⓘ L'inventaire des variables de canal (lot LV, 01/09) — DÉRIVÉ DU CODE,
+# et partagé avec le banc `tools/test_alertes.sh`. Deux énumérations
+# séparées divergeraient, et celle du contrôle serait toujours la plus
+# vieille : c'est la faute du lot LD, transposée aux alertes.
+# shellcheck source=/dev/null
+. "$ICI/tools/bw_inventaire_alertes.sh"
 echec() { printf '\n❌ %s\n' "$*" >&2; exit 1; }
 
 # ══════════════════════════════════════════════════════════════════════
@@ -200,6 +206,22 @@ if stat -f '%m' . >/dev/null 2>&1; then
 else
   bw_mtime() { stat -c '%Y' "$1"; }          # GNU / Debian
 fi
+# ⚠️ La TAILLE se lit sans DROIT DE LECTURE sur le fichier (les
+# métadonnées suffisent) — c'est ce qui permet, depuis le lot LV, de
+# dire quelque chose des unités en 0600 root sans jamais appeler sudo.
+# ⛔ `wc -c < f` ne marcherait PAS : la redirection, elle, exige le droit
+# de lecture. C'est `stat` qu'il faut, et il ne s'écrit pas pareil des
+# deux côtés.
+if stat -f '%z' . >/dev/null 2>&1; then
+  bw_taille() { stat -f '%z' "$1" 2>/dev/null; }   # BSD / macOS
+else
+  bw_taille() { stat -c '%s' "$1" 2>/dev/null; }   # GNU / Debian
+fi
+if stat -f '%Lp' . >/dev/null 2>&1; then
+  bw_mode()  { stat -f '%Lp' "$1" 2>/dev/null; }   # BSD / macOS
+else
+  bw_mode()  { stat -c '%a'  "$1" 2>/dev/null; }   # GNU / Debian
+fi
 if date -u -r 0 '+%Y' >/dev/null 2>&1; then
   bw_date()  { date -u -r "$1" '+%d/%m/%Y %H:%M'; }   # BSD : -r prend une époque
 else
@@ -215,8 +237,9 @@ fi
 # exactement la faute que ce lot répare.
 #   $1 chemin dans le dépôt · $2 ABSENT|ILLISIBLE|LU
 #   $3 mtime dans /etc (époque, vide si ABSENT) · $4 sha256 dans /etc
+#   $5 TAILLE dans /etc (lot LV, 01/09) — vide si non relevée.
 bw_verdict_unite() {
-  local depot="$1" etat="$2" mt="$3" sha="$4" marque=0
+  local depot="$1" etat="$2" mt="$3" sha="$4" taille="${5:-}" marque=0
   head -30 "$depot" | grep -q '^# bw-deploy: ne-pas-installer' && marque=1
   if [ "$marque" = 1 ]; then
     # ⛔ LE MARQUEUR NE VAUT QUE POUR UNE ABSENCE. S'il est posé sur une
@@ -228,7 +251,26 @@ bw_verdict_unite() {
   fi
   case "$etat" in
     ABSENT)    printf 'MANQUANTE' ;;
-    ILLISIBLE) if [ -n "$mt" ] && [ "$mt" -lt "$(bw_mtime "$depot")" ] 2>/dev/null; then
+    # ⭐⭐ LOT LV, 01/09 — CE QU'ON PEUT DIRE D'UN FICHIER QU'ON N'A PAS
+    # LE DROIT DE LIRE. La taille, elle, se lit sans sudo. Ce n'est pas
+    # l'égalité des octets, et ce fichier ne prétend pas le contraire :
+    # un `NON_VERIFIABLE_TAILLE_OK` reste compté dans la RÉSERVE, jamais
+    # dans les verts (règle du lot L8 : ce qu'on ne peut pas lire n'est
+    # pas vert, il est inconnu). Mais une taille ÉGALE à celle du dépôt
+    # transforme « je ne sais rien » en « très probablement conforme »,
+    # et une taille DIFFÉRENTE nomme un écart réel que la seule date ne
+    # prouvait pas.
+    # ⓘ Mesuré le 01/09 sur les cinq unités en 0600 du VPS : quatre
+    # collent au dépôt à l'octet près ; la cinquième,
+    # `balise-entretien.service`, fait 3 542 o contre 4 084 dans le
+    # dépôt — et 3 542 est EXACTEMENT la taille du blob git au commit
+    # 7c49711 (09/08 10:49:43), installé 3 min 14 s plus tard. Le seul
+    # commit depuis ne touche que des lignes de commentaire.
+    ILLISIBLE) if [ -n "$taille" ] && [ "$taille" = "$(bw_taille "$depot")" ]; then
+                 printf 'NON_VERIFIABLE_TAILLE_OK'
+               elif [ -n "$taille" ]; then
+                 printf 'NON_VERIFIABLE_ECART'
+               elif [ -n "$mt" ] && [ "$mt" -lt "$(bw_mtime "$depot")" ] 2>/dev/null; then
                  printf 'NON_VERIFIABLE_ANCIENNE'
                else printf 'NON_VERIFIABLE'; fi ;;
     LU)        if [ "$sha" = "$(bw_sha "$depot")" ]; then printf 'IDENTIQUE'
@@ -237,10 +279,115 @@ bw_verdict_unite() {
   esac
 }
 
+# ══════════════════════════════════════════════════════════════════════
+#  §2 TER — LES CANAUX D'ALERTE : CE QUE LE CODE LIT ↔ CE QUE LA MACHINE
+#  DÉFINIT.                                        (lot LV, 01/09/2026)
+#
+#  ⛔⛔ POURQUOI. Le 01/09, sur les 29 jours de journal du VPS :
+#  `BW_AGRUME_CONFRONTATION_PING_URL` avait crié « PERSONNE NE SURVEILLE
+#  CETTE CHAÎNE » VINGT JOURS D'AFFILÉE, dès la première passe de son
+#  unité, sans que rien ne remonte. Plusieurs déploiements ont eu lieu
+#  pendant ces vingt jours, tous verts : le déploiement ne regardait pas
+#  la configuration, seulement le code.
+#
+#  ⚠️ IL NE LIT QUE DES NOMS, JAMAIS DES VALEURS, ET C'EST ÉCRIT ICI
+#  NOIR SUR BLANC. La commande distante ci-dessous ne rend que la partie
+#  gauche des affectations : une URL de check ou une adresse ne remonte
+#  jamais dans ce terminal, ni dans les journaux de ce script.
+#
+#  ⛔ ET IL NE REFUSE PAS, contrairement au §2 bis. Deux raisons :
+#    · le trou n'est pas causé par le déploiement — refuser de déployer
+#      LE CORRECTIF parce que la chose à corriger n'est pas corrigée est
+#      un piège d'amorçage, et il bloquerait tout le reste ;
+#    · l'exécution, désormais, est ailleurs : depuis ce lot chaque runner
+#      concerné envoie un e-mail et un push PAR JOUR tant que sa variable
+#      manque (`tools/bw_avertir_config.sh`). Le §2 ter donne la vue
+#      d'ensemble au moment du déploiement ; c'est le runner qui insiste.
+# ══════════════════════════════════════════════════════════════════════
+bw_controle_config_alertes() {
+  dire "canaux d'alerte : ce que le code LIT ↔ ce que le VPS DÉFINIT (noms seuls)"
+  LUES=$(bw_inv_lues "$ICI")
+  [ -n "$LUES" ] || echec "aucune variable de canal trouvée dans le code — l'inventaire est cassé"
+
+  # ⚠️ NOMS SEULS. `grep -o` sur la partie gauche du `=`, rien d'autre.
+  DEFINIES=$(ssh "$VPS" '
+    F="${BW_ALERTES_FILE:-$HOME/.balise-watch-alertes.env}"
+    [ -r "$F" ] || exit 0
+    grep -oE "^[[:space:]]*(export[[:space:]]+)?BW_[A-Z0-9_]+=" "$F" \
+      | grep -oE "BW_[A-Z0-9_]+" | sort -u') \
+    || echec "lecture des NOMS du fichier d'alertes impossible"
+
+  TROUS=""; N_TROU=0; N_SANS_JOB=0; MORTES=""; N_MORTE=0
+  while IFS= read -r V; do
+    [ -n "$V" ] || continue
+    printf '%s\n' "$DEFINIES" | grep -qxF "$V" && continue
+    # ⛔ NE PAS CRIER AU LOUP : `collect-p2` et `tau` sont des modes réels
+    # dont l'unité porte « ne-pas-installer ». Leur variable n'est pas un
+    # trou, c'est un mode sans job. Un contrôle qui rougit deux fois à
+    # chaque passage finit ignoré — piège nº 4 du lot LD.
+    MODE=$(printf '%s' "$V" | sed -n 's/^BW_MODEL_\(.*\)_PING_URL$/\1/p' \
+           | tr '[:upper:]_' '[:lower:]-')
+    if [ -n "$MODE" ] && ! bw_inv_mode_installable "$ICI" "$MODE"; then
+      N_SANS_JOB=$((N_SANS_JOB+1)); continue
+    fi
+    N_TROU=$((N_TROU+1)); TROUS="$TROUS
+      ⛔ TROU  $V — lue par un runner, ABSENTE du fichier d'alertes du VPS.
+         Le job tourne et il est INVISIBLE. Il le dira par e-mail une fois par jour."
+  done <<< "$LUES"
+
+  while IFS= read -r V; do
+    [ -n "$V" ] || continue
+    printf '%s\n' "$LUES" | grep -qxF "$V" && continue
+    N_MORTE=$((N_MORTE+1)); MORTES="$MORTES
+      ⚠️ MORTE $V — définie sur le VPS, lue par AUCUN runner.
+         Une variable morte donne l'illusion d'une surveillance qui n'existe pas."
+  done <<< "$DEFINIES"
+
+  echo "  ✓ $(printf '%s\n' "$LUES" | wc -l | tr -d ' ') variables lues par le code  ·  $(printf '%s\n' "$DEFINIES" | wc -l | tr -d ' ') définies sur le VPS  ·  ⓘ $N_SANS_JOB mode(s) sans job installé"
+  if [ -n "$TROUS" ]; then
+    printf '%s\n' "$TROUS"
+    echo "      ⓘ Geste : créer le check chez Healthchecks, puis ajouter la ligne
+         dans ~/.balise-watch-alertes.env. Rien ici ne peut le faire à votre place :
+         ce script ne lit que des NOMS, et n'écrit jamais dans ce fichier."
+  else
+    echo "  ✓ aucun trou : toute variable lue par un job installé est définie"
+  fi
+  [ -n "$MORTES" ] && printf '%s\n' "$MORTES"
+  return 0
+}
+
 bw_controle_unites() {
   dire "dépôt ↔ /etc/systemd/system (lecture seule, sans sudo)"
   CIBLES="$(bw_cibles_etc)"
   [ -n "$CIBLES" ] || echec "aucune unité trouvée dans le dépôt — le filtre du §0 est cassé"
+
+  # ⛔⛔ LOT LV, 01/09 — TARIR LA SOURCE DES UNITÉS ILLISIBLES.
+  # Cinq unités installées sont en 0600 root, donc non comparables. La
+  # sonde du 01/09 a établi que ce mode ne protège RIEN : aucune ne porte
+  # d'`Environment=` ni d'`EnvironmentFile=`, et aucun secret dans son
+  # `ExecStart`. Il n'est pas choisi, il est SUBI — `cp` crée le fichier
+  # avec le mode de la SOURCE masqué par l'umask, et la preuve tient en
+  # une ligne : `balise-entretien.service` (0600) et
+  # `bw-model-collect.service` (0644) portent dans /etc la MÊME mtime À
+  # LA NANOSECONDE (2026-08-09 10:52:57.703437985) — une seule commande,
+  # deux modes, donc deux sources de modes différents.
+  # ⇒ Le dépôt portait encore HUIT fichiers d'unité en 600 le 01/09. Tant
+  #   qu'ils y sont, la prochaine installation FABRIQUE une nouvelle
+  #   unité illisible : le stock de cinq grandit tout seul. On refuse
+  #   ici, parce qu'un avertissement de plus serait un avertissement de
+  #   plus que personne ne lit — c'est le sujet même de ce lot.
+  MODES_ANORMAUX=$(printf '%s\n' "$CIBLES" | cut -d'|' -f1 | while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      m=$(bw_mode "$f")
+      [ "$m" = "644" ] || printf '      ⛔ %s est en %s dans le dépôt\n' "$f" "$m"
+    done)
+  if [ -n "$MODES_ANORMAUX" ]; then
+    printf '%s\n' "$MODES_ANORMAUX"
+    echec "des fichiers d'unité du dépôt ne sont pas en 644.
+      Une unité installée depuis une source en 600 devient illisible sans sudo,
+      et sort définitivement du contrôle « dépôt ↔ /etc » (cinq y sont déjà).
+      Geste : chmod 644 sur les fichiers nommés ci-dessus, puis relancer."
+  fi
 
   # Une seule connexion : pour chaque cible, l'état vu depuis le VPS.
   #   <nom sous /etc>|ABSENT|| · |ILLISIBLE|<mtime>| · |LU|<mtime>|<sha256>
@@ -248,9 +395,9 @@ bw_controle_unites() {
     cd /etc/systemd/system || exit 1
     while IFS= read -r c; do
       [ -n "$c" ] || continue
-      if   [ ! -e "$c" ]; then printf "%s|ABSENT||\n" "$c"
-      elif [ ! -r "$c" ]; then printf "%s|ILLISIBLE|%s|\n" "$c" "$(date -u -r "$c" +%s)"
-      else printf "%s|LU|%s|%s\n" "$c" "$(date -u -r "$c" +%s)" "$(sha256sum "$c" | cut -d" " -f1)"
+      if   [ ! -e "$c" ]; then printf "%s|ABSENT|||\n" "$c"
+      elif [ ! -r "$c" ]; then printf "%s|ILLISIBLE|%s||%s\n" "$c" "$(date -u -r "$c" +%s)" "$(stat -c "%s" "$c" 2>/dev/null)"
+      else printf "%s|LU|%s|%s|%s\n" "$c" "$(date -u -r "$c" +%s)" "$(sha256sum "$c" | cut -d" " -f1)" "$(stat -c "%s" "$c" 2>/dev/null)"
       fi
     done') || echec "lecture de /etc/systemd/system impossible"
 
@@ -262,7 +409,8 @@ bw_controle_unites() {
     ETAT=$(printf '%s' "$LIGNE" | cut -d'|' -f2)
     MT=$(printf '%s'   "$LIGNE" | cut -d'|' -f3)
     SHA=$(printf '%s'  "$LIGNE" | cut -d'|' -f4)
-    case "$(bw_verdict_unite "$DEPOT" "$ETAT" "$MT" "$SHA")" in
+    TAILLE=$(printf '%s' "$LIGNE" | cut -d'|' -f5)
+    case "$(bw_verdict_unite "$DEPOT" "$ETAT" "$MT" "$SHA" "$TAILLE")" in
       IDENTIQUE) N_OK=$((N_OK+1)) ;;
       VOULUE)    N_VOULUE=$((N_VOULUE+1)); VOULUES="$VOULUES
       ⓘ $NOM — absente de /etc, ET C'EST LA DÉCISION (marqueur dans son en-tête)" ;;
@@ -273,6 +421,16 @@ bw_controle_unites() {
       MARQUEUR_PERIME) N_RESERVE=$((N_RESERVE+1)); RESERVE="$RESERVE
       ⚠️ MARQUEUR PÉRIMÉ $NOM — porte « ne-pas-installer » alors qu'elle EST installée.
          Retirer la ligne de $DEPOT : un marqueur qui ment éteint le contrôle sur une unité vivante." ;;
+      NON_VERIFIABLE_TAILLE_OK) N_RESERVE=$((N_RESERVE+1)); RESERVE="$RESERVE
+      ⚠️ NON VÉRIFIABLE  $NOM — installée en 0600 root, MAIS taille identique au dépôt ($TAILLE o).
+         Très probablement conforme ; l'égalité des octets reste hors de portée sans sudo." ;;
+      NON_VERIFIABLE_ECART) N_RESERVE=$((N_RESERVE+1)); RESERVE="$RESERVE
+      ⛔ NON VÉRIFIABLE  $NOM — illisible sans sudo, ET LA TAILLE DIFFÈRE :
+         $TAILLE o installés contre $(bw_taille "$DEPOT") o dans le dépôt (installée le $(bw_date "$MT"),
+         dépôt du $(bw_date "$(bw_mtime "$DEPOT")")). L'écart est RÉEL, sa nature est inconnue.
+         ⓘ Avant d'écraser : chercher la taille dans l'historique git du fichier
+            (git log --format=%h -- <dépôt> puis git show <sha>:<chemin> | wc -c).
+            Si elle tombe sur un commit connu, l'écart est daté et le diff se lit sans sudo." ;;
       NON_VERIFIABLE) N_RESERVE=$((N_RESERVE+1)); RESERVE="$RESERVE
       ⚠️ NON VÉRIFIABLE  $NOM — installée en 0600 root, illisible sans sudo. Ni verte, ni rouge : INCONNUE." ;;
       NON_VERIFIABLE_ANCIENNE) N_RESERVE=$((N_RESERVE+1)); RESERVE="$RESERVE
@@ -308,7 +466,8 @@ bw_controle_unites() {
 
 if [ "$CONTROLE_SEUL" -eq 1 ]; then
   bw_controle_unites
-  dire "✅ contrôle des unités terminé — RIEN n'a été transporté, écrit ni redémarré"
+  bw_controle_config_alertes
+  dire "✅ contrôle des unités ET des canaux terminé — RIEN n'a été transporté, écrit ni redémarré"
   exit 0
 fi
 
@@ -438,6 +597,7 @@ echo "  ✓ identique des deux côtés ($(printf '%s\n' "$LOCAL_SUM" | wc -l | t
 #                   installée le 09/08, dépôt du 22/08 (lot S0.4).
 # ══════════════════════════════════════════════════════════════════════
 bw_controle_unites
+bw_controle_config_alertes
 
 # ══════════════════════════════════════════════════════════════════════
 # 3. LES BANCS, SUR LE VPS — pas seulement sur le Mac. Le VPS a son
@@ -623,10 +783,21 @@ ssh "$VPS" '
 # ⓘ Installer reste donc une action de Yann, à la main, une fois — mais
 #   elle n'est plus INVISIBLE : le §2 bis nomme chaque unité qui manque.
 # ══════════════════════════════════════════════════════════════════════
+BILAN="✅ déploiement terminé — code ET unités à jour sur le VPS, bancs verts, services redémarrés"
 if [ -n "$RESERVE" ]; then
-  dire "✅ déploiement terminé — code ET unités à jour sur le VPS, bancs verts, services redémarrés
+  BILAN="$BILAN
    ⚠️ AVEC RÉSERVE : $N_RESERVE unité(s) installée(s) n'ont PAS pu être comparées (0600 root,
       illisibles sans sudo). Elles ne sont pas vertes ; elles sont inconnues. Voir le §2 bis."
-else
-  dire "✅ déploiement terminé — code ET unités à jour sur le VPS, bancs verts, services redémarrés"
 fi
+# ⛔ LOT LV — LE TROU DE CONFIGURATION EST LA DERNIÈRE LIGNE DE L'ÉCRAN,
+# pas une ligne au milieu d'un rsync de 200 fichiers. C'est tout ce qui
+# distingue un avertissement lu d'un avertissement émis, et vingt jours
+# de cris ont prouvé que la distinction n'est pas rhétorique.
+if [ "${N_TROU:-0}" -gt 0 ]; then
+  BILAN="$BILAN
+   ⛔ ET $N_TROU JOB(S) TOURNENT SANS SURVEILLANCE : une variable de canal lue par
+      un runner installé n'est pas définie sur le VPS. Voir le §2 ter ci-dessus.
+      Tant qu'elle manque, le job envoie un e-mail par jour — et rien d'autre ne
+      dira qu'il s'est arrêté."
+fi
+dire "$BILAN"
