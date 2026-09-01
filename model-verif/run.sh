@@ -57,8 +57,8 @@ set -uo pipefail
 
 MODE="${1:-}"
 case "$MODE" in
-  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome) ;;
-  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome" >&2
+  collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome|oracle) ;;
+  *) echo "usage: run.sh collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome|oracle" >&2
      exit 2 ;;
 esac
 
@@ -168,6 +168,24 @@ case "$MODE" in
   # porter un second chemin pour un seul mode.
   tau)            SCRIPT="$ICI/controle_tau.py"
                   LIBELLE="controle tau inter-populations" ;;
+  # ⭐ L'ORACLE BATCH MENSUEL (lot L12, 01/09/2026). Comme `tau`, il
+  # N'ARCHIVE RIEN ET NE GARDE RIEN : il relit les archives, relit la
+  # base, et dépose un rapport.
+  #
+  # ⛔ IL VIT DANS `tools/`, COMME `garde-fou-r2`, ET PAS ICI — parce
+  # qu'il ne doit RIEN partager avec ce dossier. Un oracle qui importe
+  # le code testé compare la faute à elle-même : le poser à côté de
+  # `scoring.py` rendrait l'import d'une ligne trop facile le jour où
+  # quelqu'un voudra « réutiliser la médiane ». Il porte en plus un
+  # garde-fou qui refuse de démarrer si un module de la chaîne est
+  # chargé — mais la distance physique coûte zéro et se voit.
+  #
+  # ⓘ Il prend `--out` avec le MÊME sens que tous les autres jobs (la
+  # racine de l'état et des archives) et en dérive le chemin de son
+  # rapport. Aucun drapeau `EXTRA` : sa fenêtre de 30 jours est son
+  # défaut, et un `run.sh oracle --jours 7` la déplace à la main.
+  oracle)         SCRIPT="$ICI/../tools/oracle_scoring.py"
+                  LIBELLE="oracle batch du scoring" ;;
 esac
 if [[ ! -f "$SCRIPT" ]]; then
   echo "job introuvable : $SCRIPT" >&2; exit 2
@@ -290,6 +308,29 @@ elif [[ "$MODE" == "tau" ]]; then
   # personne ne s'est aperçu. C'est ça qu'on veut apprendre, et rien
   # avant.
   SEUIL_ALERTE=3
+elif [[ "$MODE" == "oracle" ]]; then
+  # ⓘ MESURÉ le 01/09 sur le VPS : 63 s par journée notée (trois
+  # archives d'émission relues, ~58 000 balise-jours recalculés) plus
+  # ~59 appels PostgREST par journée. 25 journées ⇒ ~35 min. 60 min de
+  # garde laissent la place à une base lente sans jamais laisser
+  # traîner un processus oublié.
+  # ⚠️ CE CHIFFRE EST UN COÛT PAR JOURNÉE, PAS UN FORFAIT : le jour où
+  # la fenêtre passera à 60 jours, ce chien de garde devra suivre. Il
+  # est écrit ici pour qu'on n'ait pas à le redécouvrir.
+  MAX_MINUTES="${BW_MODEL_ORACLE_MAX_MINUTES:-60}"
+  # ⛔ SEUIL_ALERTE=1, ET C'EST LE CONTRAIRE DE `tau`, QUI EST À 3.
+  # Le raisonnement de `tau` (« il ne garde rien, il se rejoue à
+  # l'identique, trois échecs valent un mois de silence ») s'applique
+  # mot pour mot ICI AUSSI — sauf que ce job-ci ne tourne qu'UNE FOIS
+  # PAR MOIS. Deux échecs consécutifs valent donc DEUX MOIS de silence
+  # sur le seul contrôle qui regarde la fenêtre, c'est-à-dire un oracle
+  # mort dont personne ne s'est aperçu. C'est exactement la panne que
+  # le lot LV vient de nommer sur cinq unités.
+  # ⚠️ Et son code de sortie 1 n'est PAS une panne du job : c'est son
+  # VERDICT (« la base et l'archive ne disent pas la même chose »). Les
+  # deux passent par la même alerte, à dessein — on veut être réveillé
+  # dans les deux cas, et le rapport déposé dit lequel des deux c'est.
+  SEUIL_ALERTE=1
 elif [[ "$MODE" == "garde-fou-r2" ]]; then
   # Un listing complet des buckets, rien de plus. 10 min est déjà très
   # large ; si un jour ça dépasse, c'est que le compte a explosé — et

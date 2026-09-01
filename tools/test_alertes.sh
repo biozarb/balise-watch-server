@@ -44,10 +44,10 @@ trap 'chmod -R u+w "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 # ══════════════════════════════════════════════════════════════════════
 echo "▶ A. l'inventaire des variables lues"
 
-check "A1  les 11 modes de run.sh sont énumérés" \
-      "$(bw_inv_modes "$RACINE" | wc -l | tr -d ' ')" "11"
-check "A2  ⭐ les 11 noms CONSTRUITS sont reconstitués" \
-      "$(bw_inv_construites "$RACINE" | wc -l | tr -d ' ')" "11"
+check "A1  les 12 modes de run.sh sont énumérés" \
+      "$(bw_inv_modes "$RACINE" | wc -l | tr -d ' ')" "12"
+check "A2  ⭐ les 12 noms CONSTRUITS sont reconstitués" \
+      "$(bw_inv_construites "$RACINE" | wc -l | tr -d ' ')" "12"
 check "A3  le mode à tirets devient un nom de variable VALIDE" \
       "$(bw_inv_construites "$RACINE" | grep -c 'BW_MODEL_GARDE_FOU_R2_PING_URL' | tr -d ' ')" "1"
 check "A4  ⛔ et JAMAIS un nom à tirets (l'expansion rendrait vide)" \
@@ -65,8 +65,8 @@ check "A5  ⭐ l'inventaire == ce que run.sh CALCULE réellement, mode par mode"
       "$(diff <(printf '%s\n' "$CALCULES") <(bw_inv_construites "$RACINE" | sort -u) >/dev/null && echo identique || echo DIVERGENT)" \
       "identique"
 
-check "A6  19 variables de canal lues au total" \
-      "$(bw_inv_lues "$RACINE" | wc -l | tr -d ' ')" "19"
+check "A6  20 variables de canal lues au total" \
+      "$(bw_inv_lues "$RACINE" | wc -l | tr -d ' ')" "20"
 check "A7  ⛔ un nom cité SEULEMENT en commentaire n'est pas 'lu'" \
       "$(bw_inv_lues "$RACINE" | grep -cE '^(BW_PING_FAIL_URL|BW_MAIL_TO)$' | tr -d ' ')" "0"
 
@@ -133,9 +133,17 @@ check "C5  ⛔ un mode dont l'unité porte le marqueur n'est PAS installable" \
       "$(bw_inv_mode_installable "$RACINE" tau && echo installable || echo non)" "non"
 check "C6  ⛔ et un mode VIVANT l'est (sinon le contrôle se tairait sur tout)" \
       "$(bw_inv_mode_installable "$RACINE" agrume-quart && echo installable || echo non)" "installable"
-check "C7  les deux seuls modes sans job sont collect-p2 et tau" \
+# ⭐ 01/09 (lot L12) : `oracle` rejoint les deux autres. Un mode dont
+# l'unité porte « bw-deploy: ne-pas-installer » est un mode SANS JOB —
+# le canal d'alerte qu'il construit (`BW_MODEL_ORACLE_PING_URL`) n'a
+# donc pas à exister aujourd'hui, et son absence n'est pas un trou.
+# ⚠️ Cette liste est ce qui empêche l'inverse : le jour où l'unité
+# s'installe sans qu'on retire son marqueur, ce banc rougit — et sans
+# lui, le job tournerait un mois durant en disant « PERSONNE NE
+# SURVEILLE » dans un journal que rien ne lit (lot LV).
+check "C7  les trois seuls modes sans job sont collect-p2, tau et oracle" \
       "$(for M in $(bw_inv_modes "$RACINE"); do bw_inv_mode_installable "$RACINE" "$M" || printf '%s ' "$M"; done)" \
-      "collect-p2 tau "
+      "collect-p2 tau oracle "
 
 check "C4  chaque runner a un repli si l'outillage manque (jamais de mort en prod)" \
       "$(grep -l 'bw_avertir_config() { :; }' model-verif/run.sh traces/infoclimat/poller.sh \
@@ -276,8 +284,8 @@ NON644=$(find . -name '*.service' -o -name '*.timer' \
   | grep -v node_modules | grep -v _to_delete \
   | while IFS= read -r f; do [ "$(bw_mode "$f")" = "644" ] || printf '%s ' "$f"; done)
 check "E1  ⭐ AUCUN fichier d'unité du dépôt n'est en 600" "$(printf '%s' "$NON644")" ""
-check "E2  ⓘ et il y en a bien 35 à vérifier (le périmètre n'a pas fondu)" \
-      "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "35"
+check "E2  ⓘ et il y en a bien 37 à vérifier (le périmètre n'a pas fondu)" \
+      "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "37"
 fi
 
 # ══════════════════════════════════════════════════════════════════════

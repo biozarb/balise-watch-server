@@ -1,0 +1,81 @@
+[Unit]
+# bw-deploy: ne-pas-installer
+#   ⓘ Lu par `tools/deploy-agrume-vps.sh` (§2 bis, lot LD du 31/08/2026).
+#   Sans cette ligne, le contrôle « dépôt ↔ /etc » signalerait cette unité
+#   comme MANQUANTE à chaque déploiement — alors que son absence est la
+#   décision, écrite juste en dessous. ⛔ Retirer cette ligne le jour où
+#   l'unité est installée pour de bon — pas avant, pas après.
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ UNITÉ PROPOSÉE, PAS INSTALLÉE.
+#      (lot L12, 01/09/2026 — l'oracle batch mensuel, audit §4.7)
+#
+#  Le mode `run.sh oracle` EXISTE depuis le 01/09 : ce couple
+#  service/timer est fonctionnel, et l'installer est un `cp` + un
+#  `enable`. Ce qui manque n'est pas du code, c'est une décision de
+#  Yann — le prompt du lot dit « PROPOSER (pas installer) un timer
+#  mensuel », et c'est ce que fait ce fichier.
+#
+#  ⛔ ET IL PASSE PAR `run.sh`, JAMAIS À CÔTÉ. Même raison que pour
+#  `bw-model-tau.service`, et une de plus qui lui est propre :
+#    · `source ~/.balise-watch-r2.env` PUIS
+#      `~/.balise-watch-model-verif.env` — écrits en `export VAR=…`,
+#      donc illisibles par `EnvironmentFile=` ;
+#    · le VERROU, le COMPTEUR D'ÉCHECS CONSÉCUTIFS et le CANAL
+#      D'ALERTE. ⚠️ C'est CE point-là qui a tranché entre les deux
+#      formes possibles de ce lot. Un oracle sans oreille est
+#      exactement la panne que le lot LV vient de nommer : un détecteur
+#      qui parle tous les jours dans un journal que personne ne lit.
+#      Un oracle MENSUEL sans oreille serait pire — il parlerait douze
+#      fois par an.
+#
+#  ═══ CE QUE SON CODE DE SORTIE VEUT DIRE ═══
+#
+#  ⚠️ 1 N'EST PAS UNE PANNE DU JOB, C'EST SON VERDICT : « la base et
+#  l'archive ne disent pas la même chose ». `run.sh` le traitera comme
+#  un échec et alertera — c'est voulu, on veut être réveillé dans les
+#  deux cas, et le rapport déposé
+#  (`/var/lib/bw-model-verif/oracle-scoring-<jour>.txt`) dit lequel des
+#  deux c'est, écart par écart, balise par balise.
+#
+#  ═══ ET IL FAUT UN CANAL ═══
+#
+#  ⚠️ `BW_MODEL_ORACLE_PING_URL` doit exister dans
+#  `~/.balise-watch-alertes.env` AVANT l'installation. Sans lui,
+#  `run.sh` dira « PERSONNE NE SURVEILLE CE JOB » à chaque passage —
+#  et un job qui ne tourne qu'une fois par mois est SILENCIEUX par
+#  nature : c'est Healthchecks qui voit qu'il n'est pas parti, personne
+#  d'autre.
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — oracle batch du scoring (mensuel, lot L12)
+Documentation=file:///home/debian/balise-watch/balise-watch-server/model-verif/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/run.sh oracle
+# ⓘ `run.sh` passe `--out /var/lib/bw-model-verif` comme à tous ses
+# jobs ; `oracle_scoring.py` en dérive le chemin de son rapport
+# (`oracle-scoring-<jour>.txt`) et la racine des archives. Aucun
+# drapeau à ajouter ici — sa fenêtre de 30 jours est son défaut.
+#
+# ⓘ MESURÉ le 01/09 sur le VPS : 63 s par journée notée à pleine
+# population (58 328 balise-jours recalculés depuis trois archives
+# d'émission), 18 s sur les journées d'août les plus maigres, et
+# ~59 appels PostgREST par journée. 25 journées ⇒ ~35 min. Le chien de
+# garde de `run.sh` est à 60 min ; ce `TimeoutStartSec` est au-dessus,
+# pour que ce soit `run.sh` qui constate l'échec et ALERTE, et non
+# systemd qui tue tout sans que personne ne l'apprenne.
+TimeoutStartSec=70min
+# ⛔ LA MÉMOIRE EST MESURÉE, PAS ESPÉRÉE : RSS plat autour de 100 Mo sur
+# 25 journées, parce que chaque journée est relâchée dès qu'elle est
+# confrontée (`AccumulateurCases`). C'est 3,5 % du `MAX_RSS_MO` de la
+# notation, et ça n'augmente pas avec la fenêtre — seul l'accumulateur
+# de cases grandit, et il ne porte que des flottants.
+# ⚠️ Si un jour ce chiffre monte, c'est que quelqu'un a remis les
+# journées en mémoire pour « traiter à la fin ». C'est la faute du
+# 28/08, et elle a coûté une nuit entière.
+
+[Install]
+WantedBy=multi-user.target

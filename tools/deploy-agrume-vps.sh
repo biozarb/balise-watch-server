@@ -624,7 +624,21 @@ PY="\${BW_PYTHON:-\$HOME/venv-balise/bin/python3}"
 # tournait pas au déploiement. Trois fausses alertes en une semaine, et
 # à chaque fois le correctif partait sur le Mac sans que rien ne le
 # revérifie sur le VPS.
-for B in tools/test_mf_s3.py tools/test_audit_r2.py agrume/test_orographie.py \\
+# ⭐ \`tools/test_oracle_scoring.py\` AJOUTÉ LE 01/09 (lot L12), ET IL A
+# UNE RAISON DE TOURNER **ICI** QUE LES AUTRES N'ONT PAS. Son banc de
+# parité compare les constantes que l'oracle TRANSCRIT À LA MAIN
+# (demi-fenêtre, plancher, seuil de girouette, quorum de case, chaîne de
+# repli, classes d'échéance) à celles que \`scoring.py\` et \`score.py\`
+# portent **SUR CETTE MACHINE-CI**. Une divergence entre le dépôt du Mac
+# et le code du VPS sur l'une de ces valeurs ferait, en production, un
+# oracle qui crie tous les mois pour rien — et un oracle qu'on n'écoute
+# plus est un oracle perdu. C'est exactement le genre d'écart qu'un
+# sha256 ne voit pas, puisque les deux fichiers seraient chacun
+# cohérents avec eux-mêmes.
+# ⓘ Rejoué vert sur le VPS le 01/09 AVANT cet ajout (17 bancs) — on
+# n'ajoute pas un banc à cette liste sans l'avoir vu passer.
+for B in tools/test_mf_s3.py tools/test_audit_r2.py \\
+         tools/test_oracle_scoring.py agrume/test_orographie.py \\
          verif/test_colonnes.py verif/test_separation.py verif/test_purge.py \\
          verif/test_confronter_quotidien.py agrume/test_grille.py \\
          agrume/test_profil.py agrume/test_radiosondage.py agrume/test_transect.py \\
@@ -635,7 +649,7 @@ for B in tools/test_mf_s3.py tools/test_audit_r2.py agrume/test_orographie.py \\
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
 done
-echo "  ✓ 19/19 bancs Python verts sur le VPS"
+echo "  ✓ 20/20 bancs Python verts sur le VPS"
 
 # ⛔ 27/08 — ET LES BANCS DE \`model-verif/\`, QUI N'AVAIENT JAMAIS
 # TOURNÉ ICI. Le 26/08 au soir, ce script ne SYNCHRONISAIT même pas

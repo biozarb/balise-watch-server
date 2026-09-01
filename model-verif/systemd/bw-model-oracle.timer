@@ -1,0 +1,53 @@
+[Unit]
+# bw-deploy: ne-pas-installer
+#   ⓘ Lu par `tools/deploy-agrume-vps.sh` (§2 bis, lot LD du 31/08/2026).
+#   ⛔ Retirer cette ligne le jour où le timer est installé pour de bon.
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ TIMER PROPOSÉ, PAS INSTALLÉ (lot L12, 01/09/2026).
+#
+#  ⛔ MENSUEL, ET C'EST LA CADENCE QUE L'AUDIT DEMANDE (§4.7 : « oracle
+#  mensuel du pipeline incrémental »), pas une économie de calcul. La
+#  question à laquelle ce job répond — « la fenêtre glissante et les
+#  accumulateurs ont-ils dérivé ? » — n'a pas de sens à l'échelle du
+#  jour : le contrôle n°2 (`recalcul_balise_jour.py`) la pose déjà
+#  chaque nuit sur UNE journée, et il coûte 6 s. Ce qui manquait était
+#  l'échelle du MOIS, et il n'y a rien à gagner à la poser plus souvent
+#  qu'un mois — deux fenêtres de 30 jours à un jour d'écart partagent
+#  29 jours sur 30, et mesurer leur accord mesurerait surtout ce
+#  recouvrement (la leçon d'`inference.rank_stability`, déjà appliquée
+#  à la cadence de `bw-model-tau.timer`).
+#
+#  ⚠️ LE 1ᵉʳ DU MOIS, ET PAS UN JOUR AU HASARD : `oracle_scoring.py`
+#  prend « hier » par défaut, donc le rapport du 1ᵉʳ couvre le dernier
+#  jour du mois écoulé et les 29 qui le précèdent. Un rapport mensuel
+#  qui déborde sur deux mois serait illisible dès la deuxième lecture.
+#
+#  ⚠️ 08:30 UTC : APRÈS toute la chaîne de la nuit — notation (03:56 →
+#  ~06:30 mesuré le 29/08), `bw-model-arome` (07:00 Z depuis le 30/08),
+#  `bw-garde-fou-r2` (06:34). Il lit une base et des archives que plus
+#  personne n'écrit, et il a 35 min de travail devant lui.
+#
+#  L'activation reste un geste séparé du déploiement :
+#      sudo cp /tmp/bw-model-oracle.{service,timer} /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now bw-model-oracle.timer
+#      systemctl list-timers bw-model-oracle.timer --no-pager
+# ══════════════════════════════════════════════════════════════════════
+Description=Balise Watch — oracle batch du scoring (mensuel, lot L12)
+
+[Timer]
+# ⚠️ `UTC` EXPLICITE, comme tous les autres timers du projet — sinon
+# `OnCalendar` suit l'heure locale du VPS et glisse d'une heure deux
+# fois par an.
+OnCalendar=*-*-01 08:30:00 UTC
+RandomizedDelaySec=600
+# ⛔ `Persistent=false`, comme `bw-model-tau.timer` et pour la même
+# raison : rien ne se perd si le VPS était éteint le 1ᵉʳ. La base et
+# les archives restent, et le contrôle se rejoue à l'identique à la
+# main (`run.sh oracle --day 2026-09-30`). Rattraper au démarrage ne
+# ferait qu'écrire un rapport daté d'aujourd'hui sur une fenêtre
+# d'avant-hier.
+Persistent=false
+
+[Install]
+WantedBy=timers.target
