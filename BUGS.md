@@ -6,6 +6,60 @@
 
 ---
 
+## 01/09/2026 (lot L13) — « deux fois de suite » n'est pas « structurel »
+
+Le lot partait avec « la moitié du chemin faite » : l'audit avait écrit
+que le HTTP 500 de la purge `model_character` s'était reproduit deux
+nuits d'affilée, donc **« structurel, pas transitoire — la question est
+tranchée »**. Le premier geste du lot a été de relire le journal du VPS
+en entier. Il ne l'était pas.
+
+**Piège nº 1 — ⛔⛔ DEUX OCCURRENCES NE FONT PAS UNE LOI.** Trois
+`HTTP 500` sur **huit** runs complets (26, 27 et 29/08), **plus un seul
+depuis le 30/08**, et pas une ligne de code n'a bougé entre-temps.
+Aucune corrélation avec le volume écrit : la nuit la plus lourde
+(722 602 lignes) échoue, la suivante (653 625) passe. Rejoué à la main
+le 01/09, le MÊME `DELETE` rend `204` en 1,27 s. *« Deux fois » est un
+échantillon, pas une propriété — et un acquis écrit en gras dans un
+document se recopie de lot en lot sans que personne le remesure.*
+
+**Piège nº 2 — ⛔ ON NE PEUT PAS DIAGNOSTIQUER CE QU'ON N'IMPRIME PAS.**
+`Supabase.delete` n'écrivait que `HTTP {code}`. `_page` lisait le corps
+depuis le 25/08, `insert` depuis le 28/08 — `delete` était le dernier
+muet de la classe, et c'est précisément lui qui échouait. Résultat :
+`57014` (délai dépassé) est resté cinq jours en « hypothèse forte », ni
+confirmée ni écartée. *Quand une correction de journalisation est faite
+« partout », vérifier la liste : l'endroit oublié est souvent celui qui
+en avait besoin.*
+
+**Piège nº 3 — ⛔ UN `else` QUI NOMME UN FICHIER SE LIT COMME UNE
+CONSIGNE.** `_pour_la_base` déduisait le `.sql` à jouer par une cascade
+de sets terminée par `else: "supabase_step40_lot_g.sql"`. Ce n'était pas
+une connaissance, c'était un repli — mais il imprimait un nom précis,
+et le nom a été suivi : « rejouer step40 » pour `rank_corr`, un fichier
+passé depuis le 07/08 et idempotent, alors qu'il fallait ÉCRIRE le
+step52. *Un repli doit dire « je ne sais pas », jamais un nom
+plausible.* Remplacé par une table extraite des `.sql` eux-mêmes, avec
+un troisième cas « migration À ÉCRIRE » qui ne nomme aucun fichier.
+
+**Piège nº 4 — ⚠️ « JE NE SAIS PAS » N'EST PAS « ZÉRO ».** Le garde-fou
+neuf compte avant de supprimer. Écrit `if not compte:` au lieu de
+`if compte == 0:`, un compte qui échoue annule la purge **en silence**,
+pour toujours — et ça ne se verrait qu'en mars 2027, quand la table
+cesserait de maigrir. La mutation qui le prouve est dans
+`mutations_l13_ops.py`.
+
+**Piège nº 5 — ⚠️ UN BANC QUI DIT MOINS QUE CE QU'IL CROIT.** Le banc
+du lot L9a posait un schéma factice où les colonnes du lot G manquaient
+aussi, et exigeait « step40 n'est pas nommé ». C'était vrai — mais
+seulement parce que l'ancien code s'arrêtait au premier fichier de sa
+cascade. Dès que le code s'est mis à nommer TOUS les fichiers
+concernés, l'assertion est devenue fausse **pour la bonne raison**.
+*Un banc vert peut certifier une incomplétude ; il faut lire ce que le
+schéma du banc décrit vraiment.*
+
+---
+
 ## 01/09/2026 (lot LR) — `score --day` republiait le classement DU JOUR
 
 Trouvé par l'oracle du lot L12, qui cherchait autre chose : il a relevé

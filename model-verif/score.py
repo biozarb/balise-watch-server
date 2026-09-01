@@ -1042,7 +1042,61 @@ class Supabase:
         self.ecritures += n
         return n
 
+    def compte(self, table: str, query: str = "") -> int | None:
+        """Combien de lignes ce filtre concerne, sans en rapatrier une seule.
+
+        `HEAD` + `Prefer: count=exact` : PostgREST met le total dans
+        `content-range` (`*/0` quand rien ne correspond) et ne rend
+        aucun corps. Mesuré le 01/09/2026 sur `model_character`
+        (1 223 107 lignes) : 1,3 s sans filtre, 3,0 s avec
+        `last_day=lt.…`. ⚠️ Le filtre RALENTIT la requête au lieu de
+        l'accélérer — signature d'une colonne sans index utilisable,
+        déjà mesurée le 27/08 sur 942 832 lignes (5,3 s contre 1,4 s).
+
+        ⚠️ REND `None` QUAND LE SERVEUR REFUSE, ET EN DRY-RUN : c'est
+        « je ne sais pas », pas « zéro ». L'appelant doit distinguer
+        les deux — les confondre ferait sauter une purge en silence, et
+        le silence est précisément ce qu'on répare ici.
+        """
+        if self.dry_run:
+            return None
+        req = self._req(f"{table}{query}", "HEAD", None,
+                        {"Prefer": "count=exact", "Range-Unit": "items",
+                         "Range": "0-0"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                entete = r.headers.get("content-range") or ""
+        except urllib.error.HTTPError as e:
+            print(f"  ⚠️ compte {table} : HTTP {e.code} — "
+                  f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
+            return None
+        except urllib.error.URLError as e:
+            print(f"  ⚠️ compte {table} : {type(e).__name__} — "
+                  f"{getattr(e, 'reason', e)}", file=sys.stderr)
+            return None
+        total = entete.rsplit("/", 1)[-1]
+        return int(total) if total.isdigit() else None
+
     def delete(self, table: str, query: str) -> None:
+        """Supprime — et quand ça rate, DIT POURQUOI.
+
+        ⛔ ELLE N'IMPRIMAIT QUE « HTTP {code} », ET C'EST LA DETTE Nº 1
+        DU LOT L13. La purge de `model_character` a rendu 500 les nuits
+        des 26, 27 et 29/08 ; le journal du VPS n'en a gardé que trois
+        lignes « ⚠️ purge model_character : HTTP 500 », SANS le corps,
+        donc sans le code PostgREST. Résultat : `57014` (délai de
+        requête dépassé) n'a jamais pu être ni confirmé ni écarté, et
+        l'audit a dû l'écrire en « hypothèse forte » pendant cinq
+        jours. `_page` lit ce corps depuis le 25/08, `insert` depuis le
+        28/08 (`_detail_erreur`) : `delete` était le dernier muet.
+
+        ⚠️ Elle JOURNALISE ET CONTINUE sur un HTTP d'erreur — c'est
+        voulu, et les appelants en dépendent (la purge est la toute
+        dernière étape du run : la faire échouer perdrait un run
+        entièrement écrit pour du ménage). Une coupure réseau, elle,
+        continue de remonter : ce n'est pas un refus du serveur, et le
+        run a déjà tout écrit avant d'arriver ici.
+        """
         if self.dry_run:
             print(f"  (dry-run) delete {table}{query}")
             return
@@ -1051,7 +1105,8 @@ class Supabase:
             with urllib.request.urlopen(req, timeout=120) as r:
                 r.read()
         except urllib.error.HTTPError as e:
-            print(f"  ⚠️ purge {table} : HTTP {e.code}", file=sys.stderr)
+            print(f"  ⚠️ purge {table} : HTTP {e.code} — "
+                  f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -5046,6 +5101,182 @@ def _publish_murphy(st, par_modele: list[dict], par_balise: list[dict],
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
 
+def _purge_caractere(sb, today) -> None:
+    """La purge des accumulateurs — comptée avant d'être lancée.
+
+    Extraite de `main` pour être BANÇABLE : le geste tient en
+    quatre lignes, mais c'est la branche « 0 ligne ⇒ on ne lance
+    rien » qui doit être prouvée, et on ne prouve pas une branche
+    enfouie dans un `main` de six étapes.
+    """
+    # ── LOT L13 (01/09/2026) — ON COMPTE AVANT DE SUPPRIMER ─────────
+    # ⛔ CE QUE LA MESURE A DÉFAIT. L'audit tenait le HTTP 500 de
+    # cette purge pour STRUCTUREL (« deux nuits d'affilée ⇒
+    # structurel, pas transitoire »). Le journal du VPS, relu en
+    # ENTIER le 01/09, dit autre chose : 500 les nuits des 26, 27 et
+    # 29/08, RIEN les 28, 30, 31/08 ni le 01/09 — trois échecs sur
+    # six runs complets, et plus un seul depuis le 30/08. Rejoué à
+    # la main le 01/09 (même filtre, même clé, depuis le Mac), le
+    # DELETE rend 204 en 1,3 s. C'est INTERMITTENT, et la cause
+    # n'est donc PAS nommée : elle le sera à la prochaine
+    # occurrence, par le corps d'erreur que `delete` lit désormais.
+    #
+    # ⓘ L'ARBITRAGE, ET POURQUOI PAS UN INDEX. Le filtre concerne
+    # ZÉRO ligne (mesuré : `*/0`) et le restera jusqu'en mars 2027 —
+    # la table a 25 jours pour une rétention de 180. Deux façons
+    # d'empêcher le 500 : un index sur `last_day`, ou ne pas lancer
+    # le DELETE. L'index se paierait sur CHAQUE écriture
+    # d'accumulateur — 541 000 à 722 000 par nuit, mesurées dans le
+    # journal — pour servir une requête par nuit qui ne supprime
+    # rien. On le refuse. Le compte préalable, lui, coûte 3,0 s une
+    # fois par nuit (mesuré sur 1 223 107 lignes) et n'a jamais
+    # échoué.
+    #
+    # ⚠️ « JE NE SAIS PAS » N'EST PAS « ZÉRO ». Si le compte échoue
+    # — ou en dry-run — il rend `None` et la purge PART quand même :
+    # sauter une purge en silence serait pire que la voir échouer
+    # bruyamment, puisque c'est exactement le silence qu'on répare.
+    seuil_caractere = today - timedelta(days=RETENTION_CHARACTER_D)
+    filtre_caractere = f"?last_day=lt.{seuil_caractere:%Y-%m-%d}"
+    vieux_caractere = sb.compte("model_character", filtre_caractere)
+    if vieux_caractere == 0:
+        print(f"  ⓘ purge model_character : aucune ligne plus vieille "
+              f"que {seuil_caractere:%Y-%m-%d} (rétention "
+              f"{RETENTION_CHARACTER_D} j) — DELETE non lancé.")
+    else:
+        sb.delete("model_character", filtre_caractere)
+
+
+#: Colonne → fichier `.sql` qui l'AJOUTE, par table (lot L13,
+#: 01/09/2026).
+#:
+#: ⛔ POURQUOI CETTE TABLE EXISTE. Avant elle, `_pour_la_base` DÉDUISAIT
+#: le nom du fichier par une cascade de sets qui finissait sur un
+#: `else: step40`. Un `else` n'est pas une connaissance : c'est un
+#: repli, et un repli qui NOMME un fichier précis se lit comme une
+#: consigne. L'audit §2.5 l'a payé — « rejouer supabase_step40_lot_g.sql
+#: » pour `rank_corr`, une colonne qu'aucun fichier ne portait encore.
+#: Une table ne peut pas faire cette faute : ou bien la colonne y est,
+#: ou bien la réponse est « migration à écrire ».
+#:
+#: ⚠️ EXTRAITE DES FICHIERS EUX-MÊMES, PAS ÉCRITE DE MÉMOIRE. Relevé le
+#: 01/09/2026 sur `PWA/web/supabase_step*.sql`, en lisant chaque
+#: `alter table … add column` et la table qu'il vise :
+#:
+#:     grep -inE 'alter table|add column' PWA/web/supabase_step*.sql
+#:
+#: ⓘ CE QUI N'Y EST PAS, ET POURQUOI. Les colonnes NÉES avec leur table
+#: (`step35` pour les trois tables de vérification, `step41` pour
+#: `model_verif_daily_pres`) n'y figurent pas, et c'est VOLONTAIRE :
+#: `step35` est un `create table if not exists`, donc le rejouer
+#: n'ajouterait rien à une table déjà là. Si la base servait un jour
+#: une de ces tables SANS une de ses colonnes d'origine, la bonne
+#: réponse serait « migration à écrire » — exactement ce que rend le
+#: troisième cas. Les steps 42, 53, 58, 61, 62 et 63 n'y figurent pas —
+#: ils n'ajoutent AUCUNE colonne, ils élargissent des CHECK ; le
+#: mécanisme qui les nomme est ailleurs (`REPLIS_RANG`), et il ne peut
+#: pas être fusionné ici : PostgREST ne dit jamais QUELLE valeur sa
+#: contrainte a refusée, donc rien ne s'y déduit d'une colonne.
+#:
+#: ⚠️ À TENIR À JOUR AVEC CHAQUE `.sql` QUI AJOUTE UNE COLONNE. Oublier
+#: une entrée ne casse rien et ne ment pas : la colonne tombe dans le
+#: cas « migration À ÉCRIRE », qui dit « je ne sais pas » — bruyant,
+#: mais vrai. C'est le sens du troisième cas.
+_SQL_PAR_COLONNE: dict[str, dict[str, str]] = {
+    "model_score_zone": {
+        # supabase_step40_lot_g.sql (07/08) — lot G
+        "n_days": "supabase_step40_lot_g.sql",
+        "ci_kind": "supabase_step40_lot_g.sql",
+        "ci_reason": "supabase_step40_lot_g.sql",
+        "block_days": "supabase_step40_lot_g.sql",
+        "err_sd": "supabase_step40_lot_g.sql",
+        "pooled_err_kmh": "supabase_step40_lot_g.sql",
+        "borrowed_weight": "supabase_step40_lot_g.sql",
+        "skill_clim": "supabase_step40_lot_g.sql",
+        "beats_clim": "supabase_step40_lot_g.sql",
+        # supabase_step49_lot_s2_biais_corrige.sql — lot S2
+        "typical_err_kmh_corr": "supabase_step49_lot_s2_biais_corrige.sql",
+        "beats_clim_corr": "supabase_step49_lot_s2_biais_corrige.sql",
+        "skill_clim_corr": "supabase_step49_lot_s2_biais_corrige.sql",
+        "n_corr": "supabase_step49_lot_s2_biais_corrige.sql",
+        "bias_n_days": "supabase_step49_lot_s2_biais_corrige.sql",
+        # supabase_step52_rank_corr.sql — le classement corrigé
+        "rank_corr": "supabase_step52_rank_corr.sql",
+        "rank_reason_corr": "supabase_step52_rank_corr.sql",
+        # supabase_step54_lot_l3_fdr.sql — lot L3
+        "n_comparable": "supabase_step54_lot_l3_fdr.sql",
+        # supabase_step57_lot_l9_compagnons.sql — lot L9
+        "bias_ratio": "supabase_step57_lot_l9_compagnons.sql",
+        "bias_dir_deg": "supabase_step57_lot_l9_compagnons.sql",
+        "n_bias_dir": "supabase_step57_lot_l9_compagnons.sql",
+        "skill_comb": "supabase_step57_lot_l9_compagnons.sql",
+        "beats_comb": "supabase_step57_lot_l9_compagnons.sql",
+    },
+    "model_verif_daily": {
+        "mse_clim": "supabase_step40_lot_g.sql",
+        "bias_slope": "supabase_step49_lot_s2_biais_corrige.sql",
+        "err_vec_med_corr": "supabase_step49_lot_s2_biais_corrige.sql",
+        "mse_model_corr": "supabase_step49_lot_s2_biais_corrige.sql",
+        "bias_n_days": "supabase_step49_lot_s2_biais_corrige.sql",
+        "mse_comb": "supabase_step57_lot_l9_compagnons.sql",
+        "mse_model_comb": "supabase_step57_lot_l9_compagnons.sql",
+    },
+    # ⓘ `model_verif_daily_pres` naît complète au step41 et n'a jamais
+    # reçu de colonne depuis. L'entrée VIDE est délibérée : elle dit
+    # « cette table est connue, et rien n'y a été ajouté », ce qui n'est
+    # pas la même chose qu'une table oubliée.
+    "model_verif_daily_pres": {},
+}
+
+
+def _rang_step(fichier: str) -> int:
+    """Le numéro d'un `supabase_stepNN_…sql`, pour les citer dans l'ordre."""
+    chiffres = "".join(c for c in fichier[len("supabase_step"):] if c.isdigit())
+    return int(chiffres) if chiffres else 0
+
+
+def _sql_a_jouer(table: str, absentes, correspondance: dict | None = None) -> str:
+    """La phrase qui dit QUOI JOUER pour les colonnes qui manquent.
+
+    Trois cas, et c'est le TROISIÈME qui justifie la fonction :
+
+      1. toutes les colonnes absentes sont portées par des `.sql`
+         connus → on les nomme, groupées par fichier, dans l'ordre des
+         steps ;
+      2. plusieurs fichiers sont concernés → on les nomme TOUS, au lieu
+         d'en élire un et de taire les autres (la cascade d'avant
+         s'arrêtait au premier set qui mordait) ;
+      3. ⛔ aucune correspondance → « migration À ÉCRIRE », en toutes
+         lettres, et surtout AUCUN nom de fichier. C'est le cas de
+         `rank_corr` avant que le step52 existe, et c'est précisément
+         celui où l'ancien code envoyait rejouer le step40.
+
+    ⓘ `correspondance` s'injecte pour le banc : il rejoue l'état du
+    schéma d'AVANT un fichier donné, ce qu'on ne peut pas obtenir en
+    retirant des lignes du dictionnaire réel.
+    """
+    corr = (_SQL_PAR_COLONNE if correspondance is None
+            else correspondance).get(table, {})
+    par_fichier: dict[str, list[str]] = {}
+    orphelines: list[str] = []
+    for col in absentes:
+        fichier = corr.get(col)
+        if fichier:
+            par_fichier.setdefault(fichier, []).append(col)
+        else:
+            orphelines.append(col)
+    bouts = []
+    for fichier in sorted(par_fichier, key=_rang_step):
+        bouts.append(f"Lancer {fichier} pour "
+                     f"{', '.join(sorted(par_fichier[fichier]))}.")
+    if orphelines:
+        bouts.append(f"⛔ AUCUN .sql connu n'ajoute "
+                     f"{', '.join(sorted(orphelines))} à {table} : "
+                     f"migration À ÉCRIRE — ne rejouer aucun step "
+                     f"existant, aucun ne porte cette colonne.")
+    return " ".join(bouts)
+
+
 def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
     """N'envoie que les colonnes que la table sait recevoir.
 
@@ -5088,41 +5319,18 @@ def _pour_la_base(sb, table: str, rows: list[dict]) -> list[dict]:
     absentes = sorted(set(rows[0]) - cols)
     if not absentes:
         return rows
-    # ⚠️ Le nom du SQL est DÉDUIT des colonnes qui manquent, pas écrit en
-    # dur. La version précédente nommait toujours `step40_lot_g` : au lot
-    # S2, elle aurait envoyé Yann rejouer un fichier déjà passé pendant
-    # que les vraies colonnes manquantes attendaient ailleurs.
-    _S2 = {"bias_slope", "err_vec_med_corr", "mse_model_corr", "bias_n_days",
-           "typical_err_kmh_corr", "beats_clim_corr", "skill_clim_corr",
-           "n_corr"}
-    # ⚠️ LOT L3 (27/08/2026) — LA COLONNE QUE CE LOT AJOUTE SE NOMME
-    # ELLE-MÊME. Sans cette ligne, `n_comparable` absente en base ferait
-    # dire « Lancer supabase_step40_lot_g.sql », un fichier DÉJÀ PASSÉ :
-    # exactement la fausse déduction que l'audit §2.5 a payée pour
-    # `rank_corr`, reproduite par le lot suivant. ⓘ Ceci n'est PAS le
-    # correctif de fond (une table colonne→fichier avec un troisième cas
-    # explicite « migration à écrire ») — celui-là est la dette nº 2 du
-    # lot L13. C'est le minimum pour que CE lot n'ajoute pas un mensonge
-    # de plus en attendant.
-    _L3 = {"n_comparable"}
-    # ⚠️ LOT L9 (28/08/2026) — MÊME RÈGLE, MÊME RAISON. Cinq colonnes
-    # neuves partent dans le même `.sql` : le compagnon WMO du score
-    # (volet a) sur `model_score_zone`, la référence combinée (volet c)
-    # sur `model_verif_daily` ET son skill de case sur
-    # `model_score_zone`. Sans cette ligne, la nuit d'avant l'exécution
-    # du SQL enverrait Yann rejouer `step40`, un fichier passé depuis
-    # trois semaines.
-    _L9 = {"bias_ratio", "bias_dir_deg", "n_bias_dir",
-           "mse_comb", "mse_model_comb", "skill_comb", "beats_comb"}
-    if set(absentes) & _L9:
-        fichier = "supabase_step57_lot_l9_compagnons.sql"
-    elif set(absentes) & _L3:
-        fichier = "supabase_step54_lot_l3_fdr.sql"
-    else:
-        fichier = ("supabase_step49_lot_s2_biais_corrige.sql"
-                   if set(absentes) & _S2 else "supabase_step40_lot_g.sql")
+    # ⚠️ LE NOM DU `.sql` NE SE DÉDUIT PLUS, IL SE LIT (lot L13,
+    # 01/09/2026). La version d'avant tranchait par une cascade de sets
+    # — `_L9`, sinon `_L3`, sinon `_S2`, SINON step40 — et ce dernier
+    # « sinon » était un mensonge par défaut : toute colonne inconnue
+    # renvoyait vers `supabase_step40_lot_g.sql`, un fichier passé
+    # depuis le 07/08. C'est ce qui a fait écrire « rejouer step40 »
+    # pour `rank_corr` (audit §2.5) alors qu'AUCUN fichier ne portait
+    # cette colonne : il fallait l'ÉCRIRE, et c'est devenu le step52.
+    # Une journée perdue à rejouer un fichier idempotent qui ne pouvait
+    # rien changer.
     print(f"  ⓘ {table} : colonnes pas encore en base, non envoyées — "
-          f"{', '.join(absentes)}. Lancer {fichier} pour les activer.")
+          f"{', '.join(absentes)}. {_sql_a_jouer(table, absentes)}")
     out = [{k: v for k, v in r.items() if k in cols} for r in rows]
 
     # ⚠️ ET LE CAS QUI NE SE VOIT PAS. `model_score_zone.rank_reason`
@@ -6594,14 +6802,15 @@ def main() -> int:
         # ⓘ Mesuré le 25/08 : CETTE LIGNE NE SUPPRIME RIEN AUJOURD'HUI
         # (0 ligne concernée, la table a 18 jours). Elle est écrite pour
         # le régime permanent, et elle est ici pour que la question ne
-        # se repose pas dans six mois.
+        # se repose pas dans six mois. ⓘ Toujours vrai le 01/09
+        # (1 223 107 lignes, 25 jours) — et c'est désormais MESURÉ à
+        # chaque nuit plutôt que supposé : voir `_purge_caractere`, qui
+        # compte avant de supprimer.
         #
         # ⓘ L'archive R2, elle, ne se purge toujours pas — ~544 Mo/an
         # mesurés, et c'est ce qui rend chaque amélioration de la
         # formule rejouable.
-        sb.delete("model_character",
-                  f"?last_day=lt."
-                  f"{(today - timedelta(days=RETENTION_CHARACTER_D)):%Y-%m-%d}")
+        _purge_caractere(sb, today)
 
     print(f"✅ terminé ({sb.ecritures} lignes écrites en base)")
     return 0

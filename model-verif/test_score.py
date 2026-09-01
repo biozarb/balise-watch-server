@@ -16,6 +16,8 @@ lecture d'archive du calcul précisément pour que ce soit possible.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import math
 import os
@@ -4696,9 +4698,19 @@ def test_l9a_compagnon_wmo_biais_de_vitesse_et_de_cap():
 
     # ⚠️ ET LE NOM DU `.sql`, parce que la fausse déduction « rejouer
     # step40 » a déjà coûté une session (audit §2.5, puis lot L3).
+    #
+    # ⚠️ LE SCHÉMA FACTICE A CHANGÉ AU LOT L13 (01/09), ET LE BANC DIT
+    # MIEUX CE QU'IL VOULAIT DIRE. Il ne rendait que cinq colonnes :
+    # celles du lot G, du S2 et du L3 manquaient elles aussi, et le
+    # code d'alors ne nommait QUE le premier fichier de sa cascade.
+    # Depuis le L13, tous les fichiers concernés sont nommés — donc
+    # citer `step40` sur ce schéma-là serait devenu VRAI, et le banc
+    # aurait rougi pour la bonne raison. On lui donne donc le schéma
+    # qu'il décrivait : tout est en base SAUF les cinq colonnes du L9.
     class _SbFactice:
         def columns(self, table):
-            return {"as_of", "zone_id", "model", "lead_h", "typical_err_kmh"}
+            return set(fine) - {"bias_ratio", "bias_dir_deg", "n_bias_dir",
+                                "skill_comb", "beats_comb"}
     import io
     import contextlib
     tampon = io.StringIO()
@@ -4883,6 +4895,301 @@ def test_lr_le_rejeu_ancien_ne_republie_pas_le_classement():
           "args.publier_quand_meme" in src, True)
 
 
+def _rep_entetes(entetes: dict):
+    """Une réponse HTTP factice qui ne porte QUE des en-têtes (comme un HEAD)."""
+    import io
+
+    class _Rep(io.BytesIO):
+        headers = entetes
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    return _Rep(b"")
+
+
+def test_l13_la_purge_dit_desormais_le_corps_de_son_erreur():
+    """⛔ LA DETTE Nº 1 DU LOT L13, ET ELLE A COÛTÉ CINQ JOURS.
+
+    `Supabase.delete` n'imprimait que « HTTP {code} ». La purge de
+    `model_character` a rendu 500 les nuits des 26, 27 et 29/08 : le
+    journal du VPS en garde trois lignes, aucune ne dit POURQUOI, et
+    l'audit a dû écrire « `57014` — hypothèse forte » faute de pouvoir
+    trancher. `_page` lit ce corps depuis le 25/08, `insert` depuis le
+    28/08 : `delete` était le dernier endroit muet de la classe.
+
+    ⚠️ Et elle doit CONTINUER : la purge est la toute dernière étape du
+    run. La faire lever perdrait un run entièrement écrit, pour du
+    ménage qui ne concerne aucune ligne.
+    """
+    print("── L13 : la purge dit le corps de son erreur (01/09) ──")
+    import io
+    import urllib.error as E
+    import urllib.request as U
+
+    corps = json.dumps({
+        "code": "57014",
+        "message": "canceling statement due to statement timeout",
+        "hint": None,
+        "details": "DELETE model_character",
+    }).encode("utf-8")
+
+    def faux_500(req, timeout=None):
+        raise E.HTTPError(req.full_url, 500, "Internal Server Error", {},
+                          io.BytesIO(corps))
+
+    sb = _sb_de_banc()
+    tampon = io.StringIO()
+    vrai, U.urlopen = U.urlopen, faux_500
+    try:
+        with contextlib.redirect_stderr(tampon):
+            rendu = sb.delete("model_character", "?last_day=lt.2026-03-05")
+    finally:
+        U.urlopen = vrai
+    dit = tampon.getvalue()
+
+    check("L13 le journal nomme toujours la table et le code HTTP",
+          "model_character" in dit and "HTTP 500" in dit, True)
+    check("L13 ⭐ … et il nomme MAINTENANT le code PostgREST — c'est ce "
+          "qui manquait aux trois nuits de 500", "57014" in dit, True)
+    check("L13 ⭐ … et le message, en clair",
+          "statement timeout" in dit, True)
+    check("L13 ⛔ et la purge NE LÈVE PAS : elle est la dernière étape "
+          "du run, la faire échouer perdrait tout ce qui est écrit",
+          rendu, None)
+
+
+def test_l13_le_compte_dit_zero_ou_je_ne_sais_pas():
+    """`Supabase.compte` : `*/0` c'est zéro, un refus c'est `None`.
+
+    ⛔ LA CONFUSION QU'ON REFUSE. Rendre `0` quand le serveur n'a pas
+    répondu ferait sauter la purge EN SILENCE — exactement le défaut
+    qu'on répare. Les deux valeurs doivent être distinguables par
+    l'appelant, donc distinguées ici.
+    """
+    print("── L13 : compter avant de supprimer ──")
+    import io
+    import urllib.error as E
+    import urllib.request as U
+
+    sb = _sb_de_banc()
+    vrai = U.urlopen
+    try:
+        U.urlopen = lambda req, timeout=None: _rep_entetes(
+            {"content-range": "*/0"})
+        check("L13 `*/0` se lit ZÉRO (et pas `None`)",
+              sb.compte("model_character", "?last_day=lt.2026-03-05"), 0)
+
+        U.urlopen = lambda req, timeout=None: _rep_entetes(
+            {"content-range": "0-0/1223107"})
+        check("L13 un total se lit tel quel (1 223 107, mesuré le 01/09)",
+              sb.compte("model_character"), 1223107)
+
+        U.urlopen = lambda req, timeout=None: _rep_entetes(
+            {"content-range": "*/*"})
+        check("L13 ⛔ un total INCONNU (`*/*`) rend `None`, pas 0",
+              sb.compte("model_character"), None)
+
+        def refus(req, timeout=None):
+            raise E.HTTPError(req.full_url, 500, "boom", {},
+                              io.BytesIO(b'{"code":"57014"}'))
+
+        U.urlopen = refus
+        tampon = io.StringIO()
+        with contextlib.redirect_stderr(tampon):
+            rendu = sb.compte("model_character")
+        check("L13 ⛔ un serveur qui refuse rend `None`, jamais 0", rendu,
+              None)
+        check("L13 … et il le DIT, corps compris",
+              "57014" in tampon.getvalue(), True)
+    finally:
+        U.urlopen = vrai
+
+    check("L13 en dry-run, `compte` dit « je ne sais pas »",
+          J.Supabase(dry_run=True).compte("model_character"), None)
+
+
+def test_l13_on_ne_lance_pas_un_delete_qui_ne_supprime_rien():
+    """⭐ LE GESTE DU LOT : compter, puis ne supprimer que s'il y a de quoi.
+
+    Mesuré le 01/09 : le filtre `last_day=lt.J-180` concerne ZÉRO ligne
+    et le restera jusqu'en mars 2027 (25 jours de table pour 180 de
+    rétention). Le DELETE partait quand même, toutes les nuits, contre
+    1 223 107 lignes sans index utilisable — et rendait 500 trois nuits
+    sur six.
+
+    ⚠️ LES TROIS BRANCHES COMPTENT, pas seulement la première. « Je ne
+    sais pas » (`None`) doit LANCER la purge : une purge sautée en
+    silence serait un défaut pire que celui qu'on répare, et il ne se
+    verrait qu'au bout de six mois de table qui gonfle.
+    """
+    print("── L13 : le DELETE ne part plus pour rien ──")
+    U = timezone.utc
+    today = datetime(2026, 9, 1, 3, 59, tzinfo=U)
+
+    class _Sb:
+        def __init__(self, n):
+            self.n = n
+            self.comptes, self.deletes = [], []
+
+        def compte(self, table, query=""):
+            self.comptes.append((table, query))
+            return self.n
+
+        def delete(self, table, query):
+            self.deletes.append((table, query))
+
+    vide = _Sb(0)
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        J._purge_caractere(vide, today)
+    check("L13 ⭐ 0 ligne à jeter ⇒ AUCUN DELETE n'est lancé",
+          vide.deletes, [])
+    check("L13 … mais le compte, lui, a bien eu lieu (on MESURE, on ne "
+          "suppose pas)", len(vide.comptes), 1)
+    check("L13 … et le filtre compté est celui de la rétention, J-180",
+          vide.comptes[0], ("model_character", "?last_day=lt.2026-03-05"))
+    check("L13 … et le journal dit ce qui n'a pas été fait, et pourquoi",
+          "DELETE non lancé" in tampon.getvalue(), True)
+
+    plein = _Sb(1234)
+    with contextlib.redirect_stdout(io.StringIO()):
+        J._purge_caractere(plein, today)
+    check("L13 ⭐ des lignes à jeter ⇒ le DELETE part, au même filtre",
+          plein.deletes, [("model_character", "?last_day=lt.2026-03-05")])
+
+    muet = _Sb(None)
+    with contextlib.redirect_stdout(io.StringIO()):
+        J._purge_caractere(muet, today)
+    check("L13 ⛔ compte INDISPONIBLE ⇒ la purge part QUAND MÊME "
+          "(« je ne sais pas » n'est pas « zéro »)",
+          muet.deletes, [("model_character", "?last_day=lt.2026-03-05")])
+
+
+def test_l13_rank_corr_davant_step52_dit_a_ecrire_jamais_step40():
+    """⛔ LE BANC QUI DIT TOUT SEUL SI LA DETTE Nº 2 EST PAYÉE.
+
+    L'audit §2.5 : `rank_corr` manquait en base, le code a imprimé
+    « Lancer supabase_step40_lot_g.sql », et ce fichier était passé
+    depuis le 07/08 — il ne pouvait rien ajouter. La bonne réponse
+    était « aucun fichier ne porte cette colonne : migration À
+    ÉCRIRE », et c'est ce qui a fini par s'écrire, en step52.
+
+    Ce banc rejoue CET ÉTAT-LÀ du schéma (la table de correspondance
+    sans le step52) et exige les deux moitiés de la phrase : « À
+    ÉCRIRE » présent, `step40` ABSENT. La seconde est la plus
+    importante : un message qui dit « à écrire » ET nomme un fichier
+    envoie quand même Yann le rejouer.
+    """
+    print("── L13 : le .sql ne se déduit plus, il se lit ──")
+
+    # L'état du 25/08 : le step52 n'existe pas encore.
+    avant_52 = {
+        "model_score_zone": {
+            c: f for c, f in J._SQL_PAR_COLONNE["model_score_zone"].items()
+            if "step52" not in f
+        }
+    }
+    dit = J._sql_a_jouer("model_score_zone", ["rank_corr"], avant_52)
+    check("L13 ⭐ `rank_corr` d'AVANT step52 : « migration À ÉCRIRE »",
+          "À ÉCRIRE" in dit, True)
+    check("L13 ⛔ … et le message ne nomme AUCUN step existant — c'est "
+          "la faute exacte de l'audit §2.5",
+          "step40" not in dit and "supabase_step" not in dit, True)
+
+    dit_ok = J._sql_a_jouer("model_score_zone", ["rank_corr",
+                                                "rank_reason_corr"])
+    check("L13 aujourd'hui, la même colonne nomme le step52",
+          "supabase_step52_rank_corr.sql" in dit_ok, True)
+    check("L13 … et lui seul", "step40" not in dit_ok, True)
+
+    # ⚠️ La cascade d'avant s'arrêtait au PREMIER set qui mordait : deux
+    # migrations en attente, une seule nommée, et la nuit d'après
+    # rejouait le même diagnostic incomplet.
+    deux = J._sql_a_jouer("model_verif_daily", ["mse_clim", "mse_comb"])
+    check("L13 ⭐ deux fichiers en attente ⇒ les DEUX sont nommés",
+          "supabase_step40_lot_g.sql" in deux
+          and "supabase_step57_lot_l9_compagnons.sql" in deux, True)
+    check("L13 … et dans l'ordre des steps",
+          deux.index("step40") < deux.index("step57"), True)
+
+    melange = J._sql_a_jouer("model_score_zone", ["n_comparable",
+                                                 "colonne_de_demain"])
+    check("L13 ⭐ connue + inconnue : le step54 est nommé pour l'une, "
+          "« À ÉCRIRE » pour l'autre",
+          "supabase_step54_lot_l3_fdr.sql" in melange
+          and "À ÉCRIRE" in melange, True)
+    check("L13 ⛔ … et la colonne à écrire est NOMMÉE, pas noyée",
+          "colonne_de_demain" in melange.split("À ÉCRIRE")[0][-120:]
+          or "colonne_de_demain" in melange, True)
+
+    # ── et le chemin réel, celui qui imprime ──────────────────────────
+    class _SbSans52:
+        def columns(self, table):
+            return {"as_of", "zone_id", "model", "lead_h", "rank"}
+
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        sortie = J._pour_la_base(_SbSans52(), "model_score_zone",
+                                 [{"as_of": "2026-09-01", "zone_id": "b1",
+                                   "model": "arome", "lead_h": 6, "rank": 1,
+                                   "n_comparable": 12}])
+    journal = tampon.getvalue()
+    check("L13 bout en bout : la colonne absente ne part pas en base",
+          "n_comparable" in sortie[0], False)
+    check("L13 bout en bout : le journal nomme le step54, pas le step40",
+          "supabase_step54_lot_l3_fdr.sql" in journal
+          and "step40" not in journal, True)
+
+
+def test_l13_la_table_colonne_sql_colle_aux_fichiers_reels():
+    """La table dit-elle la VÉRITÉ des `.sql` du dépôt ?
+
+    ⚠️ CE CONTRÔLE NE TOURNE QUE LÀ OÙ LES `.sql` SONT — c'est-à-dire
+    sur le Mac. Le VPS ne reçoit que `*.py` (`~/balise-watch/web/` n'a
+    que `public/`), donc le banc distant l'annonce sauté au lieu de le
+    croire vert : un contrôle qui ne trouve pas sa matière doit le
+    DIRE, sinon il se compte comme une preuve (leçon du lot LD, où un
+    vérificateur portait le même filtre que le geste qu'il vérifiait).
+    """
+    print("── L13 : la table colonne→.sql relue depuis les fichiers ──")
+    import re                                              # noqa: PLC0415
+    web = (pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
+           / ".." / ".." / "web").resolve()
+    fichiers = sorted(web.glob("supabase_step*.sql")) if web.is_dir() else []
+    if not fichiers:
+        print(f"     ⓘ contrôle SAUTÉ : aucun .sql sous {web} "
+              f"(machine de déploiement — les .sql restent au dépôt)")
+        return
+
+    reel: dict[str, dict[str, str]] = {}
+    for f in fichiers:
+        courante = None
+        for ligne in f.read_text(encoding="utf-8").splitlines():
+            ligne = ligne.split("--")[0]
+            m = re.search(r"alter\s+table\s+(?:if\s+exists\s+)?"
+                          r"(?:public\.)?(\w+)", ligne, re.I)
+            if m:
+                courante = m.group(1)
+            for m2 in re.finditer(r"add\s+column\s+(?:if\s+not\s+exists\s+)?"
+                                  r"(\w+)", ligne, re.I):
+                if courante in J._SQL_PAR_COLONNE:
+                    reel.setdefault(courante, {})[m2.group(1)] = f.name
+
+    for table, colonnes in J._SQL_PAR_COLONNE.items():
+        check(f"L13 {table} : la table du code == les `add column` réels",
+              colonnes, reel.get(table, {}))
+    check("L13 ⭐ et les trois tables que `_pour_la_base` sert y sont "
+          "toutes — une table absente rendrait « À ÉCRIRE » pour TOUTES "
+          "ses colonnes, ce qui est bruyant mais faux",
+          sorted(J._SQL_PAR_COLONNE),
+          ["model_score_zone", "model_verif_daily",
+           "model_verif_daily_pres"])
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -4969,7 +5276,13 @@ def main() -> int:
                test_memoire_rss_suit_une_allocation_reelle,
                test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime,
                # ── lot LR (01/09) : le rejeu qui republiait le jour ──
-               test_lr_le_rejeu_ancien_ne_republie_pas_le_classement):
+               test_lr_le_rejeu_ancien_ne_republie_pas_le_classement,
+               # ── lot L13 (01/09) : les deux dettes ops de l'audit ──
+               test_l13_la_purge_dit_desormais_le_corps_de_son_erreur,
+               test_l13_le_compte_dit_zero_ou_je_ne_sais_pas,
+               test_l13_on_ne_lance_pas_un_delete_qui_ne_supprime_rien,
+               test_l13_rank_corr_davant_step52_dit_a_ecrire_jamais_step40,
+               test_l13_la_table_colonne_sql_colle_aux_fichiers_reels):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0
