@@ -1,19 +1,14 @@
 [Unit]
-# bw-deploy: ne-pas-installer
-#   ⓘ Lu par `tools/deploy-agrume-vps.sh` (§2 bis, lot LD du 31/08/2026).
-#   Sans cette ligne, le contrôle « dépôt ↔ /etc » signalerait cette unité
-#   comme MANQUANTE à chaque déploiement — alors que son absence est la
-#   décision, écrite juste en dessous. ⛔ Retirer cette ligne le jour où
-#   l'unité est installée pour de bon — pas avant, pas après.
 # ══════════════════════════════════════════════════════════════════════
-#  ⛔ UNITÉ PROPOSÉE, PAS INSTALLÉE.
-#      (lot L12, 01/09/2026 — l'oracle batch mensuel, audit §4.7)
+#  ✅ UNITÉ INSTALLÉE LE 01/09/2026, LE SOIR MÊME DE SA PROPOSITION.
+#      (lot L12 — l'oracle batch mensuel, audit §4.7)
 #
-#  Le mode `run.sh oracle` EXISTE depuis le 01/09 : ce couple
-#  service/timer est fonctionnel, et l'installer est un `cp` + un
-#  `enable`. Ce qui manque n'est pas du code, c'est une décision de
-#  Yann — le prompt du lot dit « PROPOSER (pas installer) un timer
-#  mensuel », et c'est ce que fait ce fichier.
+#  Le prompt du lot disait « PROPOSER (pas installer) un timer
+#  mensuel », et ce fichier a d'abord été proposé, marqueur
+#  `bw-deploy: ne-pas-installer` compris. Yann a tranché dans la
+#  foulée : le check Healthchecks a été créé, la variable posée, le
+#  marqueur retiré. ⓘ L'ordre a compté — le check D'ABORD, l'unité
+#  ENSUITE : voir le ⚠️ sur le canal, plus bas.
 #
 #  ⛔ ET IL PASSE PAR `run.sh`, JAMAIS À CÔTÉ. Même raison que pour
 #  `bw-model-tau.service`, et une de plus qui lui est propre :
@@ -39,12 +34,14 @@
 #
 #  ═══ ET IL FAUT UN CANAL ═══
 #
-#  ⚠️ `BW_MODEL_ORACLE_PING_URL` doit exister dans
-#  `~/.balise-watch-alertes.env` AVANT l'installation. Sans lui,
-#  `run.sh` dira « PERSONNE NE SURVEILLE CE JOB » à chaque passage —
-#  et un job qui ne tourne qu'une fois par mois est SILENCIEUX par
-#  nature : c'est Healthchecks qui voit qu'il n'est pas parti, personne
-#  d'autre.
+#  ✅ `BW_MODEL_ORACLE_PING_URL` EXISTE (posée le 01/09, check
+#  `bw-model-oracle` : cron `30 8 1 * *` en UTC, grâce 2 h, tag
+#  `model-verif`). ⛔ ET ELLE A ÉTÉ POSÉE AVANT L'INSTALLATION, PAS
+#  APRÈS. Sans elle, `run.sh` dit « PERSONNE NE SURVEILLE CE JOB » à
+#  chaque passage — et un job qui ne tourne qu'une fois par mois est
+#  SILENCIEUX par nature : c'est Healthchecks qui voit qu'il n'est pas
+#  parti, personne d'autre. Installer d'abord et brancher l'oreille
+#  ensuite aurait été le motif du lot LV, reproduit sciemment.
 # ══════════════════════════════════════════════════════════════════════
 Description=Balise Watch — oracle batch du scoring (mensuel, lot L12)
 Documentation=file:///home/debian/balise-watch/balise-watch-server/model-verif/README.md

@@ -133,17 +133,15 @@ check "C5  ⛔ un mode dont l'unité porte le marqueur n'est PAS installable" \
       "$(bw_inv_mode_installable "$RACINE" tau && echo installable || echo non)" "non"
 check "C6  ⛔ et un mode VIVANT l'est (sinon le contrôle se tairait sur tout)" \
       "$(bw_inv_mode_installable "$RACINE" agrume-quart && echo installable || echo non)" "installable"
-# ⭐ 01/09 (lot L12) : `oracle` rejoint les deux autres. Un mode dont
-# l'unité porte « bw-deploy: ne-pas-installer » est un mode SANS JOB —
-# le canal d'alerte qu'il construit (`BW_MODEL_ORACLE_PING_URL`) n'a
-# donc pas à exister aujourd'hui, et son absence n'est pas un trou.
-# ⚠️ Cette liste est ce qui empêche l'inverse : le jour où l'unité
-# s'installe sans qu'on retire son marqueur, ce banc rougit — et sans
-# lui, le job tournerait un mois durant en disant « PERSONNE NE
-# SURVEILLE » dans un journal que rien ne lit (lot LV).
-check "C7  les trois seuls modes sans job sont collect-p2, tau et oracle" \
+# ⭐ 01/09 (lot L12) : `oracle` les a rejoints le matin et les a
+# QUITTÉS le soir — son unité a été installée une fois son check
+# Healthchecks créé. Ce banc est ce qui empêche l'ordre inverse : le
+# jour où une unité s'installe sans qu'on retire son marqueur, il
+# rougit — et sans lui, le job tournerait des mois durant en disant
+# « PERSONNE NE SURVEILLE » dans un journal que rien ne lit (lot LV).
+check "C7  les deux seuls modes sans job sont collect-p2 et tau" \
       "$(for M in $(bw_inv_modes "$RACINE"); do bw_inv_mode_installable "$RACINE" "$M" || printf '%s ' "$M"; done)" \
-      "collect-p2 tau oracle "
+      "collect-p2 tau "
 
 check "C4  chaque runner a un repli si l'outillage manque (jamais de mort en prod)" \
       "$(grep -l 'bw_avertir_config() { :; }' model-verif/run.sh traces/infoclimat/poller.sh \

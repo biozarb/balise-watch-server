@@ -1,9 +1,7 @@
 [Unit]
-# bw-deploy: ne-pas-installer
-#   ⓘ Lu par `tools/deploy-agrume-vps.sh` (§2 bis, lot LD du 31/08/2026).
-#   ⛔ Retirer cette ligne le jour où le timer est installé pour de bon.
 # ══════════════════════════════════════════════════════════════════════
-#  ⛔ TIMER PROPOSÉ, PAS INSTALLÉ (lot L12, 01/09/2026).
+#  ✅ TIMER INSTALLÉ LE 01/09/2026 (lot L12), le soir même de sa
+#  proposition, une fois le check Healthchecks créé.
 #
 #  ⛔ MENSUEL, ET C'EST LA CADENCE QUE L'AUDIT DEMANDE (§4.7 : « oracle
 #  mensuel du pipeline incrémental »), pas une économie de calcul. La
@@ -27,7 +25,9 @@
 #  `bw-garde-fou-r2` (06:34). Il lit une base et des archives que plus
 #  personne n'écrit, et il a 35 min de travail devant lui.
 #
-#  L'activation reste un geste séparé du déploiement :
+#  L'activation reste un geste séparé du déploiement — celui qui a été
+#  fait le 01/09, et qu'il faudra refaire à l'identique si l'unité
+#  change :
 #      sudo cp /tmp/bw-model-oracle.{service,timer} /etc/systemd/system/
 #      sudo systemctl daemon-reload
 #      sudo systemctl enable --now bw-model-oracle.timer

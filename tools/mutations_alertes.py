@@ -53,8 +53,16 @@ MUTATIONS = [
      "un banc qui grepperait des noms littéraux resterait vert en ratant "
      "onze variables sur dix-neuf (la sonde du 31/08 l'a fait)",
      ALERTES, RUN,
-     "collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|agrume-quart|arome|tau|filet-arome) ;;",
-     "collect|collect-p2|collect-reduit|score|garde-fou-r2|agrume|agrume-court|arome|tau|filet-arome) ;;"),
+     # ⚠️ MOTIF RÉÉCRIT LE 01/09 (lot L12) : la ligne du `case`
+     # s'est allongée d'un mode (`oracle`), et cette mutation a
+     # cessé de mordre — le runner l'a dit lui-même (« MOTIF
+     # INTROUVABLE : le code a bougé »). ⛔ On ne recopie donc PLUS
+     # la ligne entière : on retire `|agrume-quart` là où il est,
+     # ce qui survivra au douzième mode comme au treizième. Un
+     # motif de mutation qui se périme à chaque mode ajouté est un
+     # motif qui finira par dormir sans que personne ne le voie.
+     "|agrume-quart|arome|tau|",
+     "|arome|tau|"),
 
     ("⛔⛔ UNE VARIABLE LUE LITTÉRALEMENT DISPARAÎT : la confrontation lit "
      "un autre nom que celui qu'elle annonce — c'est le défaut EXACT du "

@@ -285,21 +285,25 @@ check "E4  ⭐ les unités de traces/ sont des cibles" \
       "$(cible 'traces/entretien/balise-entretien.service|balise-entretien.service')" "oui"
 check "E5  les 3 surcharges du dépôt sont TOUTES des cibles" \
       "$(printf '%s\n' "$CIB" | grep -c '\.d/.*\.conf|' | tr -d ' ')" "3"
-# ⭐ 01/09 (lot L12) : elles passent de 4 à 6 — `bw-model-oracle.service`
-# et `.timer` s'ajoutent aux deux couples déjà proposés-non-installés.
-# ⚠️ Ces deux compteurs se tiennent l'un l'autre : E6 exige que les six
-# PORTENT le marqueur, E7 qu'AUCUNE AUTRE ne le porte. Un marqueur posé
-# par erreur sur une unité vivante l'effacerait du contrôle « dépôt ↔
-# /etc » — c'est-à-dire qu'on cesserait de voir sa disparition, la panne
-# exacte du lot LD.
-check "E6  ⭐ les 6 unités volontairement non installées portent le marqueur" \
+# ⭐ 01/09 (lot L12) : elles sont passées de 4 à 6 le matin, et SONT
+# REVENUES À 4 le soir — `bw-model-oracle.{service,timer}` a été proposé
+# marqué, puis installé pour de vrai une fois son check Healthchecks
+# créé, donc démarqué. Le va-et-vient est le comportement NORMAL de ce
+# compteur : il suit les décisions, il ne les précède pas.
+# ⚠️ Ces deux compteurs se tiennent l'un l'autre : E6 exige que les
+# quatre PORTENT le marqueur, E7 qu'AUCUNE AUTRE ne le porte. Un
+# marqueur posé par erreur sur une unité vivante l'effacerait du
+# contrôle « dépôt ↔ /etc » — c'est-à-dire qu'on cesserait de voir sa
+# disparition, la panne exacte du lot LD. Un marqueur OUBLIÉ sur une
+# unité qu'on vient d'installer fait la même chose, en silence : c'est
+# E7 qui l'attrape, et c'est pour ça qu'il compte les DEUX sens.
+check "E6  ⭐ les 4 unités volontairement non installées portent le marqueur" \
       "$(for f in model-verif/systemd/bw-model-collect-p2.service model-verif/systemd/bw-model-collect-p2.timer \
-                  model-verif/systemd/bw-model-tau.service model-verif/systemd/bw-model-tau.timer \
-                  model-verif/systemd/bw-model-oracle.service model-verif/systemd/bw-model-oracle.timer; do
-           head -30 "$f" | grep -q '^# bw-deploy: ne-pas-installer' && echo x; done | wc -l | tr -d ' ')" "6"
+                  model-verif/systemd/bw-model-tau.service model-verif/systemd/bw-model-tau.timer; do
+           head -30 "$f" | grep -q '^# bw-deploy: ne-pas-installer' && echo x; done | wc -l | tr -d ' ')" "4"
 check "E7  ⛔ et AUCUNE autre unité ne le porte (un marqueur de trop éteint un contrôle)" \
       "$(printf '%s\n' "$CIB" | cut -d'|' -f1 | while IFS= read -r f; do
-           head -30 "$f" | grep -q '^# bw-deploy: ne-pas-installer' && echo x; done | wc -l | tr -d ' ')" "6"
+           head -30 "$f" | grep -q '^# bw-deploy: ne-pas-installer' && echo x; done | wc -l | tr -d ' ')" "4"
 
 # ══════════════════════════════════════════════════════════════════════
 echo
