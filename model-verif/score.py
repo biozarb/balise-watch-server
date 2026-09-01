@@ -5810,6 +5810,75 @@ def self_test() -> int:
     return SELF_TEST_FAUX
 
 
+# ══════════════════════════════════════════════════════════════════
+#  ⛔⛔ UN REJEU DE VIEILLE JOURNÉE NE REPUBLIE PAS LE CLASSEMENT
+#      (lot LR, 01/09/2026 — trouvé par l'oracle du lot L12)
+# ══════════════════════════════════════════════════════════════════
+
+def doit_republier(day: datetime, as_of: datetime,
+                   forcer: bool = False) -> bool:
+    """Ce run a-t-il le droit de republier `model_score_zone` et les
+    objets R2 ? Vrai seulement si la journée notée est HIER ou plus
+    récente.
+
+    ⛔ LE DÉFAUT, MESURÉ ET NON DÉDUIT. Deux faits de ce fichier se
+    combinent mal :
+
+      · `as_of = datetime.now(timezone.utc)` — TOUJOURS aujourd'hui,
+        quel que soit `--day` ;
+      · la fenêtre glissante est lue par `?day=gte.{day − 14}`, **sans
+        borne haute**.
+
+    Rejouer la journée J publie donc, sous l'étiquette `rolling15` et
+    l'`as_of` du jour, une fenêtre de **15 + (hier − J) jours**. Un jour
+    d'ancienneté = un jour de trop.
+
+    ⛔ CE QUE ÇA COÛTE, MESURÉ SUR LA PRODUCTION LE 01/09 (sonde du lot
+    L12, lecture seule, `model_verif_daily` relu deux fois) pour un
+    `--day 2026-08-13` lancé le 01/09 — 25 jours au lieu de 15 :
+
+      · 9 929 cases au lieu de 9 535, dont **394 QUI N'EXISTENT QUE
+        GRÂCE À LA FENÊTRE LARGE**. ⛔ Celles-là ne partent JAMAIS : un
+        run correctif derrière ne les efface pas, l'upsert est en
+        `merge-duplicates` et ne supprime rien ;
+      · 4 587 cases déplacées de plus de 0,01 km/h, **3 742 de plus de
+        0,10**, jusqu'à 3,832 km/h ;
+      · ⛔⛔ **290 premières places sur 1 984 changent de titulaire** —
+        une case sur sept, sur l'écran que lisent les pilotes.
+
+    ⚠️ ET LE PRÉCÉDENT AVAIT RAISON PAR CHANCE. Le lot L0a a rejoué le
+    25/08 le 26/08 au soir : la base s'arrêtait alors à la veille, donc
+    `gte(11/08)` sans borne haute rendait EXACTEMENT 15 jours. Rien
+    n'avait été pensé pour ça — c'est la date qui était clémente.
+
+    ⛔ CE QUE LE REJEU CONTINUE DE FAIRE, et c'est tout ce qu'on lui
+    demande : combler `model_verif_daily` (la journée manquante),
+    écrire son archive, et jouer le duel. Ce qu'il ne fait plus :
+    `model_score_zone` (glissant ET régime), les scores d'événement,
+    Murphy, le rapport de stabilité et les objets R2 — c'est-à-dire
+    tout ce qui est CLÉÉ PAR `as_of` alors que la fenêtre, elle, finit
+    à `day`.
+
+    ⚠️ ET IL NE RETIRE RIEN AU PASSAGE. `model_character` est mis à jour
+    par une RPC dont le `where p_day > mc.last_day` refuse déjà toute
+    journée plus vieille que la dernière intégrée (lot S15) : la
+    contribution d'un vieux rejeu aux accumulateurs était REJETÉE avant
+    ce garde-fou comme après. Le garde-fou ne fait pas perdre cette
+    donnée-là ; elle était déjà perdue, et c'est une réserve du lot L12,
+    pas une conséquence de celui-ci.
+
+    `forcer` (`--publier-quand-meme`) rouvre la porte. Un seul usage
+    légitime connu : rejouer une nuit qui vient d'échouer alors que la
+    date a déjà basculé — la fenêtre est alors trop large d'un jour, et
+    c'est un arbitrage qu'on prend en connaissance de cause, pas par
+    défaut.
+    """
+    if forcer:
+        return True
+    hier = (as_of - timedelta(days=1)).date()
+    return day.date() >= hier
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="/var/lib/bw-model-verif")
@@ -5819,6 +5888,14 @@ def main() -> int:
                          "(défaut : 2 = heure d'été française)")
     ap.add_argument("--no-purge", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    # ⛔ LOT LR : la porte de sortie du garde-fou de `doit_republier`.
+    # Nommee en toutes lettres pour qu'on ne la tape pas par reflexe.
+    ap.add_argument("--publier-quand-meme", action="store_true",
+                    help="republier model_score_zone et les objets R2 "
+                         "MEME si la journee notee est plus vieille "
+                         "qu'hier. Voir doit_republier() : la fenetre "
+                         "publiee sera alors plus large que 15 jours, "
+                         "sous l'etiquette rolling15")
     # ⛔ LE CONTRÔLE N°1 DU LOT S3 — cf. le pavé `--self-test` ci-dessus.
     # Il sort AVANT tout le reste : ni Supabase, ni R2, ni archive.
     ap.add_argument("--self-test", action="store_true",
@@ -5859,6 +5936,11 @@ def main() -> int:
            else datetime.now(timezone.utc) - timedelta(days=1)).replace(
                hour=0, minute=0, second=0, microsecond=0)
     as_of = datetime.now(timezone.utc)
+    # ⛔ LOT LR (01/09/2026) — voir `doit_republier` pour le pourquoi et
+    # les chiffres. Décidé ICI, une seule fois, à côté des deux dates
+    # dont il dépend : le calculer plus bas obligerait à retrouver `day`
+    # et `as_of` au milieu de six cents lignes.
+    republier = doit_republier(day, as_of, args.publier_quand_meme)
     utc_offset_s = int(args.utc_offset_h * 3600)
 
     try:
@@ -6145,6 +6227,30 @@ def main() -> int:
         # nº 5 du lot L1, appliqué à l'envers et à découvert).
         print("     ⚠️ `model_murphy.json` n'est donc pas republié non plus :")
         print("        il monte sur la fenêtre rejouée, qui n'est pas lue ici.")
+    elif not republier:
+        # ⛔⛔ LOT LR — LE REJEU D'UNE VIEILLE JOURNÉE S'ARRÊTE ICI.
+        # `model_verif_daily` est écrit (c'était tout l'objet du rejeu),
+        # l'archive est là, le duel a joué. Ce qui suit publierait le
+        # classement DU JOUR sur une fenêtre qui finit à la journée
+        # rejouée — 15 + (hier − day) jours sous l'étiquette
+        # `rolling15`. Mesuré le 01/09 pour un rejeu du 13/08 : 290
+        # premières places sur 1 984 changeaient de titulaire.
+        # ⚠️ CE MESSAGE SORT À CHAQUE FOIS, et il DIT LE NOMBRE DE JOURS
+        # de trop : un garde-fou muet a exactement l'allure d'une
+        # fonctionnalité manquante, et c'est comme ça qu'on finit par le
+        # retirer « parce qu'il ne sert à rien ».
+        trop = (as_of - timedelta(days=1)).date() - day.date()
+        print(f"  ⛔ JOURNÉE REJOUÉE ({day:%Y-%m-%d}) PLUS VIEILLE QU'HIER "
+              f"de {trop.days} jour(s) : le classement du jour n'est PAS "
+              f"republié.")
+        print(f"     `model_verif_daily` est comblé, l'archive est lue, le "
+              f"duel a joué — mais `model_score_zone`, les scores")
+        print(f"     d'événement, Murphy et les objets R2 sont SAUTÉS : leur "
+              f"fenêtre finirait à {day:%Y-%m-%d} alors que leur")
+        print(f"     `as_of` dit {as_of:%Y-%m-%d}, soit "
+              f"{15 + trop.days} jours publiés sous l'étiquette "
+              f"`rolling15`. (lot LR — `--publier-quand-meme` pour")
+        print(f"     passer outre en connaissance de cause.)")
     else:
         needed = zone_rows_needed(list(zone_of.values()))
         if needed:

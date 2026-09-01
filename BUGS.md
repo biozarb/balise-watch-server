@@ -6,6 +6,72 @@
 
 ---
 
+## 01/09/2026 (lot LR) — `score --day` republiait le classement DU JOUR
+
+Trouvé par l'oracle du lot L12, qui cherchait autre chose : il a relevé
+**317 balise-jours `agrume` des 13 et 14/08 jamais notés** (le job avait
+échoué deux nuits, l'archive avait été réparée à la main le 15/08 à
+13:04 — donc APRÈS les runs de notation — et personne n'avait rejoué).
+En allant écrire « il suffit de rejouer », on a trouvé pourquoi ce
+n'était pas si simple.
+
+**Piège nº 1 — ⛔⛔ DEUX LIGNES JUSTES SÉPARÉMENT, FAUSSES ENSEMBLE.**
+`as_of = datetime.now(timezone.utc)` (toujours aujourd'hui, quel que
+soit `--day`) et `?day=gte.{day − 14}` **sans borne haute**. Chacune se
+défend seule. Ensemble, elles font que rejouer la journée J publie une
+fenêtre de **15 + (hier − J) jours** sous l'étiquette `rolling15` et
+l'`as_of` du jour. *Un jour d'ancienneté = un jour de trop, et rien
+dans le nom de la colonne ne le dit.*
+
+**Piège nº 2 — ⛔ LE COÛT NE SE DEVINE PAS, IL SE MESURE.** Sonde en
+lecture seule le 01/09 pour un `--day 2026-08-13` lancé le 01/09
+(25 jours au lieu de 15) : 9 929 cases au lieu de 9 535, **4 587
+déplacées de plus de 0,01 km/h, 3 742 de plus de 0,10**, jusqu'à
+3,832 km/h — et **290 premières places sur 1 984 qui changent de
+titulaire**. Une case sur sept, sur l'écran que lisent les pilotes.
+
+**Piège nº 3 — ⛔⛔ « ON CORRIGERA DERRIÈRE » NE MARCHE PAS.** L'upsert
+de `model_score_zone` est en `resolution=merge-duplicates` : il écrase
+ce qu'il recouvre et **ne supprime rien**. Les **394 cases qui
+n'existent que grâce à la fenêtre large** ne sont recouvertes par aucun
+run correctif — elles restent publiées sous cet `as_of` pour toujours.
+*Un correctif qui ne peut pas retirer ce qu'il a ajouté n'est pas un
+correctif.*
+
+**Piège nº 4 — ⭐ LE PRÉCÉDENT AVAIT RAISON PAR CHANCE.** Le lot L0a a
+rejoué le 25/08 le 26/08 au soir, et la fenêtre faisait exactement
+15 jours — parce que la base s'arrêtait alors à la veille. Rien n'avait
+été pensé pour ça. *Un geste qui a marché une fois n'est pas un geste
+sûr : il faut savoir CE QUI l'a rendu juste.*
+
+**Piège nº 5 — ⚠️ ET LA FRONTIÈRE EST CALENDAIRE, PAS À 24 h.** Le
+garde-fou compare des DATES (`day.date() >= (as_of − 1 j).date()`). Un
+`as_of - day < timedelta(days=1)` paraît équivalent et ne l'est pas :
+la nuit tourne à 03:56, la journée notée a alors **27 h 56**, et ce
+garde-fou-là refuserait de publier CHAQUE NUIT. Le job rendrait 0,
+aucune alerte ne partirait, et le classement se figerait — on ne s'en
+apercevrait qu'en remarquant que l'écran ne bouge plus. *Des deux
+façons de casser ce garde-fou, la trop stricte est la plus
+silencieuse.* Deux mutations la tiennent (`mutations_rejeu_ancien.py`,
+nº 2 et 3).
+
+**Piège nº 6 — ⚠️ CE QUE LE GARDE-FOU NE RÉPARE PAS, ET QUI ÉTAIT DÉJÀ
+PERDU.** `model_character` est mis à jour par une RPC dont le
+`where p_day > mc.last_day` (lot S15) refuse toute journée plus vieille
+que la dernière intégrée. La contribution des 13 et 14/08 aux
+accumulateurs était rejetée AVANT ce lot comme APRÈS. *Le garde-fou ne
+fait pas perdre cette donnée — il ne faut simplement pas croire qu'un
+rejeu la récupère.*
+
+**Correctif** : `score.doit_republier(day, as_of, forcer)`, une fonction
+pure, plus une troisième branche à côté de `if not zone_of:` qui dit à
+chaque fois **combien de jours de trop** elle vient d'éviter. Porte de
+sortie explicite `--publier-quand-meme`. 8 assertions dans
+`test_score.py`, 7 mutations dans `model-verif/mutations_rejeu_ancien.py`,
+7/7 tuées.
+
+---
+
 ## 01/09/2026 (lot LV) — l'oreille existait, mais par accident
 
 Cinq runners criaient « PERSONNE NE SURVEILLE » depuis des semaines.

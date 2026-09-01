@@ -4833,6 +4833,56 @@ def test_manches_pas_de_rejeu_historique_sous_min_block_days():
           all(r["rank_reason"] != "ok" for r in fine), True)
 
 
+# ══════════════════════════════════════════════════════════════════
+#  LOT LR (01/09/2026) — un rejeu de vieille journée ne republie pas
+#  le classement du jour. Trouvé par l'oracle du lot L12.
+# ══════════════════════════════════════════════════════════════════
+
+def test_lr_le_rejeu_ancien_ne_republie_pas_le_classement():
+    """`doit_republier` : hier oui, avant-hier non, et la frontière est
+    CALENDAIRE."""
+    U = timezone.utc
+    nuit = datetime(2026, 9, 1, 3, 56, tzinfo=U)      # l'heure du timer
+    hier = datetime(2026, 8, 31, tzinfo=U)
+    check("LR  la nuit normale publie (J-1 note a 03:56)",
+          J.doit_republier(hier, nuit), True)
+    # ⭐ LA FRONTIÈRE EST CALENDAIRE, PAS À 24 h — et c'est le piège de
+    # ce garde-fou. À 03:56, la journée notée a 27 h et 56 min : un test
+    # écrit `as_of - day < timedelta(days=1)` refuserait de publier
+    # CHAQUE NUIT, et personne ne verrait pourquoi le classement a cessé
+    # de bouger.
+    check("LR  ⭐ 27 h d'ecart a 03:56 : c'est la DATE qui compte",
+          (nuit - hier) > timedelta(days=1)
+          and J.doit_republier(hier, nuit), True)
+    check("LR  ⭐ et a 23:59 le meme jour, toujours oui",
+          J.doit_republier(hier, datetime(2026, 9, 1, 23, 59, tzinfo=U)),
+          True)
+    check("LR  la journee du jour meme publie aussi",
+          J.doit_republier(datetime(2026, 9, 1, tzinfo=U), nuit), True)
+    check("LR  ⛔ avant-hier ne publie PAS",
+          J.doit_republier(datetime(2026, 8, 30, tzinfo=U), nuit), False)
+    check("LR  ⛔ le trou du 13/08 rejoue le 01/09 ne publie PAS "
+          "(25 j sous l'etiquette rolling15, 290 podiums qui changent)",
+          J.doit_republier(datetime(2026, 8, 13, tzinfo=U), nuit), False)
+    check("LR  `--publier-quand-meme` rouvre la porte, et lui seul",
+          J.doit_republier(datetime(2026, 8, 13, tzinfo=U), nuit, True),
+          True)
+    # ⛔ Le drapeau doit EXISTER : un garde-fou sans porte de sortie se
+    # contourne en éditant le code, ce qui ne laisse aucune trace.
+    # ⚠️ ON CHERCHE LE JETON EXACT, PAS LA SOUS-CHAINE. Cherchez
+    # `"--publier-quand-meme" in src` et un drapeau renomme
+    # `--publier-quand-meme-x` passe le test : la sous-chaine y est
+    # toujours. La mutation nº 6 a SURVECU a cette version-la, et c'est
+    # elle qui a fait ecrire ces deux lignes.
+    src = (pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
+           / "score.py").read_text(encoding="utf-8")
+    check("LR  le drapeau de sortie est DECLARE tel quel",
+          'ap.add_argument("--publier-quand-meme",' in src, True)
+    check("LR  ⭐ et il est LU : un drapeau declare et jamais lu est un "
+          "garde-fou sans porte, avec l'air d'en avoir une",
+          "args.publier_quand_meme" in src, True)
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -4917,7 +4967,9 @@ def main() -> int:
                test_memoire_le_jalon_dit_les_mo_et_crie_au_dessus_du_seuil,
                test_memoire_rss_lit_bien_vmrss_et_le_rend_en_mo,
                test_memoire_rss_suit_une_allocation_reelle,
-               test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime):
+               test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime,
+               # ── lot LR (01/09) : le rejeu qui republiait le jour ──
+               test_lr_le_rejeu_ancien_ne_republie_pas_le_classement):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0
