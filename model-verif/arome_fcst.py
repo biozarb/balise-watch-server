@@ -110,6 +110,74 @@
 #     « +6 h ». On préfère une journée SANS ligne AROME à une journée
 #     où AROME gagne par l'horaire.
 #
+#  3 bis. ⛔⛔ **ET LE POINT DE COMPARABILITÉ QUI MANQUAIT À LA
+#     DÉCISION 3 : NOS JOURNÉES N'ONT PAS 24 HEURES.**
+#     La décision ci-dessus protège la comparabilité contre un run trop
+#     frais. Elle ne dit rien de la seconde, mesurée seulement le 27/08
+#     (lot L4) : `arome-wind/ingest.py::keep_step()` ne garde qu'une
+#     échéance sur COARSE_EVERY = 3 dans la fenêtre `is_night_utc`,
+#     soit [22, 04[ UTC — six heures d'horloge dont il n'en reste que
+#     deux. Nommément, pour le run 00 Z, `arome_r2` n'a AUCUNE valeur
+#     aux heures **01, 02, 22 et 23 UTC** (vérifié au L4 sur les 4 302
+#     lignes du 26/08), là où `agrume` en a 24 sur 24.
+#     ⇒ ⚠️ **`n_hours` VAUT 19 OU 20, PAS « 20 ».** Le L4 avait mesuré
+#     20 sur une journée servie par le run 00 Z ; remesuré le 01/09 sur
+#     les trois nuits des 29, 30 et 31/08 (11 654 à 11 699 balise-jours
+#     chacune), le mode est **20 le 29/08 aux deux échéances**, puis
+#     **19 à +6 h et 20 à +24 h les 30 et 31/08** — la valeur dépend du
+#     run retenu par `pick_run()` et de l'échéance, pas seulement du
+#     filtre. Contre **24** pour tous les modèles Open-Meteo aux mêmes
+#     nuits. Au niveau des cases publiées (fichier servi du 01/09) :
+#     19,6 échéances par balise-jour à +6 h et 19,9 à +24 h, contre
+#     23,8 à 23,9 pour les onze autres, sur **851 cases**.
+#     ⚠️ *Écrire « 20 » aurait été une constante là où il y a une
+#     distribution.* Le chiffre publié par l'écran du L14 est le
+#     rapport mesuré case par case, jamais cette valeur-ci.
+#     ⛔ ET CE N'EST PAS NEUTRE POUR LE SCORE. `err_vec_med` est une
+#     médiane SUR LES HEURES DISPONIBLES : les quatre qui manquent sont
+#     les heures calmes de la nuit, celles où l'erreur est petite. Les
+#     retirer remonte la médiane. Mesuré au L4 sur 1 245 balise-jours
+#     appariés : **63 % du plancher de +0,28 km/h d'`arome_r2` vient de
+#     là** — plus que l'arrondi des tuiles (27 %, décision 5) et que le
+#     point lu (10 %) réunis. Ce n'est pas un défaut de prévision,
+#     c'est un défaut de COMPARABILITÉ, et c'est la cause DOMINANTE :
+#     aucun des quatre suspects écrits par l'audit (§0.3, §2.2) ne la
+#     nommait, et cet en-tête non plus.
+#     ⇒ **Arbitrage de Yann, 27/08 : on ne touche ni aux tuiles ni au
+#     scoring — on PUBLIE le nombre d'heures.** Le rapport
+#     `n_hours / occurrences` est affiché à côté de chaque rang depuis
+#     le lot L14 (01/09), côté web. Corriger `keep_step()` ferait
+#     grossir les tuiles pour toutes les cartes du site afin de
+#     réparer une seule colonne d'un seul tableau ; rendre le chiffre
+#     LISIBLE coûte une division.
+#     ⛔⛔ **ET AROME/R2 N'EST PAS SEUL — TROUVÉ EN VÉRIFIANT CE PAVÉ,
+#     LE 01/09, ET AUCUN LOT NE L'AVAIT NOMMÉ.** Le L4, l'audit et le
+#     prompt du L14 parlent tous d'`arome_r2` comme du cas unique. Sur
+#     les trois nuits des 29, 30 et 31/08, `model_verif_daily` dit
+#     autre chose, et à une AUTRE échéance :
+#       · `dmi_harmonie_arome_europe` à **+48 h : 12 heures** par
+#         balise-jour (554 à 557 balise-jours sur ~570, les trois
+#         nuits) — la MOITIÉ de la journée — contre 24 à +6 h et +24 h ;
+#       · `chmi_aladin_central_europe_2km` à **+48 h : 19 heures**
+#         (509 à 514 balise-jours), contre 24 aux deux autres échéances.
+#     Ce n'est donc pas un défaut de NOTRE chaîne de lecture, c'est une
+#     propriété de la profondeur d'archive de chaque fournisseur — et
+#     elle frappe l'échéance la plus lointaine, celle où les modèles se
+#     ressemblent le plus. ⓘ Dans ces cases-là, le modèle noté sur le
+#     moins d'heures est aussi celui qui affiche la plus petite erreur
+#     (DMI 5,71 km/h contre 5,77 à 6,74 pour les cinq autres, case
+#     `*:*` +48 h du 01/09) — ce qui est exactement le sens attendu, et
+#     exactement ce que l'écran du L14 doit faire voir.
+#     ⚠️ Ce pavé vit dans `arome_fcst.py` et parle de deux modèles qui
+#     n'y passent pas : c'est assumé, parce que c'est ici qu'un lecteur
+#     va chercher « pourquoi ce modèle n'a pas ses 24 heures », et
+#     qu'une note vraie au mauvais endroit vaut mieux qu'aucune note.
+#
+#     ⚠️ Si `keep_step()` change un jour, cette décision et l'écran du
+#     L14 deviennent faux ENSEMBLE : le second cessera simplement
+#     d'avertir (l'écart tombera sous son seuil), mais ce pavé, lui,
+#     restera à mentir. Le remesurer avant de le croire.
+#
 #  4. ⚠️ **`fetched_at` porte l'heure du RUN**, comme AGRUME et pour la
 #     même raison : ce job ne fait aucun appel d'API. Conséquence sur
 #     la SEULE colonne qui en dépend, `lead_exact_h` : la nôtre se
@@ -122,12 +190,34 @@
 #  5. ⚠️ **La vitesse des tuiles est ARRONDIE À L'ENTIER**, et on ne le
 #     corrige pas. `arome-wind/ingest.py::_ms()` arrondit pour une
 #     raison de TAILLE DE FICHIER, pas de physique (« erreur maximale
-#     0,5 km/h sur une flèche de carte »). Pour un score, c'est une
-#     quantification de ±0,5 km/h, soit ~0,29 km/h en RMS : ajoutée en
-#     quadrature à une erreur modèle de 5,7 km/h elle donne 5,71, soit
-#     **+0,1 %**. Négligeable pour le classement, et — comme
-#     l'asymétrie de `lead_exact_h` — DÉFAVORABLE à AROME/R2, jamais
-#     l'inverse. À écrire, pas à corriger.
+#     0,5 km/h sur une flèche de carte »).
+#
+#     ⛔⛔ **CE PAVÉ A DIT « +0,1 %, NÉGLIGEABLE » PENDANT CINQ JOURS,
+#     ET C'ÉTAIT LA MAUVAISE GRANDEUR.** Le raisonnement écrit ici
+#     était : quantification ±0,5 km/h ⇒ ~0,29 km/h en RMS ⇒ ajoutée en
+#     QUADRATURE à une erreur modèle de 5,7 km/h, 5,71, soit +0,1 %.
+#     Ce calcul est JUSTE — et il porte sur le RMS, quand le classement
+#     publié lit une MÉDIANE. La quadrature ne s'applique pas à elle.
+#     ⇒ Mesuré au lot L4 (27/08), sans aucune observation, sur
+#     **24 900 balise-heures** : `‖v(arome_r2) − v(agrume)‖` vaut
+#     **0,30 km/h en médiane** (p90 0,50, max 0,50 — la borne théorique,
+#     retrouvée), et l'arrondi seul en explique la totalité. Sur le
+#     score, il pèse **27 % du plancher de +0,28 km/h** d'`arome_r2`
+#     (décomposition appariée, 1 245 balise-jours), pas 0,1 %.
+#     ⓘ Sur `err_vec_rms` — la colonne du duel L1 — l'ordre s'inverse
+#     et l'arrondi redevient le premier terme (51,3 % contre 32,2 %
+#     pour les heures manquantes) : le RMS voit bien la quantification
+#     que la médiane absorbe, exactement comme le raisonnement en
+#     quadrature ci-dessus le laissait attendre. **Les deux lectures
+#     sont vraies sur leur propre grandeur ; une seule décrit ce que
+#     l'écran publie.**
+#     ⇒ Conclusion INCHANGÉE — à écrire, pas à corriger, et toujours
+#     DÉFAVORABLE à AROME/R2, jamais l'inverse — mais pour un poids
+#     douze fois plus grand, et derrière une cause que ce pavé ne
+#     nommait pas du tout (décision 3 bis, 63 %).
+#     ⚠️ *Une estimation juste sur la mauvaise grandeur se lit comme
+#     une mesure.* Celle-ci a survécu cinq jours parce qu'elle était
+#     chiffrée.
 #
 #  6. ⭐ **On écrit AUSSI les 570 Pioupiou déjà notées**, en doublon
 #     apparent avec `meteofrance_arome_france_hd` d'Open-Meteo. C'est
