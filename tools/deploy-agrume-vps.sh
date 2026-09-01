@@ -735,6 +735,20 @@ bash agrume/test-voyant-piaf.sh || exit 1
 # ni au VPS, ni à /etc : uniquement des dossiers temporaires.
 echo "  · tools/test_deploiement.sh"
 bash tools/test_deploiement.sh || exit 1
+
+# ⛔ 01/09 (lot LV) — LE BANC DES CANAUX, ET IL TOURNE ICI POUR DEUX
+# RAISONS QUE LE MAC NE PEUT PAS COUVRIR.
+#   · ses assertions E1/E2 lisent des PERMISSIONS, et les permissions qui
+#     comptent sont celles de la copie D'ICI : c'est elle qu'un
+#     `sudo cp` installerait dans /etc. ⚠️ `model-verif/` est transporté
+#     en `-rtv` (sans `-p`, pour protéger le 600 délibéré de `score.py`),
+#     donc un mode corrigé sur le Mac N'ARRIVE PAS ici : la seule façon
+#     de savoir que cette copie est saine est de le vérifier ici ;
+#   · `bw_avertir_config` s'appuie sur `msmtp`, `curl` et `systemd-cat`,
+#     qui n'existent pas pareil des deux côtés. Le banc les remplace par
+#     des faux, mais c'est ici que le chien devra aboyer pour de vrai.
+echo "  · tools/test_alertes.sh"
+bash tools/test_alertes.sh || exit 1
 EOF
 [ $? -eq 0 ] || echec "un banc a échoué sur le VPS — RIEN N'A ÉTÉ REDÉMARRÉ"
 

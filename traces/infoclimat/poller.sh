@@ -183,7 +183,7 @@ if (( code == 0 )); then
       || dire "⚠️ ping de vie non parti (réseau ?) — le check va passer en retard"
   else
     dire "⚠️ BW_INFOCLIMAT_PING_URL absente de $ALERTES_FILE — PERSONNE NE SURVEILLE CE POLLER"
-    bw_avertir_config BW_INFOCLIMAT_PING_URL "$ALERTES_FILE" balise-infoclimat "CE POLLER"
+    bw_avertir_config BW_INFOCLIMAT_PING_URL "$ALERTES_FILE" balise-infoclimat "CE POLLER" "$ETAT"
   fi
   dire "run OK en ${duree}s"
   exit 0

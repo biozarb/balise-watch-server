@@ -57,6 +57,21 @@
 bw_avertir_config() {
   bw_ac_var="${1:-}"; bw_ac_fichier="${2:-}"
   bw_ac_etiq="${3:-balise-watch}"; bw_ac_quoi="${4:-CE JOB}"
+  # $5 = LE DOSSIER D'ÉTAT DU JOB APPELANT. ⛔⛔ AJOUTÉ LE 01/09 À 17:45,
+  # UNE HEURE APRÈS LE DÉPLOIEMENT, PARCE QUE LA PRODUCTION L'A DIT.
+  # Le premier vrai passage du poller a fait partir le push — le chien a
+  # bien aboyé — mais NI l'e-mail NI le jeton ne se sont écrits. Cause :
+  # `balise-infoclimat.service` porte `ProtectHome=read-only` et
+  # `ReadWritePaths=/home/debian/.balise-watch-infoclimat`. Le défaut
+  # `$HOME/.balise-watch-etat-alertes` n'est PAS inscriptible pour lui.
+  # ⇒ Sans jeton, le repli « échouer ouvert » s'appliquait : un push
+  #   toutes les 5 minutes, soit 288 par jour. Un dispositif d'alerte
+  #   qu'on apprend à ignorer ne sert plus — c'est la faute même que ce
+  #   lot répare, retournée contre lui en une heure.
+  # ⚠️ Chaque runner passe donc SON dossier d'état, celui que son unité
+  # systemd déclare déjà en `ReadWritePaths`. Le défaut ne sert plus qu'aux
+  # runners sans durcissement (les trois d'agrume/ et verif/).
+  bw_ac_dir="${5:-${BW_ETAT_ALERTES:-$HOME/.balise-watch-etat-alertes}}"
   [ -n "$bw_ac_var" ] || return 0
 
   bw_ac_sujet="configuration incomplete : $bw_ac_var absente"
@@ -69,7 +84,6 @@ Machine : $(hostname 2>/dev/null || echo '?')
 ⓘ Cet avertissement ne repart qu'une fois par jour et par variable."
 
   # ── Le jeton : une fois par jour et par variable ────────────────────
-  bw_ac_dir="${BW_ETAT_ALERTES:-$HOME/.balise-watch-etat-alertes}"
   bw_ac_jour="$(date -u +%Y-%m-%d)"
   bw_ac_jeton="$bw_ac_dir/cri.$bw_ac_var"
   if [ -r "$bw_ac_jeton" ] \

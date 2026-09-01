@@ -165,6 +165,23 @@ MUTATIONS = [
      '  bw_ac_sujet="configuration incomplete : $bw_ac_var absente"',
      '  bw_ac_sujet="configuration incomplete"'),
 
+    ("⛔⛔ LE DOSSIER D'ÉTAT REDEVIENT LE DÉFAUT (`$HOME`) : sous "
+     "`ProtectHome=read-only`, le jeton ne s'écrit plus et le poller "
+     "pousse une alerte TOUTES LES 5 MINUTES — 288 par jour. C'est la "
+     "faute que la PRODUCTION a trouvée une heure après le déploiement "
+     "du 01/09, et qu'aucun banc ne voyait",
+     ALERTES, AVERTIR,
+     '  bw_ac_dir="${5:-${BW_ETAT_ALERTES:-$HOME/.balise-watch-etat-alertes}}"',
+     '  bw_ac_dir="${BW_ETAT_ALERTES:-$HOME/.balise-watch-etat-alertes}"'),
+
+    ("⛔ LE POLLER NE PASSE PLUS SON DOSSIER D'ÉTAT : même effet, vu du "
+     "côté de l'appelant. Le durcissement systemd d'une unité ne se lit "
+     "pas dans le script qu'elle lance — c'est pour ça que l'argument "
+     "doit être EXPLICITE, et bancé",
+     ALERTES, RACINE / "traces/infoclimat/poller.sh",
+     'bw_avertir_config BW_INFOCLIMAT_PING_URL "$ALERTES_FILE" balise-infoclimat "CE POLLER" "$ETAT"',
+     'bw_avertir_config BW_INFOCLIMAT_PING_URL "$ALERTES_FILE" balise-infoclimat "CE POLLER"'),
+
     # ══ LE VERDICT TAILLE (réponse Q4) ════════════════════════════════
     ("⛔⛔ UN FICHIER ILLISIBLE DE MÊME TAILLE EST DÉCLARÉ IDENTIQUE : la "
      "réserve du lot L8 s'effondre — « ce qu'on ne peut pas lire n'est pas "

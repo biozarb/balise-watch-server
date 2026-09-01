@@ -607,7 +607,7 @@ if (( code == 0 )); then
     # surveillé. La panne ne se verrait qu'au moment où l'on irait
     # chercher des chiffres qui n'existent pas.
     dire "⚠️ $PING_VAR absente de $ALERTES_FILE — PERSONNE NE SURVEILLE CE JOB"
-    bw_avertir_config "$PING_VAR" "$ALERTES_FILE" "bw-model-$MODE" "CE JOB ($MODE)"
+    bw_avertir_config "$PING_VAR" "$ALERTES_FILE" "bw-model-$MODE" "CE JOB ($MODE)" "$ETAT"
   fi
   dire "run $MODE OK en ${duree}s"
   exit 0

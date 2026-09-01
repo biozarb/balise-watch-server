@@ -209,6 +209,26 @@ bw_avertir_config BW_ESSAI_PING_URL /tmp/faux.env banc-essai "CE JOB"
 check "D8  ⭐⭐ un job qui crie 3 jours envoie 3 messages, pas 0 (le cas du lot)" \
       "$(grep -c -- '--MAIL--' "$BANC_MAILS" | tr -d ' ')" "4"
 
+# ⭐⭐ D8 bis — LE DOSSIER D'ÉTAT SE PASSE EN ARGUMENT, ET C'EST LA
+# PRODUCTION QUI L'A EXIGÉ. Une heure après le déploiement du 01/09, le
+# poller a fait partir son push mais n'a écrit NI e-mail NI jeton :
+# `balise-infoclimat.service` porte `ProtectHome=read-only` et ne peut
+# écrire que dans `~/.balise-watch-infoclimat`. Sans jeton, le repli
+# « échouer ouvert » envoyait un push TOUTES LES 5 MINUTES — 288 par
+# jour. Le banc vérifie donc les deux moitiés : le 5e argument est bien
+# utilisé, et les deux runners DURCIS le passent.
+: > "$BANC_MAILS"
+AILLEURS="$TMP/ailleurs"; mkdir -p "$AILLEURS"
+bw_avertir_config BW_ARG_PING_URL /tmp/f.env banc "X" "$AILLEURS"
+check "D8b ⭐ le 5e argument décide où va le jeton" \
+      "$(cat "$AILLEURS/cri.BW_ARG_PING_URL" 2>/dev/null)" "$(date -u +%Y-%m-%d)"
+bw_avertir_config BW_ARG_PING_URL /tmp/f.env banc "X" "$AILLEURS"
+check "D8c ⭐ et il fait bien taire le second appel du jour" \
+      "$(grep -c -- '--MAIL--' "$BANC_MAILS" | tr -d ' ')" "1"
+check "D8d ⛔ les deux runners DURCIS passent leur dossier d'état inscriptible" \
+      "$(grep -c 'bw_avertir_config .*"\$ETAT"' traces/infoclimat/poller.sh model-verif/run.sh \
+         | awk -F: '$2==1' | wc -l | tr -d ' ')" "2"
+
 check "D9  le jeton porte la date du jour, en UTC" \
       "$(cat "$BW_ETAT_ALERTES/cri.BW_ESSAI_PING_URL")" "$(date -u +%Y-%m-%d)"
 
