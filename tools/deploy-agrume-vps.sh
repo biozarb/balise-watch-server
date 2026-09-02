@@ -25,6 +25,11 @@ VPS="${BW_VPS_HOST:-debian@51.91.102.146}"
 DISTANT="${BW_VPS_CODE:-~/balise-watch/balise-watch-server}"
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SANS_BANCS=0
+#: Le plancher du second filet. 4 Go posés le 28/08 ; on accepte un peu
+#: moins (un swapfile de 4 GiB se lit 4 095 Mo, pas 4 096) sans accepter
+#: un swap symbolique de 512 Mo qui ne changerait rien à la nuit qui a
+#: motivé l'arbitrage.
+BW_SWAP_MIN_MO="${BW_SWAP_MIN_MO:-3500}"
 [ "${1:-}" = "--sans-bancs" ] && SANS_BANCS=1
 # ⓘ 31/08 (lot LD) — `--controle-unites` joue le §2 bis SEUL, en lecture
 # pure : ni rsync, ni bancs, ni restart, ni sudo. C'est la commande à
@@ -356,6 +361,94 @@ bw_controle_config_alertes() {
   return 0
 }
 
+# ══════════════════════════════════════════════════════════════════════
+#  LE SECOND FILET DE L'ARBITRAGE OOM — le swap    (02/09/2026)
+#
+#  ⛔ POURQUOI CE CONTRÔLE EXISTE, ET IL EST NÉ D'UNE VÉRIFICATION QUI
+#  DEVAIT ÊTRE UNE FORMALITÉ. Le 02/09, en relisant « le VPS porte trois
+#  surcharges `.d/*.conf` qui n'existent dans aucun dépôt » (tableau de
+#  suivi, ligne LD), on a trouvé que ce n'était PLUS VRAI : le lot LD les
+#  a versionnées le 31/08, elles sont suivies par git et leur sha256 est
+#  identique des deux côtés. La ligne décrivait un état corrigé le jour
+#  même.
+#
+#  ⭐ MAIS LE MÊME SONDAGE A TROUVÉ CE QUI RESTE. `20-oom.conf` s'appuie
+#  explicitement sur un second filet — « le swap de 4 Go posé le même
+#  jour est le second filet ; celui-ci ne fait que désigner qui tombe en
+#  premier ». Ce swap existe (4 095 Mo, `/swapfile`, ligne `swap sw` dans
+#  `/etc/fstab`, unité `swapfile.swap` active) — et il n'est écrit NULLE
+#  PART dans les dépôts, ni contrôlé par rien. L'arbitrage du 28/08 tient
+#  donc sur DEUX pièces dont une seule est reproductible.
+#
+#  ⚠️ IL DIT, IL N'INSTALLE PAS — même règle que le §2 bis (décision de
+#  Yann du 31/08, Q2). Créer un swap est un geste `sudo` sur une machine
+#  de production, et c'est une décision, pas une copie.
+#
+#  ⛔ ET IL NE REFUSE PAS LE DÉPLOIEMENT. Un swap absent ne casse aucune
+#  nuit par lui-même : il rend seulement la nuit du 28/08 possible à
+#  nouveau. Refuser bloquerait tous les déploiements sur un risque, pas
+#  sur une panne — et un contrôle qui bloque trop se fait désarmer
+#  (piège nº 3 du lot LV). Il RÉSERVE, comme les unités illisibles.
+# ══════════════════════════════════════════════════════════════════════
+# Le verdict, SÉPARÉ DU TRANSPORT — même patron que `bw_verdict_unite`,
+# et pour la même raison : une fonction qui fait un `ssh` ne se banche
+# pas, une fonction pure se banche en trois lignes. Le banc du chemin de
+# déploiement (`tools/test_deploiement.sh`) l'appelle directement.
+#
+# ⚠️ TROIS ÉTATS, PAS DEUX. « présent » et « absent » laisseraient dans
+# les verts le cas qui compte le plus : un swap ACTIF aujourd'hui mais
+# absent de `/etc/fstab`, qui disparaît au prochain redémarrage sans que
+# rien ne le dise. C'est la panne du 28/08 en différé, armée par un
+# reboot — et elle se lirait « ✓ swap 4095 Mo » jusque-là.
+bw_verdict_swap() {
+  local total="${1:-0}" fstab="${2:-0}"
+  if [ "$total" -lt "$BW_SWAP_MIN_MO" ]; then printf 'ABSENT'; return 0; fi
+  if [ "$fstab" -eq 0 ]; then printf 'NON_PERSISTANT'; return 0; fi
+  printf 'PERSISTANT'
+}
+
+bw_controle_swap() {
+  dire "le second filet de l'arbitrage OOM : le swap (lecture seule)"
+  # ⚠️ `/proc/meminfo`, pas `swapon` : `swapon` n'est pas dans le PATH
+  # d'un ssh non interactif sur cette machine (mesuré le 02/09 —
+  # « command not found »). Un contrôle qui dépend d'un binaire absent
+  # rend un verdict de son PATH, pas de la machine.
+  ETAT_SWAP=$(ssh "$VPS" '
+    T=$(awk "/^SwapTotal:/ {print int(\$2/1024)}" /proc/meminfo 2>/dev/null)
+    L=$(awk "/^SwapFree:/  {print int(\$2/1024)}" /proc/meminfo 2>/dev/null)
+    P=$(grep -cE "^[^#].*[[:space:]]swap[[:space:]]" /etc/fstab 2>/dev/null || echo 0)
+    printf "%s|%s|%s\n" "${T:-0}" "${L:-0}" "${P:-0}"')     || echec "lecture de /proc/meminfo impossible"
+  SWAP_MO=$(printf '%s' "$ETAT_SWAP" | cut -d'|' -f1)
+  SWAP_LIBRE=$(printf '%s' "$ETAT_SWAP" | cut -d'|' -f2)
+  SWAP_FSTAB=$(printf '%s' "$ETAT_SWAP" | cut -d'|' -f3)
+
+  case "$(bw_verdict_swap "${SWAP_MO:-0}" "${SWAP_FSTAB:-0}")" in
+  ABSENT)
+    echo "      ⛔ SWAP ABSENT OU TROP PETIT — ${SWAP_MO:-0} Mo, attendu ≥ $BW_SWAP_MIN_MO.
+         C'est le SECOND FILET de \`20-oom.conf\`, et sans lui l'arbitrage du
+         28/08 ne tient plus que sur un rang de priorité. La nuit du 28/08
+         (2,82 Go de notation + la passe piaf, 3,73 Go utilisables, PAS de
+         swap) redevient possible.
+         ⓘ Geste, À LA MAIN et avec accord :
+            sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile
+            sudo mkswap /swapfile && sudo swapon /swapfile
+            puis la ligne « /swapfile none swap sw 0 0 » dans /etc/fstab." ;;
+  NON_PERSISTANT)
+    # ⚠️ LE CAS QUI SE LIT VERT ET QUI NE L'EST PAS : un swap actif
+    # aujourd'hui mais absent de `/etc/fstab` disparaît au prochain
+    # redémarrage, sans que rien ne le dise. C'est la panne du 28/08 en
+    # différé, armée par un reboot.
+    echo "      ⚠️ SWAP ACTIF MAIS NON PERSISTANT — ${SWAP_MO} Mo en service, AUCUNE
+         ligne \`swap\` dans /etc/fstab. Il ne survivra pas à un redémarrage,
+         et le filet tombera sans bruit. Ajouter la ligne." ;;
+  *)
+    echo "  ✓ swap ${SWAP_MO} Mo (${SWAP_LIBRE} Mo libres), persistant via /etc/fstab
+      ⓘ Second filet de l'arbitrage OOM du 28/08 — cf.
+         model-verif/systemd/bw-model-score.service.d/20-oom.conf" ;;
+  esac
+  return 0
+}
+
 bw_controle_unites() {
   dire "dépôt ↔ /etc/systemd/system (lecture seule, sans sudo)"
   CIBLES="$(bw_cibles_etc)"
@@ -467,6 +560,7 @@ bw_controle_unites() {
 if [ "$CONTROLE_SEUL" -eq 1 ]; then
   bw_controle_unites
   bw_controle_config_alertes
+  bw_controle_swap
   dire "✅ contrôle des unités ET des canaux terminé — RIEN n'a été transporté, écrit ni redémarré"
   exit 0
 fi
@@ -598,6 +692,7 @@ echo "  ✓ identique des deux côtés ($(printf '%s\n' "$LOCAL_SUM" | wc -l | t
 # ══════════════════════════════════════════════════════════════════════
 bw_controle_unites
 bw_controle_config_alertes
+bw_controle_swap
 
 # ══════════════════════════════════════════════════════════════════════
 # 3. LES BANCS, SUR LE VPS — pas seulement sur le Mac. Le VPS a son

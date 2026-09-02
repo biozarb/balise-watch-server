@@ -161,6 +161,42 @@ MUTATIONS = [
      QUART_TIMER,
      '[Unit]\n',
      '[Unit]\n# bw-deploy: ne-pas-installer\n'),
+
+    # ══════════════════════════════════════════════════════════════════
+    #  LE SECOND FILET DE L'ARBITRAGE OOM — le swap (02/09/2026)
+    #
+    #  ⛔ La faute qu'on craint ici n'est pas « le contrôle plante », c'est
+    #  « le contrôle RASSURE ». Un swap actif mais non persistant, ou un
+    #  swap symbolique de 512 Mo, doivent être NOMMÉS — sinon la nuit du
+    #  28/08 redevient possible derrière un ✓ vert.
+    # ══════════════════════════════════════════════════════════════════
+    ("⛔⛔ le contrôle du swap ne connaît plus que deux états : un swap "
+     "ACTIF mais absent de /etc/fstab est compté PERSISTANT, et il "
+     "disparaîtra au prochain redémarrage sans que rien ne le dise",
+     DEPLOY,
+     '  if [ "$fstab" -eq 0 ]; then printf \'NON_PERSISTANT\'; return 0; fi',
+     '  if [ "$fstab" -eq 99 ]; then printf \'NON_PERSISTANT\'; return 0; fi'),
+
+    ("⭐ le plancher du swap tombe à zéro : n'importe quel swap "
+     "symbolique (512 Mo) passe pour le filet de 4 Go",
+     DEPLOY,
+     '  if [ "$total" -lt "$BW_SWAP_MIN_MO" ]; then printf \'ABSENT\'; return 0; fi',
+     '  if [ "$total" -lt 0 ]; then printf \'ABSENT\'; return 0; fi'),
+
+    ("la persistance rattrape une taille insuffisante — l'ordre des deux "
+     "tests est inversé, et 100 Mo dans /etc/fstab passent au vert",
+     DEPLOY,
+     '  if [ "$total" -lt "$BW_SWAP_MIN_MO" ]; then printf \'ABSENT\'; return 0; fi\n'
+     '  if [ "$fstab" -eq 0 ]; then printf \'NON_PERSISTANT\'; return 0; fi',
+     '  if [ "$fstab" -eq 0 ]; then printf \'NON_PERSISTANT\'; return 0; fi\n'
+     '  if [ "$total" -lt "$BW_SWAP_MIN_MO" ]; then printf \'ABSENT\'; return 0; fi'),
+
+    ("⚠️ le plancher passe à 4 096 : un swapfile de 4 GiB RÉEL (4 095 Mo "
+     "lus dans /proc/meminfo) serait déclaré ABSENT à chaque "
+     "déploiement — un contrôle qui crie au loup se fait désarmer",
+     DEPLOY,
+     'BW_SWAP_MIN_MO="${BW_SWAP_MIN_MO:-3500}"',
+     'BW_SWAP_MIN_MO="${BW_SWAP_MIN_MO:-4096}"'),
 ]
 
 

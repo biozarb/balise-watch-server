@@ -306,6 +306,40 @@ check "E7  ⛔ et AUCUNE autre unité ne le porte (un marqueur de trop éteint u
            head -30 "$f" | grep -q '^# bw-deploy: ne-pas-installer' && echo x; done | wc -l | tr -d ' ')" "4"
 
 # ══════════════════════════════════════════════════════════════════════
+#  F. LE SECOND FILET DE L'ARBITRAGE OOM — le swap    (02/09/2026)
+#
+#  ⛔ POURQUOI CES ASSERTIONS EXISTENT. `20-oom.conf` s'appuie
+#  explicitement sur un second filet — « le swap de 4 Go posé le même
+#  jour » — qui n'était écrit dans AUCUN dépôt et que RIEN ne vérifiait.
+#  L'arbitrage du 28/08 tenait donc sur deux pièces dont une seule était
+#  reproductible, et la seconde pouvait disparaître à un redémarrage
+#  sans que personne ne l'apprenne.
+#
+#  ⚠️ LE CAS QUI COMPTE EST F3, PAS F1. Un swap absent se voit ; un swap
+#  ACTIF MAIS ABSENT DE /etc/fstab se lit « ✓ swap 4095 Mo » jusqu'au
+#  jour du reboot. Deux états auraient rangé ce cas dans les verts.
+# ══════════════════════════════════════════════════════════════════════
+echo
+echo "▶ F. le swap, second filet de l'arbitrage OOM"
+check "F1  aucun swap → ABSENT" "$(bw_verdict_swap 0 0)" "ABSENT"
+check "F2  ⛔ un swap symbolique (512 Mo) ne compte PAS pour un filet" \
+      "$(bw_verdict_swap 512 1)" "ABSENT"
+check "F3  ⭐⭐ actif mais absent de /etc/fstab → NON_PERSISTANT (le cas
+      qui se lirait vert jusqu'au prochain redémarrage)" \
+      "$(bw_verdict_swap 4095 0)" "NON_PERSISTANT"
+check "F4  4 Go et persistant → PERSISTANT" "$(bw_verdict_swap 4095 1)" "PERSISTANT"
+check "F5  ⭐ le plancher accepte 4 095 Mo (un swapfile de 4 GiB ne se lit
+      pas 4 096) et refuse la moitié" \
+      "$(bw_verdict_swap 3499 1)/$(bw_verdict_swap 3500 1)" "ABSENT/PERSISTANT"
+check "F6  ⛔ la persistance ne rattrape JAMAIS une taille insuffisante" \
+      "$(bw_verdict_swap 100 1)" "ABSENT"
+# ⭐ F7 — LE CHIFFRE MESURÉ SUR LA MACHINE, le 02/09 : 4 095 Mo, ligne
+# `/swapfile none swap sw 0 0` dans /etc/fstab, unité `swapfile.swap`
+# active. C'est l'état que le contrôle doit appeler PERSISTANT.
+check "F7  ⭐ l'état RÉEL du VPS au 02/09 (4 095 Mo, fstab) → PERSISTANT" \
+      "$(bw_verdict_swap 4095 1)" "PERSISTANT"
+
+# ══════════════════════════════════════════════════════════════════════
 echo
 if [ "$ROUGES" -eq 0 ]; then
   echo "  ✓ $VERTS assertions vertes, 0 rouge — le chemin de déploiement tient"
