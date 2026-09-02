@@ -362,6 +362,75 @@ bw_controle_config_alertes() {
 }
 
 # ══════════════════════════════════════════════════════════════════════
+#  §2 quater — LE CANAL E-MAIL ET SES RÉGLAGES        (lot LE, 02/09/2026)
+#
+#  ⛔ POURQUOI CE CONTRÔLE EXISTE. `~/.msmtprc` était la QUATRIÈME copie
+#  unique du chantier : 239 octets, 0600, sur le VPS et NULLE PART
+#  ailleurs. Le lot LE lui donne un exemple versionné — et Q2 nommait
+#  d'avance le piège : *un exemple que rien ne relit périme.* Le
+#  précédent, celui du fichier d'alertes, annonçait 4 variables sur 15.
+#  ⇒ Ce contrôle est ce qui l'empêche : à chaque déploiement, les NOMS
+#    de réglage du VRAI fichier du VPS sont comparés à ceux de l'exemple.
+#
+#  ⚠️ NOMS SEULS, ET C'EST UNE RÈGLE DE SÉCURITÉ. Le fichier porte un
+#  mot de passe d'application. `bw_inv_msmtp_noms` ne rend que le
+#  PREMIER MOT de chaque ligne, des deux côtés — le banc §G le vérifie
+#  sur une fixture qui porte un faux secret. Aucune valeur ne remonte
+#  dans ce terminal ni dans les journaux de ce script.
+#
+#  ⛔ ET IL NE REFUSE PAS, comme le §2 ter. Même raison : le trou n'est
+#  pas causé par le déploiement, et refuser de déployer le correctif
+#  parce que la chose à corriger n'est pas corrigée est un piège
+#  d'amorçage. Il DIT, et c'est déjà tout ce que personne ne faisait.
+# ══════════════════════════════════════════════════════════════════════
+bw_controle_config_msmtp() {
+  dire "canal e-mail : les RÉGLAGES de ~/.msmtprc du VPS ↔ l'exemple versionné (noms seuls)"
+  ANNONCES=$(bw_inv_msmtp_exemple "$ICI")
+  [ -n "$ANNONCES" ] \
+    || echec "l'exemple $BW_EXEMPLE_MSMTP est introuvable ou vide — le contrôle certifierait sa propre cécité"
+
+  # ⚠️ La même extraction que le banc, recopiée en une ligne pour le
+  # shell DISTANT (qui n'a pas ce dépôt sous la main au moment du ssh) :
+  # premier mot, commentaires retirés, trié. Si elle diverge de
+  # `bw_inv_msmtp_noms`, le banc §G5/§G6 le verra localement.
+  REELS=$(ssh "$VPS" '
+    F="$HOME/.msmtprc"
+    [ -r "$F" ] || exit 0
+    sed "s/#.*$//" "$F" | awk "NF {print \$1}" | sort -u') \
+    || echec "lecture des NOMS de ~/.msmtprc impossible"
+
+  if [ -z "$REELS" ]; then
+    echo "  ⚠️ ~/.msmtprc absent ou illisible sur le VPS — le canal e-mail n'existe pas.
+     Geste : cp traces/entretien/msmtprc.exemple ~/.msmtprc puis chmod 600."
+    return 0
+  fi
+
+  INCONNUS=$(comm -13 <(printf '%s\n' "$ANNONCES") <(printf '%s\n' "$REELS") | tr '\n' ' ' | sed 's/ *$//')
+  JAMAIS=$(comm -23 <(printf '%s\n' "$ANNONCES") <(printf '%s\n' "$REELS") | tr '\n' ' ' | sed 's/ *$//')
+
+  echo "  ✓ $(printf '%s\n' "$ANNONCES" | wc -l | tr -d ' ') réglages annoncés par l'exemple  ·  $(printf '%s\n' "$REELS" | wc -l | tr -d ' ') sur le VPS"
+  [ -n "$INCONNUS" ] && echo "      ⛔ INCONNU(S) $INCONNUS — réglage(s) du VPS que l'exemple n'annonce pas.
+         C'est exactement comme ça que le précédent exemple a péri (4 sur 15).
+         Geste : les ajouter à $BW_EXEMPLE_MSMTP, SANS leur valeur."
+  [ -n "$JAMAIS" ] && echo "      ⚠️ ANNONCÉ(S) SANS EMPLOI $JAMAIS — présent(s) dans l'exemple, absent(s) du VPS."
+
+  # ⭐⭐ LE POINT DU LOT LE. Treize unités portent ProtectHome=read-only ;
+  # sous ce durcissement msmtp ENVOIE (mesuré le 02/09 : il livre
+  # d'abord, journalise ensuite, EXIT=0) mais ne peut plus écrire son
+  # journal — donc l'accusé de livraison disparaît. `syslog on` le rend.
+  if printf '%s\n' "$REELS" | grep -qx 'logfile'; then
+    echo "      ⛔⛔ ~/.msmtprc porte encore 'logfile'. Les $(bw_inv_unites_durcies "$ICI" | wc -l | tr -d ' ') unités durcies
+         envoient alors SANS TRACE : impossible de distinguer un e-mail
+         arrivé d'un e-mail perdu (mesuré le 02/09, lot LE).
+         Geste, une ligne, sur le VPS : remplacer 'logfile …' par 'syslog on'."
+  fi
+  printf '%s\n' "$REELS" | grep -qx 'syslog' \
+    || echo "      ⚠️ 'syslog' absent de ~/.msmtprc — la trace des envois n'ira nulle part
+         pour les unités durcies."
+  return 0
+}
+
+# ══════════════════════════════════════════════════════════════════════
 #  LE SECOND FILET DE L'ARBITRAGE OOM — le swap    (02/09/2026)
 #
 #  ⛔ POURQUOI CE CONTRÔLE EXISTE, ET IL EST NÉ D'UNE VÉRIFICATION QUI
@@ -560,6 +629,7 @@ bw_controle_unites() {
 if [ "$CONTROLE_SEUL" -eq 1 ]; then
   bw_controle_unites
   bw_controle_config_alertes
+  bw_controle_config_msmtp
   bw_controle_swap
   dire "✅ contrôle des unités ET des canaux terminé — RIEN n'a été transporté, écrit ni redémarré"
   exit 0
@@ -692,6 +762,7 @@ echo "  ✓ identique des deux côtés ($(printf '%s\n' "$LOCAL_SUM" | wc -l | t
 # ══════════════════════════════════════════════════════════════════════
 bw_controle_unites
 bw_controle_config_alertes
+bw_controle_config_msmtp
 bw_controle_swap
 
 # ══════════════════════════════════════════════════════════════════════

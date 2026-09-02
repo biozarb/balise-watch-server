@@ -106,3 +106,94 @@ bw_inv_mode_installable() {
   head -30 "$u" | grep -q '^# bw-deploy: ne-pas-installer' && return 1
   return 0
 }
+
+# ══════════════════════════════════════════════════════════════════════
+#  LE CANAL E-MAIL ET SON JOURNAL                    (lot LE, 02/09/2026)
+#
+#  ⛔⛔ POURQUOI CES TROIS FONCTIONS SONT ICI, ET PAS DANS LE BANC. Même
+#  raison qu'en tête de ce fichier, un lot plus tard : le banc
+#  (`test_alertes.sh` §G) et le déploiement (`bw_controle_config_msmtp`)
+#  doivent lire les réglages de msmtp de LA MÊME façon. Deux extractions
+#  divergeraient, et celle du contrôle serait toujours la plus vieille.
+#
+#  ⚠️ NOMS SEULS, ET C'EST UNE RÈGLE DE SÉCURITÉ, PAS UN CONFORT.
+#  `~/.msmtprc` porte un mot de passe d'application. Ces fonctions ne
+#  rendent JAMAIS que le premier mot d'une ligne. C'est ce qui a permis
+#  de sonder le vrai fichier le 02/09 sans en afficher une seule valeur,
+#  et le banc §G le vérifie sur une fixture qui porte un faux secret.
+# ══════════════════════════════════════════════════════════════════════
+
+BW_EXEMPLE_MSMTP="traces/entretien/msmtprc.exemple"
+
+# ── Les NOMS de réglage d'un fichier de configuration msmtp ──────────
+bw_inv_msmtp_noms() {
+  [ -r "${1:-}" ] || return 0
+  sed 's/#.*$//' "$1" | awk 'NF {print $1}' | sort -u
+}
+
+bw_inv_msmtp_exemple() {
+  local racine="${1:-.}"
+  bw_inv_msmtp_noms "$racine/$BW_EXEMPLE_MSMTP"
+}
+
+# ── UN CHEMIN DE JOURNAL EST-IL INSCRIPTIBLE DEPUIS TOUTES LES UNITÉS
+#    DURCIES DU DÉPÔT ?  ⭐ C'est LA propriété du lot LE.
+#
+# ⛔ ELLE LIT LES UNITÉS RÉELLES DU DÉPÔT, PAS UNE FIXTURE — leçon du
+# §2 bis du lot LD : un contrôle qui se donne ses propres données
+# certifie sa propre cécité.
+#
+# ⚠️ ET LA RÉPONSE EST « NON » POUR TOUT CHEMIN, aujourd'hui : les
+# `ReadWritePaths` des treize unités durcies sont DISJOINTS
+# (`/var/lib/bw-model-verif` pour onze, `~/.balise-watch-infoclimat`
+# pour le poller, trois chemins à part pour l'entretien). Aucun chemin
+# unique ne peut les satisfaire toutes — c'est la démonstration, en
+# code, que la voie « un chemin par unité » de la Q1 ne tenait pas,
+# AVANT même qu'AppArmor ne la tue une seconde fois.
+# ⇒ Le chemin VIDE (`syslog on`, aucun fichier) est le seul qui passe.
+bw_inv_journal_couvert() {   # $1 racine · $2 chemin (vide = syslog)
+  local racine="${1:-.}" chemin="${2:-}" u p rwp ok n=0
+  local unites
+  unites=$(find "$racine" -name '*.service' \
+             -not -path '*/node_modules/*' -not -path '*/_to_delete/*' 2>/dev/null)
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    grep -q '^ProtectHome=read-only' "$u" 2>/dev/null || continue
+    n=$((n+1))
+    [ -n "$chemin" ] || continue          # syslog : rien à couvrir
+    ok=0
+    rwp=$(sed -n 's/^ReadWritePaths=//p' "$u" | tr ' ' '\n')
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      # ⚠️ Le `/` après `$p` n'est pas décoratif : sans lui,
+      # `/var/lib/bw-model-verif-bis/x` passerait pour couvert par
+      # `/var/lib/bw-model-verif`. Le banc §G tient ce point.
+      case "$chemin" in "$p"|"$p"/*) ok=1 ;; esac
+    done <<EOF
+$rwp
+EOF
+    [ "$ok" = 1 ] || return 1
+  done <<EOF
+$unites
+EOF
+  # ⛔ AUCUNE UNITÉ DURCIE LUE = CONTRÔLE AVEUGLE, DONC « NON ».
+  # Sans cette ligne, la propriété serait vraie GRATUITEMENT le jour où
+  # la recherche d'unités casse — piège nº 3 du lot LD, celui qui a déjà
+  # eu la section D de ce banc et le jeton du lot LV.
+  [ "$n" -gt 0 ] || return 1
+  return 0
+}
+
+# ── Combien d'unités DURCIES le dépôt porte-t-il ? ───────────────────
+# Sert au banc à refuser de conclure sur un périmètre qui aurait fondu.
+# ⛔ `-exec … {} +` ET PAS `| xargs` : le dépôt vit, sur le Mac, sous un
+# chemin qui CONTIENT UNE ESPACE (« surveillance balise »). `xargs` y
+# découpe les chemins et rend ZÉRO unité — vu le 02/09, et le banc a
+# rougi tout de suite (G11). Un contrôle qui ne lit rien dit « oui » à
+# tout : c'est la faute que G12 tient dans l'autre fonction.
+bw_inv_unites_durcies() {
+  local racine="${1:-.}"
+  find "$racine" -name '*.service' \
+       -not -path '*/node_modules/*' -not -path '*/_to_delete/*' \
+       -exec grep -l '^ProtectHome=read-only' {} + 2>/dev/null | sort
+}

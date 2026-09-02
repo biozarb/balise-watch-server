@@ -40,6 +40,8 @@ AVERTIR = ICI / "bw_avertir_config.sh"
 DEPLOY = ICI / "deploy-agrume-vps.sh"
 RUN = RACINE / "model-verif/run.sh"
 EXEMPLE = RACINE / "traces/entretien/balise-watch-alertes.env.exemple"
+#: L'exemple versionné de ~/.msmtprc (lot LE, 02/09/2026).
+EXEMPLE_MSMTP = RACINE / "traces/entretien/msmtprc.exemple"
 TAU = RACINE / "model-verif/systemd/bw-model-tau.service"
 SCORE_TIMER = RACINE / "model-verif/systemd/bw-model-score.timer"
 #: Le banc qui lance le VRAI `run.sh` dans un bac (lot du 02/09).
@@ -283,6 +285,77 @@ MUTATIONS = [
      ALERTES, SELFTEST,
      '        "BW_AVERTIR_CONFIG_BANC": "test_run_selftest.py",',
      '        "BW_AVERTIR_CONFIG_BANC_INACTIF": "test_run_selftest.py",'),
+
+    # ══ LOT LE (02/09/2026) — LE CANAL E-MAIL ET SA TRACE ════════════
+    # ⛔⛔ CE QUE CES MUTATIONS NE FONT PAS, ET IL FAUT LE LIRE. Le lot
+    # LE prescrivait « rendre le chemin de log NON INSCRIPTIBLE et
+    # exiger que le banc rougisse ». Mesuré le 02/09 contre un puits
+    # SMTP local : un journal inécrivable N'EMPÊCHE PAS L'ENVOI (msmtp
+    # livre d'abord, journalise ensuite, EXIT=0), et les trois
+    # avertissements du 01/09 émis par une unité DURCIE sont ARRIVÉS.
+    # La mutation prescrite n'aurait donc rien mordu — non par
+    # faiblesse du banc, mais parce que la faute supposée n'était pas
+    # la faute. Ce qui se défend ici est la TRACE, pas l'envoi.
+    ("⛔⛔ `logfile` REVIENT DANS L'EXEMPLE : les treize unités durcies "
+     "renvoient alors sans accusé de livraison, et on ne peut plus "
+     "distinguer un e-mail arrivé d'un e-mail perdu",
+     ALERTES, EXEMPLE_MSMTP,
+     "syslog         on",
+     "syslog         on\nlogfile        ~/.msmtp.log"),
+
+    ("⛔ `syslog` DISPARAÎT DE L'EXEMPLE : plus aucune trace des envois, "
+     "nulle part",
+     ALERTES, EXEMPLE_MSMTP,
+     "syslog         on",
+     "# syslog       on"),
+
+    ("⚠️ UNE VRAIE ADRESSE SE GLISSE DANS L'EXEMPLE VERSIONNÉ — même "
+     "faute que l'UUID de check du lot LV, sur le fichier qui porte un "
+     "mot de passe",
+     ALERTES, EXEMPLE_MSMTP,
+     "from           <expediteur@exemple.invalid>",
+     "from           alertes@balise.watch"),
+
+    ("⛔⛔ L'EXTRACTION REND LA LIGNE ENTIÈRE au lieu du premier mot : le "
+     "mot de passe d'application de ~/.msmtprc remonte dans le terminal "
+     "du déploiement ET dans ses journaux",
+     ALERTES, INV,
+     "  sed 's/#.*$//' \"$1\" | awk 'NF {print $1}' | sort -u",
+     "  sed 's/#.*$//' \"$1\" | awk 'NF {print $0}' | sort -u"),
+
+    ("⛔⛔ LE CONTRÔLE AVEUGLE REDIT « OUI » : la garde « aucune unité "
+     "lue = non » saute, et le jour où la recherche d'unités casse, "
+     "tout chemin devient couvert — piège nº 3 du lot LD",
+     ALERTES, INV,
+     '  [ "$n" -gt 0 ] || return 1\n  return 0',
+     '  return 0'),
+
+    ("⛔ LA COMPARAISON DE PRÉFIXE PERD SON `/` : "
+     "/var/lib/bw-model-verif-bis passerait pour couvert par "
+     "/var/lib/bw-model-verif",
+     ALERTES, INV,
+     '      case "$chemin" in "$p"|"$p"/*) ok=1 ;; esac',
+     '      case "$chemin" in "$p"*) ok=1 ;; esac'),
+
+    ("⛔⛔ TOUT CHEMIN DEVIENT COUVERT : la couverture ne regarde plus "
+     "les ReadWritePaths du tout. C'est la faute d'origine du lot — une "
+     "unité durcie dont le canal d'alerte écrit hors de ses chemins",
+     ALERTES, INV,
+     '      case "$chemin" in "$p"|"$p"/*) ok=1 ;; esac',
+     '      ok=1'),
+
+    ("⛔ LE PÉRIMÈTRE DES UNITÉS FOND À ZÉRO (une lettre dans `-name`) : "
+     "un contrôle qui ne lit aucune unité ne doit pas passer pour vert",
+     ALERTES, INV,
+     "  find \"$racine\" -name '*.service' \\\n       -not -path '*/node_modules/*' -not -path '*/_to_delete/*' \\\n       -exec grep -l '^ProtectHome=read-only' {} + 2>/dev/null | sort",
+     "  find \"$racine\" -name '*.sevice' \\\n       -not -path '*/node_modules/*' -not -path '*/_to_delete/*' \\\n       -exec grep -l '^ProtectHome=read-only' {} + 2>/dev/null | sort"),
+
+    ("⛔ LE DÉPLOIEMENT N'APPELLE PLUS LE CONTRÔLE DU CANAL E-MAIL : il "
+     "est défini et jamais appelé — la faute exacte du lot LV, où "
+     "`alerter` était dans le fichier dix lignes plus haut",
+     ALERTES, DEPLOY,
+     "bw_controle_config_alertes\nbw_controle_config_msmtp\nbw_controle_swap",
+     "bw_controle_config_alertes\nbw_controle_swap"),
 ]
 
 
@@ -293,6 +366,25 @@ def joue() -> int:
         if mode_mutation:
             origine_mode = fichier.stat().st_mode & 0o7777
             origine = None
+            # ⛔⛔ GARDE AJOUTÉE LE 02/09/2026 (lot LE), APRÈS QUE CE
+            # HARNAIS A CASSÉ LE DÉPÔT LUI-MÊME. Joué depuis une session
+            # Cowork, `stat` traverse un MONTAGE qui rapporte 600 pour
+            # tout : `origine_mode` valait donc 600, la mutation ne
+            # mutait rien — et la RESTAURATION du `finally` écrivait 600
+            # sur le vrai fichier du Mac. `model-verif/bw-model-score.timer`
+            # est resté en 600, et git ne suit pas ce bit : rien ne
+            # l'aurait dit. *Un harnais qui lit un montage écrit le
+            # verdict du montage dans le dépôt.*
+            # ⇒ Une mutation de MODE dont l'origine EST DÉJÀ le mode muté
+            #   ne prouve rien et ne doit RIEN toucher.
+            if origine_mode == avant[1]:
+                print(f"  ⛔ {i:>2}. {nom}\n       MODE DÉJÀ CELUI DE LA "
+                      f"MUTATION ({oct(origine_mode)}) — rien à muter, et la "
+                      f"restauration écrirait ce mode dans le dépôt. "
+                      f"(Session Cowork ? ce harnais se joue sur un VRAI "
+                      f"système de fichiers, pas à travers un montage.)")
+                rouges += 1
+                continue
         else:
             origine = fichier.read_text(encoding="utf-8")
             if avant not in origine:

@@ -362,6 +362,105 @@ check "F8  ⭐ test_run_selftest.py DÉCLARE son bac dans l'environnement du run
       "$(grep -c '\"BW_AVERTIR_CONFIG_BANC\": ' model-verif/test_run_selftest.py | tr -d ' ')" "1"
 
 # ══════════════════════════════════════════════════════════════════════
+#  G. LE CANAL E-MAIL SURVIT AU DURCISSEMENT          (lot LE, 02/09/2026)
+#
+#  ⛔⛔ LA MUTATION QUE LE LOT DEMANDAIT N'EXISTE PAS, ET IL FAUT LE
+#  DIRE ICI. Le lot LE prescrivait : « rendre le chemin de log NON
+#  INSCRIPTIBLE et exiger que le banc rougisse ». MESURÉ le 02/09 contre
+#  un puits SMTP local : un journal inécrivable N'EMPÊCHE PAS L'ENVOI.
+#  msmtp livre d'abord, journalise ensuite, `EXIT=0`. La propriété
+#  « le mail part » est donc VRAIE, et elle le reste sous durcissement —
+#  la mutation prescrite n'aurait rien mordu, non par faiblesse du banc,
+#  mais parce que la faute supposée n'était pas la faute.
+#
+#  ⭐ Contre-épreuve par l'effet, et c'est elle qui a tranché : les TROIS
+#  avertissements émis le 01/09 à 17:40, 17:45 et 17:50 CEST par
+#  `balise-infoclimat` — unité DURCIE — SONT ARRIVÉS dans la boîte, sans
+#  laisser une ligne dans `~/.msmtp.log`.
+#
+#  ⇒ CE QUE CETTE SECTION TIENT EST DONC AUTRE CHOSE : non pas « le mail
+#  part », mais **« SA TRACE SURVIT »**. Sous `logfile`, un job durci
+#  envoie sans accusé : on ne peut plus distinguer un e-mail arrivé d'un
+#  e-mail perdu. C'est cette distinction-là qu'on défend.
+# ══════════════════════════════════════════════════════════════════════
+echo
+echo "▶ G. le canal e-mail et sa trace sous durcissement"
+
+check "G1  l'exemple msmtprc est versionné et déclare des réglages" \
+      "$(bw_inv_msmtp_exemple "$RACINE" | wc -l | tr -d ' ' | awk '$1>5{print "assez"} $1<=5{print "trop peu"}')" "assez"
+check "G2  ⭐ il déclare 'syslog' — la trace va où va déjà tout le reste" \
+      "$(bw_inv_msmtp_exemple "$RACINE" | grep -cx 'syslog' | tr -d ' ')" "1"
+check "G3  ⛔ et PAS 'logfile' — sous ProtectHome il ne s'écrit pas, et l'accusé de livraison disparaît" \
+      "$(bw_inv_msmtp_exemple "$RACINE" | grep -cx 'logfile' | tr -d ' ')" "0"
+check "G4  ⛔ l'exemple ne porte AUCUNE valeur réelle (toute adresse est un <placeholder>)" \
+      "$(grep -oE '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+' "$RACINE/$BW_EXEMPLE_MSMTP" \
+         | grep -vcE '(exemple\.invalid|@exemple)' | tr -d ' ')" "0"
+
+# ⭐⭐ G5/G6/G7 — LE COMPARATEUR, JOUÉ SUR DES FIXTURES. C'est lui que le
+# déploiement fera tourner contre le VRAI `~/.msmtprc` du VPS, et le
+# piège de Q2 est nommé dans le lot : un exemple que rien ne relit
+# périme. Le précédent annonçait 4 variables sur 15.
+FIXT_M="$TMP/msmtp"; mkdir -p "$FIXT_M"
+printf 'defaults\nauth on\ntls on\nsyslog on\naccount x\nhost h\nport 587\nuser u\npassword TRES-SECRET-42\nfrom f\naccount default : x\n' \
+  > "$FIXT_M/reel-conforme"
+cp "$FIXT_M/reel-conforme" "$FIXT_M/reel-divergent"
+printf 'set_from_header on\n' >> "$FIXT_M/reel-divergent"
+
+MANQUE_OK=$(comm -13 <(bw_inv_msmtp_exemple "$RACINE") <(bw_inv_msmtp_noms "$FIXT_M/reel-conforme") | tr '\n' ' ' | sed 's/ *$//')
+MANQUE_KO=$(comm -13 <(bw_inv_msmtp_exemple "$RACINE") <(bw_inv_msmtp_noms "$FIXT_M/reel-divergent") | tr '\n' ' ' | sed 's/ *$//')
+check "G5  ⭐⭐ un réglage présent chez le VRAI et absent de l'exemple est VU" "$MANQUE_KO" "set_from_header"
+check "G6  ⓘ et deux fichiers d'accord ne rendent rien (pas de cri au loup)" "$MANQUE_OK" ""
+# ⛔ G7 — LA RÈGLE DE SÉCURITÉ, TENUE PAR UN BANC ET PAS PAR UNE
+# INTENTION. `~/.msmtprc` porte un mot de passe d'application ; toute la
+# sonde du 02/09 a été faite sans en afficher une ligne. Si l'extraction
+# rendait la ligne entière au lieu du premier mot, le secret remonterait
+# dans le terminal du déploiement ET dans ses journaux.
+check "G7  ⛔ l'extraction ne rend JAMAIS une valeur (le mot de passe ne remonte pas)" \
+      "$(bw_inv_msmtp_noms "$FIXT_M/reel-conforme" | grep -c 'TRES-SECRET-42' | tr -d ' ')" "0"
+
+# ⭐⭐ G8-G11 — LA COUVERTURE DU JOURNAL, LUE SUR LES UNITÉS RÉELLES DU
+# DÉPÔT. C'est le cas qui a produit le lot : une unité durcie dont le
+# `ReadWritePaths` ne couvre pas ce que son canal d'alerte doit écrire.
+check "G8  ⛔⛔ le chemin historique (~/.msmtp.log) n'est couvert par AUCUNE unité durcie" \
+      "$(bw_inv_journal_couvert "$RACINE" /home/debian/.msmtp.log && echo couvert || echo non)" "non"
+# ⭐ G9 — ET C'EST LA DÉMONSTRATION QUE « UN CHEMIN PAR UNITÉ » NE
+# TENAIT PAS : même le chemin des ONZE jobs model-verif échoue, parce
+# que le poller et l'entretien ont d'autres ReadWritePaths. Les
+# ensembles sont DISJOINTS : aucun chemin unique n'existe.
+check "G9  ⭐ ni /var/lib/bw-model-verif — les ReadWritePaths sont disjoints" \
+      "$(bw_inv_journal_couvert "$RACINE" /var/lib/bw-model-verif/msmtp.log && echo couvert || echo non)" "non"
+check "G10 ⭐ seul le chemin VIDE passe : 'syslog on' n'écrit aucun fichier" \
+      "$(bw_inv_journal_couvert "$RACINE" '' && echo couvert || echo non)" "couvert"
+check "G11 ⓘ et il y a bien 13 unités durcies à vérifier (le périmètre n'a pas fondu)" \
+      "$(bw_inv_unites_durcies "$RACINE" | wc -l | tr -d ' ')" "13"
+
+# ⛔ G12 — UN CONTRÔLE QUI NE LIT RIEN NE DOIT PAS DIRE « OUI ». Sans
+# cette assertion, le jour où la recherche d'unités casse, tout chemin
+# deviendrait « couvert » et la propriété serait vraie GRATUITEMENT.
+# C'est le piège nº 3 du lot LD, qui a déjà eu la section D de ce banc.
+VIDE="$TMP/sans-unites"; mkdir -p "$VIDE"
+check "G12 ⛔ une racine SANS unité rend 'non', pas 'oui' (un contrôle aveugle n'est pas vert)" \
+      "$(bw_inv_journal_couvert "$VIDE" /var/lib/bw-model-verif/x && echo couvert || echo non)" "non"
+
+# ⛔ G13 — LE `/` DE LA COMPARAISON DE PRÉFIXE. Sans lui,
+# `/var/lib/bw-model-verif-bis` passerait pour couvert par
+# `/var/lib/bw-model-verif`, et on autoriserait un journal dans un
+# dossier voisin qui n'existe pas dans l'unité.
+FIXU="$TMP/racine-u"; mkdir -p "$FIXU"
+printf '[Service]\nProtectHome=read-only\nReadWritePaths=/var/lib/bw-model-verif\n' > "$FIXU/u.service"
+check "G13 ⛔ un dossier VOISIN n'est pas couvert (/var/lib/bw-model-verif-bis)" \
+      "$(bw_inv_journal_couvert "$FIXU" /var/lib/bw-model-verif-bis/m.log && echo couvert || echo non)" "non"
+check "G14 ⓘ … alors que le dossier lui-même l'est (sinon G13 serait vrai pour rien)" \
+      "$(bw_inv_journal_couvert "$FIXU" /var/lib/bw-model-verif/m.log && echo couvert || echo non)" "couvert"
+
+# ⭐ G15 — LE CONTRÔLE EXISTE ET IL EST APPELÉ. Un contrôle défini mais
+# jamais appelé est la faute du lot LV vue une fois déjà (`alerter`
+# était dans le fichier, dix lignes plus haut, et personne ne
+# l'appelait).
+check "G15 ⭐ le déploiement DÉFINIT et APPELLE bw_controle_config_msmtp" \
+      "$(grep -c 'bw_controle_config_msmtp' tools/deploy-agrume-vps.sh | tr -d ' ' | awk '$1>=3{print "oui"} $1<3{print "non"}')" "oui"
+
+# ══════════════════════════════════════════════════════════════════════
 echo
 if [ "$ROUGES" -eq 0 ]; then
   echo "  ✓ $VERTS assertions vertes, 0 rouge — les canaux d'alerte tiennent"

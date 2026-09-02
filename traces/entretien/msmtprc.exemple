@@ -1,0 +1,83 @@
+# ~/.msmtprc — le canal e-mail des alertes du VPS   (lot LE, 02/09/2026)
+#
+# ⚠️ CE FICHIER-CI est un EXEMPLE versionné dans git. Il porte les NOMS
+#    des réglages, JAMAIS leurs valeurs. Le vrai fichier vit sur le VPS
+#    en 0600 et NULLE PART AILLEURS — c'était la QUATRIÈME copie unique
+#    du chantier, après les surcharges `.d/` (lot LD), le fichier
+#    d'alertes (lot LV) et `/etc/fstab` (lot L2 bis).
+#
+# INSTALLATION :
+#   cp msmtprc.exemple ~/.msmtprc
+#   chmod 600 ~/.msmtprc
+#   $EDITOR ~/.msmtprc
+#
+# ⛔ ET IL NE SUFFIT PAS QU'IL EXISTE. `deploy-agrume-vps.sh` compare, à
+#    chaque déploiement, les NOMS de réglage du vrai fichier du VPS à
+#    ceux d'ici, et le dit quand ils divergent — parce que le précédent
+#    exemple versionné du chantier avait péri en silence (4 variables
+#    annoncées sur 15). Un exemple que rien ne relit périme toujours.
+#
+# ══════════════════════════════════════════════════════════════════════
+# ⛔⛔ POURQUOI `syslog on` ET PAS `logfile` — MESURÉ LE 02/09/2026.
+#
+# Treize des dix-huit unités du VPS portent `ProtectHome=read-only` :
+# leur `$HOME` n'est plus inscriptible, donc `logfile ~/.msmtp.log` ne
+# peut pas s'écrire. Le lot LE en avait déduit « le canal e-mail est
+# muet sous durcissement ». C'ÉTAIT FAUX, et la mesure l'a dit :
+#
+#   msmtp LIVRE D'ABORD, JOURNALISE ENSUITE. Journal inécrivable :
+#     msmtp: cannot log to …: cannot open: Permission denied
+#     msmtp: log info was: … smtpstatus=250 … exitcode=EX_OK
+#     EXIT=0                                  ← LE MAIL EST PARTI
+#
+# ⭐ Et la contre-épreuve par l'effet a suivi : les TROIS avertissements
+# émis le 01/09 à 17:40, 17:45 et 17:50 CEST par `balise-infoclimat`
+# — une unité DURCIE — SONT ARRIVÉS dans la boîte, sans laisser la
+# moindre ligne dans `~/.msmtp.log`.
+#
+# ⇒ Ce que le durcissement détruit n'est pas l'e-mail, c'est SON ACCUSÉ
+#   DE RÉCEPTION (`smtpstatus=250` et l'identifiant rendu par le
+#   serveur). Sous `logfile`, un job durci envoie SANS TRACE : on ne
+#   peut plus distinguer un e-mail arrivé d'un e-mail perdu. Et comme
+#   `bw_avertir_config` appelle msmtp en `>/dev/null 2>&1 || true`, même
+#   le « cannot log » qui l'aurait dit est jeté.
+#   `syslog on` rend cette trace, et il la rend AU MÊME ENDROIT pour les
+#   dix-huit unités, durcies ou non : journald.
+#
+# ⛔ ET LA CONTRAINTE RÉELLE N'EST PAS SYSTEMD, C'EST APPARMOR — personne
+# ne l'avait écrit avant le 02/09. Le paquet Debian `msmtp` livre son
+# propre profil, EN ENFORCE : `/etc/apparmor.d/usr.bin.msmtp`. msmtp n'a
+# le droit d'écrire QUE dans `~/.msmtp*.log`, `~/.cache/msmtp/*.log` et
+# `/var/log/msmtp`. Vérifié par l'effet : il refuse d'écrire dans
+# `/var/lib/bw-model-verif/` (« Permission denied ») là où la DAC
+# l'autorise, et refuse de LIRE un `.msmtprc` posé dans un sous-dossier
+# de `/tmp` que `cat` lit sans peine.
+# ⇒ « un chemin de journal par unité » est MORT À L'ARRIVÉE : le choix
+#   des `ReadWritePaths` n'y change rien, AppArmor l'interdit d'abord.
+#   Le rendre possible demanderait d'écrire
+#   `/etc/apparmor.d/local/usr.bin.msmtp` (le point d'extension est
+#   prévu, en pied de profil) — soit une CINQUIÈME copie unique sur le
+#   VPS. `syslog on` ne coûte pas ça : `abstractions/base` autorise déjà
+#   /dev/log, mesuré le 02/09.
+# ══════════════════════════════════════════════════════════════════════
+
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+
+# ⭐ LA LIGNE DE CE LOT. Elle remplace `logfile` — voir le pavé ci-dessus.
+# Le banc `tools/test_alertes.sh` (section G) EXIGE `syslog` et REFUSE
+# `logfile` : reposer un `logfile` ici fait rougir le banc.
+syslog         on
+
+account        <nom-du-compte>
+host           <serveur.smtp.exemple>
+port           587
+user           <identifiant@exemple.invalid>
+# ⛔ LE SEUL SECRET DU FICHIER — et la raison pour laquelle le vrai
+#    fichier n'entre pas dans git, ni tel quel ni chiffré.
+password       <mot-de-passe-d-application>
+from           <expediteur@exemple.invalid>
+
+account default : <nom-du-compte>
