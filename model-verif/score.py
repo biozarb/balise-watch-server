@@ -414,6 +414,17 @@ REPLAY_SUBDIR = "replay"
 #:     ⓘ Et le cache grossit : six nombres de plus par balise-jour. À
 #:     MESURER sur le VPS après le premier rejeu complet, pas à estimer
 #:     ici.
+#:
+#:   ⛔ RESTÉE À 5 APRÈS LE L9(c) DU 02/09, ET C'EST UN CONTRAT ROMPU
+#:     ASSUMÉ. `daily_rows` a gagné `mse_comb_vec` sans que ce numéro
+#:     bouge : le chemin RÉGIME (cache) ne porte la colonne que pour les
+#:     journées rejouées après le 02/09, le chemin ROLLING (base) pour
+#:     toutes les nuits écrites depuis — deux profondeurs sous une même
+#:     colonne. Passer à 6 rejoue trente journées (`--replay-budget 30`,
+#:     ~18 min) UNE nuit où le run tourne déjà à **2,7 Go de pic cgroup**
+#:     (02/09, contre 2 820 Mo qui ont tué le 28/08) : on ne le fait pas
+#:     avant que la mémoire ait fini de monter (fenêtre pleine vers le
+#:     12/09). Décision de la vérification du 02/09, à reprendre alors.
 REPLAY_FORMULA = 5
 
 
@@ -759,8 +770,26 @@ class Supabase:
             offset += self.PAGE
 
     def select(self, table: str, query: str = "", order: str | None = None,
-               ) -> list[dict]:
+               cle_unique: bool = False) -> list[dict]:
         """Lit une table ENTIÈRE, page par page.
+
+        ⛔ `cle_unique=True` (02/09/2026) : PAGINATION PAR CLÉ, PAS PAR
+        DÉCALAGE. Le rejeu de la nuit du 02/09 (14:33 CEST) est mort en
+        lisant `model_verif_event` à la page 782 (`Range: 781000-781999`)
+        sur trois `57014 statement timeout` de suite. Un `OFFSET n` fait
+        RELIRE n lignes au serveur avant d'en rendre mille : la 782ᵉ page
+        coûte 782 fois la première, et le coût total d'une table de N
+        lignes est en N². Quinze jours d'événements font ~780 000 lignes
+        (38 700 par nuit, et le L7 les a fait grossir) — le matin, sous
+        faible charge, ça passait ; l'après-midi, non. Avec `cle_unique`,
+        chaque page demande `{order}=gt.{dernière valeur}` et `Range:
+        0-999` : le serveur va droit à la ligne suivante par l'index de
+        la clé, et la 782ᵉ page coûte la première.
+        ⚠️ N'EST JUSTE QUE SI `order` EST UNE COLONNE UNIQUE (clé
+        primaire) : sur une colonne à doublons, `gt.` sauterait les
+        lignes qui partagent la valeur de la borne. C'est pour ça que
+        c'est l'appelant qui l'affirme, et que le défaut reste le
+        décalage.
 
         ⚠️ DÉFAUT TROUVÉ LE 08/08 EN VÉRIFIANT LES CHIFFRES DU LOT F, ET
         IL NE DATAIT PAS DU LOT F. La version précédente faisait UN appel
@@ -792,6 +821,22 @@ class Supabase:
                 else f"{table}{query}")
         if order:
             base += f"{'&' if '?' in base else '?'}order={order}"
+        if cle_unique:
+            if not order or "," in order or "." in order:
+                raise Abort(f"select({table}) : cle_unique exige un `order` "
+                            f"sur UNE colonne, reçu {order!r}")
+            out: list[dict] = []
+            borne = None
+            while True:
+                b = base
+                if borne is not None:
+                    b += (f"&{order}=gt."
+                          f"{urllib.parse.quote(str(borne), safe='')}")
+                page = self._page(b, 0, self.PAGE - 1)
+                out.extend(page)
+                if len(page) < self.PAGE:
+                    return out
+                borne = page[-1][order]
         out: list[dict] = []
         offset = 0
         while True:
@@ -2593,8 +2638,17 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
 def replay_window(root: pathlib.Path, day: datetime, storage,
                   utc_offset_s: int, n_days: int = REGIME_REPLAY_DAYS,
                   budget_new_days: int | None = None,
-                  murphy_acc: dict | None = None):
+                  murphy_acc: dict | None = None,
+                  murphy_exclus: set[str] | None = None):
     """La fenêtre rejouée, la plus récente d'abord.
+
+    ⚠️ `murphy_exclus` (02/09/2026) : les unités que Murphy ne doit
+    PAS accumuler — `unites_hors_notation(zone_of)`, doublons et
+    positions suspectes. Elles restent dans `rows` : le chemin régime
+    les écarte lui-même dans `_case_rows`, avec ses propres motifs et
+    son propre décompte. Seul l'accumulateur les ignore ici, parce
+    qu'il n'a pas de seconde chance — il se remplit au fil de l'eau et
+    la clé `_murphy` meurt avec la ligne.
 
     Rend `(lignes, bilan)`. Chaque ligne porte en plus `unit`
     (« source:station_id »), la clé d'appariement du test du G2.
@@ -2639,7 +2693,8 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
             # traîner ferait payer la mémoire à qui ne s'en sert pas
             # (`regime_scores`, `stability_report`).
             mo = r.pop(MU.MURPHY_KEY, None)
-            if murphy_acc is not None:
+            if murphy_acc is not None and (murphy_exclus is None
+                                           or unit not in murphy_exclus):
                 MU.accumule(murphy_acc, (unit, r["model"], r["lead_h"]), mo)
             rows.append(r)
     bilan = (f"{len(rows)} balise-jours sur {vus} journées "
@@ -2878,6 +2933,32 @@ def est_doublon(zone: dict | None) -> bool:
     continueraient de compter deux fois, sans rien faire rougir.
     """
     return bool(zone and zone.get(COL_DOUBLON))
+
+
+def unites_hors_notation(zone_of: dict[str, dict]) -> set[str]:
+    """Les unités qu'AUCUN diagnostic ne doit compter : doublon
+    d'inscription (lot L17) et position suspecte (lot L15).
+
+    ⛔ POURQUOI UNE FONCTION DE PLUS (02/09/2026). La vérification de
+    cohérence des lots a compté les chemins qui écartent une balise :
+    `_case_rows` et `accumulator_updates` écartaient les deux motifs,
+    le duel (L1) n'écartait QUE le doublon, et Murphy (L9b) — rempli
+    dans `replay_window`, AVANT toute lecture de `zone_of` —
+    n'écartait RIEN : `model_murphy.json` comptait deux fois les
+    ~35 000 balise-jours de doublons que le classement venait de
+    retirer, et `pioupiou:1333` (147 km entre gel et référentiel)
+    alimentait le cumul du duel dont le verdict est attendu à ~40 j.
+    Deux diagnostics du même run sur deux populations, sans qu'une
+    ligne le dise.
+
+    ⚠️ Ce n'est PAS le filtre de `_case_rows` : lui écarte aussi les
+    zones inconnues et `basin_uncertain`, parce qu'une CASE a besoin
+    d'une zone. Un diagnostic par balise (duel, Murphy) n'en a pas
+    besoin — une balise sans zone y reste, comme l'arbitrage nº 5 du
+    L1 l'exige (« on ajoute un filtre, pas une dépendance »).
+    """
+    return {u for u, z in zone_of.items()
+            if est_doublon(z) or z.get("position_suspecte")}
 
 
 def zone_kind_for(zone: dict) -> str:
@@ -4954,6 +5035,13 @@ LIGHT_SCORE_FIELDS = (
     # ce sont deux tests, sur deux grandeurs, et une case peut très bien
     # trancher sur l'une et pas sur l'autre.
     "rank_corr", "rank_reason_corr",
+    # ── lot L16 (02/09/2026) : les mauvais jours, DANS LE LÉGER ─────────
+    # ⛔ Même raison que L3 et L9a : c'est l'écran léger (le nouvel
+    # atelier pilote ouvert depuis la coupe) qui répond à « et les
+    # mauvais jours ? ». Un pire décile publié dans le seul fichier de
+    # 27 Mo serait une carte que le téléphone d'un pilote ne charge
+    # jamais. ⓘ Prix : un flottant par ligne, ~8 200 lignes.
+    "worst_decile_kmh",
 )
 
 
@@ -5086,7 +5174,8 @@ def rounds_rows(state: dict) -> list[dict]:
 
 def _publish_light(st, scores: list[dict], ev_scores: list[dict],
                    rounds_state: dict, as_of: datetime, dry_run: bool,
-                   duels: list[dict] | None = None):
+                   duels: list[dict] | None = None,
+                   temoin: dict | None = None):
     """Publie `model_scores_light.json` — le sous-ensemble pour la pastille.
 
     Même bucket, même clé stable, même cache court que
@@ -5125,6 +5214,13 @@ def _publish_light(st, scores: list[dict], ev_scores: list[dict],
         # l'audit §2.4 interdit : le classement ne peut PAS trancher cette
         # question, c'est pour ça que le duel existe.
         "duels": list(duels or []),
+        # ── lot L16 (02/09/2026) : LE TÉMOIN VOYAGE AVEC LE CORRIGÉ, ICI
+        # AUSSI. Le léger publie `typical_err_kmh_corr` depuis le 25/08
+        # sans son témoin placebo — c'est-à-dire exactement ce que le S2
+        # interdisait pour le gros fichier (« qu'on ne puisse pas lire le
+        # gain sans son témoin »). Même forme que `meta.bias_correction`
+        # du gros fichier, réduite au seul champ que l'écran lit.
+        "bias_correction": {"witness": temoin},
     }, separators=(",", ":")).encode("utf-8")
     st.put("model_scores_light.json", body, cache_control=CACHE_REECRIT)
     st.bilan()
@@ -5547,6 +5643,13 @@ REPLI_LEAD_DAILY = (
     "d'heure)")
 
 
+REPLI_LEAD_SCORES = (
+    "model_score_zone_lead_h_check", "lead_h",
+    "supabase_step62_lot_l10_classe_courte.sql puis "
+    "supabase_step63_lot_l11_classe_quart.sql (le CHECK de "
+    "`model_score_zone` y est élargi avec celui de `model_verif_daily`)")
+
+
 def _upsert_daily(sb, rows: list[dict]) -> int:
     """`model_verif_daily`, avec un repli sur le CHECK de `lead_h`.
 
@@ -5626,6 +5729,30 @@ def _upsert_scores(sb, rows: list[dict]) -> int:
             # porte sur autre chose que la raison) ferait BOUCLER le run
             # à l'infini — un run qui ne finit pas est pire qu'un run
             # qui échoue, parce que personne ne reçoit rien.
+            # ── ⛔ (02/09) LE CHECK DE `lead_h`, symétrique de celui de
+            # `_upsert_daily`. La vérification de cohérence des lots a
+            # trouvé que ce repli n'existait que pour `model_verif_daily`
+            # alors que `regime_scores` lit la fenêtre rejouée NON
+            # filtrée des échéances négatives : entre le déploiement
+            # d'une classe nouvelle et l'exécution de son `.sql`, la
+            # nuit ENTIÈRE tombait ici, après 38 minutes de calcul. Les
+            # cases écartées se comptent et se nomment ; la nuit passe.
+            nom_lead, col_lead, quoi_lead = REPLI_LEAD_SCORES
+            if nom_lead in str(exc) and nom_lead not in desarmes:
+                desarmes.add(nom_lead)
+                admises_lead = set(LEAD_BY_OFFSET.values())
+                gardees = [r for r in rows if r.get(col_lead) in admises_lead]
+                refusees = sorted({str(r.get(col_lead)) for r in rows
+                                   if r.get(col_lead) not in admises_lead})
+                print(f"  ⚠️ {col_lead} : {', '.join(refusees)} refusé(s) "
+                      f"par le CHECK en base → {len(rows) - len(gardees)} "
+                      f"case(s) ÉCARTÉE(S) cette nuit (la clé primaire "
+                      f"porte `lead_h`, on ne peut pas le taire). Jouer "
+                      f"{quoi_lead}.", file=sys.stderr)
+                if not gardees:
+                    raise
+                rows = gardees
+                continue
             repli = next((p for p in REPLIS_RANG
                           if p[0] in str(exc) and p[0] not in desarmes),
                          None)
@@ -6413,7 +6540,10 @@ def main() -> int:
             # l'efface. S'il n'y arrive pas (run tué plus loin), il est
             # toujours là demain — bruyant, jamais muet.
             (root / "cri.position").write_text(_texte, encoding="utf-8")
-            CP.poser_jeton(res_pos, root)
+            # ⛔ EN ATTENTE, pas posé : c'est `run.sh` qui le promeut,
+            # après l'e-mail (02/09). Posé ici, un envoi raté rendait
+            # le garde-fou muet pour toujours sur cet ensemble.
+            CP.poser_jeton(res_pos, root, en_attente=True)
             print(f"  ⛔ position : {len(res_pos['confirmees'])} balise(s) "
                   f"CONFIRMÉE(S) — cri déposé pour envoi", file=sys.stderr)
     except Exception as exc:                           # noqa: BLE001
@@ -6564,7 +6694,10 @@ def main() -> int:
         # soit moins que la résolution du tirage. Mieux vaut une petite
         # marche aujourd'hui qu'un verdict à 40 jours (arbitrage nº 3 du
         # L1) construit sur des paires comptées deux fois.
-        doublons_duel = {u for u, z in zone_of.items() if est_doublon(z)}
+        # ⓘ 02/09 : `unites_hors_notation` — doublon ET position
+        # suspecte (lot L15), le même ensemble que Murphy. Le nom
+        # `doublons_duel` reste pour que le journal ne change pas.
+        doublons_duel = unites_hors_notation(zone_of)
         if doublons_duel:
             avant_duel = len(daily_duel)
             daily_duel = [r for r in daily_duel
@@ -6577,7 +6710,8 @@ def main() -> int:
         print(f"  duel apparié ({DUEL.DUEL_VALUE_KEY}, lead "
               f"{DUEL.DUEL_LEAD_H}, {DUEL.DUEL_SOURCE}) : "
               f"{len(daily_duel)} lignes lues depuis le {depuis_duel}"
-              + (f" ({retires_duel} retirée(s) : doublon d'inscription)"
+              + (f" ({retires_duel} retirée(s) : doublon d'inscription"
+                 f" ou position suspecte)"
                  if retires_duel else
                  ("" if doublons_duel else
                   " — ⓘ aucun doublon connu (`station_zone` vide ou "
@@ -6744,8 +6878,10 @@ def main() -> int:
         jalon_memoire("l'oubli du chemin J-0")
 
         since_ev = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
+        # ⛔ `cle_unique` : `id` est la clé primaire — pagination par clé,
+        # pas par décalage (mort à la page 782 le 02/09, voir `select`).
         ev_all = sb.select("model_verif_event", f"?day=gte.{since_ev}",
-                           order="id")
+                           order="id", cle_unique=True)
         ev_scores, rejets, inconnues, retenues = event_scores(ev_all, zone_of)
         # ⓘ 15 jours de `model_verif_event`, dont plus rien ne se sert
         # dès que les scores d'événement sont calculés.
@@ -6785,7 +6921,8 @@ def main() -> int:
         # une déduction faite sur la forme de son identifiant. Une table
         # de quelques centaines de lignes, une fois par nuit.
         kind_of = {r["zone_id"]: r["kind"]
-                   for r in sb.select("model_zone", order="zone_id")}
+                   for r in sb.select("model_zone", order="zone_id",
+                                      cle_unique=True)}
 
         # ── chemin régime : archive rejouée, plus accumulateurs ───
         t_replay = time.monotonic()
@@ -6793,9 +6930,14 @@ def main() -> int:
         # fenêtre (lot L9b) : une seule passe, et la clé `_murphy` ne
         # survit pas à la ligne. Voir le pavé dans `replay_window`.
         murphy_acc: dict = {}
+        # ⓘ 02/09 : Murphy sur la MÊME population que le classement et
+        # le duel — sans les doublons (L17) ni les positions suspectes
+        # (L15). Voir `unites_hors_notation`.
+        murphy_exclus = unites_hors_notation(zone_of)
         units, bilan_replay = replay_window(
             root, day, st, utc_offset_s, args.regime_days,
-            args.replay_budget, murphy_acc=murphy_acc)
+            args.replay_budget, murphy_acc=murphy_acc,
+            murphy_exclus=murphy_exclus)
         print(f"  rejeu d'archive : {bilan_replay} en "
               f"{time.monotonic() - t_replay:.1f} s")
         jalon_memoire("le rejeu d'archive")
@@ -6822,6 +6964,8 @@ def main() -> int:
             n_ok = sum(1 for l in mur_balises if l["reason"] == "ok")
             print(f"  décomposition de Murphy : {len(mur_balises)} "
                   f"(balise × modèle × échéance), dont {n_ok} décomposées "
+                  f"— {len(murphy_exclus)} balise(s) tenue(s) dehors "
+                  f"(doublon ou position suspecte, comme le classement) "
                   f"({time.monotonic() - t_mur:.1f} s)")
             if not n_ok and mur_balises:
                 # ⛔ ZÉRO DÉCOMPOSÉE N'EST PAS « TOUT VA BIEN ». C'est le
@@ -7014,7 +7158,7 @@ def main() -> int:
             # ── S13.0 : le fichier léger + le résumé des manches ──
             rounds_state = update_rounds(root, day, scores, args.dry_run)
             _publish_light(st, scores, ev_scores, rounds_state, as_of,
-                           args.dry_run, duels_rows)
+                           args.dry_run, duels_rows, temoin=part_temoin)
             print(f"  → manches : {rounds_state.get('nights', 0)} nuit(s) "
                   f"suivie(s) depuis le {rounds_state.get('since')}, "
                   f"{len(rounds_state.get('wins', {}))} case(s) "
