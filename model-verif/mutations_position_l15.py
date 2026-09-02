@@ -33,7 +33,9 @@ import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
 CP = ICI / "controle_position.py"
+RUN = ICI / "run.sh"
 BANC = "test_controle_position.py"
+BANC_RUN = "test_run_selftest.py"
 
 MUTATIONS = [
     # ── ⛔⛔ LA FAUTE CENTRALE : le critère cesse d'être une conjonction
@@ -137,6 +139,25 @@ MUTATIONS = [
      "ne tourne plus",
      '    if not r["lignes"]:\n        L.append("     (aucune : le gel et le référentiel tombent dans la "\n                 "même maille partout)")\n    return "\\n".join(L)',
      '    if not r["lignes"]:\n        return ""\n    return "\\n".join(L)'),
+    # ── ⛔ LES SIX LIGNES DE `run.sh` QUI PORTENT LE CRI DEHORS ──────
+    ("⛔⛔ le cri repart par `dire` au lieu d'`alerter` — il reste dans "
+     "un journal que RIEN ne lit sur cette machine : la faute exacte du "
+     "lot LV, qui a crié vingt jours dans le vide",
+     RUN, BANC_RUN,
+     '    alerter "$LIBELLE — position des balises" "$(cat "$CRI_POSITION")"',
+     '    dire "position des balises : $(cat "$CRI_POSITION")"'),
+
+    ("⛔ le fichier de cri n'est plus effacé — le même avertissement "
+     "repart TOUTES les nuits, et on apprend à l'ignorer",
+     RUN, BANC_RUN,
+     '    rm -f "$CRI_POSITION" \\\n      || dire "⚠️ cri de position non effacé — il repartira demain"',
+     '    :'),
+
+    ("⛔ le cri n'est jamais envoyé (condition morte) — le garde-fou "
+     "détecte et personne n'entend, l'état d'avant ce lot",
+     RUN, BANC_RUN,
+     '  if [[ "$MODE" == "score" && -s "$CRI_POSITION" ]]; then',
+     '  if false; then'),
 ]
 
 
@@ -155,22 +176,32 @@ def _env_sans_pyc() -> dict:
 
 def joue() -> int:
     rouges = 0
-    for i, (nom, avant, apres) in enumerate(MUTATIONS, 1):
-        origine = CP.read_text(encoding="utf-8")
+    for i, mutation in enumerate(MUTATIONS, 1):
+        # ⓘ Une entrée à trois champs vise `controle_position.py` et son
+        # banc ; une entrée à cinq nomme son fichier et son banc. Les six
+        # lignes de `run.sh` qui portent le cri DEHORS sont dans le second
+        # cas — et elles n'étaient tenues par rien avant le 02/09.
+        if len(mutation) == 3:
+            nom, avant, apres = mutation
+            fichier, banc = CP, BANC
+        else:
+            nom, fichier, banc, avant, apres = mutation
+        origine = fichier.read_text(encoding="utf-8")
         if avant not in origine:
             print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
-                  f"{CP.name} — la mutation n'a rien muté, donc elle n'a "
-                  f"rien prouvé. (Le code a bougé : réécrire ce motif.)")
+                  f"{fichier.name} — la mutation n'a rien muté, donc elle "
+                  f"n'a rien prouvé. (Le code a bougé : réécrire ce motif.)")
             rouges += 1
             continue
         try:
-            CP.write_text(origine.replace(avant, apres, 1), encoding="utf-8")
-            r = subprocess.run([sys.executable, "-B", str(ICI / BANC)],
+            fichier.write_text(origine.replace(avant, apres, 1),
+                               encoding="utf-8")
+            r = subprocess.run([sys.executable, "-B", str(ICI / banc)],
                                capture_output=True, text=True, cwd=ICI,
                                env=_env_sans_pyc())
             if r.returncode == 0:
                 print(f"  ❌ {i:>2}. {nom}\n       LE BANC RESTE VERT — il "
-                      f"ne tient pas cette propriété.")
+                      f"ne tient pas cette propriété ({banc}).")
                 rouges += 1
             else:
                 lignes = [l.strip() for l in r.stdout.splitlines()
@@ -181,7 +212,7 @@ def joue() -> int:
                       + (f" (+{len(lignes) - 1} autres)"
                          if len(lignes) > 1 else ""))
         finally:
-            CP.write_text(origine, encoding="utf-8")
+            fichier.write_text(origine, encoding="utf-8")
     return rouges
 
 

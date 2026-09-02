@@ -102,25 +102,42 @@ def _bac(run_sh: pathlib.Path):
     return env, d
 
 
-def _jouer(code_self_test: int, run_sh: pathlib.Path = RUN_SH,
-           mode: str = "score", bloquant: str | None = None):
-    """Lance `run.sh <mode>` et rend `(code, appels, journal)`."""
+def _jouer_brut(code_self_test: int, run_sh: pathlib.Path = RUN_SH,
+                mode: str = "score", bloquant: str | None = None,
+                preparer=None):
+    """Lance `run.sh <mode>` et rend `(code, appels, journal, dossier)`.
+
+    ⚠️ LE DOSSIER N'EST PAS EFFACÉ — c'est à l'appelant de le faire.
+    Cette variante existe pour le lot L15 : son garde-fou dépose un
+    FICHIER que `run.sh` doit envoyer PUIS EFFACER, et vérifier
+    l'effacement demande de regarder le bac après coup.
+    `preparer(dossier)` est appelé avant le lancement, pour y semer ce
+    qu'il faut.
+    """
     env, d = _bac(run_sh)
     env["CODE_SELF_TEST"] = str(code_self_test)
     if bloquant is not None:
         env["BW_MODEL_SELF_TEST_BLOQUANT"] = bloquant
     else:
         env.pop("BW_MODEL_SELF_TEST_BLOQUANT", None)
-    try:
-        p = subprocess.run(["bash", str(run_sh), mode], env=env,
-                           capture_output=True, text=True, timeout=120)
-        trace = (d / "trace")
-        appels = trace.read_text().splitlines() if trace.exists() else []
-        journal = (d / "etat" / f"{mode}.log")
-        return (p.returncode, appels,
-                journal.read_text() if journal.exists() else "")
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+    if preparer is not None:
+        preparer(d)
+    p = subprocess.run(["bash", str(run_sh), mode], env=env,
+                       capture_output=True, text=True, timeout=120)
+    trace = (d / "trace")
+    appels = trace.read_text().splitlines() if trace.exists() else []
+    journal = (d / "etat" / f"{mode}.log")
+    return (p.returncode, appels,
+            journal.read_text() if journal.exists() else "", d)
+
+
+def _jouer(code_self_test: int, run_sh: pathlib.Path = RUN_SH,
+           mode: str = "score", bloquant: str | None = None):
+    """Lance `run.sh <mode>` et rend `(code, appels, journal)`."""
+    code, appels, journal, d = _jouer_brut(code_self_test, run_sh, mode,
+                                           bloquant)
+    shutil.rmtree(d, ignore_errors=True)
+    return code, appels, journal
 
 
 def _est_notation(ligne: str) -> bool:
@@ -240,11 +257,55 @@ def test_la_mutation_sapplique_vraiment():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_cri_de_position():
+    """⛔ LOT L15 (02/09) — LES SIX LIGNES QUI PORTENT LE CRI DEHORS.
+
+    Le garde-fou de position vit dans `score.py`, il est bancé et muté
+    là — mais ce qu'il DÉPOSE ne sert à rien si `run.sh` ne l'envoie
+    pas. Ces six lignes-là n'étaient tenues par aucune assertion, et
+    c'est exactement l'angle mort que le lot LV a payé vingt jours
+    durant : le détecteur marchait, c'est l'oreille qui manquait.
+    """
+    print("\n── ⛔ lot L15 : le cri de position sort-il du bac ? ──")
+    TEXTE = "9 balises divergent du gel depuis au moins 10 jours."
+
+    def semer(d):
+        (d / "etat" / "cri.position").write_text(TEXTE, encoding="utf-8")
+
+    code, _appels, journal, d = _jouer_brut(0, preparer=semer)
+    try:
+        check("run.sh sort 0 : une divergence de position n'est PAS un "
+              "échec de run", code, 0)
+        check("⭐ le cri est passé par `alerter` — donc journald -p err, "
+              "webhook et e-mail — et pas par `dire`",
+              "ALERTE — " in journal and "position des balises" in journal,
+              True)
+        check("… et c'est bien le TEXTE déposé qui part",
+              TEXTE in journal, True)
+        check("⭐ le fichier est EFFACÉ après envoi — sans quoi le même "
+              "cri repartirait toutes les nuits",
+              (d / "etat" / "cri.position").exists(), False)
+        check("le compteur d'échecs consécutifs reste à zéro",
+              (d / "etat" / "echecs_consecutifs.score").read_text().strip(),
+              "0")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # ── et le cas normal : PAS de fichier ⇒ PAS d'alerte ──────────────
+    code, _appels, journal, d = _jouer_brut(0)
+    try:
+        check("⭐ sans fichier de cri, `run.sh` n'alerte sur rien",
+              "position des balises" in journal, False)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main() -> int:
     if not RUN_SH.exists():
         print(f"❌ {RUN_SH} introuvable")
         return 1
-    for fn in (test_chemin_dappel, test_la_mutation_sapplique_vraiment):
+    for fn in (test_chemin_dappel, test_cri_de_position,
+               test_la_mutation_sapplique_vraiment):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0
