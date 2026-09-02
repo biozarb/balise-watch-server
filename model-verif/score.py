@@ -68,6 +68,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import controle_position as CP  # noqa: E402
 import duel as DUEL  # noqa: E402
 import events as EV  # noqa: E402
 import inference as INF  # noqa: E402
@@ -6371,6 +6372,56 @@ def main() -> int:
         # persistance est incalculable et `beats_persist` restera nul.
         print("  ⚠️ pas d'observations de la veille : le skill contre la "
               "persistance ne sera pas calculable pour cette journée.")
+
+    # ── 1 ter. LE GARDE-FOU DE POSITION (lot L15, 02/09/2026) ─────
+    #
+    # ⛔ POURQUOI ICI, ET PAS DANS UN TIMER DE PLUS. Ce contrôle a besoin
+    # des positions que la chaîne a UTILISÉES ces dix derniers jours,
+    # c'est-à-dire des lignes d'archive obs — dont deux journées sont
+    # déjà en mémoire trois lignes plus haut. Un job séparé relirait les
+    # mêmes objets pour rien, et il faudrait le surveiller (le lot LV a
+    # mesuré ce que coûte une unité de plus qu'on ne sait pas lire).
+    #
+    # ⚠️ SOUS `try`, ET NON BLOQUANT, comme le bilan des parties : une
+    # notation qui tomberait ENTIÈRE parce qu'un contrôle de DIAGNOSTIC
+    # a levé serait le remède pire que le mal. Il ne touche à rien : il
+    # lit, il écrit une ligne de journal, et il dépose au plus un
+    # fichier de cri que `run.sh` enverra.
+    try:
+        # ⛔⛔ UNE JOURNÉE À LA FOIS, RÉDUITE TOUT DE SUITE. Tenir les
+        # dix journées de lignes ensemble coûtait 906 Mo, mesurés sur le
+        # VPS le 02/09 — sur un run qui culmine déjà à 1 474 Mo pour un
+        # plafond de 2 800, et qui est mort à 2 820 la nuit du 28/08
+        # (lot LM). Réduites, les dix journées ne pèsent plus que des
+        # dictionnaires de couples (lat, lon).
+        obs_pos = {day.strftime("%Y-%m-%d"): CP.positions_des_obs(obs_day),
+                   (day - timedelta(days=1)).strftime("%Y-%m-%d"):
+                   CP.positions_des_obs(obs_prev)}
+        for _k in range(2, CP.SEUIL_PERSISTANCE_J):
+            _d = day - timedelta(days=_k)
+            _rows = all_obs_rows(root, _d, st)
+            obs_pos[_d.strftime("%Y-%m-%d")] = CP.positions_des_obs(_rows)
+            del _rows
+        res_pos = CP.verifier(root, day, obs_pos)
+        del obs_pos
+        gc.collect()
+        print(CP.texte_journal(res_pos),
+              file=sys.stderr if res_pos["confirmees"] else sys.stdout)
+        _texte = CP.cri(res_pos, root)
+        if _texte:
+            # ⓘ Le fichier EST la file d'attente : `run.sh` l'envoie puis
+            # l'efface. S'il n'y arrive pas (run tué plus loin), il est
+            # toujours là demain — bruyant, jamais muet.
+            (root / "cri.position").write_text(_texte, encoding="utf-8")
+            CP.poser_jeton(res_pos, root)
+            print(f"  ⛔ position : {len(res_pos['confirmees'])} balise(s) "
+                  f"CONFIRMÉE(S) — cri déposé pour envoi", file=sys.stderr)
+    except Exception as exc:                           # noqa: BLE001
+        print(f"  ⚠️ garde-fou de position : {type(exc).__name__} — {exc}. "
+              f"La notation n'est pas affectée ; c'est le CONTRÔLE qui est "
+              f"muet cette nuit, et c'est exactement ce qu'il surveille "
+              f"chez les autres.", file=sys.stderr)
+    jalon_memoire("le garde-fou de position")
 
     # ── 2-3. apparier et écrire l'agrégat quotidien ──────────────
     t_clim = time.monotonic()

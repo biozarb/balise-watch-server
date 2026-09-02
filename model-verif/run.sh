@@ -638,6 +638,27 @@ if (( code == 0 )); then
     "$PYTHON" "$RECALCUL" --out "$ETAT" 2>&1 | tee -a "$LOG" || true
   fi
 
+  # ── Le cri du garde-fou de POSITION (lot L15, 02/09) ──────────────
+  #
+  # ⛔ POURQUOI LE PYTHON N'ENVOIE PAS LUI-MÊME. `alerter` — journald en
+  # `-p err`, webhook, e-mail au sujet translittéré — vit ICI, et la
+  # règle écrite en tête de ce fichier dit de ne pas la recopier pour un
+  # job de plus. `score.py` dépose donc un fichier ; ce fichier EST la
+  # file d'attente : envoyé puis effacé, il survit à un run tué et
+  # repart la nuit suivante.
+  # ⓘ `alerter` pingue `/fail` : le check passe au rouge, puis revient
+  # au vert au ping de fin de run douze lignes plus bas. C'est voulu —
+  # même choix que le self-test désarmé : la trace durable est le mail,
+  # le rouge fugace est ce qui fait ouvrir la boîte.
+  # ⚠️ Une divergence de position n'est PAS un échec de run : on
+  # n'incrémente pas `$ECHECS` et on ne sort pas non nul.
+  CRI_POSITION="$ETAT/cri.position"
+  if [[ "$MODE" == "score" && -s "$CRI_POSITION" ]]; then
+    alerter "$LIBELLE — position des balises" "$(cat "$CRI_POSITION")"
+    rm -f "$CRI_POSITION" \
+      || dire "⚠️ cri de position non effacé — il repartira demain"
+  fi
+
   echo 0 > "$ECHECS"
   ping="${!PING_VAR:-}"
   if [[ -n "$ping" ]]; then
