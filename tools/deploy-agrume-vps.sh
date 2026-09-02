@@ -831,12 +831,20 @@ PY="\${BW_PYTHON:-\$HOME/venv-balise/bin/python3}"
 # \`recalcul_balise_jour.py\` CHAQUE NUIT. Une liste écrite à la main se
 # périme au lot suivant ; celle-ci est LUE sur le disque du VPS, et
 # c'est l'EXCLUSION qui s'écrit, avec sa raison :
-#   · \`test_scoring.py\` — à part, juste en dessous (parité TS manuelle).
+#   · \`test_scoring.py\` — à part, juste en dessous (parité TS manuelle) ;
+#   · \`tools/test_isobars_manifest.py\` et \`tools/test_storage_cablage.py\`
+#     — ils lisent \`arpege-isobars/ingest.py\` et les \`ingest.py\` des
+#     chaînes GitHub Actions (arome-wind, arome-thermal, …), dossiers
+#     que ce déploiement NE TRANSPORTE PAS (\`BW_TRANSPORT_*\` : cinq
+#     dossiers). Mesuré au premier déploiement de la liste lue, le
+#     02/09 : \`FileNotFoundError … arpege-isobars/ingest.py\`, et RIEN
+#     n'a été redémarré — le garde a fait son travail. Ces deux bancs
+#     restent joués sur le Mac.
 # Les trois bancs des sondes L4/L6/L16 et \`sonde_l9c_jensen\` sont
 # désormais VERSIONNÉS (02/09) : ils entrent comme les autres.
 # ⚠️ Un banc qui ne passerait pas sur le VPS ARRÊTE le déploiement —
 # c'est le but ; on l'exclut ici avec sa raison, jamais en silence.
-EXCLUS_BANCS="model-verif/test_scoring.py"
+EXCLUS_BANCS="model-verif/test_scoring.py tools/test_isobars_manifest.py tools/test_storage_cablage.py"
 N=0
 for B in \$(ls model-verif/test_*.py tools/test_*.py verif/test_*.py agrume/test_*.py | sort); do
   case " \$EXCLUS_BANCS " in *" \$B "*) continue ;; esac
