@@ -74,6 +74,42 @@ bw_avertir_config() {
   bw_ac_dir="${5:-${BW_ETAT_ALERTES:-$HOME/.balise-watch-etat-alertes}}"
   [ -n "$bw_ac_var" ] || return 0
 
+  # ── UN BANC N'ALERTE PAS LA PRODUCTION ──────────────────────────────
+  # ⛔⛔ MESURÉ LE 02/09, ET LE SUIVI LV DISAIT « SANS EFFET ».
+  # `model-verif/test_run_selftest.py` lance le VRAI `run.sh` avec un
+  # `alertes.env` VIDE — délibérément, pour tester l'enchaînement. Or,
+  # depuis ce lot, un fichier vide veut dire « aucune variable de ping »,
+  # donc « PERSONNE NE SURVEILLE », donc un cri. Relevé sur le journal du
+  # VPS entre le 01/09 15:00 Z et le 02/09 09:00 Z : **93 cris, dont 50
+  # venus d'un bac de banc** (`/tmp/s3_run_*`) — 54 % du total. Et ils
+  # portaient l'identifiant de PRODUCTION (`bw-model-score`), donc un
+  # `grep -c "PERSONNE NE SURVEILLE"` rendait un chiffre faux à plus de
+  # la moitié. *Le dispositif que ce lot a construit pour être entendu
+  # devenait, par son propre banc, un dispositif qu'on apprend à
+  # ignorer* — piège nº 3 du lot LV, retourné une seconde fois.
+  #
+  # ⚠️ ET LE SILENCE DES CANAUX ÉTAIT UN ACCIDENT DE COUCHES, PAS UNE
+  # GARANTIE. Rien n'est parti chez Yann, et c'est vrai — mais seulement
+  # parce que le bac écrase `BW_ALERTES_FILE` par un fichier vide, donc
+  # `BW_WEBHOOK_URL` et `BW_ALERTE_MAIL` restent indéfinis. `_bac()`
+  # hérite pourtant de `os.environ` : le jour où un banc tourne dans un
+  # shell qui a sourcé le vrai fichier d'alertes, il pousse sur le
+  # téléphone. La propriété était vraie GRATUITEMENT — exactement ce que
+  # le piège nº 3 du lot LD reproche à un banc.
+  #
+  # ⇒ Le banc se DÉCLARE, et ici on en tire deux conséquences :
+  #   · les canaux extérieurs (webhook, e-mail) ne partent PAS ;
+  #   · le cri va quand même dans journald, sous une étiquette
+  #     `banc-…` et avec sa mention dans le corps.
+  # ⛔ IL NE SE TAIT PAS, ET C'EST LE POINT. Un drapeau qui rendrait
+  # muet serait un désarmement à une variable près : posé par erreur en
+  # production, il effacerait le dispositif entier. Posé par erreur ici,
+  # il ne fait que RENOMMER un cri qui reste visible.
+  bw_ac_banc="${BW_AVERTIR_CONFIG_BANC:-}"
+  if [ -n "$bw_ac_banc" ]; then
+    bw_ac_etiq="banc-$bw_ac_etiq"
+  fi
+
   bw_ac_sujet="configuration incomplete : $bw_ac_var absente"
   bw_ac_corps="⚠️ $bw_ac_var est absente de $bw_ac_fichier — PERSONNE NE SURVEILLE $bw_ac_quoi.
 Le job continue de tourner : il n'échoue pas, il est INVISIBLE. Un job qui
@@ -82,6 +118,11 @@ Geste : créer le check chez le service extérieur, puis ajouter la ligne
         export $bw_ac_var=\"…\"  dans $bw_ac_fichier
 Machine : $(hostname 2>/dev/null || echo '?')
 ⓘ Cet avertissement ne repart qu'une fois par jour et par variable."
+  if [ -n "$bw_ac_banc" ]; then
+    bw_ac_corps="$bw_ac_corps
+⛔ ÉMIS PAR UN BANC ($bw_ac_banc) — ce n'est PAS un job de production.
+Les canaux extérieurs (webhook, e-mail) n'ont pas été appelés."
+  fi
 
   # ── Le jeton : une fois par jour et par variable ────────────────────
   bw_ac_jour="$(date -u +%Y-%m-%d)"
@@ -103,14 +144,15 @@ Machine : $(hostname 2>/dev/null || echo '?')
   # ⚠️ Le titre part dans un EN-TÊTE HTTP, qui ne transporte pas d'UTF-8
   # (défaut du 03/08) : `$bw_ac_sujet` est écrit en ASCII pur plus haut,
   # exprès, et non translittéré ici.
-  if [ -n "${BW_WEBHOOK_URL:-}" ]; then
+  if [ -n "${BW_WEBHOOK_URL:-}" ] && [ -z "$bw_ac_banc" ]; then
     curl -fsS --max-time 10 -o /dev/null \
          -H "Title: Balise Watch - $bw_ac_sujet" -H "Priority: default" \
          -d "$bw_ac_corps" "$BW_WEBHOOK_URL" >/dev/null 2>&1 || true
   fi
 
   # ── 3. E-mail via msmtp ─────────────────────────────────────────────
-  if [ -n "${BW_ALERTE_MAIL:-}" ] && command -v msmtp >/dev/null 2>&1; then
+  if [ -n "${BW_ALERTE_MAIL:-}" ] && [ -z "$bw_ac_banc" ] \
+     && command -v msmtp >/dev/null 2>&1; then
     printf 'To: %s\nSubject: [Balise Watch] %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n' \
       "$BW_ALERTE_MAIL" "$bw_ac_sujet" "$bw_ac_corps" \
       | msmtp --read-recipients >/dev/null 2>&1 || true

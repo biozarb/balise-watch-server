@@ -42,6 +42,8 @@ RUN = RACINE / "model-verif/run.sh"
 EXEMPLE = RACINE / "traces/entretien/balise-watch-alertes.env.exemple"
 TAU = RACINE / "model-verif/systemd/bw-model-tau.service"
 SCORE_TIMER = RACINE / "model-verif/systemd/bw-model-score.timer"
+#: Le banc qui lance le VRAI `run.sh` dans un bac (lot du 02/09).
+SELFTEST = RACINE / "model-verif/test_run_selftest.py"
 
 ALERTES = ["bash", str(ICI / "test_alertes.sh")]
 DEPLOIEMENT = ["bash", str(ICI / "test_deploiement.sh")]
@@ -155,7 +157,15 @@ MUTATIONS = [
      "que RIEN ne lit sur cette machine (0 logcheck, 0 crontab, OnFailure= "
      "sur 0 des 31 unités, mesuré le 01/09)",
      ALERTES, AVERTIR,
-     '  if [ -n "${BW_ALERTE_MAIL:-}" ] && command -v msmtp >/dev/null 2>&1; then',
+     # ⚠️ MOTIF RÉÉCRIT LE 02/09 : la condition a gagné le garde
+     # `[ -z "$bw_ac_banc" ]` (un banc n'alerte pas la production) et
+     # s'est coupée en deux lignes. Le runner l'a dit lui-même
+     # (« MOTIF INTROUVABLE : le code a bougé »), et c'est exactement ce
+     # que ce contrôle existe pour attraper — une mutation dont le motif
+     # a vieilli ne prouve plus rien, mais elle reste VERTE si personne
+     # ne vérifie qu'elle a mordu.
+     '  if [ -n "${BW_ALERTE_MAIL:-}" ] && [ -z "$bw_ac_banc" ] \\\n'
+     '     && command -v msmtp >/dev/null 2>&1; then',
      '  if false; then'),
 
     ("⛔ L'AVERTISSEMENT PINGUE LE CHECK D'UN AUTRE JOB : le check "
@@ -217,6 +227,62 @@ MUTATIONS = [
      "unités y sont déjà — le mode n'est pas choisi, il est hérité de la "
      "source par `cp`",
      ALERTES, SCORE_TIMER, ("MODE", 0o600), None),
+
+    # ══════════════════════════════════════════════════════════════════
+    #  UN BANC N'ALERTE PAS LA PRODUCTION (02/09/2026)
+    #
+    #  ⛔ La faute qu'on craint : un drapeau qui, au lieu d'isoler un
+    #  banc, DÉSARME le dispositif — ou qui ne l'isole qu'à moitié.
+    # ══════════════════════════════════════════════════════════════════
+    ("⛔⛔ le drapeau de banc rend MUET au lieu de renommer : posé par "
+     "erreur en production, il effacerait le dispositif entier",
+     ALERTES, AVERTIR,
+     '  bw_ac_banc="${BW_AVERTIR_CONFIG_BANC:-}"\n'
+     '  if [ -n "$bw_ac_banc" ]; then\n'
+     '    bw_ac_etiq="banc-$bw_ac_etiq"\n'
+     '  fi',
+     '  bw_ac_banc="${BW_AVERTIR_CONFIG_BANC:-}"\n'
+     '  if [ -n "$bw_ac_banc" ]; then\n'
+     '    return 0\n'
+     '  fi'),
+
+    ("⭐ le webhook part QUAND MEME depuis un banc — le telephone sonne "
+     "pour un banc, et on apprend a ignorer le dispositif",
+     ALERTES, AVERTIR,
+     '  if [ -n "${BW_WEBHOOK_URL:-}" ] && [ -z "$bw_ac_banc" ]; then',
+     '  if [ -n "${BW_WEBHOOK_URL:-}" ]; then'),
+
+    ("l'e-mail part quand meme depuis un banc",
+     ALERTES, AVERTIR,
+     '  if [ -n "${BW_ALERTE_MAIL:-}" ] && [ -z "$bw_ac_banc" ] \\\n'
+     '     && command -v msmtp >/dev/null 2>&1; then',
+     '  if [ -n "${BW_ALERTE_MAIL:-}" ] && command -v msmtp >/dev/null 2>&1; then'),
+
+    ("⭐⭐ l'etiquette journald reste celle de la PRODUCTION : le cri du "
+     "banc redevient indiscernable, et `grep -c` rend un chiffre faux a "
+     "54 % (mesure du 02/09 : 50 cris de banc sur 93)",
+     ALERTES, AVERTIR,
+     '    bw_ac_etiq="banc-$bw_ac_etiq"',
+     '    bw_ac_etiq="$bw_ac_etiq"'),
+
+    ("le corps ne dit plus que le cri vient d'un banc, ni lequel",
+     ALERTES, AVERTIR,
+     '⛔ ÉMIS PAR UN BANC ($bw_ac_banc) — ce n\'est PAS un job de production.',
+     '(cri de banc)'),
+
+    ("⛔ le drapeau s'applique meme quand il est VIDE : une variable "
+     "definie a la chaine vide isolerait la production sans le dire",
+     ALERTES, AVERTIR,
+     '  if [ -n "$bw_ac_banc" ]; then\n'
+     '    bw_ac_etiq="banc-$bw_ac_etiq"',
+     '  if [ -z "$bw_ac_banc" ]; then\n'
+     '    bw_ac_etiq="banc-$bw_ac_etiq"'),
+
+    ("⭐ le banc qui a produit ce lot ne declare plus son bac : le "
+     "correctif vit dans bw_avertir_config et personne ne l'appelle",
+     ALERTES, SELFTEST,
+     '        "BW_AVERTIR_CONFIG_BANC": "test_run_selftest.py",',
+     '        "BW_AVERTIR_CONFIG_BANC_INACTIF": "test_run_selftest.py",'),
 ]
 
 

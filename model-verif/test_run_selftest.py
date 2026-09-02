@@ -65,10 +65,25 @@ def _bac(run_sh: pathlib.Path):
     (d / "supa.env").write_text(
         "export SUPABASE_URL=http://exemple.invalide\n"
         "export SUPABASE_SERVICE_KEY=x\n")
-    # ⚠️ VIDE, ET C'EST VOULU : sans `BW_ALERTE_MAIL` ni ping, `alerter`
-    # se contente d'écrire dans le journal. Le banc n'envoie donc ni
-    # e-mail ni requête — il ne teste pas les canaux d'alerte, il teste
-    # l'enchaînement.
+    # ⚠️ VIDE, ET C'EST VOULU : le banc ne teste pas les canaux d'alerte,
+    # il teste l'enchaînement.
+    # ⛔⛔ MAIS « VIDE » NE VEUT PLUS DIRE « MUET » DEPUIS LE LOT LV.
+    # Le commentaire d'origine disait « sans BW_ALERTE_MAIL ni ping,
+    # `alerter` se contente d'écrire dans le journal ». C'était vrai le
+    # 23/08 et faux depuis le 01/09 : un fichier d'alertes vide veut dire
+    # « aucune variable de ping définie », donc « PERSONNE NE SURVEILLE »,
+    # donc un cri de `bw_avertir_config` — canaux compris. Mesuré sur le
+    # journal du VPS le 02/09 : **50 cris venus d'un bac `/tmp/s3_run_*`
+    # en 18 heures, 54 % du total**, tous estampillés de l'identifiant de
+    # PRODUCTION. *Un banc qui déclenche le dispositif d'alerte de la
+    # production apprend à tout le monde à l'ignorer.*
+    # ⚠️ Et rien n'est parti chez Yann uniquement parce que ce fichier
+    # vide laisse `BW_WEBHOOK_URL`/`BW_ALERTE_MAIL` indéfinis — or
+    # `env = dict(os.environ)` juste en dessous hérite du shell appelant.
+    # La propriété était vraie GRATUITEMENT.
+    # ⇒ Le banc se DÉCLARE (`BW_AVERTIR_CONFIG_BANC`), et le cri reste
+    # visible dans le journal sous `banc-…` : on ne le fait pas taire,
+    # on le rend reconnaissable.
     (d / "alertes.env").write_text("")
     faux = d / "faux_python"
     faux.write_text(FAUX_PYTHON)
@@ -81,6 +96,8 @@ def _bac(run_sh: pathlib.Path):
         "BW_MODEL_VERIF_ETAT": str(d / "etat"),
         "BW_PYTHON": str(faux),
         "TRACE": str(d / "trace"),
+        # cf. le pavé ci-dessus — le nom du banc voyage dans le message.
+        "BW_AVERTIR_CONFIG_BANC": "test_run_selftest.py",
     })
     return env, d
 

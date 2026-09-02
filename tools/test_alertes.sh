@@ -265,6 +265,14 @@ check "D14 sans canal configuré, rien ne part et rien ne casse" \
 # ══════════════════════════════════════════════════════════════════════
 # E. LES UNITÉS DU DÉPÔT SONT LISIBLES (lot LV, réponse Q4)
 # ══════════════════════════════════════════════════════════════════════
+# ⛔⛔ CETTE SECTION NE PEUT PAS ÊTRE JOUÉE DEPUIS UNE SESSION COWORK
+# (`device_bash`), ET ELLE Y REND UN FAUX ROUGE — vérifié le 02/09 : le
+# montage du dossier partagé rapporte **600 pour les 37 fichiers**,
+# alors que `stat` sur le Mac lui-même les donne tous en 644. Le banc
+# n'y voit donc pas les permissions du dépôt, il voit celles du montage.
+# ⇒ Jouer ce banc depuis Desktop Commander (le Mac) ou sur le VPS, comme
+# le fait `deploy-agrume-vps.sh`. *Un banc qui lit un montage rend un
+# verdict sur le montage.*
 echo "▶ E. les modes des unités du dépôt"
 # ⚠️ CES DEUX ASSERTIONS LISENT DES PERMISSIONS, donc elles n'ont de sens
 # que sur un VRAI système de fichiers. Jouées à travers un montage réseau
@@ -285,6 +293,73 @@ check "E1  ⭐ AUCUN fichier d'unité du dépôt n'est en 600" "$(printf '%s' "$
 check "E2  ⓘ et il y en a bien 37 à vérifier (le périmètre n'a pas fondu)" \
       "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "37"
 fi
+
+# ══════════════════════════════════════════════════════════════════════
+#  F. UN BANC N'ALERTE PAS LA PRODUCTION          (02/09/2026)
+#
+#  ⛔ POURQUOI. `model-verif/test_run_selftest.py` lance le VRAI `run.sh`
+#  avec un `alertes.env` vide. Depuis le lot LV, « vide » veut dire
+#  « aucune variable de ping », donc « PERSONNE NE SURVEILLE », donc un
+#  cri. Mesuré sur le journal du VPS entre le 01/09 15:00 Z et le 02/09
+#  09:00 Z : **93 cris, dont 50 venus d'un bac de banc — 54 % du total**,
+#  et tous estampillés de l'identifiant de PRODUCTION.
+#
+#  ⚠️ ET LES CANAUX SE TAISAIENT PAR ACCIDENT, PAS PAR CONSTRUCTION : le
+#  bac écrase `BW_ALERTES_FILE` par un fichier vide, donc les deux URL
+#  restent indéfinies. Mais `_bac()` hérite de `os.environ` — un banc
+#  lancé dans un shell qui a sourcé le vrai fichier POUSSERAIT sur le
+#  téléphone. Ces assertions rendent la propriété vraie par
+#  construction, au lieu de la laisser vraie gratuitement.
+# ══════════════════════════════════════════════════════════════════════
+echo
+echo "▶ F. un banc n'alerte pas la production"
+
+: > "$BANC_MAILS"; : > "$BANC_CURL"; : > "$BANC_JOURNAL"
+rm -rf "$TMP/etat-banc"
+BW_AVERTIR_CONFIG_BANC="banc-des-essais" \
+  bw_avertir_config BW_BANC_PING_URL /tmp/faux.env bw-model-score "CE JOB" "$TMP/etat-banc"
+check "F1  ⛔⛔ AUCUN e-mail ne part d'un banc, même avec BW_ALERTE_MAIL défini" \
+      "$(grep -c -- '--MAIL--' "$BANC_MAILS" | tr -d ' ')" "0"
+check "F2  ⛔⛔ AUCUN webhook non plus — le téléphone ne sonne pas pour un banc" \
+      "$(grep -c 'ntfy.invalid' "$BANC_CURL" | tr -d ' ')" "0"
+# ⭐ F3 — IL NE SE TAIT PAS, ET C'EST LE POINT. Un drapeau qui rendrait
+# muet serait un désarmement à une variable près : posé par erreur en
+# production, il effacerait le dispositif entier. Ici il RENOMME.
+check "F3  ⭐⭐ le cri va QUAND MÊME dans journald (un drapeau ne doit pas rendre muet)" \
+      "$(grep -c 'configuration incomplete' "$BANC_JOURNAL" | tr -d ' ')" "1"
+check "F4  ⭐ … et le corps DIT que c'est un banc, avec son nom" \
+      "$(grep -c 'ÉMIS PAR UN BANC (banc-des-essais)' "$BANC_JOURNAL" | tr -d ' ')" "1"
+
+# ⭐⭐ F5 — L'ÉTIQUETTE, ET C'EST ELLE QUI RÉPARE LE `grep -c`. Un cri de
+# banc portait `bw-model-score`, l'identifiant du job de production :
+# impossible de compter les vrais sans lire chaque ligne.
+: > "$BANC_JOURNAL"
+CAT_ARGS="$TMP/cat-args.txt"; : > "$CAT_ARGS"
+cat > "$FAUX/systemd-cat" <<'EOS'
+#!/bin/sh
+echo "$*" >> "$CAT_ARGS"
+cat >> "$BANC_JOURNAL"
+EOS
+chmod +x "$FAUX/systemd-cat"; export CAT_ARGS
+rm -rf "$TMP/etat-banc2"
+BW_AVERTIR_CONFIG_BANC=1 \
+  bw_avertir_config BW_BANC2_PING_URL /tmp/faux.env bw-model-score "CE JOB" "$TMP/etat-banc2"
+check "F5  ⭐⭐ l'étiquette journald devient 'banc-bw-model-score' (le grep -c redevient honnête)" \
+      "$(grep -c -- '-t banc-bw-model-score' "$CAT_ARGS" | tr -d ' ')" "1"
+
+rm -rf "$TMP/etat-vrai"
+: > "$CAT_ARGS"; : > "$BANC_MAILS"
+bw_avertir_config BW_VRAI_PING_URL /tmp/faux.env bw-model-score "CE JOB" "$TMP/etat-vrai"
+check "F6  ⛔ SANS le drapeau, rien ne change : l'étiquette reste celle du job…" \
+      "$(grep -c -- '-t bw-model-score' "$CAT_ARGS" | tr -d ' ')" "1"
+check "F7  ⛔ … et l'e-mail repart (le drapeau ne doit RIEN désarmer par défaut)" \
+      "$(grep -c -- '--MAIL--' "$BANC_MAILS" | tr -d ' ')" "1"
+
+# ⭐ F8 — LE BANC QUI A PRODUIT CE LOT : `test_run_selftest.py` doit
+# poser le drapeau. Sans cette assertion, le correctif vit dans
+# `bw_avertir_config` et personne ne l'appelle.
+check "F8  ⭐ test_run_selftest.py DÉCLARE son bac dans l'environnement du run" \
+      "$(grep -c '\"BW_AVERTIR_CONFIG_BANC\": ' model-verif/test_run_selftest.py | tr -d ' ')" "1"
 
 # ══════════════════════════════════════════════════════════════════════
 echo
