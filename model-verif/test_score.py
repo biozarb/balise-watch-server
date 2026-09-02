@@ -4447,6 +4447,38 @@ def test_l9c_reference_combinee_bout_en_bout():
           r["mse_comb"] is not None, True)
     check("⛔ … et `mse_model_comb` VOYAGE AVEC LUI (le témoin sur la "
           "même population d'heures)", r["mse_model_comb"] is not None, True)
+    # ── la SECONDE définition, sur la même ligne (02/09/2026) ─────────
+    # ⛔ SANS CETTE ASSERTION, LA COLONNE PEUT NE JAMAIS ÊTRE ÉCRITE.
+    # Toutes les épreuves de case plus bas partent de dictionnaires
+    # fabriqués à la main : elles vérifient ce que `_case_rows` FAIT de
+    # la colonne, jamais que `daily_rows` la POSE. Une mutation qui
+    # remplace `_r(mse_cbv)` par `None` les laisse toutes vertes — et la
+    # colonne existerait en base, vide, pour toujours.
+    check("⭐⭐ `mse_comb_vec` est POSÉ par `daily_rows`, sur la même "
+          "ligne et sous les mêmes conditions", r["mse_comb_vec"] is not None,
+          True)
+    check("⛔ … et il reste NUL quand `mse_comb` l'est (mêmes entrées, "
+          "mêmes silences)", r_sans["mse_comb_vec"], None)
+    # ⭐ ET SUR CETTE LIGNE-CI ELLES COÏNCIDENT, POUR UNE RAISON QU'IL
+    # FAUT DIRE : la climatologie de la fixture n'a pas de cap
+    # (`(brise(h) * 0.8, None, 12)`). Sans cap des deux côtés il n'y a
+    # aucun vecteur à mélanger, et les deux définitions DOIVENT rendre le
+    # même nombre — c'est ce qui garantit que l'écart entre les deux
+    # colonnes publiées ne vient jamais des girouettes manquantes.
+    check("⭐ sans cap côté climatologie, les deux colonnes coïncident au "
+          "bit près (bout en bout, pas seulement dans `inference`)",
+          abs(r["mse_comb_vec"] - r["mse_comb"]) < 1e-12, True)
+    # ⛔ ET AVEC UN CAP, ELLES DOIVENT DIVERGER — sinon la seconde
+    # définition ne serait qu'un alias coûteux de la première, et rien
+    # dans ce fichier ne le dirait.
+    clim_cap = {"pioupiou:835": {h: (brise(h) * 0.8, (h * 37) % 360, 12)
+                                 for h in range(24)}}
+    avec_cap, _ = J.daily_rows(DAY, snapshots, obs_j, obs_v, 7200, clim_cap,
+                               poids_comb={"pioupiou:835": 0.5})
+    r_cap = next(x for x in avec_cap if x["lead_h"] == 6)
+    check("⭐⭐ avec un cap climatologique, les deux définitions DIVERGENT "
+          "bout en bout — l'espace du mélange décide vraiment",
+          abs(r_cap["mse_comb_vec"] - r_cap["mse_comb"]) > 1e-6, True)
     check("le reste de la ligne n'a pas bougé d'un chiffre",
           (r["err_vec_med"], r["mse_model"], r["mse_persist"]),
           (r_sans["err_vec_med"], r_sans["mse_model"],
@@ -4513,8 +4545,86 @@ def test_l9c_reference_combinee_bout_en_bout():
           "cassée", (fine_v["skill_comb"], fine_v["beats_comb"]),
           (None, None))
 
+    # ── 2 bis. LA SECONDE DÉFINITION, ET SON COMPTE (02/09/2026) ─────
+    #
+    # ⛔ LA SCÈNE EST CELLE QUI ARRIVE VRAIMENT LE 02/09 : la colonne
+    # `mse_comb_vec` est neuve, donc la fenêtre `rolling15` mélange des
+    # balise-jours qui la portent (les nuits d'après le déploiement) et
+    # des balise-jours qui ne la portent pas (ceux déjà en base, qu'AUCUN
+    # rejeu ne pourra combler — `replay_day` ne lit pas la climatologie).
+    # Un banc qui donnerait la colonne à TOUS les balise-jours testerait
+    # une situation qui n'existera pas avant quinze nuits.
+    mixte = []
+    for n_j, d in enumerate(daily):
+        # Une journée sur trois porte la colonne neuve — et son
+        # `mse_comb_vec` est DÉLIBÉRÉMENT différent de `mse_comb` (4,0
+        # contre 8,0) : deux colonnes qui coïncideraient ne diraient rien
+        # de l'endroit où le skill neuf va chercher son dénominateur.
+        mixte.append({**d, "mse_comb_vec": 4.0} if n_j % 3 == 0 else dict(d))
+    fine_m = [r for r in J.rolling_scores(mixte, zone_of, DAY)
+              if r["zone_id"] == "b1:valley"][0]
+    check("⭐ `n_comb` compte TOUS les balise-jours porteurs du mélange",
+          fine_m["n_comb"], 24)
+    check("⭐⭐ `n_comb_vec` ne compte QUE ceux qui portent la colonne "
+          "neuve — c'est lui qui dit que la comparaison n'est pas encore "
+          "posée", fine_m["n_comb_vec"], 8)
+    check("⛔⛔ le skill neuf prend SON numérateur sur SA population : "
+          "1 − 4/4 = 0, pas 1 − 4/4 lu sur une autre médiane",
+          fine_m["skill_comb_vec"], 0.0, 1e-6)
+    check("⚠️ … et l'ancien n'a PAS bougé (les deux colonnes cohabitent "
+          "sans se toucher)", fine_m["skill_comb"], 0.5, 1e-6)
+    check("`beats_comb_vec` est faux quand le modèle ne bat pas la "
+          "référence vectorielle", fine_m["beats_comb_vec"], False)
+
+    # ⭐ LE CAS OÙ LES DEUX COLONNES REPOSENT SUR LA MÊME MATIÈRE — celui
+    # qu'on attend après quinze nuits, et le seul où les comparer a un
+    # sens. `n_comb_vec == n_comb` est la façon de le LIRE.
+    tout_vec = [{**d, "mse_comb_vec": 16.0} for d in daily]
+    fine_t = [r for r in J.rolling_scores(tout_vec, zone_of, DAY)
+              if r["zone_id"] == "b1:valley"][0]
+    check("⭐ quand tous les balise-jours la portent, les deux comptes "
+          "sont ÉGAUX — la comparaison est posée",
+          (fine_t["n_comb"], fine_t["n_comb_vec"]), (24, 24))
+    check("⭐⭐ et le skill neuf se calcule bien contre SA référence "
+          "(1 − 4/16 = 0,75), pas contre celle de l'autre colonne",
+          fine_t["skill_comb_vec"], 0.75, 1e-6)
+
+    # ⛔⛔ LA SCÈNE QUI SÉPARE LE NUMÉRATEUR DU DÉNOMINATEUR, et sans
+    # laquelle les deux précédentes ne prouvent rien. Ci-dessus,
+    # `mse_model_comb` vaut 4,0 PARTOUT : prendre sa médiane sur tous les
+    # balise-jours ou sur le sous-ensemble porteur donne le même nombre,
+    # donc un code qui se tromperait de population resterait vert.
+    # Ici les deux groupes ont des numérateurs DIFFÉRENTS — 2,0 pour ceux
+    # qui portent la colonne neuve, 10,0 pour les autres — et la faute
+    # devient visible : le bon skill vaut 1 − 2/4 = 0,5, celui qui
+    # prendrait la médiane globale (10,0) rendrait −1,5.
+    separe = []
+    for n_j, d in enumerate(daily):
+        if n_j % 3 == 0:
+            separe.append({**d, "mse_model_comb": 2.0, "mse_comb_vec": 4.0})
+        else:
+            separe.append({**d, "mse_model_comb": 10.0})
+    fine_s = [r for r in J.rolling_scores(separe, zone_of, DAY)
+              if r["zone_id"] == "b1:valley"][0]
+    check("⭐⭐ le skill vectoriel prend son NUMÉRATEUR et son "
+          "DÉNOMINATEUR dans le même filtre (1 − 2/4 = 0,5)",
+          fine_s["skill_comb_vec"], 0.5, 1e-6)
+    check("⛔ … et surtout PAS −1,5, qu'aurait donné la médiane de "
+          "`mse_model_comb` sur TOUS les balise-jours",
+          abs(fine_s["skill_comb_vec"] + 1.5) > 0.5, True)
+
+    # ⛔ Des balise-jours d'AVANT le lot : la colonne neuve se tait, et
+    # son compte le DIT (0), au lieu de laisser croire à une case sans
+    # matière. C'est la différence entre « pas encore » et « rien ».
+    check("des balise-jours sans la colonne neuve laissent le skill "
+          "vectoriel muet…", fine["skill_comb_vec"], None)
+    check("⭐ … et `n_comb_vec` vaut 0 pendant que `n_comb` en compte 24 "
+          "— « pas encore », pas « rien »",
+          (fine["n_comb"], fine["n_comb_vec"]), (24, 0))
+
     # ── 3. le fichier léger ne s'alourdit PAS de ces deux champs ──────
-    for champ in ("skill_comb", "beats_comb"):
+    for champ in ("skill_comb", "beats_comb", "skill_comb_vec",
+                  "beats_comb_vec", "n_comb", "n_comb_vec"):
         check(f"⛔ `{champ}` n'entre PAS dans le fichier léger (la "
               f"pastille n'affiche aucun skill)",
               champ in J.LIGHT_SCORE_FIELDS, False)

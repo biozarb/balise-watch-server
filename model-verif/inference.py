@@ -62,7 +62,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, NamedTuple, Sequence
 
 import scoring as S
 
@@ -1062,14 +1062,133 @@ def combined_reference(k: float, persist: tuple, clim_h: tuple) -> tuple:
     return force, S.from_uv(u, v)
 
 
+def combined_reference_vec(k: float, persist: tuple, clim_h: tuple) -> tuple:
+    """`(force, cap)` du mélange `k·persistance + (1−k)·climatologie`
+    fait DANS L'ESPACE (u, v) — celui où `scoring.pair_error` mesure.
+
+    ⛔⛔ CE N'EST PAS UN CORRECTIF DE `combined_reference`, C'EST UNE
+    SECONDE DÉFINITION PUBLIÉE À CÔTÉ (arbitrage de Yann, 02/09/2026).
+    Les deux sont défendables et se trompent par des bouts OPPOSÉS :
+
+    · `combined_reference` mélange la FORCE en scalaire. Sa force est
+      juste, mais le mélange n'est PAS convexe dans l'espace où l'erreur
+      est mesurée — la borne de Jensen n'y est donc pas valable, et
+      c'est ce qui explique les 568 lignes à `mse_comb > max(persist,
+      clim)` du 28/08, mesurées par `sonde_l9c_jensen.py` le 31/08.
+    · celle-ci mélange les VECTEURS. La borne de Jensen y tient par
+      construction — mais sa force est SYSTÉMATIQUEMENT ≤ celle de
+      l'autre dès que les deux caps diffèrent (inégalité triangulaire),
+      donc la référence est plus faible, donc le skill plus flatteur.
+      C'est l'objection écrite dans la docstring de
+      `combined_reference`, et elle n'est pas levée : elle est MISE À
+      L'ÉPREUVE, à côté, sur plusieurs semaines de production.
+
+    ⭐⭐ ET LA CAUSE EXACTE N'EST PAS SEULEMENT « LE MAUVAIS ESPACE »
+    (trouvée le 02/09 en balayant forces × caps × k × observation, pas
+    déduite). `combined_reference` mélange les caps sur des vecteurs
+    UNITAIRES — « sinon la référence la plus forte imposerait aussi sa
+    direction », dit sa docstring, et c'était un choix délibéré. Une
+    persistance de 2 km/h y pèse donc autant qu'une climatologie de
+    20 km/h pour décider la DIRECTION, pendant que la FORCE, elle, est
+    moyennée. Le mélange sort alors un vent de force moyenne dans une
+    direction qu'AUCUNE des deux références ne soutient :
+
+        persistance    2 km/h @   0°   ·  erreur 16,00
+        climatologie  20 km/h @ 165°   ·  erreur 14,66
+        k = 0,5 · observation 18 km/h @ 210°
+          → mélange SCALAIRE   : 26,19  ⛔ pire que les DEUX
+          → mélange VECTORIEL  : 13,50  ✅ mieux que les deux
+
+    ⇒ Ce n'est donc pas seulement que le mélange n'est pas convexe dans
+    l'espace de l'erreur : c'est que la force et le cap n'y sont pas
+    mélangés avec le même poids. Le banc tient ce point exact.
+
+    ⭐ CE QUE LA SONDE A MESURÉ, ET QUI N'A PAS TRANCHÉ. Sur les nuits
+    des 28, 29 et 30/08, refaire le mélange ici fait tomber les
+    violations de **568 → 83**, **351 → 19** et **262 → 0**, et
+    l'inversion des médianes disparaît (28/08 : `mse_comb` 125,227 ⛔ →
+    119,059 ✅ contre `mse_clim` 123,994). La référence est donc devenue
+    PLUS DURE, pas plus faible — l'inverse de ce que l'objection
+    craignait. ⚠️ Mais c'est trois nuits, en médiane, et l'anomalie est
+    intermittente (`skill_comb > skill_clim` est passé de 12/12 le 29/08
+    à 4/12 le 31/08). Trois nuits ne tranchent pas une définition.
+
+    ⇒ D'où les deux colonnes. Le jour où plusieurs semaines les
+    départagent, l'une des deux disparaît — et ce sera un lot, avec un
+    verdict écrit, pas un `if` changé en silence.
+
+    ⚠️ SANS CAP DES DEUX CÔTÉS, LES DEUX DÉFINITIONS COÏNCIDENT, et
+    c'est voulu : il n'y a alors aucun vecteur à mélanger, seulement des
+    forces. On retombe donc mot pour mot sur `combined_reference`, ce
+    qui garantit que l'écart entre les deux colonnes ne vient JAMAIS
+    d'un traitement différent des balises sans girouette.
+
+    ⓘ `k = 1` rend la persistance et `k = 0` la climatologie, au bit
+    près, comme l'autre — un mélange qui ne retrouve pas ses bornes
+    n'est pas un mélange, et le banc le vérifie ici aussi.
+    """
+    sp, dp = persist
+    sc, dc = clim_h[0], clim_h[1]
+    if dp is None or dc is None:
+        # Rien à mélanger vectoriellement : même résultat que l'autre
+        # définition, cf. le pavé ci-dessus.
+        return combined_reference(k, persist, clim_h)
+    up, vp = S.to_uv(sp, dp)
+    uc, vc = S.to_uv(sc, dc)
+    u = k * up + (1.0 - k) * uc
+    v = k * vp + (1.0 - k) * vc
+    f = math.hypot(u, v)
+    if f < 1e-12:
+        # Deux vents exactement opposés à poids égal. La résultante est
+        # nulle : la force EST zéro (ce n'est pas une indétermination,
+        # contrairement au cap), et aucune direction ne la représente.
+        # ⚠️ Différence assumée avec `combined_reference`, qui rend ici
+        # la moyenne des deux FORCES : les deux définitions ne peuvent
+        # pas coïncider sur ce cas, puisque c'est exactement celui où
+        # l'espace du mélange décide.
+        return 0.0, None
+    return f, S.from_uv(u, v)
+
+
+class CombinedSkill(NamedTuple):
+    """Ce que rend `skill_vs_combined` — cinq champs, deux références.
+
+    ⛔ `mse_comb` et `mse_comb_vec` sont DEUX DÉFINITIONS de la même
+    référence de Murphy, mesurées sur LES MÊMES HEURES et contre LE MÊME
+    `mse_model`. Elles se comparent donc directement, et c'est tout
+    l'intérêt de les rendre ensemble : le jour où plusieurs semaines
+    disent laquelle tient, la comparaison aura été faite sur la même
+    matière du premier jour.
+    """
+    skill: float | None
+    n: int
+    mse_model: float | None
+    mse_comb: float | None
+    #: Le mélange fait dans l'espace de l'erreur (lot L9c, 02/09/2026).
+    mse_comb_vec: float | None
+
+
 def skill_vs_combined(pairs: Sequence[S.VerifPair],
                       clim: Mapping[int, tuple],
                       k: float,
                       obs: Sequence[S.ObsSample],
                       utc_offset_s: int = 0):
-    """Rend `(skill, n, mse_model, mse_comb)` — même forme que les deux
-    autres références, et les deux MSE sortent séparément pour la même
-    raison (le skill est indéfini quand la référence est parfaite).
+    """Rend un `CombinedSkill` — même forme que les deux autres
+    références, et les MSE sortent séparément pour la même raison (le
+    skill est indéfini quand la référence est parfaite).
+
+    ⚠️ CINQ CHAMPS DEPUIS LE 02/09/2026, ET UN `NamedTuple` PLUTÔT QU'UN
+    TUPLE. `mse_comb_vec` — la même référence mélangée dans l'espace de
+    l'erreur (cf. `combined_reference_vec`) — s'ajoute au bout. Un
+    5-uple nu se serait dépaqueté en silence chez qui n'en attend que
+    quatre ; un `NamedTuple` de cinq champs y lève un `ValueError`, et
+    c'est le bon côté des deux (même raisonnement que le S2 : « le
+    compilateur qui refuse est le bon côté »).
+
+    ⓘ `skill` reste celui de `mse_comb`, la définition d'origine —
+    changer ce qu'un champ publié VEUT DIRE est l'interdit du 26/08. Le
+    skill de l'autre espace se calcule là où les deux MSE sont
+    médianisés (`score._case_rows`), sous SON propre nom.
 
     ⛔ LE MSE DU MODÈLE EST RECALCULÉ SUR **CETTE** POPULATION D'HEURES,
     et c'est la différence de fond avec `skill_vs_climatology`. Le
@@ -1091,7 +1210,7 @@ def skill_vs_combined(pairs: Sequence[S.VerifPair],
     jamais en place »). À traiter comme un lot, avec une colonne neuve.
     """
     from dataclasses import replace
-    sq_m = sq_c = 0.0
+    sq_m = sq_c = sq_v = 0.0
     n = 0
     for p in pairs:
         ref_s, ref_d = S.persistence_reference(obs, p.t)
@@ -1101,16 +1220,30 @@ def skill_vs_combined(pairs: Sequence[S.VerifPair],
         c = clim.get(hod)
         if c is None or not S._finite(c[0]):
             continue
-        fs, fd = combined_reference(k, (ref_s, ref_d), c)
+        # ⛔⛔ LES DEUX MÉLANGES DANS LA MÊME BOUCLE, ET C'EST LA LEÇON
+        # DU LOT APPLIQUÉE À LUI-MÊME (02/09/2026). Une seconde fonction
+        # qui aurait refait sa propre boucle aurait pu tomber sur une
+        # population d'heures différente — et comparer deux MSE sur deux
+        # populations est EXACTEMENT le défaut §2.5.a que ce volet a
+        # passé trois sessions à départager. Ici, `mse_comb` et
+        # `mse_comb_vec` partagent leurs heures PAR CONSTRUCTION, et
+        # `mse_model` est le leur à tous les deux : les trois se
+        # soustraient sans réserve.
+        pers = (ref_s, ref_d)
+        fs, fd = combined_reference(k, pers, c)
+        gs, gd = combined_reference_vec(k, pers, c)
         em, _ = S.pair_error(p)
         ec, _ = S.pair_error(replace(p, fcst_speed=fs, fcst_dir=fd))
+        ev, _ = S.pair_error(replace(p, fcst_speed=gs, fcst_dir=gd))
         sq_m += em * em
         sq_c += ec * ec
+        sq_v += ev * ev
         n += 1
     if n < 2:
-        return None, n, None, None
-    mse_m, mse_c = sq_m / n, sq_c / n
-    return (None if sq_c == 0 else 1 - sq_m / sq_c), n, mse_m, mse_c
+        return CombinedSkill(None, n, None, None, None)
+    mse_m, mse_c, mse_v = sq_m / n, sq_c / n, sq_v / n
+    return CombinedSkill(
+        (None if sq_c == 0 else 1 - sq_m / sq_c), n, mse_m, mse_c, mse_v)
 
 
 # ══════════════════════════════════════════════════════════════════

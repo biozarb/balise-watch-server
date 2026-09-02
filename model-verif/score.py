@@ -1839,13 +1839,26 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
             # sur tout le chemin RÉGIME, exactement comme `mse_clim`. Ce
             # n'est pas une nouveauté de ce lot, et ce lot ne la répare
             # pas — il la NOMME.
-            mse_cb = mse_mcb = None
+            #
+            # ⭐ DEUX DÉFINITIONS DEPUIS LE 02/09 (arbitrage de Yann,
+            # volet c). `mse_comb` mélange la FORCE en scalaire ;
+            # `mse_comb_vec` mélange les VECTEURS, dans l'espace où
+            # `pair_error` mesure. Les deux sont défendables et se
+            # trompent par des bouts opposés (cf.
+            # `INF.combined_reference_vec`) ; on les publie côte à côte
+            # et plusieurs semaines de production les départageront.
+            # ⓘ UN SEUL `mse_model_comb` pour les deux : elles vivent
+            # sur les mêmes heures, donc le numérateur est le même. Une
+            # seconde colonne aurait laissé croire à deux populations.
+            mse_cb = mse_mcb = mse_cbv = None
             if clim and poids_comb:
                 c = clim.get(key)
                 kk = poids_comb.get(key)
                 if c and kk is not None:
-                    _, _, mse_mcb, mse_cb = INF.skill_vs_combined(
+                    cs = INF.skill_vs_combined(
                         pairs, c, kk, obs_for_skill, utc_offset_s)
+                    mse_mcb, mse_cb, mse_cbv = (
+                        cs.mse_model, cs.mse_comb, cs.mse_comb_vec)
 
             # ── la colonne corrigée du biais de site (lot S2) ─────────
             # ⛔ L'ANTÉCÉDENT NE CONTIENT JAMAIS LE JOUR J. Il est bâti
@@ -1894,6 +1907,7 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 "mse_clim": _r(mse_c),
                 # ── lot L9c : la référence combinée, et son témoin ────
                 "mse_comb": _r(mse_cb), "mse_model_comb": _r(mse_mcb),
+                "mse_comb_vec": _r(mse_cbv),
                 "bias_ratio": _r(bias.speed_ratio),
                 "bias_dir_deg": _r(bias.dir_offset),
                 "vector_ratio": _r(err.vector_ratio),
@@ -3747,7 +3761,18 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             # défaut §2.5.a que la colonne existe pour éviter.
             if (d.get("mse_model_comb") is not None
                     and d.get("mse_comb") is not None):
-                b["mse_cb"].append((d["mse_model_comb"], d["mse_comb"]))
+                # ⛔ UN TRIPLET, PAS DEUX COUPLES (02/09/2026). Les deux
+                # définitions du mélange partagent leurs heures ET leur
+                # `mse_model_comb` ; les ramasser dans deux listes
+                # séparées aurait permis à leurs médianes de reposer sur
+                # deux sous-ensembles de balise-jours le jour où l'une
+                # sort nulle et pas l'autre — le défaut §2.5.a, reproduit
+                # par le lot qui existe pour le fermer.
+                # ⓘ `mse_comb_vec` peut manquer sur un fichier de rejeu
+                # d'avant ce lot : `None` alors, et le triplet reste
+                # complet pour les deux premiers.
+                b["mse_cb"].append((d["mse_model_comb"], d["mse_comb"],
+                                    d.get("mse_comb_vec")))
             # ── lot S2 ────────────────────────────────────────────────
             # ⚠️ LA CLIMATOLOGIE N'EST PAS CORRIGÉE, ET C'EST LA QUESTION.
             # Elle est bâtie sur des OBSERVATIONS : elle porte déjà le
@@ -3830,9 +3855,21 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         # d'une référence calculée sur une population différente
         # comparerait deux échantillons »), sauf qu'ici les deux membres
         # du couple viennent DÉJÀ des mêmes heures.
-        mse_cbm = S.median([m for m, _ in b["mse_cb"]])
-        mse_cbc = S.median([c for _, c in b["mse_cb"]])
+        mse_cbm = S.median([m for m, _, _ in b["mse_cb"]])
+        mse_cbc = S.median([c for _, c, _ in b["mse_cb"]])
         skill_comb, bat_comb = skill_contre(mse_cbm, mse_cbc)
+        # ── la seconde définition, sur les MÊMES balise-jours ─────────
+        # ⚠️ MÉDIANÉE SUR LE SOUS-ENSEMBLE QUI LA PORTE, et son
+        # numérateur avec elle. Un fichier de rejeu d'avant le 02/09 n'a
+        # pas `mse_comb_vec` : prendre `mse_cbm` (calculé sur TOUS les
+        # balise-jours) au numérateur d'un dénominateur calculé sur une
+        # partie d'entre eux comparerait deux populations — la faute que
+        # ce volet départage depuis trois sessions. Les deux membres
+        # sortent donc du même filtre.
+        trio_vec = [(m, v) for m, _, v in b["mse_cb"] if v is not None]
+        mse_cbm_vec = S.median([m for m, _ in trio_vec])
+        mse_cbc_vec = S.median([v for _, v in trio_vec])
+        skill_comb_vec, bat_comb_vec = skill_contre(mse_cbm_vec, mse_cbc_vec)
         # ── lot S2 : la même arithmétique, sur le modèle corrigé ──────
         # ⚠️ Le quorum est CELUI DE LA CASE, pas un second : une case
         # publie son corrigé si et seulement si elle publie son brut.
@@ -3917,8 +3954,56 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
             # n'affiche pas de skill, et ces deux champs sur 8 180
             # lignes alourdiraient un objet servi à chaque ouverture de
             # fiche pour un chiffre de diagnostic.
+            #
+            # ⛔⛔ ET « PAR CONSTRUCTION » EST FAUX DEPUIS LE 31/08 —
+            # LA DOMINANCE CI-DESSUS NE TIENT QUE SI LE MÉLANGE EST
+            # CONVEXE DANS L'ESPACE OÙ L'ERREUR EST MESURÉE.
+            # `combined_reference` mélange la force en scalaire et
+            # `pair_error` mesure un vecteur : la borne de Jensen n'y
+            # est tout simplement pas valable, et 568 lignes du 28/08
+            # avaient `mse_comb > max(mse_persist, mse_clim)` — la
+            # combinaison battue par CHACUNE de ses composantes, ce que
+            # la phrase « domine par construction » interdit.
+            # ⇒ `skill_comb`/`beats_comb` restent publiés (arbitrage de
+            # Yann, 02/09) mais QUALIFIÉS : `meta.references_combinees`
+            # du fichier dit sur quelle définition ils reposent et ce
+            # qu'on sait d'elle. Publier sans la réserve, c'était laisser
+            # 15 001 verdicts « bat la référence combinée » se lire comme
+            # une propriété du modèle.
             "beats_comb": bat_comb,
             "skill_comb": skill_comb,
+            # ── la seconde définition (02/09/2026) ────────────────────
+            # ⛔ SOUS UN NOM NEUF, JAMAIS EN REMPLAÇANT L'AUTRE. Le
+            # mélange fait dans l'espace de l'erreur (cf.
+            # `INF.combined_reference_vec`) rend la borne de Jensen
+            # valable — au prix d'une référence dont la force est
+            # systématiquement ≤ celle de l'autre. Les deux se lisent
+            # ENSEMBLE ou pas du tout : `skill_comb_vec` seul dirait
+            # « meilleur skill », alors qu'il peut ne dire que
+            # « référence plus faible ».
+            "beats_comb_vec": bat_comb_vec,
+            "skill_comb_vec": skill_comb_vec,
+            # ⛔⛔ ET LES DEUX COMPTES AVEC EUX, PARCE QUE LES DEUX
+            # COLONNES NE REPOSERONT PAS SUR LA MÊME MATIÈRE AVANT
+            # QUINZE NUITS. `rolling15` est alimenté par
+            # `model_verif_daily` (pas par le cache de rejeu) : les
+            # lignes déjà en base n'ont pas `mse_comb_vec`, et il n'y a
+            # AUCUN moyen de le leur donner — le rejeu ne lit pas la
+            # climatologie, donc il ne sait recalculer ni l'une ni
+            # l'autre des deux références. La colonne neuve se remplira
+            # donc nuit après nuit, et pendant ce temps `skill_comb_vec`
+            # reposera sur trois journées quand `skill_comb` en aura
+            # quinze.
+            # ⇒ Publier le second sans dire ça, c'est publier un
+            # numérateur — le défaut que le lot L3 a fermé pour
+            # `n_comparable`/`occurrences`, et que celui-ci refuse de
+            # rouvrir dans sa propre colonne. Les deux comptes voyagent
+            # donc avec les deux skills, et se lisent l'un contre
+            # l'autre : `n_comb_vec` == `n_comb` dit « même matière » ;
+            # `3` contre `15` dit que la comparaison n'est pas encore
+            # posée.
+            "n_comb": len(b["mse_cb"]),
+            "n_comb_vec": len(trio_vec),
             # ── lot S2 : le corrigé, À CÔTÉ du brut, jamais à sa place ─
             # ⛔ Décision D intacte : `typical_err_kmh` reste LE score.
             # `n_corr` voyage avec, parce qu'une case peut publier son
@@ -5211,6 +5296,11 @@ _SQL_PAR_COLONNE: dict[str, dict[str, str]] = {
         "n_bias_dir": "supabase_step57_lot_l9_compagnons.sql",
         "skill_comb": "supabase_step57_lot_l9_compagnons.sql",
         "beats_comb": "supabase_step57_lot_l9_compagnons.sql",
+        # supabase_step65_lot_l9c_melange_vectoriel.sql — lot L9(c), 02/09
+        "skill_comb_vec": "supabase_step65_lot_l9c_melange_vectoriel.sql",
+        "beats_comb_vec": "supabase_step65_lot_l9c_melange_vectoriel.sql",
+        "n_comb": "supabase_step65_lot_l9c_melange_vectoriel.sql",
+        "n_comb_vec": "supabase_step65_lot_l9c_melange_vectoriel.sql",
     },
     "model_verif_daily": {
         "mse_clim": "supabase_step40_lot_g.sql",
@@ -5220,6 +5310,10 @@ _SQL_PAR_COLONNE: dict[str, dict[str, str]] = {
         "bias_n_days": "supabase_step49_lot_s2_biais_corrige.sql",
         "mse_comb": "supabase_step57_lot_l9_compagnons.sql",
         "mse_model_comb": "supabase_step57_lot_l9_compagnons.sql",
+        # ⓘ Pas de `mse_model_comb_vec` : les deux définitions vivent sur
+        # les mêmes heures, donc le MSE du modèle est le MÊME. Une
+        # seconde colonne aurait laissé croire à deux populations.
+        "mse_comb_vec": "supabase_step65_lot_l9c_melange_vectoriel.sql",
     },
     # ⓘ `model_verif_daily_pres` naît complète au step41 et n'a jamais
     # reçu de colonne depuis. L'entrée VIDE est délibérée : elle dit
@@ -5943,6 +6037,39 @@ def self_test_epreuves(permuter=self_test_permuter, n=SELF_TEST_STATIONS,
         # neuve se lit comme un contrôle réussi.
         lignes.append(f"     ⓘ (a) référence combinée non éprouvée : "
                       f"mse_comb = {mse_comb} (sous SKILL_MIN_REF_MSE)")
+    # ── la SECONDE définition, éprouvée par la même passe (02/09) ─────
+    # ⛔⛔ ET C'EST ICI QUE LA DIFFÉRENCE ENTRE LES DEUX SE VOIT OU NE SE
+    # VOIT PAS. Un contrôle qui n'éprouverait que `mse_comb` laisserait
+    # la colonne neuve arriver en production sans qu'une seule passe
+    # nocturne l'ait regardée — exactement ce que le lot LD reproche à
+    # un vérificateur taillé dans le patron de ce qu'il vérifie.
+    # ⓘ Les deux MSE sortent de la MÊME boucle et de la même population :
+    # ils se comparent directement, et l'écart entre eux EST la mesure
+    # que ce lot publie. On l'imprime, même quand il est nul.
+    mse_comb_vec = _med([r.get("mse_comb_vec") for r in honnete
+                         if r.get("mse_comb_vec") is not None])
+    if mse_comb_vec is not None and mse_comb_vec >= SKILL_MIN_REF_MSE:
+        skill_cv, bat_cv = skill_contre(mse_mod_comb, mse_comb_vec)
+        dire(skill_cv is not None and abs(skill_cv - 1.0) <= SELF_TEST_ZERO_KMH
+             and bat_cv,
+             f"(a) skill contre la combinée VECTORIELLE = {skill_cv} "
+             f"(attendu 1) — mse_comb_vec {mse_comb_vec:.3f}")
+        mesures["mse_comb_vec"] = mse_comb_vec
+    else:
+        lignes.append(f"     ⓘ (a) combinée vectorielle non éprouvée : "
+                      f"mse_comb_vec = {mse_comb_vec} "
+                      f"(sous SKILL_MIN_REF_MSE)")
+    if mse_comb is not None and mse_comb_vec is not None:
+        # ⚠️ INÉGALITÉ TRIANGULAIRE, PAS UNE PRÉFÉRENCE. La force du
+        # mélange vectoriel est ≤ celle du mélange scalaire dès que les
+        # deux caps diffèrent ; ce que ça fait au MSE dépend de
+        # l'observation et n'est PAS déterminé. On imprime donc l'écart
+        # sans en faire une épreuve — le jour où il change de signe,
+        # c'est une mesure, pas une panne.
+        lignes.append(f"     ⓘ (a) écart des deux mélanges : "
+                      f"mse_comb {mse_comb:.3f} contre mse_comb_vec "
+                      f"{mse_comb_vec:.3f} "
+                      f"({100 * (mse_comb_vec - mse_comb) / mse_comb:+.2f} %)")
     mesures["skill_parfait"] = skill
     mesures["skill_clim_parfait"] = skill_c
 
@@ -6755,6 +6882,81 @@ def main() -> int:
                                "witness": part_temoin,
                            },
                            "climatology_stations": n_clim,
+                           # ⛔⛔ LA RÉSERVE VOYAGE AVEC LES COLONNES
+                           # QU'ELLE QUALIFIE (arbitrage de Yann,
+                           # 02/09/2026, volet c du lot L9).
+                           #
+                           # `skill_comb`/`beats_comb` sont publiés
+                           # depuis le 28/08 et lus par PERSONNE — zéro
+                           # occurrence dans `PWA/web/src`, vérifié le
+                           # 01/09. Ils n'en sont pas moins un objet
+                           # PUBLIC : 33 068 lignes au 01/09, dont
+                           # 15 001 `beats_comb = true`. La question
+                           # posée à Yann était « les taire ou les
+                           # qualifier » ; il a tranché QUALIFIER, et
+                           # une réserve qui vivrait dans un rapport à
+                           # côté ne qualifierait rien du tout. Elle est
+                           # donc DANS le fichier, comme le témoin du
+                           # S2 : pour qu'on ne puisse pas lire les
+                           # colonnes sans elle.
+                           #
+                           # ⚠️ CE QU'ELLE DIT, ET CE QU'ELLE NE DIT
+                           # PAS. Elle ne dit pas « ces chiffres sont
+                           # faux » : le test tourne sur des heures
+                           # réellement communes, et l'anomalie est
+                           # INTERMITTENTE (`skill_comb > skill_clim`
+                           # sur 12 modèles sur 12 le 29/08, sur 4 sur
+                           # 12 le 31/08). Elle dit dans quel ESPACE le
+                           # mélange est fait, et que la dominance de
+                           # Murphy — l'argument qui justifie de publier
+                           # un `beats_comb` du tout — n'est pas
+                           # démontrée dans cet espace-là.
+                           "references_combinees": {
+                               "definition": "k*persistance + (1-k)*climatologie",
+                               "poids_k": "autocorrelation 24 h de "
+                                          "l'anomalie, bornee a [0, 1]",
+                               "comb": {
+                                   "melange": "force scalaire, cap circulaire",
+                                   "colonnes": ["mse_comb", "skill_comb",
+                                                "beats_comb"],
+                                   "reserve":
+                                       "le melange n'est PAS convexe dans "
+                                       "l'espace ou pair_error mesure "
+                                       "(vectoriel) : la borne de Jensen ne "
+                                       "s'y applique pas, et la dominance de "
+                                       "Murphy n'est donc pas garantie. "
+                                       "Mesure du 28/08 (sonde_l9c_jensen) : "
+                                       "568 balise-jours ont mse_comb > "
+                                       "max(mse_persist, mse_clim). "
+                                       "Intermittent : 351 le 29/08, 262 le "
+                                       "30/08.",
+                               },
+                               "comb_vec": {
+                                   "melange": "vecteurs (u, v) — l'espace "
+                                              "de l'erreur",
+                                   "colonnes": ["mse_comb_vec",
+                                                "skill_comb_vec",
+                                                "beats_comb_vec"],
+                                   "reserve":
+                                       "la borne de Jensen y tient par "
+                                       "construction, mais la force du "
+                                       "melange est systematiquement <= "
+                                       "celle de l'autre des que les deux "
+                                       "caps different : reference plus "
+                                       "faible, donc skill plus flatteur. "
+                                       "Ne se lit JAMAIS sans son n_comb_vec "
+                                       "— la colonne est neuve le 02/09 et "
+                                       "sa fenetre met quinze nuits a "
+                                       "rejoindre celle de comb.",
+                               },
+                               "arbitrage":
+                                   "les DEUX sont publiees cote a cote "
+                                   "(Yann, 02/09/2026). Trois nuits de sonde "
+                                   "ne tranchent pas une definition ; "
+                                   "plusieurs semaines de production le "
+                                   "feront, et l'une des deux disparaitra "
+                                   "alors sous un verdict ecrit.",
+                           },
                            "events_calibrated": EVENTS_CALIBRATED,
                            "audience": "beta"})
 

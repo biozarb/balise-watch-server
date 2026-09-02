@@ -749,7 +749,8 @@ def _mse_des_trois(jours_utiles):
               for h in range(24)]
         _, na, _, mp = S.skill_vs_persistence(pr, serie)
         _, nb, _, mc = I.skill_vs_climatology(pr, clim_h, 0)
-        _, nc, _, mb = I.skill_vs_combined(pr, clim_h, rho, serie, 0)
+        cs = I.skill_vs_combined(pr, clim_h, rho, serie, 0)
+        nc, mb = cs.n, cs.mse_comb
         if not (na == nb == nc == 24):
             continue
         sp += mp * na
@@ -784,9 +785,10 @@ prevs = [S.VerifPair(t=(1779926400 + 28 * 86400) * 1000 + h * 3_600_000,
          for h in range(24)]
 _, _, _, mse_p1 = S.skill_vs_persistence(prevs, obs_serie)
 _, _, _, mse_c1 = I.skill_vs_climatology(prevs, clim_h, 0)
-_, n_b1, mm_b1, _ = I.skill_vs_combined(prevs, clim_h, rho, obs_serie, 0)
-_, _, _, mse_k1 = I.skill_vs_combined(prevs, clim_h, 1.0, obs_serie, 0)
-_, _, _, mse_k0 = I.skill_vs_combined(prevs, clim_h, 0.0, obs_serie, 0)
+cs_b1 = I.skill_vs_combined(prevs, clim_h, rho, obs_serie, 0)
+n_b1, mm_b1 = cs_b1.n, cs_b1.mse_model
+mse_k1 = I.skill_vs_combined(prevs, clim_h, 1.0, obs_serie, 0).mse_comb
+mse_k0 = I.skill_vs_combined(prevs, clim_h, 0.0, obs_serie, 0).mse_comb
 check("⭐ bout en bout : k = 1 rend EXACTEMENT le MSE de la persistance",
       abs(mse_k1 - mse_p1) < 1e-9, f"{mse_k1} vs {mse_p1}")
 check("⭐ bout en bout : k = 0 rend EXACTEMENT le MSE de la climatologie",
@@ -797,7 +799,7 @@ check("⛔ `skill_vs_combined` rend SON PROPRE mse_model, pas celui de la "
 
 # Une heure sans climatologie sort du calcul plutôt que d'être comblée.
 clim_trouee = {h: v for h, v in clim_h.items() if h != 12}
-_, n_t, _, _ = I.skill_vs_combined(prevs, clim_trouee, rho, obs_serie, 0)
+n_t = I.skill_vs_combined(prevs, clim_trouee, rho, obs_serie, 0).n
 check("une heure sans climatologie n'entre pas dans le mélange "
       "(23 heures, pas 24 comblées)", n_t == 23, f"n = {n_t}")
 
@@ -809,6 +811,191 @@ mse_mod_direct = sum(
 check("⭐ … et ce mse_model coïncide avec le calcul direct sur les "
       "mêmes 24 heures", abs(mm_b1 - mse_mod_direct) < 1e-9,
       f"{mm_b1} vs {mse_mod_direct}")
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  11. lot L9(c), reprise du 02/09/2026 — LES DEUX ESPACES DE MÉLANGE
+#
+#  ⛔ CE QUE LA SECTION 10 NE POUVAIT PAS TESTER. Sa fixture n'a AUCUNE
+#  direction (`fcst_dir=None`, `obs_dir=None`) : les deux définitions y
+#  coïncident mot pour mot, et toutes ses assertions restent donc vraies
+#  des deux côtés sans rien dire de leur différence. Il faut des CAPS
+#  pour que l'espace du mélange décide quoi que ce soit — c'est le sens
+#  même de l'arbitrage, et un banc sans cap l'aurait laissé passer.
+# ══════════════════════════════════════════════════════════════════
+print("\n── 11. lot L9c (02/09) : mélange scalaire contre mélange vectoriel ──")
+
+# Deux références de MÊME force et de caps très différents : le cas où
+# les deux définitions s'écartent le plus.
+_P = (10.0, 0.0)      # persistance : 10 km/h plein nord
+_C = (10.0, 90.0)     # climatologie : 10 km/h plein est
+
+_f_sca, _d_sca = I.combined_reference(0.5, _P, _C)
+_f_vec, _d_vec = I.combined_reference_vec(0.5, _P, _C)
+check("⭐ à poids égal, le mélange SCALAIRE garde la force des deux (10.0)",
+      abs(_f_sca - 10.0) < 1e-9, f"{_f_sca}")
+check("⭐⭐ le mélange VECTORIEL, lui, la RÉTRÉCIT — inégalité "
+      f"triangulaire ({_f_vec:.4f} au lieu de 10.0)",
+      _f_vec < _f_sca - 1e-6, f"{_f_vec} vs {_f_sca}")
+check("⛔ … et c'est EXACTEMENT l'objection écrite dans la docstring de "
+      "`combined_reference` : 10·√2/2 pour 90° d'écart",
+      abs(_f_vec - 10.0 * math.sqrt(2) / 2) < 1e-9, f"{_f_vec}")
+check("les deux tombent sur le MÊME cap quand les forces sont égales "
+      "(seule la force les sépare ici)",
+      abs(_d_sca - _d_vec) < 1e-9, f"{_d_sca} vs {_d_vec}")
+
+# ⛔ LES BORNES, DES DEUX CÔTÉS. Un mélange qui ne retrouve pas ses
+# bornes n'est pas un mélange — la section 10 l'exige déjà de l'un,
+# l'exiger de l'autre est ce qui rend les deux colonnes comparables.
+for _k, _att, _nom in ((1.0, _P, "k = 1 rend la persistance"),
+                       (0.0, _C, "k = 0 rend la climatologie")):
+    _fv, _dv = I.combined_reference_vec(_k, _P, _C)
+    check(f"⭐ {_nom}, au bit près, dans l'espace vectoriel aussi",
+          abs(_fv - _att[0]) < 1e-9 and abs(_dv - _att[1]) < 1e-9,
+          f"({_fv}, {_dv}) attendu {_att}")
+
+# ⚠️ SANS CAP DES DEUX CÔTÉS, LES DEUX DÉFINITIONS DOIVENT COÏNCIDER.
+# C'est ce qui garantit que l'écart entre les deux colonnes publiées ne
+# vient jamais d'un traitement différent des balises sans girouette.
+for _pp, _cc, _quoi in (((10.0, None), (6.0, 90.0), "persistance sans cap"),
+                        ((10.0, 30.0), (6.0, None), "climatologie sans cap"),
+                        ((10.0, None), (6.0, None), "aucun des deux")):
+    check(f"⭐ {_quoi} : les deux définitions coïncident",
+          I.combined_reference(0.5, _pp, _cc)
+          == I.combined_reference_vec(0.5, _pp, _cc),
+          f"{I.combined_reference(0.5, _pp, _cc)} vs "
+          f"{I.combined_reference_vec(0.5, _pp, _cc)}")
+
+# ⛔ LE CAS QUI SÉPARE VRAIMENT LES DEUX : deux vents OPPOSÉS à poids
+# égal. Le scalaire rend leur force moyenne (et se tait sur le cap) ; le
+# vectoriel rend une force NULLE, parce que la résultante l'est.
+_o_sca = I.combined_reference(0.5, (10.0, 0.0), (10.0, 180.0))
+_o_vec = I.combined_reference_vec(0.5, (10.0, 0.0), (10.0, 180.0))
+check("⛔⛔ vents opposés : le scalaire garde 10 km/h, le vectoriel rend 0 "
+      "— l'espace du mélange décide, et c'est visible",
+      abs(_o_sca[0] - 10.0) < 1e-9 and _o_sca[1] is None
+      and _o_vec[0] == 0.0 and _o_vec[1] is None,
+      f"{_o_sca} vs {_o_vec}")
+
+# ══ LA PROPRIÉTÉ QUI MOTIVE TOUT LE VOLET : LA BORNE DE JENSEN ══
+# ⛔ Mesurée sur des séries à CAPS, contre une observation, exactement
+# là où `pair_error` mesure. Le mélange vectoriel est convexe dans cet
+# espace : son MSE ne peut PAS dépasser le max des deux composantes.
+# Le scalaire, lui, n'a aucune raison de la respecter — et c'est ce que
+# la sonde du 31/08 a mesuré sur la production (568 dépassements le
+# 28/08). Ici on le REPRODUIT sur une fixture minimale.
+_obs_uv = [S.ObsSample(t=(1780000000 + h * 3600) * 1000,
+                       speed=9.0 + 3.0 * math.sin(h / 3.0),
+                       dir=(40.0 + 25.0 * math.cos(h / 4.0)) % 360.0)
+           for h in range(48)]
+_clim_uv = {h: (8.0, 95.0) for h in range(24)}
+_pairs_uv = [S.VerifPair(t=(1780000000 + (24 + h) * 3600) * 1000,
+                         fcst_speed=9.5, fcst_dir=60.0,
+                         obs_speed=_obs_uv[24 + h].speed,
+                         obs_dir=_obs_uv[24 + h].dir, n_obs=1)
+             for h in range(24)]
+_cs = I.skill_vs_combined(_pairs_uv, _clim_uv, 0.5, _obs_uv, 0)
+_p_only = I.skill_vs_combined(_pairs_uv, _clim_uv, 1.0, _obs_uv, 0)
+_c_only = I.skill_vs_combined(_pairs_uv, _clim_uv, 0.0, _obs_uv, 0)
+check("les deux MSE sortent de la MÊME population d'heures "
+      f"(n = {_cs.n}) — ils se comparent sans réserve",
+      _cs.n == _p_only.n == _c_only.n == 24, f"n = {_cs.n}")
+check("⭐⭐ le mélange VECTORIEL respecte la borne de Jensen : son MSE ne "
+      "dépasse pas le max de ses deux composantes",
+      _cs.mse_comb_vec <= max(_p_only.mse_comb, _c_only.mse_comb) + 1e-9,
+      f"{_cs.mse_comb_vec:.4f} vs max({_p_only.mse_comb:.4f}, "
+      f"{_c_only.mse_comb:.4f})")
+
+# ⛔⛔ ET LE DÉPASSEMENT DU MÉLANGE SCALAIRE, REPRODUIT SUR UN POINT —
+# avec sa CAUSE, qui n'est pas celle que le lot avait écrite.
+#
+# La lecture du 31/08 disait « le mélange n'est pas fait dans l'espace
+# où l'erreur est mesurée ». C'est vrai, et incomplet. Le mécanisme
+# exact se lit sur cette configuration, trouvée par balayage de la
+# grille (forces × caps × k × observation) plutôt que fabriquée :
+#
+#   persistance   2 km/h @   0°     ← FAIBLE
+#   climatologie 20 km/h @ 165°     ← FORTE
+#   k = 0,5   ·   observation 18 km/h @ 210°
+#
+#   erreur persistance  16,00 · climatologie 14,66
+#   mélange SCALAIRE    26,19  ⛔ pire que les DEUX
+#   mélange vectoriel   13,50  ✅ meilleur que les deux
+#
+# ⭐ La cause : `combined_reference` mélange les caps sur des vecteurs
+# UNITAIRES — « sinon la référence la plus forte imposerait aussi sa
+# direction », dit sa docstring, et c'était un choix délibéré. Une
+# persistance de 2 km/h y pèse donc autant qu'une climatologie de 20
+# pour décider la direction, pendant que la FORCE, elle, est moyennée à
+# 11. Le mélange sort alors un vent de 11 km/h dans une direction
+# qu'AUCUNE des deux références ne soutient. Ce n'est pas seulement un
+# problème d'espace : c'est que la force et le cap n'y sont pas mélangés
+# avec le même poids.
+_V = dict(sp=2.0, dp=0.0, sc=20.0, dc=165.0, k=0.5, so=18.0, do=210.0)
+
+
+def _err_de(f, d):
+    return S.pair_error(S.VerifPair(t=0, fcst_speed=f, fcst_dir=d,
+                                    obs_speed=_V["so"], obs_dir=_V["do"],
+                                    n_obs=1))[0]
+
+
+_e_p = _err_de(_V["sp"], _V["dp"])
+_e_c = _err_de(_V["sc"], _V["dc"])
+_e_s = _err_de(*I.combined_reference(_V["k"], (_V["sp"], _V["dp"]),
+                                     (_V["sc"], _V["dc"])))
+_e_v = _err_de(*I.combined_reference_vec(_V["k"], (_V["sp"], _V["dp"]),
+                                         (_V["sc"], _V["dc"])))
+check("⛔⛔ le mélange SCALAIRE fait PIRE QUE SES DEUX COMPOSANTES — les "
+      f"568 balise-jours du 28/08, reproduits sur un point "
+      f"({_e_s:.2f} > max({_e_p:.2f}, {_e_c:.2f}))",
+      _e_s > max(_e_p, _e_c) + 1e-9, f"{_e_s:.4f}")
+check("⭐⭐ … et le VECTORIEL fait mieux que les deux sur ce même point "
+      f"({_e_v:.2f})", _e_v < min(_e_p, _e_c) - 1e-9, f"{_e_v:.4f}")
+check("⭐ LA CAUSE, tenue par une assertion : le cap scalaire s'éloigne "
+      "de la référence FORTE parce qu'il est mélangé sur des vecteurs "
+      "UNITAIRES — une persistance de 2 km/h y pèse autant qu'une "
+      "climatologie de 20",
+      abs(I.combined_reference(_V["k"], (_V["sp"], _V["dp"]),
+                               (_V["sc"], _V["dc"]))[1] - _V["dc"]) > 60.0
+      and abs(I.combined_reference_vec(_V["k"], (_V["sp"], _V["dp"]),
+                                       (_V["sc"], _V["dc"]))[1] - _V["dc"]) < 20.0,
+      f"cap scalaire {I.combined_reference(_V['k'], (_V['sp'], _V['dp']), (_V['sc'], _V['dc']))[1]:.1f}° · "
+      f"cap vectoriel {I.combined_reference_vec(_V['k'], (_V['sp'], _V['dp']), (_V['sc'], _V['dc']))[1]:.1f}° · "
+      f"clim {_V['dc']}°")
+check("⚠️ les deux colonnes DIFFÈRENT vraiment ici (un banc où elles "
+      "coïncideraient ne prouverait rien)",
+      abs(_cs.mse_comb - _cs.mse_comb_vec) > 1e-6,
+      f"{_cs.mse_comb:.4f} vs {_cs.mse_comb_vec:.4f}")
+check("⛔ `mse_model` est le MÊME pour les deux références — un seul "
+      "numérateur, donc une seule population",
+      _cs.mse_model is not None and _cs.n == 24)
+
+# ⛔⛔ AUX BORNES, LES DEUX COLONNES DOIVENT COÏNCIDER AU BIT PRÈS, et
+# c'est l'assertion qui manquait : une mutation qui donnait au mélange
+# vectoriel une climatologie DÉFORMÉE (×1,5) laissait tout le reste du
+# banc vert — la borne de Jensen tenait encore, les deux colonnes
+# différaient encore « vraiment ». Rien ne disait qu'elles partaient des
+# MÊMES ENTRÉES.
+# ⇒ À k = 0 il n'y a plus de mélange du tout : les deux définitions
+# rendent la climatologie pure, donc le même MSE. Idem à k = 1 avec la
+# persistance. Toute divergence d'entrée s'y voit immédiatement.
+_k1 = I.skill_vs_combined(_pairs_uv, _clim_uv, 1.0, _obs_uv, 0)
+_k0 = I.skill_vs_combined(_pairs_uv, _clim_uv, 0.0, _obs_uv, 0)
+check("⭐⭐ à k = 1, les DEUX colonnes rendent la persistance pure — donc "
+      "le même MSE, au bit près",
+      abs(_k1.mse_comb - _k1.mse_comb_vec) < 1e-12,
+      f"{_k1.mse_comb} vs {_k1.mse_comb_vec}")
+check("⭐⭐ à k = 0, les DEUX rendent la climatologie pure — c'est ce qui "
+      "prouve qu'elles partent des mêmes entrées, pas seulement du même "
+      "espace",
+      abs(_k0.mse_comb - _k0.mse_comb_vec) < 1e-12,
+      f"{_k0.mse_comb} vs {_k0.mse_comb_vec}")
+check("⛔ une série trop courte rend les CINQ champs nuls, jamais 0",
+      I.skill_vs_combined(_pairs_uv[:1], _clim_uv, 0.5, _obs_uv, 0)
+      == (None, 1, None, None, None))
 
 
 # ══════════════════════════════════════════════════════════════════
