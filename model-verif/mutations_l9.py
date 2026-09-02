@@ -21,6 +21,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 SCORE = ICI / "score.py"
 INFER = ICI / "inference.py"
 MURPHY = ICI / "murphy.py"
@@ -105,12 +110,11 @@ MUTATIONS = [
     ("`_pour_la_base` retombe sur la déduction d'avant : les colonnes "
      "du L9 manquantes envoient Yann rejouer `step40`",
      SCORE, B_SCORE,
-     '    if set(absentes) & _L9:\n'
-     '        fichier = "supabase_step57_lot_l9_compagnons.sql"\n'
-     '    elif set(absentes) & _L3:',
-     '    if False:\n'
-     '        fichier = "supabase_step57_lot_l9_compagnons.sql"\n'
-     '    elif set(absentes) & _L3:'),
+     # ⓘ motif réécrit le 02/09 : le L13 a remplacé la cascade `elif`
+     # par la table `_SQL_PAR_COLONNE` ; la faute équivalente est une
+     # ligne de la table qui renvoie au mauvais fichier.
+     '        "bias_ratio": "supabase_step57_lot_l9_compagnons.sql",',
+     '        "bias_ratio": "supabase_step40_lot_g.sql",'),
 
     # ══════════════════════════════════════════════════════════════
     #  VOLET (b) — la décomposition de Murphy
@@ -287,8 +291,8 @@ MUTATIONS = [
      "population « persistance ») au lieu de son témoin apparié "
      "`mse_model_comb`",
      SCORE, B_SCORE,
-     '                b["mse_cb"].append((d["mse_model_comb"], d["mse_comb"]))',
-     '                b["mse_cb"].append((d["mse_model"], d["mse_comb"]))'),
+     '                b["mse_cb"].append((d["mse_model_comb"], d["mse_comb"],\n                                    d.get("mse_comb_vec")))',
+     '                b["mse_cb"].append((d["mse_model"], d["mse_comb"],\n                                    d.get("mse_comb_vec")))'),
 
     ("une balise sans `k` reçoit un poids par DÉFAUT au lieu de rester "
      "muette — un poids inventé sur une référence publiée",
@@ -312,6 +316,46 @@ MUTATIONS = [
      SCORE, B_SCORE,
      '             "k": poids},',
      '             "k": {}},'),
+
+    # ══════════════════════════════════════════════════════════════
+    #  (02/09) — MURPHY SUR LA MÊME POPULATION QUE LE CLASSEMENT
+    # ══════════════════════════════════════════════════════════════
+    ("⛔⛔ l'accumulateur de Murphy ignore la liste des balises tenues "
+     "dehors — doublons comptés deux fois, positions suspectes notées "
+     "à 147 km (l'état d'avant la vérification du 02/09)",
+     SCORE, B_SCORE,
+     '            if murphy_acc is not None and (murphy_exclus is None\n'
+     '                                           or unit not in murphy_exclus):',
+     '            if murphy_acc is not None:'),
+
+    ("⛔ `unites_hors_notation` oublie la position suspecte — le duel "
+     "et Murphy recomptent `pioupiou:1333`",
+     SCORE, B_SCORE,
+     '            if est_doublon(z) or z.get("position_suspecte")}',
+     '            if est_doublon(z)}'),
+
+    ("⛔ `unites_hors_notation` écarte aussi les zones incertaines — un "
+     "diagnostic PAR BALISE se met à dépendre de `station_zone`, ce que "
+     "l'arbitrage nº 5 du L1 interdit",
+     SCORE, B_SCORE,
+     '            if est_doublon(z) or z.get("position_suspecte")}',
+     '            if est_doublon(z) or z.get("position_suspecte")\n'
+     '            or z.get("basin_uncertain")}'),
+
+    # ══════════════════════════════════════════════════════════════
+    #  (02/09) — LE KeyError QUI A TUÉ model_murphy.json TROIS NUITS
+    # ══════════════════════════════════════════════════════════════
+    ("⛔⛔ `par_modele` ne pose plus `reason` — `dire()` lève KeyError "
+     "sur la première ligne, `_publish_murphy` n'est jamais atteint "
+     "(les nuits des 31/08, 01/09 et 02/09)",
+     MURPHY, B_MURPHY,
+     '            "reason": "ok",\n            "r2": _med([l["r2"] for l in ls]),',
+     '            "r2": _med([l["r2"] for l in ls]),'),
+
+    ("⛔ `dire()` relit une clé absente comme un motif à imprimer",
+     MURPHY, B_MURPHY,
+     '    if l.get("reason", "ok") != "ok":',
+     '    if l.get("reason") != "ok":'),
 ]
 
 
@@ -328,7 +372,7 @@ def joue(debut: int = 1, fin: int | None = None) -> int:
     for i, (nom, fichier, banc, avant, apres) in enumerate(MUTATIONS, 1):
         if not (debut <= i <= fin):
             continue
-        origine = fichier.read_text(encoding="utf-8")
+        origine = HARNAIS.garder(fichier)
         if avant not in origine:
             print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
                   f"{fichier.name} — la mutation n'a rien muté, donc elle "
@@ -339,7 +383,8 @@ def joue(debut: int = 1, fin: int | None = None) -> int:
             fichier.write_text(origine.replace(avant, apres, 1),
                                encoding="utf-8")
             r = subprocess.run([sys.executable, str(banc)],
-                               capture_output=True, text=True, cwd=ICI)
+                               capture_output=True, text=True, cwd=ICI,
+                               env=HARNAIS.env_banc(ICI))
             if r.returncode == 0:
                 print(f"  ❌ {i:>2}. {nom}\n       LE BANC RESTE VERT "
                       f"({banc.name}) — il ne tient pas cette propriété.")
@@ -354,7 +399,7 @@ def joue(debut: int = 1, fin: int | None = None) -> int:
                       + (f" (+{len(lignes) - 1} autres)"
                          if len(lignes) > 1 else ""))
         finally:
-            fichier.write_text(origine, encoding="utf-8")
+            HARNAIS.rendre(fichier, origine)
     return rouges
 
 

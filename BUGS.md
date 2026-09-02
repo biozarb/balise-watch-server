@@ -6,6 +6,67 @@
 
 ---
 
+## 02/09/2026 (vérification de cohérence des lots L1 → L15) — la somme des lots a débordé un `smallint`, et un `except` a caché Murphy trois nuits
+
+Relecture de tout ce que les lots ont livré depuis le 27/08 : code,
+bancs, VPS, base, document de suivi. Trois pièges qui valent pour la
+suite.
+
+**Piège nº 1 — ⛔⛔ AUCUN LOT N'A DÉBORDÉ LA BASE ; LEUR SOMME, OUI.**
+`model_score_zone.occurrences` était `smallint` depuis `step35`,
+déclarée pour compter des occurrences de RÉGIME sur ~300 balises.
+Le L7 (953 balises AGRUME de plus), `arome_r2` (~2 470 balises par
+échéance) et la fenêtre `rolling15` qui se remplit ont fait monter la
+case `rolling15/all/global · arome_r2 · +6 h` de 25 728 à **35 360**
+en quatre nuits — et le 02/09 l'upsert final a rendu
+`22003 value "35360" is out of range for type smallint`, après 2 294 s
+de calcul. **4 500 lignes partielles** en base, JSON non republié,
+**aucune alerte** (`SEUIL_ALERTE=2` sur `score`). *Un type de colonne
+est une hypothèse de volume ; chaque lot qui ajoute des balises la
+retouche sans le savoir.* ⇒ `step67` (`integer`), et le lot suivant
+qui étend une population doit relire les types des colonnes de compte.
+Le repli d'`_upsert_scores` ne connaissait que deux CHECK de raison :
+il connaît désormais aussi le CHECK de `lead_h` (symétrique de
+`_upsert_daily`) ; un refus de TYPE, lui, ne se replie pas — il n'a
+pas de bonne valeur de repli.
+
+**Piège nº 2 — ⛔⛔ « VIDE POUR UNE RAISON MESURÉE » CACHAIT UNE BRANCHE
+JAMAIS EXERCÉE.** `murphy.par_modele()` ne posait pas `reason` ;
+`murphy.dire()` lisait `l.get("reason") != "ok"` — vrai pour `None` —
+puis `l['reason']` : `KeyError`. Le 29/08 le cache de rejeu était creux
+(`n_ok = 0`, liste vide, boucle muette) : « livré et sain ». Le 31/08
+le cache s'est rempli et la boucle a crié — **trois nuits de suite**
+sous un `except Exception` qui écrivait « la notation continue,
+`model_murphy.json` n'est pas republié ce soir ». Le suivi L10 l'avait
+vu et l'avait classé « rapprochement tentant, non établi ». *Un
+`except` large avec un message rassurant transforme une faute de code
+en météo.* ⇒ `reason` posée, `dire` tolérant, 4 assertions qui passent
+une ligne de `par_modele` à `dire`, 2 mutations. Et la règle : quand
+un journal répète le MÊME avertissement trois nuits, c'est un bug,
+pas une condition.
+
+**Piège nº 3 — ⛔ « ÉCRIT APRÈS L'ENVOI » ÉTAIT UNE PROMESSE DE
+DOCSTRING.** `controle_position.poser_jeton` le promettait ;
+`score.py` l'appelait dans la foulée du dépôt du cri, et l'envoi avait
+lieu plus tard dans `run.sh`, dont `alerter` rend 0 même quand msmtp
+échoue. Msmtp cassé un soir ⇒ cri effacé, jeton posé, garde-fou
+**définitivement muet** sur cet ensemble — l'inverse de « échouer
+OUVERT » (piège nº 3 du lot LV). ⇒ `score.py` dépose le jeton EN
+ATTENTE (`.attente`), `run.sh` le promeut après `ALERTE_LIVREE=1`
+(msmtp sorti), sinon garde le cri pour demain. *Une promesse écrite
+dans une fonction ne tient que si l'appelant la connaît ; ici
+l'appelant était un autre langage.*
+
+**Et trois choses qui n'étaient réparées nulle part, réparées partout**
+(`model-verif/harnais.py`) : la copie d'origine sur le disque + sha256
+au retour (un harnais tué laisse une copie qui fait foi au prochain
+démarrage, et le déploiement refuse de partir tant qu'elle traîne) ; la
+purge du bytecode (5 harnais sur 29 la faisaient) ; et la liste des
+bancs du déploiement, désormais LUE sur le disque du VPS au lieu
+d'être écrite — elle disait « 14/14 » pour 18 joués et en oubliait 11.
+
+---
+
 ## 01/09/2026 (lot L13) — « deux fois de suite » n'est pas « structurel »
 
 Le lot partait avec « la moitié du chemin faite » : l'audit avait écrit

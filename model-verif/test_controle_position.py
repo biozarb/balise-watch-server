@@ -252,6 +252,30 @@ with tempfile.TemporaryDirectory() as _etat:
     CP.poser_jeton(_r, "/proc/pas/de/chemin/ici")
     check("un jeton inécrivable ne fait pas tomber le run", True)
 
+with tempfile.TemporaryDirectory() as _etat:
+    # ── ⛔ (02/09) LE JETON EN ATTENTE N'EST PAS UN JETON ─────────────
+    # `score.py` dépose le jeton en attente ; tant que `run.sh` ne l'a
+    # pas promu (après l'e-mail), l'ensemble n'est PAS « connu » et le
+    # cri repart. Posé directement, un envoi raté rendait le garde-fou
+    # muet pour toujours.
+    CP.poser_jeton(_r, _etat, en_attente=True)
+    check("⛔ `en_attente=True` écrit le fichier `.attente`, pas le jeton",
+          CP.jeton_en_attente(_etat).exists()
+          and not CP.jeton(_etat).exists())
+    check("⛔⛔ un jeton EN ATTENTE ne fait pas taire le cri : on "
+          "recrie tant que l'envoi n'est pas confirmé",
+          CP.cri(_r, _etat) is not None)
+    check("⛔ et `score.py` DÉPOSE bien en attente — c'est une lecture "
+          "de source, comme les six lignes de run.sh : rien d'autre "
+          "ne tient cette ligne",
+          "CP.poser_jeton(res_pos, root, en_attente=True)"
+          in (pathlib.Path(__file__).resolve().parent / "score.py")
+          .read_text(encoding="utf-8"))
+    check("… son contenu est celui du jeton (run.sh ne fait que le "
+          "renommer)",
+          json.loads(CP.jeton_en_attente(_etat).read_text())["balises"]
+          == sorted(_r["confirmees"]))
+
 # ══════════════════════════════════════════════════════════════════
 #  7. LE .SQL
 # ══════════════════════════════════════════════════════════════════

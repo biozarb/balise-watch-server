@@ -368,6 +368,19 @@ def par_modele(lignes: Sequence[Mapping]) -> list[dict]:
         out.append({
             "model": model, "lead_h": lead,
             "n_balises": len(ls),
+            # ⛔ `reason` EXPLICITE, ET C'EST UNE CICATRICE (02/09/2026).
+            # Sans cette clé, `dire()` lisait `l.get("reason") != "ok"`
+            # — vrai pour `None` — puis `l['reason']` : `KeyError`. La
+            # boucle `for l in mur_modeles: print(MU.dire(l))` de
+            # `score.py` tombait sur la PREMIÈRE ligne, et
+            # `_publish_murphy` n'était jamais atteint. Le 29/08 le cache
+            # de rejeu était creux (`n_ok = 0`, liste vide, boucle
+            # muette) ; le 31/08 il s'est rempli (44 194 décomposées) et
+            # `model_murphy.json` a cessé d'être republié — trois nuits
+            # d'affilée, sous un `except` qui disait « la notation
+            # continue ». Une ligne par modèle est TOUJOURS `ok` par
+            # construction (le filtre l. 363 ne garde que celles-là).
+            "reason": "ok",
             "r2": _med([l["r2"] for l in ls]),
             "bc": _med([l["bc"] for l in ls]),
             "bs": _med([l["bs"] for l in ls]),
@@ -386,8 +399,14 @@ def _med(xs):
 
 
 def dire(l: Mapping) -> str:
-    """Une ligne de journal, lisible sans le JSON."""
-    if l.get("reason") != "ok":
+    """Une ligne de journal, lisible sans le JSON.
+
+    ⚠️ Une ligne SANS clé `reason` est lue comme `ok` — jamais comme
+    un motif à imprimer. C'est la seconde moitié du correctif du
+    02/09 : `par_modele` pose la clé, et `dire` ne peut plus lever un
+    `KeyError` sur une ligne qui ne l'aurait pas.
+    """
+    if l.get("reason", "ok") != "ok":
         return (f"  · {l['model']} +{l['lead_h']}h : {l['reason']} "
                 f"({l.get('n_balises', l.get('n', 0))})")
     # La phrase qui compte : ce que la pente PEUT réparer, et le reste.

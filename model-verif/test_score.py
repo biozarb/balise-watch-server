@@ -245,6 +245,76 @@ def test_repli_rang_corr_la_seconde_contrainte_ne_tue_plus_la_nuit():
 
 
 
+def test_repli_lead_scores_symetrique_du_daily():
+    """⛔ (02/09/2026) — le CHECK de `lead_h` sur `model_score_zone`.
+
+    La vérification de cohérence des lots a trouvé que ce repli
+    n'existait que pour `model_verif_daily`, alors que `regime_scores`
+    produit des cases à `lead_h` négatif dès qu'une classe nouvelle est
+    déployée : entre le déploiement et le `.sql`, la nuit ENTIÈRE
+    tombait à la dernière étape. Même contrat que `_upsert_daily` —
+    écarter en comptant, nommer le `.sql`, lever si tout est refusé.
+    """
+    print("── repli : le CHECK de `lead_h` sur model_score_zone (02/09) ──")
+    import contextlib, io
+
+    def _cases():
+        return [{"lead_h": 6, "rank_reason": "ok", "rank_reason_corr": "ok"},
+                {"lead_h": 24, "rank_reason": "ok", "rank_reason_corr": "ok"},
+                {"lead_h": J.LEAD_COURT_MATIN, "rank_reason": "serie_en_essai",
+                 "rank_reason_corr": "serie_en_essai"},
+                {"lead_h": J.LEAD_QUART_APREM, "rank_reason": "serie_en_essai",
+                 "rank_reason_corr": "serie_en_essai"}]
+
+    rows = _cases()
+    sb = _SbRefuse(["model_score_zone_lead_h_check"])
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        n = J._upsert_scores(sb, rows)
+    check("⭐ la nuit passe : les cases des horizons connus sont écrites",
+          n, 2)
+    check("… et ce sont bien celles-là",
+          sorted(r["lead_h"] for r in sb.appels[-1]), [6, 24])
+    check("⛔ les cases des classes courtes sont ÉCARTÉES, pas tues — "
+          "`lead_h` est dans la clé primaire",
+          [r for r in sb.appels[-1] if r["lead_h"] < 0], [])
+    check("deux tentatives d'upsert, pas une", len(sb.appels), 2)
+    check("le journal nomme le `.sql` à jouer",
+          "supabase_step62_lot_l10_classe_courte.sql" in err.getvalue(), True)
+    check("… et dit COMBIEN de cases ont été écartées",
+          "2 case(s) ÉCARTÉE(S)" in err.getvalue(), True)
+
+    # ⛔ `lead_h` PUIS une raison de rang : les deux replis s'enchaînent
+    # dans la même boucle, comme les deux CHECK de raison le 28/08.
+    rows = _cases()
+    sb = _SbRefuse(["model_score_zone_lead_h_check",
+                    "model_score_zone_rank_reason_corr_check"])
+    with contextlib.redirect_stderr(io.StringIO()):
+        n = J._upsert_scores(sb, rows)
+    check("lead_h puis rank_reason_corr : la nuit passe quand même", n, 2)
+    check("trois tentatives, pas deux", len(sb.appels), 3)
+
+    # ⛔ Et le même CHECK deux fois ne boucle pas.
+    rows = _cases()
+    sb = _SbRefuse(["model_score_zone_lead_h_check"] * 4)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            J._upsert_scores(sb, rows)
+        check("le même CHECK deux fois doit RE-LEVER", "passé", "Abort")
+    except J.Abort:
+        check("le même CHECK deux fois re-lève au lieu de boucler",
+              len(sb.appels) <= 2, True)
+
+    # ⛔ Tout refusé ⇒ on lève, un upsert vide se lirait comme une nuit.
+    seules = [r for r in _cases() if r["lead_h"] < 0]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            J._upsert_scores(_SbRefuse(["model_score_zone_lead_h_check"]),
+                             seules)
+        check("un lot ENTIÈREMENT refusé doit lever", "passé", "Abort")
+    except J.Abort:
+        check("⛔ un lot entièrement refusé lève", True, True)
+
+
 # ══════════════════════════════════════════════════════════════════
 #  LOT L18 (30/08/2026) — UN SEUL AGRUME AU CLASSEMENT
 # ══════════════════════════════════════════════════════════════════
@@ -2212,6 +2282,48 @@ def _sb_de_banc():
     sb = J.Supabase.__new__(J.Supabase)
     sb.url, sb.key, sb.dry_run, sb.ecritures = "http://x", "k", False, 0
     return sb
+
+
+def test_lecture_par_cle_unique():
+    """⛔ LE BANC DE LA PANNE DU 02/09 (14:51 CEST) — la même que le 25/08,
+    sur une AUTRE table.
+
+    Le rejeu de la nuit est mort à la page 782 de `model_verif_event`
+    (`Range: 781000-781999`, trois `57014` de suite). `select` paginait
+    par OFFSET ; avec `cle_unique=True` elle pagine par la clé primaire :
+    `id=gt.{dernière}` et `Range: 0-999` à chaque page. On exige : tout
+    lu, rien deux fois, et JAMAIS un offset non nul.
+    """
+    print("── lecture par clé unique (la panne du 02/09) ──")
+    import urllib.request as U
+
+    total = 3_407                      # 4 pages, la dernière incomplète
+    rows = [{"id": f"e{i:06d}", "i": i} for i in range(total)]
+    faux, vus = _faux_serveur_paginant(rows, cle="id")
+    sb = _sb_de_banc()
+    vrai, U.urlopen = U.urlopen, faux
+    try:
+        lues = sb.select("model_verif_event", "?day=gte.2026-08-19",
+                         order="id", cle_unique=True)
+    finally:
+        U.urlopen = vrai
+    check("toutes les lignes sont lues", len(lues), total)
+    check("aucune ligne n'est lue deux fois, aucune n'est sautée",
+          sorted(r["i"] for r in lues), list(range(total)))
+    check("⛔ JAMAIS un offset : chaque page demande `0-999`",
+          {r for _, r in vus}, {"0-999"})
+    check("… et chaque page après la première porte `id=gt.`",
+          [("id=gt." in u) for u, _ in vus], [False, True, True, True])
+    check("quatre appels, pas cinq", len(vus), 4)
+    check("le filtre de l'appelant voyage dans chaque page",
+          all("day=gte.2026-08-19" in u for u, _ in vus), True)
+    # ⛔ Le garde : une clé composite ou un tri descendant ne sont pas
+    # des clés uniques exploitables par `gt.` — on refuse, on ne devine pas.
+    try:
+        sb.select("t", order="day,source", cle_unique=True)
+        check("un `order` composite avec cle_unique doit LEVER", "passé", "Abort")
+    except J.Abort:
+        check("un `order` composite avec cle_unique lève", True, True)
 
 
 def test_lecture_par_cle_exacte():
@@ -4410,6 +4522,32 @@ def test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base():
     check("⛔ … et sans accumulateur du tout, la clé disparaît aussi",
           any(MU_.MURPHY_KEY in l for l in lus2), False)
 
+    # ── ⛔ (02/09) MURPHY SUR LA MÊME POPULATION QUE LE CLASSEMENT ────
+    # La vérification de cohérence des lots a trouvé que l'accumulateur
+    # se remplissait AVANT toute lecture de `zone_of` : doublons (L17)
+    # et positions suspectes (L15) y pesaient, deux fois pour les
+    # premiers, alors que `_case_rows` venait de les écarter.
+    unit0 = f"{rows[0]['source']}:{rows[0]['station_id']}"
+    zone_of_essai = {unit0: {"doublon_de": "pioupiou:9999"},
+                     "pioupiou:1333": {"position_suspecte": True},
+                     "pioupiou:7": {"basin_uncertain": True},
+                     "pioupiou:8": {}}
+    exclus = J.unites_hors_notation(zone_of_essai)
+    check("⛔ `unites_hors_notation` retient le doublon ET la position "
+          "suspecte", exclus, {unit0, "pioupiou:1333"})
+    check("… et RIEN d'autre : une zone incertaine ou une balise sans "
+          "zone restent des balises pour un diagnostic par balise "
+          "(arbitrage nº 5 du L1)", "pioupiou:7" in exclus
+          or "pioupiou:8" in exclus, False)
+    acc3: dict = {}
+    lus3, _ = J.replay_window(tmp, DAY, None, 7200, n_days=1,
+                              murphy_acc=acc3, murphy_exclus=exclus)
+    check("⛔⛔ une balise tenue dehors n'entre PAS dans l'accumulateur "
+          "de Murphy", cle in acc3, False)
+    check("… mais sa ligne reste dans la fenêtre : c'est `_case_rows` "
+          "qui l'écarte, avec son propre décompte",
+          any(l["unit"] == unit0 for l in lus3), True)
+
     # ⭐ LES DEUX CHEMINS RENDENT LE MÊME OBJET. `par_balise` (lignes,
     # pour le rapport ponctuel et le banc) et `par_balise_depuis_acc`
     # (l'accumulateur, pour le run) ne doivent pas diverger — c'est le
@@ -5313,6 +5451,7 @@ def main() -> int:
                test_fenetre_de_maintien_adaptative,
                test_stabilite_des_rangs,
                test_familles_publiees, test_lecture_paginee,
+               test_lecture_par_cle_unique,
                # ── 25/08 : la panne du run de 05:57 (délai 8 s, `57014`) ──
                test_lecture_par_cle_exacte,
                test_lecture_par_cle_valeur_plus_grosse_quune_page,
@@ -5379,6 +5518,7 @@ def main() -> int:
                test_detail_erreur_le_nom_de_la_contrainte_survit,
                # ── 28/08 : les deux raisons de rang ──
                test_repli_rang_corr_la_seconde_contrainte_ne_tue_plus_la_nuit,
+               test_repli_lead_scores_symetrique_du_daily,
                test_repli_rang_les_deux_ensembles_admis_disent_le_schema_reel,
                # ── 28/08 : la mémoire du run, après l'OOM de la nuit ──
                test_memoire_le_jalon_dit_les_mo_et_crie_au_dessus_du_seuil,

@@ -18,6 +18,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 CIBLE = ICI / "agrume_fcst.py"
 BANC = ICI / "test_agrume_fcst.py"
 #: ⚠️ Mutation nº 2 (le filtre PI) n'est couverte par AUCUN banc de
@@ -66,7 +71,7 @@ MUTATIONS = [
 
 
 def main():
-    source = CIBLE.read_text(encoding="utf-8")
+    source = HARNAIS.garder(CIBLE)
     echecs = []
     try:
         for i, (nom, avant, apres) in enumerate(MUTATIONS, 1):
@@ -76,9 +81,11 @@ def main():
                 continue
             CIBLE.write_text(source.replace(avant, apres, 1), encoding="utf-8")
             r = subprocess.run([sys.executable, str(BANC)],
-                               capture_output=True, text=True, cwd=str(ICI))
+                               capture_output=True, text=True, cwd=str(ICI),
+                               env=HARNAIS.env_banc(ICI))
             r_pi = subprocess.run([sys.executable, str(BANC_PI)],
-                                  capture_output=True, text=True, cwd=str(ICI))
+                                  capture_output=True, text=True, cwd=str(ICI),
+                                  env=HARNAIS.env_banc(ICI))
             if r.returncode == 0 and r_pi.returncode == 0:
                 echecs.append(f"nº {i} : les DEUX bancs restent verts — {nom}")
                 print(f"  ⛔ nº {i} : BANCS VERTS SUR UN CODE CASSÉ — {nom}")
@@ -86,11 +93,12 @@ def main():
                 lequel = ('agrume_fcst' if r.returncode else '') +                          ('+agrume_pi_fcst' if r_pi.returncode else '')
                 print(f"  ✅ nº {i} : le banc tombe ({lequel.strip('+')}) — {nom}")
     finally:
-        CIBLE.write_text(source, encoding="utf-8")
+        HARNAIS.rendre(CIBLE, source)
         print(f"\n  ⓘ {CIBLE.name} restauré")
 
     r = subprocess.run([sys.executable, str(BANC)],
-                       capture_output=True, text=True, cwd=str(ICI))
+                       capture_output=True, text=True, cwd=str(ICI),
+                       env=HARNAIS.env_banc(ICI))
     if r.returncode != 0:
         print("  ⛔⛔ le banc ne repasse PAS après restauration")
         print(r.stdout[-2000:])

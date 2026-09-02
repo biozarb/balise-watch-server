@@ -381,8 +381,16 @@ dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG";
 # shellcheck source=/dev/null
 if [ -r "$ICI/../tools/bw_avertir_config.sh" ]; then . "$ICI/../tools/bw_avertir_config.sh"; else bw_avertir_config() { :; }; fi
 
+# ⚠️ `ALERTE_LIVREE` (02/09/2026) : `alerter` rend TOUJOURS 0 (chaque
+# canal est en `|| dire …`, et c'est voulu : un canal cassé ne doit pas
+# faire tomber le run). Mais un appelant a parfois besoin de savoir si
+# QUELQUE CHOSE DE DURABLE est parti — le cri de position du lot L15
+# ne doit être effacé, et son jeton posé, que si l'e-mail est sorti.
+# La variable le dit ; la valeur de retour, non.
+ALERTE_LIVREE=0
 alerter() {
   local sujet="$1" corps="$2"
+  ALERTE_LIVREE=0
   dire "ALERTE — $sujet : $corps"
 
   local ping="${!PING_VAR:-}"
@@ -407,6 +415,7 @@ alerter() {
     printf 'To: %s\nSubject: [Balise Watch] %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\nMachine : %s\nJournal : %s\n' \
       "$BW_ALERTE_MAIL" "$sujet_h" "$corps" "$(hostname)" "$LOG" \
       | msmtp --read-recipients >/dev/null 2>&1 \
+      && ALERTE_LIVREE=1 \
       || dire "⚠️ e-mail non parti — voir ~/.msmtp.log"
   fi
 }
@@ -652,11 +661,32 @@ if (( code == 0 )); then
   # le rouge fugace est ce qui fait ouvrir la boîte.
   # ⚠️ Une divergence de position n'est PAS un échec de run : on
   # n'incrémente pas `$ECHECS` et on ne sort pas non nul.
+  #
+  # ⛔ LE JETON SE POSE ICI, APRÈS L'ENVOI — PLUS DANS `score.py`
+  # (02/09/2026, vérification de cohérence des lots). Jusque-là
+  # `score.py` posait le jeton d'anti-répétition EN MÊME TEMPS qu'il
+  # déposait le cri, et `alerter` rendait 0 quoi qu'il arrive : msmtp
+  # cassé ce soir-là ⇒ cri effacé, jeton posé, et `controle_position.cri`
+  # rendait `None` toutes les nuits suivantes (« ensemble connu »). Le
+  # garde-fou devenait DÉFINITIVEMENT muet sur cet ensemble — l'inverse
+  # de la règle « échouer OUVERT » du lot LV. Désormais `score.py`
+  # écrit le jeton EN ATTENTE (`…json.attente`) ; il ne devient le
+  # jeton que si `ALERTE_LIVREE` dit qu'un e-mail est sorti. Sinon le
+  # cri reste, et repart demain — bruyant, jamais muet.
   CRI_POSITION="$ETAT/cri.position"
+  JETON_POSITION="$ETAT/position_confirmees.json"
   if [[ "$MODE" == "score" && -s "$CRI_POSITION" ]]; then
     alerter "$LIBELLE — position des balises" "$(cat "$CRI_POSITION")"
-    rm -f "$CRI_POSITION" \
-      || dire "⚠️ cri de position non effacé — il repartira demain"
+    if (( ALERTE_LIVREE )); then
+      rm -f "$CRI_POSITION" \
+        || dire "⚠️ cri de position non effacé — il repartira demain"
+      if [[ -f "$JETON_POSITION.attente" ]]; then
+        mv -f "$JETON_POSITION.attente" "$JETON_POSITION" \
+          || dire "⚠️ jeton de position non posé — le cri repartira demain"
+      fi
+    else
+      dire "⚠️ cri de position NON LIVRÉ (aucun e-mail parti) — il repartira demain"
+    fi
   fi
 
   echo 0 > "$ECHECS"

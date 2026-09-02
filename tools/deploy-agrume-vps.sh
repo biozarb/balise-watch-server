@@ -106,6 +106,8 @@ BW_EXCLUS=(
                          # qui feraient rougir le §2 à CHAQUE déploiement. Un
                          # contrôle qui rougit pour rien finit désarmé.
   '*.npz.tmp'            # écriture atomique en cours
+  '*.harnais-origine'    # copie d'origine d'un harnais de mutations en
+                         # cours (02/09) — jamais du code à transporter
   'traces_cache'         # ⛔ ÉTAT D'EXÉCUTION, PAS DU CODE. `backfill_packs.log`
                          # et `packs_checkpoint.json` sont réécrits par la
                          # production (mesuré le 31/08 : mtime du JOUR côté VPS,
@@ -636,6 +638,23 @@ if [ "$CONTROLE_SEUL" -eq 1 ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
+# 0 bis. UN DÉPÔT PEUT-ÊTRE MUTÉ NE PART PAS (02/09/2026). Chaque harnais
+#    de mutations copie le fichier d'origine à côté de lui
+#    (`<fichier>.harnais-origine`, voir `model-verif/harnais.py`) et ne
+#    retire la copie qu'une fois l'original rendu à l'identique. Une
+#    copie qui traîne veut dire : un harnais a été TUÉ, et le fichier
+#    d'à côté est peut-être encore muté. Vécu trois fois (27/08 ×2,
+#    31/08) — et rsync l'aurait transporté tel quel.
+# ══════════════════════════════════════════════════════════════════════
+COPIES_HARNAIS=$(find . -name '*.harnais-origine' -not -path '*/_to_delete/*' 2>/dev/null)
+if [ -n "$COPIES_HARNAIS" ]; then
+  echo "⛔ des copies de harnais traînent — un harnais de mutations a été tué et le dépôt est peut-être MUTÉ :" >&2
+  echo "$COPIES_HARNAIS" | sed 's/^/     /' >&2
+  echo "   Rejouer le harnais concerné (il restaure et retire la copie), puis relancer." >&2
+  exit 1
+fi
+
+# ══════════════════════════════════════════════════════════════════════
 # 1. RSYNC — CINQ dossiers, jamais un seul. ⚠️ Le piège déjà payé une
 #    fois côté model-verif : rsyncer seulement le paquet « métier »
 #    laisse `tools/` en retard, et ça ne se voit qu'au premier import
@@ -803,80 +822,29 @@ PY="\${BW_PYTHON:-\$HOME/venv-balise/bin/python3}"
 # cohérents avec eux-mêmes.
 # ⓘ Rejoué vert sur le VPS le 01/09 AVANT cet ajout (17 bancs) — on
 # n'ajoute pas un banc à cette liste sans l'avoir vu passer.
-for B in tools/test_mf_s3.py tools/test_audit_r2.py \\
-         tools/test_oracle_scoring.py agrume/test_orographie.py \\
-         verif/test_colonnes.py verif/test_separation.py verif/test_purge.py \\
-         verif/test_confronter_quotidien.py agrume/test_grille.py \\
-         agrume/test_profil.py agrume/test_radiosondage.py agrume/test_transect.py \\
-         agrume/test_ingest_pi.py agrume/test_composite.py \\
-         agrume/test_rafraichissement.py agrume/test_piaf.py \\
-         agrume/test_freeze_balises.py agrume/test_calque.py \\
-         agrume/test_front_altitude.py agrume/test_portail.py; do
+# ⛔⛔ LA LISTE N'EST PLUS ÉCRITE À LA MAIN (02/09/2026, vérification de
+# cohérence des lots). Elle disait « 14/14 » pour 18 bancs joués, et
+# ONZE bancs du dépôt n'étaient dans aucune liste — dont
+# \`test_controle_position.py\` (L15, déployé le jour même),
+# \`test_filet_arome_wind.py\` et \`test_gh_dispatch.py\` (LW), et
+# \`verif/test_recalcul_balise_jour.py\` alors que \`run.sh\` appelle
+# \`recalcul_balise_jour.py\` CHAQUE NUIT. Une liste écrite à la main se
+# périme au lot suivant ; celle-ci est LUE sur le disque du VPS, et
+# c'est l'EXCLUSION qui s'écrit, avec sa raison :
+#   · \`test_scoring.py\` — à part, juste en dessous (parité TS manuelle).
+# Les trois bancs des sondes L4/L6/L16 et \`sonde_l9c_jensen\` sont
+# désormais VERSIONNÉS (02/09) : ils entrent comme les autres.
+# ⚠️ Un banc qui ne passerait pas sur le VPS ARRÊTE le déploiement —
+# c'est le but ; on l'exclut ici avec sa raison, jamais en silence.
+EXCLUS_BANCS="model-verif/test_scoring.py"
+N=0
+for B in \$(ls model-verif/test_*.py tools/test_*.py verif/test_*.py agrume/test_*.py | sort); do
+  case " \$EXCLUS_BANCS " in *" \$B "*) continue ;; esac
   echo "  · \$B"
   "\$PY" "\$B" || exit 1
+  N=\$((N + 1))
 done
-echo "  ✓ 20/20 bancs Python verts sur le VPS"
-
-# ⛔ 27/08 — ET LES BANCS DE \`model-verif/\`, QUI N'AVAIENT JAMAIS
-# TOURNÉ ICI. Le 26/08 au soir, ce script ne SYNCHRONISAIT même pas
-# \`model-verif/\` (entrée BUGS.md : « le déploiement annonçait tout est
-# vert sur un tiers du lot manquant ») ; le rsync a été ajouté, la
-# VÉRIFICATION non. Le code de tout le scoring partait donc sur le VPS
-# — \`score.py\`, \`inference.py\`, \`agrume_fcst.py\` — sans qu'une seule
-# de ses ~1 100 assertions n'y soit rejouée. *Un rsync vérifié au
-# sha256 prouve que les octets sont arrivés, jamais qu'ils tournent.*
-# ⚠️ Mesuré le 27/08 : ces bancs prennent ~25 s de plus sur le VPS.
-# C'est le prix, et il est écrit ici pour qu'il ne surprenne personne.
-# ⚠️ 28/08 (lot L9) — CETTE LISTE EST ÉCRITE À LA MAIN, DONC ELLE SE
-# PÉRIME. Le lot L9 y ajoute \`test_murphy.py\` ; au passage, trois bancs
-# écrits depuis le 27/08 n'y sont TOUJOURS PAS —
-# \`test_controle_tau.py\` et \`test_fraicheur.py\` (lot L8),
-# ⓘ 30/08 — le lot L10 a ajouté le SIEN (\`test_agrume_court.py\`) plutôt
-# que de laisser la liste se périmer d'un cran de plus. La dette de fond
-# (une liste écrite à la main) reste entière ; elle est juste moins
-# grande d'un banc.
-# ⓘ 31/08 — le lot L11 fait de même avec \`test_agrume_quart.py\`. ⛔ Et
-# ce banc-ci a une raison de plus d'être joué ICI : il contient la
-# NON-RÉGRESSION de la demi-fenêtre et du plancher de l'heure ronde
-# (\`scoring.demi_fenetre(3600)\` = ±20 min, \`plancher_du_pas(3600)\` = 6).
-# Une divergence entre le venv du VPS et celui du Mac sur ces deux
-# valeurs changerait la population de TOUTES les séries en silence — et
-# c'est exactement le genre de chose qu'un sha256 ne voit pas.
-# \`test_sonde_representativite.py\` / \`test_sonde_doublons.py\` /
-# \`test_sonde_chaine_arome.py\` (lots L4/L6/L16, encore hors dépôt).
-# ⭐ 31/08 — LA DETTE EST RÉGLÉE À MOITIÉ, SUR DÉCISION DE YANN, et la
-# moitié qui reste a une raison PRÉCISE, pas un oubli de plus :
-#   · \`test_controle_tau.py\` (112 assertions) et \`test_fraicheur.py\`
-#     (51) sont AJOUTÉS. Les deux ont été rejoués verts avant l'ajout —
-#     on n'ajoute pas un banc à la liste du déploiement sans l'avoir vu
-#     passer, sinon le premier déploiement d'après casse pour une raison
-#     sans rapport, exactement ce que l'alinéa ci-dessus redoutait.
-#   · ⛔ \`test_sonde_representativite.py\`, \`test_sonde_doublons.py\` et
-#     \`test_sonde_chaine_arome.py\` NE SONT PAS ajoutés, et pas par
-#     prudence : **ils ne sont pas dans le dépôt**, non plus que les
-#     sondes qu'ils testent (lots L4/L6/L16, \`git ls-files\` le dit).
-#     Les mettre dans cette liste ferait dépendre le déploiement de
-#     fichiers que seul le Mac possède — un déploiement qui passe chez
-#     soi et casse chez le suivant. Il faut d'abord les COMMITER ; c'est
-#     un geste des lots L4/L6/L16, pas de celui-ci.
-# ⇒ reste ouvert : remplacer cette liste par un
-# \`for B in model-verif/test_*.py\` — elle ne se périmerait plus, mais
-# elle embarquerait tout ce qui ressemble à un banc, y compris ce qui
-# n'y est pas prêt.
-for B in model-verif/test_score.py model-verif/test_inference.py \\
-         model-verif/test_duel.py model-verif/test_murphy.py \\
-         model-verif/test_collect.py \\
-         model-verif/test_collect_reduit.py model-verif/test_events.py \\
-         model-verif/test_geopair.py model-verif/test_run_selftest.py \\
-         model-verif/test_agrume_fcst.py model-verif/test_agrume_pi_fcst.py \\
-         model-verif/test_arome_fcst.py model-verif/test_sonde_delta_10m.py \\
-         model-verif/test_agrume_court.py \\
-         model-verif/test_agrume_quart.py \\
-         model-verif/test_controle_tau.py \\
-         model-verif/test_fraicheur.py; do
-  echo "  · \$B"
-  "\$PY" "\$B" || exit 1
-done
+echo "  ✓ \$N/\$N bancs Python verts sur le VPS (liste lue sur le disque, pas écrite)"
 # ⚠️ \`test_scoring.py\` À PART, ET IL FAUT DIRE EXACTEMENT POURQUOI.
 # Sa moitié la plus précieuse compare \`scoring.py\` à son JUMEAU
 # TypeScript (\`src/lib/verifScore.ts\`) — le seul garde-fou contre une
@@ -893,7 +861,6 @@ done
 echo "  · model-verif/test_scoring.py --unit-only"
 echo "    ⚠️ parité TypeScript NON jouée (procédure manuelle, cf. en-tête du banc)"
 "\$PY" model-verif/test_scoring.py --unit-only || exit 1
-echo "  ✓ 14/14 bancs model-verif verts sur le VPS"
 
 # ⛔ 27/08 — CELUI-CI N'EST PAS EN PYTHON, ET C'EST PRÉCISÉMENT
 # POURQUOI IL EST ICI. Ce qui a rempli la boîte de Yann la nuit du 26

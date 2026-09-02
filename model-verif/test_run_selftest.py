@@ -268,11 +268,39 @@ def test_cri_de_position():
     """
     print("\n── ⛔ lot L15 : le cri de position sort-il du bac ? ──")
     TEXTE = "9 balises divergent du gel depuis au moins 10 jours."
+    JETON = '{"balises": ["1333", "1730"]}'
 
     def semer(d):
         (d / "etat" / "cri.position").write_text(TEXTE, encoding="utf-8")
+        # ⛔ (02/09) `score.py` ne pose plus le jeton : il le dépose EN
+        # ATTENTE, et c'est `run.sh` qui le promeut après l'e-mail.
+        (d / "etat" / "position_confirmees.json.attente").write_text(
+            JETON, encoding="utf-8")
 
-    code, _appels, journal, d = _jouer_brut(0, preparer=semer)
+    def semer_avec_mail(d):
+        """Un msmtp FACTICE en tête de PATH, et une adresse INVALIDE :
+        rien ne sort de la machine, mais `alerter` voit un envoi réussi."""
+        semer(d)
+        b = d / "bin"
+        b.mkdir()
+        (b / "msmtp").write_text("#!/bin/sh\ncat > /dev/null\nexit 0\n")
+        (b / "msmtp").chmod(0o755)
+        (d / "alertes.env").write_text(
+            "export BW_ALERTE_MAIL=banc@invalid.test\n")
+
+    # ── ⛔ le canal durable est LÀ (e-mail parti) ⇒ effacé, jeton posé ──
+    def _jouer_mail(preparer):
+        env, d = _bac(RUN_SH)
+        env["CODE_SELF_TEST"] = "0"
+        env.pop("BW_MODEL_SELF_TEST_BLOQUANT", None)
+        preparer(d)
+        env["PATH"] = f"{d / 'bin'}:{env.get('PATH', '')}"
+        p = subprocess.run(["bash", str(RUN_SH), "score"], env=env,
+                           capture_output=True, text=True, timeout=120)
+        j = d / "etat" / "score.log"
+        return p.returncode, (j.read_text() if j.exists() else ""), d
+
+    code, journal, d = _jouer_mail(semer_avec_mail)
     try:
         check("run.sh sort 0 : une divergence de position n'est PAS un "
               "échec de run", code, 0)
@@ -282,12 +310,40 @@ def test_cri_de_position():
               True)
         check("… et c'est bien le TEXTE déposé qui part",
               TEXTE in journal, True)
-        check("⭐ le fichier est EFFACÉ après envoi — sans quoi le même "
-              "cri repartirait toutes les nuits",
+        check("⭐ l'e-mail est parti (msmtp factice) ⇒ le fichier est "
+              "EFFACÉ — sans quoi le même cri repartirait toutes les nuits",
               (d / "etat" / "cri.position").exists(), False)
+        check("⛔ … et le jeton en attente est PROMU en jeton, APRÈS "
+              "l'envoi (02/09 : posé avant, un envoi raté rendait le "
+              "garde-fou muet pour toujours)",
+              (d / "etat" / "position_confirmees.json").read_text()
+              if (d / "etat" / "position_confirmees.json").exists()
+              else None, JETON)
+        check("… le jeton en attente ne traîne plus",
+              (d / "etat" / "position_confirmees.json.attente").exists(),
+              False)
         check("le compteur d'échecs consécutifs reste à zéro",
               (d / "etat" / "echecs_consecutifs.score").read_text().strip(),
               "0")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+    # ── ⛔⛔ AUCUN canal durable (pas d'e-mail) ⇒ le cri RESTE, le jeton
+    #        n'est PAS posé : on recriera demain. Bruyant, jamais muet. ──
+    code, _appels, journal, d = _jouer_brut(0, preparer=semer)
+    try:
+        check("sans e-mail parti, run.sh sort quand même 0", code, 0)
+        check("… le cri a bien été tenté (`alerter`)",
+              "ALERTE — " in journal and "position des balises" in journal,
+              True)
+        check("⛔⛔ … mais le fichier de cri est GARDÉ : il repartira "
+              "demain, parce que personne ne l'a reçu",
+              (d / "etat" / "cri.position").exists(), True)
+        check("⛔⛔ … et le jeton N'EST PAS posé — un jeton posé sans "
+              "envoi, c'est un garde-fou muet pour toujours",
+              (d / "etat" / "position_confirmees.json").exists(), False)
+        check("… le journal dit pourquoi",
+              "NON LIVRÉ" in journal, True)
     finally:
         shutil.rmtree(d, ignore_errors=True)
 

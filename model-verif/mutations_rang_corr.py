@@ -17,6 +17,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 SCORE = ICI / "score.py"
 B_SCORE = ICI / "test_score.py"
 
@@ -116,7 +121,7 @@ def joue(debut: int, fin: int) -> int:
     for i, (nom, fichier, banc, avant, apres) in enumerate(MUTATIONS, 1):
         if not (debut <= i <= fin):
             continue
-        origine = fichier.read_text(encoding="utf-8")
+        origine = HARNAIS.garder(fichier)
         if avant not in origine:
             print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
                   f"{fichier.name} — la mutation n'a rien muté, donc elle "
@@ -128,7 +133,8 @@ def joue(debut: int, fin: int) -> int:
                                encoding="utf-8")
             r = subprocess.run([sys.executable, str(banc)],
                                capture_output=True, text=True, cwd=ICI,
-                               timeout=300)
+                               timeout=300,
+                               env=HARNAIS.env_banc(ICI))
             if r.returncode == 0:
                 print(f"  ❌ {i:>2}. {nom}\n       LE BANC RESTE VERT "
                       f"({banc.name}) — il ne tient pas cette propriété.")
@@ -147,7 +153,7 @@ def joue(debut: int, fin: int) -> int:
                   f"finit plus (boucle) — vu, mais préférer un banc qui "
                   f"ROUGIT à un banc qui PEND.")
         finally:
-            fichier.write_text(origine, encoding="utf-8")
+            HARNAIS.rendre(fichier, origine)
     return rouges
 
 

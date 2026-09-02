@@ -20,6 +20,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI.parent / "model-verif"))
+import harnais as HARNAIS  # noqa: E402
 ORACLE = ICI / "oracle_scoring.py"
 BANC = "test_oracle_scoring.py"
 
@@ -166,7 +171,8 @@ MUTATIONS = [
 def jouer(banc: str) -> bool:
     """Vrai si le banc PASSE."""
     r = subprocess.run([sys.executable, str(ICI / banc)],
-                       capture_output=True, text=True, cwd=str(ICI))
+                       capture_output=True, text=True, cwd=str(ICI),
+                       env=HARNAIS.env_banc(ICI))
     return r.returncode == 0
 
 
@@ -180,7 +186,7 @@ def main() -> int:
     try:
         for i, (titre, fichier, avant, apres) in enumerate(MUTATIONS, 1):
             if fichier not in sauvegardes:
-                sauvegardes[fichier] = fichier.read_text(encoding="utf-8")
+                sauvegardes[fichier] = HARNAIS.garder(fichier)
             src = sauvegardes[fichier]
             if avant not in src:
                 print(f"{i:2}. ⛔ MOTIF INTROUVABLE — la mutation ne "
@@ -199,7 +205,7 @@ def main() -> int:
                 print(f"{i:2}. ✅ tuee : {titre}")
     finally:
         for fichier, src in sauvegardes.items():
-            fichier.write_text(src, encoding="utf-8")
+            HARNAIS.rendre(fichier, src)
     print("\n" + "═" * 66)
     print(f"  {len(MUTATIONS) - len(survivantes)}/{len(MUTATIONS)} mutations tuees")
     if survivantes:

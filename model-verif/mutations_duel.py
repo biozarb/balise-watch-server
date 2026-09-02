@@ -17,6 +17,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 DUEL = ICI / "duel.py"
 SCORE = ICI / "score.py"
 
@@ -114,7 +119,7 @@ MUTATIONS = [
 def joue() -> int:
     rouges = 0
     for i, (nom, fichier, avant, apres) in enumerate(MUTATIONS, 1):
-        origine = fichier.read_text()
+        origine = HARNAIS.garder(fichier)
         if avant not in origine:
             print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
                   f"{fichier.name} — la mutation n'a rien muté, donc elle "
@@ -124,7 +129,8 @@ def joue() -> int:
         try:
             fichier.write_text(origine.replace(avant, apres, 1))
             r = subprocess.run([sys.executable, str(ICI / "test_duel.py")],
-                               capture_output=True, text=True, cwd=ICI)
+                               capture_output=True, text=True, cwd=ICI,
+                               env=HARNAIS.env_banc(ICI))
             if r.returncode == 0:
                 print(f"  ❌ {i:>2}. {nom}\n       LE BANC RESTE VERT — "
                       f"il ne tient pas cette propriété.")
@@ -137,7 +143,7 @@ def joue() -> int:
                       + (f" (+{len(lignes) - 1} autres)"
                          if len(lignes) > 1 else ""))
         finally:
-            fichier.write_text(origine)
+            HARNAIS.rendre(fichier, origine)
     return rouges
 
 

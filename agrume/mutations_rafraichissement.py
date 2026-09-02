@@ -13,6 +13,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI.parent / "model-verif"))
+import harnais as HARNAIS  # noqa: E402
 CIBLE = ICI / "rafraichissement.py"
 BANC = ICI / "test_rafraichissement.py"
 
@@ -42,7 +47,7 @@ MUTATIONS = [
 
 
 def main():
-    source = CIBLE.read_text(encoding="utf-8")
+    source = HARNAIS.garder(CIBLE)
     echecs = []
     try:
         for i, (nom, avant, apres) in enumerate(MUTATIONS, 1):
@@ -52,18 +57,20 @@ def main():
                 continue
             CIBLE.write_text(source.replace(avant, apres, 1), encoding="utf-8")
             r = subprocess.run([sys.executable, str(BANC)],
-                               capture_output=True, text=True, cwd=str(ICI))
+                               capture_output=True, text=True, cwd=str(ICI),
+                               env=HARNAIS.env_banc(ICI))
             if r.returncode == 0:
                 echecs.append(f"nº {i} : le banc RESTE VERT — {nom}")
                 print(f"  ⛔ nº {i} : BANC VERT SUR UN CODE CASSÉ — {nom}")
             else:
                 print(f"  ✅ nº {i} : le banc tombe — {nom}")
     finally:
-        CIBLE.write_text(source, encoding="utf-8")
+        HARNAIS.rendre(CIBLE, source)
         print(f"\n  ⓘ {CIBLE.name} restauré")
 
     r = subprocess.run([sys.executable, str(BANC)],
-                       capture_output=True, text=True, cwd=str(ICI))
+                       capture_output=True, text=True, cwd=str(ICI),
+                       env=HARNAIS.env_banc(ICI))
     if r.returncode != 0:
         print("  ⛔⛔ le banc ne repasse PAS après restauration")
         return 2

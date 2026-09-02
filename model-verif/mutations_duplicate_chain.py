@@ -28,6 +28,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 SCORE = ICI / "score.py"
 
 MUTATIONS = [
@@ -123,7 +128,7 @@ def _env_sans_pyc() -> dict:
 def joue() -> int:
     rouges = 0
     for i, (nom, fichier, avant, apres) in enumerate(MUTATIONS, 1):
-        origine = fichier.read_text(encoding="utf-8")
+        origine = HARNAIS.garder(fichier)
         if avant not in origine:
             print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
                   f"{fichier.name} — la mutation n'a rien muté, donc elle "
@@ -149,7 +154,7 @@ def joue() -> int:
                       + (f" (+{len(lignes) - 1} autres)"
                          if len(lignes) > 1 else ""))
         finally:
-            fichier.write_text(origine, encoding="utf-8")
+            HARNAIS.rendre(fichier, origine)
     return rouges
 
 

@@ -34,6 +34,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI.parent / "model-verif"))
+import harnais as HARNAIS  # noqa: E402
 RACINE = ICI.parent
 INV = ICI / "bw_inventaire_alertes.sh"
 AVERTIR = ICI / "bw_avertir_config.sh"
@@ -386,7 +391,7 @@ def joue() -> int:
                 rouges += 1
                 continue
         else:
-            origine = fichier.read_text(encoding="utf-8")
+            origine = HARNAIS.garder(fichier)
             if avant not in origine:
                 print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
                       f"{fichier.name} — la mutation n'a rien muté, donc elle "
@@ -398,7 +403,8 @@ def joue() -> int:
                 fichier.chmod(avant[1])
             else:
                 fichier.write_text(origine.replace(avant, apres, 1), encoding="utf-8")
-            r = subprocess.run(banc, capture_output=True, text=True, cwd=RACINE)
+            r = subprocess.run(banc, capture_output=True, text=True, cwd=RACINE,
+                               env=HARNAIS.env_banc(RACINE))
             if r.returncode == 0:
                 print(f"  ❌ {i:>2}. {nom}\n       LE BANC RESTE VERT — il ne "
                       f"tient pas cette propriété.")
@@ -415,7 +421,7 @@ def joue() -> int:
             if mode_mutation:
                 fichier.chmod(origine_mode)
             else:
-                fichier.write_text(origine, encoding="utf-8")
+                HARNAIS.rendre(fichier, origine)
     return rouges
 
 

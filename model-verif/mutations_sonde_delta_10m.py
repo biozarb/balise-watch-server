@@ -17,6 +17,11 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 SONDE = ICI / "sonde_delta_10m.py"
 
 MUTATIONS = [
@@ -122,7 +127,8 @@ MUTATIONS = [
 
 def banc_vert() -> bool:
     r = subprocess.run([sys.executable, str(ICI / "test_sonde_delta_10m.py")],
-                       capture_output=True, text=True, cwd=str(ICI))
+                       capture_output=True, text=True, cwd=str(ICI),
+                       env=HARNAIS.env_banc(ICI))
     return r.returncode == 0
 
 
@@ -133,7 +139,7 @@ def main():
     print(f"banc vert sur le code intact — {len(MUTATIONS)} mutations\n")
     survivantes = []
     for i, (nom, cible, avant, apres) in enumerate(MUTATIONS, 1):
-        src = cible.read_text(encoding="utf-8")
+        src = HARNAIS.garder(cible)
         if src.count(avant) != 1:
             print(f"  ⚠️  {i:2d}. {nom}\n       motif introuvable ou "
                   f"ambigu ({src.count(avant)} occurrences) — MUTATION "
@@ -144,7 +150,7 @@ def main():
             cible.write_text(src.replace(avant, apres), encoding="utf-8")
             vert = banc_vert()
         finally:
-            cible.write_text(src, encoding="utf-8")
+            HARNAIS.rendre(cible, src)
         if vert:
             print(f"  ❌ {i:2d}. {nom}\n       le banc reste VERT")
             survivantes.append(nom)

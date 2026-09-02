@@ -325,6 +325,17 @@ def jeton(etat_dir):
     return pathlib.Path(etat_dir) / NOM_JETON
 
 
+def jeton_en_attente(etat_dir):
+    """Le jeton tel que `score.py` le DÉPOSE : il n'est pas encore posé.
+
+    ⛔ (02/09/2026) C'est `run.sh` qui le renomme en `jeton()` — et
+    SEULEMENT après qu'un e-mail est sorti (`ALERTE_LIVREE`). Tant qu'il
+    porte ce suffixe, `cri()` ne le lit pas : l'ensemble n'est pas
+    « connu », on recriera demain.
+    """
+    return pathlib.Path(etat_dir) / (NOM_JETON + ".attente")
+
+
 def cri(r, etat_dir):
     """Le texte à envoyer DEHORS, ou None s'il n'y a rien de neuf.
 
@@ -376,11 +387,21 @@ def cri(r, etat_dir):
     return "\n".join(L)
 
 
-def poser_jeton(r, etat_dir):
+def poser_jeton(r, etat_dir, en_attente: bool = False):
     """⚠️ Écrit APRÈS l'envoi, jamais avant : si le canal tombe, on
-    recriera demain. Bruyant, jamais muet."""
+    recriera demain. Bruyant, jamais muet.
+
+    ⛔ ET LA PROMESSE N'ÉTAIT PAS TENUE (vérification du 02/09/2026) :
+    `score.py` l'appelait dans la foulée du dépôt du cri, et l'envoi
+    avait lieu plus tard, dans `run.sh`, dont `alerter` rend 0 même
+    quand msmtp échoue. `en_attente=True` — le seul usage de `score.py`
+    désormais — écrit `jeton_en_attente()`, que `run.sh` promeut en
+    jeton une fois l'e-mail parti. L'appel sans `en_attente` reste
+    pour les bancs et pour un opérateur qui veut poser le jeton à la
+    main.
+    """
     try:
-        p = jeton(etat_dir)
+        p = jeton_en_attente(etat_dir) if en_attente else jeton(etat_dir)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(
             {"annonce_le": datetime.now(timezone.utc).strftime("%Y-%m-%d"),

@@ -32,8 +32,14 @@ import subprocess
 import sys
 
 ICI = pathlib.Path(__file__).resolve().parent
+
+# ⛔ (02/09/2026) copie d'origine sur le disque + sha256 + purge du
+# bytecode, pour TOUS les harnais — voir `model-verif/harnais.py`.
+sys.path.insert(0, str(ICI))
+import harnais as HARNAIS  # noqa: E402
 CP = ICI / "controle_position.py"
 RUN = ICI / "run.sh"
+SCORE = ICI / "score.py"
 BANC = "test_controle_position.py"
 BANC_RUN = "test_run_selftest.py"
 
@@ -150,8 +156,28 @@ MUTATIONS = [
     ("⛔ le fichier de cri n'est plus effacé — le même avertissement "
      "repart TOUTES les nuits, et on apprend à l'ignorer",
      RUN, BANC_RUN,
-     '    rm -f "$CRI_POSITION" \\\n      || dire "⚠️ cri de position non effacé — il repartira demain"',
-     '    :'),
+     '      rm -f "$CRI_POSITION" \\\n        || dire "⚠️ cri de position non effacé — il repartira demain"',
+     '      :'),
+
+    # ── ⛔ (02/09) le jeton ne se pose qu'APRÈS l'envoi ──────────────
+    ("⛔⛔ le cri est effacé et le jeton posé MÊME SANS e-mail parti — "
+     "un envoi raté rend le garde-fou muet pour toujours (l'état "
+     "d'avant la vérification du 02/09)",
+     RUN, BANC_RUN,
+     '    if (( ALERTE_LIVREE )); then',
+     '    if true; then'),
+
+    ("⛔ `alerter` ne dit plus qu'un e-mail est parti — le cri n'est "
+     "jamais effacé, le jeton jamais posé, et on crie toutes les nuits",
+     RUN, BANC_RUN,
+     '      && ALERTE_LIVREE=1 \\\n      || dire "⚠️ e-mail non parti — voir ~/.msmtp.log"',
+     '      || dire "⚠️ e-mail non parti — voir ~/.msmtp.log"'),
+
+    ("⛔⛔ `score.py` pose le jeton DIRECTEMENT au lieu de le déposer "
+     "en attente — la promesse « écrit APRÈS l'envoi » redevient fausse",
+     SCORE, BANC,
+     '            CP.poser_jeton(res_pos, root, en_attente=True)',
+     '            CP.poser_jeton(res_pos, root)'),
 
     ("⛔ le cri n'est jamais envoyé (condition morte) — le garde-fou "
      "détecte et personne n'entend, l'état d'avant ce lot",
@@ -186,7 +212,7 @@ def joue() -> int:
             fichier, banc = CP, BANC
         else:
             nom, fichier, banc, avant, apres = mutation
-        origine = fichier.read_text(encoding="utf-8")
+        origine = HARNAIS.garder(fichier)
         if avant not in origine:
             print(f"  ⛔ {i:>2}. {nom}\n       MOTIF INTROUVABLE dans "
                   f"{fichier.name} — la mutation n'a rien muté, donc elle "
@@ -212,7 +238,7 @@ def joue() -> int:
                       + (f" (+{len(lignes) - 1} autres)"
                          if len(lignes) > 1 else ""))
         finally:
-            fichier.write_text(origine, encoding="utf-8")
+            HARNAIS.rendre(fichier, origine)
     return rouges
 
 

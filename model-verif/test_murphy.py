@@ -314,6 +314,38 @@ check("… les lignes sous le plancher n'entrent pas dans le résumé",
       [])
 
 # ══════════════════════════════════════════════════════════════════
+print("\n── 6 bis. Le résumé par modèle se DIT, sans lever (02/09/2026) ──")
+# ══════════════════════════════════════════════════════════════════
+# ⛔ LA BRANCHE QUE LA PRODUCTION A ÉTÉ LA PREMIÈRE À EXERCER. Trois
+# nuits d'affilée (31/08, 01/09, 02/09), `score.py` a écrit
+# « décomposition de Murphy : KeyError — 'reason' » et
+# `model_murphy.json` n'a pas été republié : `par_modele` ne posait pas
+# `reason`, `dire` la lisait. Aucune assertion ne passait une ligne de
+# `par_modele` à `dire` — c'est celle-ci.
+lignes_modele = MU.par_modele([
+    {**MU.decompose(MU.moments(paires(fcst, obs))),
+     "model": "m", "lead_h": 6, "n_days": 9},
+    {**MU.decompose(MU.moments(paires(fcst, obs))),
+     "model": "m", "lead_h": 6, "n_days": 9},
+])
+check("⛔ une ligne par modèle porte `reason = ok` (elle est `ok` par "
+      "construction : seules les `ok` entrent dans la médiane)",
+      lignes_modele[0].get("reason"), "ok")
+try:
+    _phrase = MU.dire(lignes_modele[0])
+    _leve = None
+except Exception as exc:                                  # noqa: BLE001
+    _phrase, _leve = "", exc
+check("⛔ `dire()` sur une ligne par modèle ne lève pas (c'était le "
+      "KeyError qui tuait Murphy chaque nuit)", _leve, None)
+check("… et la phrase porte le r² et le verdict, pas un motif",
+      ("r²" in _phrase) and ("SS" in _phrase), True)
+check("… une ligne SANS clé `reason` (vieux cache, vieux appelant) "
+      "est lue comme `ok`, jamais comme un motif à imprimer",
+      "r²" in MU.dire({k: v for k, v in lignes_modele[0].items()
+                       if k != "reason"}), True)
+
+# ══════════════════════════════════════════════════════════════════
 print("\n── 7. L'arrondi des six sommes ne déplace pas le verdict ──")
 # ══════════════════════════════════════════════════════════════════
 # ⚠️ `moments` arrondit à 4 décimales pour tenir dans le cache de
