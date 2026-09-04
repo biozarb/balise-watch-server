@@ -69,7 +69,9 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import controle_position as CP  # noqa: E402
+import biais_fin as BF  # noqa: E402
 import duel as DUEL  # noqa: E402
+import melange as MX  # noqa: E402
 import events as EV  # noqa: E402
 import inference as INF  # noqa: E402
 import murphy as MU  # noqa: E402
@@ -425,6 +427,19 @@ REPLAY_SUBDIR = "replay"
 #:     (02/09, contre 2 820 Mo qui ont tué le 28/08) : on ne le fait pas
 #:     avant que la mémoire ait fini de monter (fenêtre pleine vers le
 #:     12/09). Décision de la vérification du 02/09, à reprendre alors.
+#:
+#:   ⛔ ET TOUJOURS À 5 APRÈS LE LOT L19 (04/09), MÊME CONTRAT ROMPU,
+#:     MÊME RAISON. `daily_rows` a gagné `bw_mix` (une LIGNE de plus par
+#:     balise × classe, fabriquée depuis les autres), les colonnes
+#:     `*_fin`, `spread_kmh`, `mix_n_models` et la clé privée
+#:     `_biais_fin`. Un cache d'avant ne porte rien de tout ça : la
+#:     fenêtre RÉGIME ne voit `bw_mix` que sur les journées rejouées
+#:     après le déploiement, et l'antécédent FIN se remplit à raison
+#:     d'une journée par nuit (il parle à partir de `FIN_MIN_JOURS` = 3
+#:     nuits). Le chemin ROLLING (base) est complet dès la première nuit.
+#:     ⚠️ Passer à 6 rejouerait trente journées AVEC le mélange et le
+#:     fin d'un coup (~18 min + la mémoire) : à faire dans la même nuit
+#:     que le passage décidé le 02/09, pas avant.
 REPLAY_FORMULA = 5
 
 
@@ -1741,8 +1756,17 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                obs_day: list[dict], obs_prev: list[dict],
                utc_offset_s: int, clim: dict | None = None,
                bias_prior: dict | None = None, temoin: list | None = None,
-               poids_comb: dict | None = None):
+               poids_comb: dict | None = None,
+               bias_prior_fin: dict | None = None,
+               temoin_fin: list | None = None):
     """Rend (lignes model_verif_daily, détail par tranche de vent).
+
+    `bias_prior_fin` (lot L19) : `{(unit, model, lead): BF.PriorFin}` bâti
+    par `prior_biais_fin` sur les jours STRICTEMENT antérieurs — la pente
+    par secteur × tranche, avec repli sur `bias_prior` (S2). `temoin_fin`
+    reçoit `(brut, corr_S2, corr_fin, placebo_fin)` sur l'échantillon.
+    Absents, les colonnes `*_fin` sortent à `None` et rien d'autre ne
+    bouge.
 
     Le détail par tranche ne va PAS en base : il alimente les
     accumulateurs le soir même. §15.4 — « ce modèle sous-estime le
@@ -1785,6 +1809,11 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
     #: (modèle, échéance) → (pente, cap, balise) du dernier échantillon,
     #: la matière du témoin ci-dessous.
     dernier_prior: dict[tuple, tuple] = {}
+    #: Lot L19 : le placebo du fin est le MÊME antécédent aux cellules
+    #: tournées (`PriorFin.permute`), pas celui d'une autre balise —
+    #: un autre site n'aurait pas la même couverture de cellules, et un
+    #: placebo qui se tait plus souvent que le vrai gagne moins sans
+    #: rien prouver.
     for offset, lead_defaut in LEAD_BY_OFFSET.items():
         for row in snapshots.get(offset, []):
             # ⛔ LOT L10 (30/08/2026) — L'ÉCHÉANCE PEUT VENIR DE LA LIGNE.
@@ -1939,6 +1968,54 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                                            S.series_error(pp).med))
                         dernier_prior[(row["model"], lead_h)] = (pente, cap, key)
 
+            # ── lot L19 : la pente par SECTEUR × TRANCHE, avec repli ──
+            # ⛔ MÊME GARDE-FOU QUE LE S2 : l'antécédent fin est bâti
+            # par `prior_biais_fin` sur [J−30, J−1] ; les sommes du
+            # jour J (`_biais_fin`) partent dans le cache pour NOURRIR
+            # J+1, jamais pour corriger J. Le niveau « balise » du
+            # repli est la pente S2 ci-dessus, passée telle quelle.
+            err_fin = mse_fin = niveau_fin = n_fin = None
+            sommes_fin = BF.sommes_du_jour(pairs, utc_offset_s)
+            pf = (bias_prior_fin or {}).get((key, row["model"], lead_h))
+            p_s2 = c_s2 = None
+            if bias_prior:
+                _ps2 = bias_prior.get((key, row["model"], lead_h))
+                if _ps2:
+                    p_s2, c_s2, _ = _ps2
+            if pf is not None or p_s2 is not None:
+                cf, compte_fin, nj_fin = BF.appliquer(
+                    pairs, pf, p_s2, c_s2, utc_offset_s)
+                niveau_fin = BF.niveau_dominant(compte_fin)
+                if niveau_fin is not None:
+                    err_fin = S.series_error(cf).med
+                    _, _, mse_fin, _ = S.skill_vs_persistence(cf, obs_for_skill)
+                    n_fin = (nj_fin if niveau_fin != BF.NIVEAU_BALISE
+                             else n_bias)
+                    # ── le témoin du fin : cellules TOURNÉES ─────────
+                    if (temoin_fin is not None and pf is not None
+                            and niveau_fin != BF.NIVEAU_BALISE
+                            and len(rows) % BIAIS_TEMOIN_PAS == 0):
+                        pp, _, _ = BF.appliquer(
+                            pairs, pf.permute(), p_s2, c_s2, utc_offset_s)
+                        temoin_fin.append((err.med, err_corr, err_fin,
+                                           S.series_error(pp).med))
+
+            # ── lot L19 : la DISPERSION des membres, si la ligne en
+            # porte une. ⚠️ « La ligne déclare » (patron des L10/L11) :
+            # `daily_rows` ne sait pas que `bw_mix` existe, elle lit un
+            # champ `spread` aligné sur `t0 + i·step_s` et le résume
+            # sur les seules heures APPARIÉES — celles que l'erreur
+            # d'à côté mesure, et pas une de plus.
+            spread_kmh = None
+            if row.get("spread"):
+                _sp = row["spread"]
+                _apparie = {p.t for p in pairs}
+                _vals = [_sp[i] for i in idx
+                         if times[i] in _apparie and i < len(_sp)
+                         and S._finite(_sp[i])]
+                if _vals:
+                    spread_kmh = math.sqrt(sum(v * v for v in _vals) / len(_vals))
+
             rows.append({
                 "day": day.strftime("%Y-%m-%d"),
                 "source": row["source"], "station_id": row["station_id"],
@@ -1966,6 +2043,26 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
                 "err_vec_med_corr": _r(err_corr),
                 "mse_model_corr": _r(mse_corr),
                 "bias_n_days": n_bias,
+                # ── lot L19 (04/09) : le corrigé FIN, et son niveau ────
+                # ⚠️ `bias_fin_niveau` dit QUEL niveau du repli a corrigé
+                # le plus d'heures ; `bias_fin_n_days`, sur combien de
+                # journées la cellule dominante repose (ou `bias_n_days`
+                # quand le repli est retombé sur le S2). Sans le niveau,
+                # une colonne « fin » égale à la colonne S2 se lirait
+                # comme « le fin n'apporte rien » alors qu'il n'a rien
+                # eu à dire.
+                "err_vec_med_corr_fin": _r(err_fin),
+                "mse_model_corr_fin": _r(mse_fin),
+                "bias_fin_niveau": niveau_fin,
+                "bias_fin_n_days": n_fin,
+                # ── lot L19 : la dispersion des membres (mélange seul) ─
+                "spread_kmh": _r(spread_kmh),
+                "mix_n_models": row.get("mix_n"),
+                # ── lot L19 : les sommes par cellule, clé PRIVÉE ───────
+                # Même patron que `_murphy` : elles voyagent dans le
+                # cache de rejeu, `_pour_la_base` les retire, et
+                # `replay_window` les `pop` de la fenêtre (mémoire).
+                BF.CLE: sommes_fin,
                 # ── lot L9b (28/08) : les six sommes de Murphy ─────────
                 # ⛔ UNE CLÉ PRIVÉE, PAS UNE COLONNE. `[n, Σf, Σo, Σf²,
                 # Σo², Σfo]` sur la VITESSE des heures appariées de cette
@@ -1987,6 +2084,13 @@ def daily_rows(day: datetime, snapshots: dict[int, list[dict]],
             })
 
             # ── détail par tranche de vent OBSERVÉE ──
+            # ⛔ LOT L19 — UNE LIGNE SYNTHÉTIQUE NE NOURRIT PAS LA
+            # MÉMOIRE DU CARACTÈRE, et c'est la ligne qui le déclare
+            # (`hors_caractere`), pas un nom de modèle : même refus que
+            # la classe courte au L10, pour la même raison (une mémoire
+            # de trois mois pour une série en essai).
+            if row.get("hors_caractere"):
+                continue
             by_band: dict[str, list[S.VerifPair]] = defaultdict(list)
             for p in pairs:
                 by_band[S.wind_band(p.obs_speed)].append(p)
@@ -2244,6 +2348,68 @@ def prior_biais(root: pathlib.Path, day: datetime,
         if pente is None and cap is None:
             continue
         out[key] = (pente, cap, n)
+    return out
+
+
+def prior_biais_fin(root: pathlib.Path, day: datetime,
+                    n_jours: int = BIAIS_PRIOR_JOURS) -> dict:
+    """L'antécédent FIN du jour `day` (lot L19) : `{(unit, model, lead):
+    BF.PriorFin}`, bâti sur les sommes `_biais_fin` du cache de rejeu des
+    jours STRICTEMENT antérieurs — exactement comme `prior_biais`, et
+    avec les mêmes conséquences assumées : un cache creux, ou écrit
+    avant ce lot, ne porte pas la clé et le fin se tait (les colonnes
+    `*_fin` retombent sur le S2, `bias_fin_niveau = balise`).
+    """
+    out: dict[tuple, BF.PriorFin] = {}
+    for k in range(n_jours, 0, -1):
+        d = day - timedelta(days=k)
+        rows = replay_read(root, d)
+        if not rows:
+            continue
+        di = _jour_index(d)
+        for r in rows:
+            sommes = r.get(BF.CLE)
+            if not sommes:
+                continue
+            key = (f"{r['source']}:{r['station_id']}", r["model"], r["lead_h"])
+            out.setdefault(key, BF.PriorFin()).push(di, sommes)
+    return {k: v for k, v in out.items() if not v.vide()}
+
+
+def prior_poids(root: pathlib.Path, day: datetime,
+                n_jours: int = MX.MIX_PRIOR_JOURS) -> dict:
+    """Les POIDS du mélange du jour `day` (lot L19) : `{(unit, lead):
+    {model: poids}}`, l'inverse de l'EWMA de `err_vec_rms²` de chaque
+    modèle sur cette balise, lue dans le cache des jours STRICTEMENT
+    antérieurs (`MX.AccMse`, demi-vie `MX.MIX_DEMI_VIE_J`).
+
+    ⛔ SUR `err_vec_rms`, PAS `mse_model` : la première est calculée sur
+    TOUTES les heures appariées, la seconde sur celles où la persistance
+    existe. Le poids doit mesurer le modèle, pas la veille.
+    ⛔ ET JAMAIS SUR LE JOUR J — même garde-fou que `prior_biais`.
+    ⓘ Les mélanges eux-mêmes n'entrent pas dans leurs propres poids.
+    """
+    accs: dict[tuple, dict[str, MX.AccMse]] = {}
+    for k in range(n_jours, 0, -1):
+        d = day - timedelta(days=k)
+        rows = replay_read(root, d)
+        if not rows:
+            continue
+        di = _jour_index(d)
+        for r in rows:
+            rms = r.get("err_vec_rms")
+            if rms is None or r["model"] in MX.MODELES_MELANGE:
+                continue
+            if r["lead_h"] not in LEAD_BY_OFFSET.values():
+                continue
+            key = (f"{r['source']}:{r['station_id']}", r["lead_h"])
+            accs.setdefault(key, {}).setdefault(r["model"], MX.AccMse()).push(
+                di, float(rms) ** 2)
+    out: dict[tuple, dict[str, float]] = {}
+    for key, par_modele in accs.items():
+        p = MX.poids_depuis_mse(par_modele)
+        if p:
+            out[key] = p
     return out
 
 
@@ -2629,8 +2795,14 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
     # « corrigé » serait meilleur que la réalité sur toute la
     # profondeur de l'archive — le genre d'erreur qui ne se voit jamais
     # parce qu'elle va dans le sens qu'on espère.
+    # ── lot L19 : le mélange entre dans les snapshots, AVANT la
+    # notation, avec les poids d'AVANT cette journée-ci (même règle que
+    # l'antécédent du biais, juste au-dessus).
+    snapshots, _ = MX.ajouter_melange(snapshots, prior_poids(root, day),
+                                      LEAD_BY_OFFSET)
     rows, _ = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s,
-                         bias_prior=prior_biais(root, day))
+                         bias_prior=prior_biais(root, day),
+                         bias_prior_fin=prior_biais_fin(root, day))
     replay_write(root, day, rows)
     return rows
 
@@ -2693,6 +2865,10 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
             # traîner ferait payer la mémoire à qui ne s'en sert pas
             # (`regime_scores`, `stability_report`).
             mo = r.pop(MU.MURPHY_KEY, None)
+            # Lot L19 : même sort pour les sommes par cellule — personne
+            # ne les lit dans la fenêtre, `prior_biais_fin` relit le
+            # cache lui-même.
+            r.pop(BF.CLE, None)
             if murphy_acc is not None and (murphy_exclus is None
                                            or unit not in murphy_exclus):
                 MU.accumule(murphy_acc, (unit, r["model"], r["lead_h"]), mo)
@@ -3423,6 +3599,13 @@ def event_rows(day: datetime, snapshots: dict[int, list[dict]],
             # un taux de fausse alerte calculé sur un sixième de la
             # matière, sous le même nom que les autres.
             if row.get("lead_h") is not None:
+                continue
+            # ⛔ LOT L19 — UNE LIGNE SYNTHÉTIQUE (`synthese`) NE PRODUIT
+            # PAS D'ÉVÉNEMENTS : une moyenne de modèles lisse les
+            # bascules et les fronts par construction ; lui compter un
+            # `far` ou un `pod` publierait un modèle « prudent » qui
+            # n'est prudent que parce qu'il est flou.
+            if row.get("synthese"):
                 continue
             key = f"{row['source']}:{row['station_id']}"
             if key not in obs_by_st:
@@ -4359,8 +4542,14 @@ def _exclus_du_rang(rows: list[dict]) -> dict[str, str]:
     # qui est de l'AROME interpolé, c'est-à-dire une valeur fabriquée.
     # Le classer contre le produit qu'il sert à juger n'aurait aucun
     # sens, et le publier au classement en aurait encore moins.
+    # ⓘ LOT L19 : le mélange multi-modèle et son témoin uniforme sont
+    # NOTÉS, PAS CLASSÉS, pour la même raison que les sous-séries du
+    # L10 — la question (« le mélange bat-il le produit servi ? ») est
+    # posée au duel L1, pas au classement. Décision de Yann du 04/09 :
+    # « noté comme un modèle, sans rang ni écran ».
     for r in rows:
-        if r["model"] in MODELES_COURTS or r["model"] in MODELES_QUARTS:
+        if (r["model"] in MODELES_COURTS or r["model"] in MODELES_QUARTS
+                or r["model"] in MX.MODELES_MELANGE):
             exclus[r["model"]] = RANK_REASON_SERIE_EN_ESSAI
     return exclus
 
@@ -5407,6 +5596,13 @@ _SQL_PAR_COLONNE: dict[str, dict[str, str]] = {
         "bias_n_days": "supabase_step49_lot_s2_biais_corrige.sql",
         "mse_comb": "supabase_step57_lot_l9_compagnons.sql",
         "mse_model_comb": "supabase_step57_lot_l9_compagnons.sql",
+        # supabase_step69_lot_l19_melange_biais_fin.sql — lot L19, 04/09
+        "err_vec_med_corr_fin": "supabase_step69_lot_l19_melange_biais_fin.sql",
+        "mse_model_corr_fin": "supabase_step69_lot_l19_melange_biais_fin.sql",
+        "bias_fin_niveau": "supabase_step69_lot_l19_melange_biais_fin.sql",
+        "bias_fin_n_days": "supabase_step69_lot_l19_melange_biais_fin.sql",
+        "spread_kmh": "supabase_step69_lot_l19_melange_biais_fin.sql",
+        "mix_n_models": "supabase_step69_lot_l19_melange_biais_fin.sql",
         # ⓘ Pas de `mse_model_comb_vec` : les deux définitions vivent sur
         # les mêmes heures, donc le MSE du modèle est le MÊME. Une
         # seconde colonne aurait laissé croire à deux populations.
@@ -6457,6 +6653,24 @@ def main() -> int:
 
     jalon_memoire("la relecture de l'archive")
 
+    # ── 1 ter. le mélange multi-modèle (lot L19) ──────────────────
+    # ⛔ AVANT `daily_rows`, qui ne saura pas qu'il est là. Les poids
+    # viennent du cache des jours < J (`prior_poids`) ; sans poids —
+    # cache creux, ou moins de `MX.MIX_MIN_JOURS` journées par membre —
+    # la balise n'a pas de `bw_mix` cette nuit, et le bilan le compte.
+    t_mix = time.monotonic()
+    poids_mix = prior_poids(root, day)
+    snapshots, bilan_mix = MX.ajouter_melange(snapshots, poids_mix,
+                                              LEAD_BY_OFFSET)
+    print(f"  mélange multi-modèle : {len(poids_mix)} balise×échéance "
+          f"avec poids sur {MX.MIX_PRIOR_JOURS} j de cache — "
+          f"{MX.dire_bilan(bilan_mix, LEAD_BY_OFFSET)} "
+          f"({time.monotonic() - t_mix:.1f} s)"
+          + ("" if poids_mix else
+             " — ⓘ aucun poids : le cache de rejeu est creux ou plus "
+             "court que MIX_MIN_JOURS ; `bw_mix` n'existe pas cette nuit."))
+    jalon_memoire("le mélange multi-modèle")
+
     # ── 1 bis. le bilan des parties EN BASE (lot S0.6) ────────────
     #
     # ⚠️ TOUT CE BLOC EST SOUS `try`, POUR LA MÊME RAISON QUE CELUI DE LA
@@ -6585,14 +6799,37 @@ def main() -> int:
              f" — ⓘ vide : le cache de rejeu est creux ou vient de changer de "
              f"formule ({REPLAY_FORMULA}). Les colonnes corrigées resteront "
              f"nulles cette nuit ; `--replay-budget 30` comble d'un coup."))
+    # ── lot L19 : l'antécédent FIN (secteur × tranche) ────────────
+    prior_fin = prior_biais_fin(root, day)
+    print(f"  antécédent fin du biais : {len(prior_fin)} couples "
+          f"balise×modèle×échéance avec au moins une cellule qui parle"
+          + ("" if prior_fin else " — ⓘ vide : le cache ne porte pas "
+                                  "encore de sommes par cellule (écrites "
+                                  "à partir de cette nuit)."))
     temoin: list = []
+    temoin_fin: list = []
     rows, banded = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s,
                               clim, bias_prior=prior, temoin=temoin,
-                              poids_comb=poids_comb)
+                              poids_comb=poids_comb,
+                              bias_prior_fin=prior_fin, temoin_fin=temoin_fin)
     print(f"  {len(rows)} agrégats quotidiens, {len(banded)} détails par tranche")
     part_temoin = bilan_temoin(temoin)
     if part_temoin:
         print(f"  ⛔ témoin du corrigé : {part_temoin['texte']}")
+    # ── lot L19 : les trois témoins du lot, dans le journal ───────
+    part_temoin_fin = BF.bilan_temoin_fin(temoin_fin)
+    if part_temoin_fin:
+        print(f"  ⛔ témoin du corrigé FIN : {part_temoin_fin['texte']}")
+    else:
+        print(f"  ⓘ témoin du corrigé fin : {len(temoin_fin)} échantillon(s), "
+              f"moins de 30 — rien à dire cette nuit")
+    part_mix = MX.bilan_melange(rows, poids_mix)
+    n_mix_rows = sum(1 for r in rows if r["model"] == MX.MODEL_MIX)
+    if part_mix:
+        print(f"  ⛔ témoins du mélange : {part_mix['texte']}")
+    else:
+        print(f"  ⓘ témoins du mélange : {n_mix_rows} ligne(s) bw_mix, pas "
+              f"assez de couples (≥ 30) pour un bilan cette nuit")
     if rows:
         n = _upsert_daily(sb, _pour_la_base(sb, "model_verif_daily", rows))
         print(f"  → model_verif_daily : {n} lignes")
@@ -6871,8 +7108,12 @@ def main() -> int:
         # NOMBRE, pas les tables : deux entiers contre quelques
         # centaines de Mo.
         n_prior, n_clim = len(prior), len(clim)
+        n_prior_fin, n_poids_mix = len(prior_fin), len(poids_mix)   # L19, idem
         snapshots = obs_day = obs_prev = clim = poids_comb = prior = None
         rows = banded = temoin = zones_raw = None
+        # Lot L19 : l'antécédent fin pèse jusqu'à 16 accumulateurs par
+        # couple ; on n'en garde que le nombre, comme pour `prior`.
+        prior_fin = poids_mix = temoin_fin = None
         pres_obs = p_rows = daily_duel = updates = ev_rows = None
         gc.collect()
         jalon_memoire("l'oubli du chemin J-0")
@@ -7077,6 +7318,34 @@ def main() -> int:
                                "witness": part_temoin,
                            },
                            "climatology_stations": n_clim,
+                           # ── lot L19 (04/09) : le mélange, le fin et la
+                           # dispersion voyagent avec LEURS témoins ────
+                           "melange": {
+                               "modeles": list(MX.MODELES_MELANGE),
+                               "demi_vie_j": MX.MIX_DEMI_VIE_J,
+                               "min_jours": MX.MIX_MIN_JOURS,
+                               "min_membres": MX.MIX_MIN_MEMBRES,
+                               "espace": "(u, v)",
+                               "poids": "1 / EWMA(err_vec_rms^2), par balise "
+                                        "x classe, normalise",
+                               "familles": {k: list(v)
+                                            for k, v in MX.FAMILLES.items()},
+                               "balises_avec_poids": n_poids_mix,
+                               "classe": "notee, pas classee "
+                                         "(serie_en_essai) — decision de "
+                                         "Yann du 04/09",
+                               "witness": part_mix,
+                           },
+                           "bias_correction_fin": {
+                               "cellule": "quadrant(direction PREVUE) x "
+                                          "tranche locale (nuit/matin/aprem)",
+                               "repli": list(BF.NIVEAUX),
+                               "min_days": BF.FIN_MIN_JOURS,
+                               "min_hours": BF.FIN_MIN_HEURES,
+                               "pairs_with_prior": n_prior_fin,
+                               "witness": part_temoin_fin,
+                           },
+                           "dispersion": MX.bilan_dispersion(units),
                            # ⛔⛔ LA RÉSERVE VOYAGE AVEC LES COLONNES
                            # QU'ELLE QUALIFIE (arbitrage de Yann,
                            # 02/09/2026, volet c du lot L9).

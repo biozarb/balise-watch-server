@@ -15,6 +15,8 @@ Trois fichiers, deux responsabilités, séparées exprès.
 | `collect.py` | **Collecte.** Archive les prévisions des 10 modèles nommés et les observations Pioupiou, en NDJSON gzip sur R2. Ne calcule aucun score. |
 | `score.py` | **Notation.** Relit l'archive, apparie prévu/observé, écrit `model_verif_daily`, fait avancer `model_character`, recalcule `model_score_zone`, publie `model_scores.json`. |
 | `scoring.py` | **L'arithmétique**, sans réseau ni base. Portage de `src/lib/verifScore.ts`, `modelCharacter.ts` et `regime.ts`. |
+| `melange.py` | **Le mélange multi-modèle** `bw_mix` (lot L19, 04/09/2026) : une ligne synthétique par balise × classe, pondérée par nos propres scores, mélangée en (u, v), notée comme un modèle et jamais classée ; la dispersion des membres et sa courbe dispersion → erreur. Sans réseau ni base. |
+| `biais_fin.py` | **Le biais de site par secteur × tranche** (lot L19) avec repli hiérarchique sur la pente du S2 ; les sommes voyagent dans le cache de rejeu (`_biais_fin`). Sans réseau ni base. |
 
 Séparer collecte et notation est délibéré : **un bug dans la formule de
 score ne doit jamais pouvoir corrompre la collecte**, qui est

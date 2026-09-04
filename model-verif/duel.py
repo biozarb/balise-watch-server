@@ -104,6 +104,11 @@ import scoring as S  # noqa: E402
 #:   continu, en attendant que L4 le décompose.
 PAIRES_SUIVIES: tuple[tuple[str, str], ...] = (
     ("agrume", "agrume_pi"),
+    # Lot L19 (04/09/2026) : le produit servi contre le mélange
+    # multi-modèle pondéré par nos scores. C'est LA question du lot —
+    # « mélanger AGRUME avec les autres fait-il mieux qu'AGRUME seul ? »
+    # — et elle se pose ici, pas au classement (bw_mix n'y concourt pas).
+    ("agrume_pi", "bw_mix"),
     ("agrume", "meteofrance_arome_france_hd"),
     ("arome_r2", "meteofrance_arome_france_hd"),
 )

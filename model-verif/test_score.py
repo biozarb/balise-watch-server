@@ -5438,6 +5438,363 @@ def test_l13_la_table_colonne_sql_colle_aux_fichiers_reels():
            "model_verif_daily_pres"])
 
 
+
+# ══════════════════════════════════════════════════════════════════
+#  LOT L19 (04/09/2026) — le mélange multi-modèle, le biais FIN et la
+#  dispersion, DANS LA CHAÎNE (archive → cache → notation)
+# ══════════════════════════════════════════════════════════════════
+#
+# ⚠️ Les bancs de `test_melange.py` et `test_biais_fin.py` tiennent
+# l'arithmétique. Ceux-ci tiennent ce que l'arithmétique ne peut pas
+# voir : que le mélange ENTRE dans les snapshots avant la notation,
+# que ses poids ne voient JAMAIS le jour J, que la ligne synthétique ne
+# nourrit ni le caractère ni les événements, et que les colonnes
+# neuves sont là — ou nulles pour une raison dite.
+
+
+def _archive_multi(root, jours, facteurs, stations=("900",),
+                   secteur_par_heure=None):
+    """`n` journées où CHAQUE modèle de `facteurs` prévoit
+    `facteur × (12 + brise)`, l'observation valant `12 + brise` — un
+    modèle à 1,0 est parfait, un modèle à 1,5 surestime de moitié.
+
+    `secteur_par_heure(h) → (dir_prévue, facteur_obs)` sert au banc du
+    biais FIN : la direction prévue change avec l'heure, et le biais
+    RÉEL du site dépend du secteur — ce qu'une pente unique ne sait pas
+    corriger.
+    """
+    import gzip as _gz
+    import json as _json
+
+    for d in jours:
+        lignes, obs_lignes = [], []
+        for station in stations:
+            for i_m, (model, fac) in enumerate(facteurs.items()):
+                def prevu(i, f=fac):
+                    return round(f * (12.0 + brise(i % 24)), 3)
+                row = fcst_line(station, model, d, prevu,
+                                aloft=(30.0, 10.0) if i_m == 0 else None)
+                if secteur_par_heure is not None:
+                    row["dir"] = [secteur_par_heure(i % 24)[0] for i in range(72)]
+                lignes.append(_json.dumps(row))
+
+            # ⚠️ L'heure RONDE la plus proche, pas la partie entière : la
+            # fenêtre d'appariement de `pair_series` est ±20 min autour de
+            # l'heure prévue, et un secteur qui basculerait à 13:00 pile
+            # mélangerait deux biais dans la fenêtre de 13 h.
+            def vitesse(h):
+                f = (secteur_par_heure(int(round(h)) % 24)[1]
+                     if secteur_par_heure is not None else 1.0)
+                return round(f * (12.0 + brise(h % 24)), 3)
+
+            obs = obs_line(station, d, vitesse)
+            if secteur_par_heure is not None:
+                t_day = int(d.replace(tzinfo=timezone.utc).timestamp())
+                obs["dir"] = [secteur_par_heure(int(round((ts - t_day) / 3600)) % 24)[0]
+                              for ts in obs["t"]]
+            obs_lignes.append(_json.dumps(obs))
+        fk = root / J.fcst_key(d)
+        fk.parent.mkdir(parents=True, exist_ok=True)
+        fk.write_bytes(_gz.compress("\n".join(lignes).encode()))
+        ok = root / J.obs_key(d)
+        ok.parent.mkdir(parents=True, exist_ok=True)
+        ok.write_bytes(_gz.compress("\n".join(obs_lignes).encode()))
+
+
+def test_l19_le_melange_entre_dans_la_chaine_et_pese_le_meilleur():
+    print("── lot L19 : le mélange multi-modèle dans la chaîne ──")
+    import melange as MX
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(13)]
+        # icon parfait, ecmwf à +50 %, gfs à −30 %
+        _archive_multi(root, jours, {"icon_d2": 1.0, "ecmwf_ifs025": 1.5,
+                                     "gfs_global": 0.7}, stations=("900", "901"))
+        for d in reversed(jours[1:]):
+            J.replay_day(root, d, None, 0)
+
+        # ── les poids, AVANT le jour J ──
+        poids = J.prior_poids(root, DAY)
+        cle = ("pioupiou:900", 6)
+        check("des poids existent pour la balise, classe +6 h", cle in poids, True)
+        p = poids.get(cle, {})
+        check("⭐ le modèle PARFAIT porte l'essentiel du poids",
+              p.get("icon_d2", 0) > 0.8, True)
+        check("… et celui à +50 % presque rien",
+              p.get("ecmwf_ifs025", 1) < 0.1, True)
+        check("les trois membres ont un poids (assez de journées)",
+              sorted(p), ["ecmwf_ifs025", "gfs_global", "icon_d2"])
+        check("les classes +24 h et +48 h ont les leurs aussi",
+              ("pioupiou:900", 24) in poids and ("pioupiou:900", 48) in poids,
+              True)
+
+        # ── la journée J notée, mélange compris ──
+        rows = J.replay_day(root, DAY, None, 0)
+        par = {(r["model"], r["lead_h"]): r for r in rows
+               if r["station_id"] == "900"}
+        mix = par.get((MX.MODEL_MIX, 6))
+        check("⭐ `bw_mix` a sa ligne à +6 h, comme un modèle", mix is not None, True)
+        if mix:
+            check("… avec le nombre de membres", mix["mix_n_models"], 3)
+            check("… et une dispersion > 0 (les membres se contredisent)",
+                  mix["spread_kmh"] > 1.0, True)
+            check("… son erreur est proche de celle du parfait (< 1 km/h)",
+                  mix["err_vec_med"] < 1.0, True)
+            check("… et loin sous celle du +50 %",
+                  mix["err_vec_med"] < par[("ecmwf_ifs025", 6)]["err_vec_med"] / 3,
+                  True)
+            check("son `lead_exact_h` est celui de ses membres (même émission)",
+                  abs(mix["lead_exact_h"] - par[("icon_d2", 6)]["lead_exact_h"]) < 0.01,
+                  True)
+        check("les autres modèles n'ont PAS de dispersion (colonne nulle)",
+              par[("icon_d2", 6)]["spread_kmh"], None)
+
+        # ── la dispersion se résume sur les heures APPARIÉES, pas sur la
+        # journée entière : une ligne synthétique dont la dispersion
+        # explose aux heures où la balise s'est TUE ne doit pas en porter
+        # la trace.
+        synth = fcst_line("900", MX.MODEL_MIX, DAY, lambda i: 12.0 + brise(i % 24))
+        # (jusqu'à 12 h INCLUS : la fenêtre ±20 min de 12:00 attrape les
+        # relevés de 11:40-11:59, donc l'heure 12 est appariée)
+        synth["spread"] = [1.0 if (i % 24) <= 12 else 100.0 for i in range(72)]
+        synth["mix_n"] = 2
+        synth["synthese"] = MX.MODEL_MIX
+        synth["hors_caractere"] = True
+        obs_matin = [dict(obs_line("900", DAY, lambda h: 12.0 + brise(h % 24)))]
+        obs_matin[0]["t"] = [t for t in obs_matin[0]["t"]
+                             if ((t % 86400) // 3600) < 12]
+        n_t = len(obs_matin[0]["t"])
+        obs_matin[0]["speed"] = obs_matin[0]["speed"][:n_t]
+        obs_matin[0]["dir"] = obs_matin[0]["dir"][:n_t]
+        obs_matin[0]["gust"] = obs_matin[0]["gust"][:n_t]
+        r_s, _ = J.daily_rows(DAY, {0: [synth]}, obs_matin, [], 0)
+        check("⛔ la dispersion publiée ne compte que les heures APPARIÉES "
+              "(matin seul → 1,0, pas la moyenne avec les 100 de l'après-midi)",
+              r_s[0]["spread_kmh"] if r_s else None, 1.0, 0.05)
+        check("… ni de nombre de membres", par[("icon_d2", 6)]["mix_n_models"], None)
+        check("le témoin uniforme n'est là que si la balise est dans "
+              "l'échantillon", (MX.MODEL_MIX_TEMOIN, 6) in par,
+              MX.est_temoin("pioupiou:900"))
+
+        # ── ⛔ LES POIDS NE VOIENT JAMAIS LE JOUR J ──
+        # Le cache de J existe désormais ; les poids « du jour J » ne
+        # doivent pas avoir bougé d'un chiffre.
+        check("⛔ prior_poids(J) est identique avant et après que J a été "
+              "rejoué : le jour J n'entre pas dans ses propres poids",
+              J.prior_poids(root, DAY), poids)
+        apres = J.prior_poids(root, DAY + timedelta(days=1))
+        # ── le mélange n'entre pas dans ses propres poids ──
+        check("`bw_mix` n'a pas de poids dans le mélange de J+1",
+              MX.MODEL_MIX in apres.get(cle, {}), False)
+
+        # ── la mémoire du caractère et les événements l'ignorent ──
+        snaps = {off: J.snapshot_rows(root, DAY - timedelta(days=off), None)
+                 for off in J.LEAD_BY_OFFSET}
+        snaps, _ = MX.ajouter_melange(snaps, poids, J.LEAD_BY_OFFSET)
+        obs_j = J.all_obs_rows(root, DAY, None)
+        obs_v = J.all_obs_rows(root, DAY - timedelta(days=1), None)
+        rows2, banded = J.daily_rows(DAY, snaps, obs_j, obs_v, 0)
+        check("⛔ `bw_mix` ne nourrit PAS `model_character` (hors_caractere)",
+              any(b["model"] in MX.MODELES_MELANGE for b in banded), False)
+        check("… mais les membres, si", any(b["model"] == "icon_d2" for b in banded), True)
+        check("la ligne du jour porte les sommes par cellule (clé privée, "
+              "pour le cache)", any(r.get("_biais_fin") for r in rows2), True)
+
+        zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                     "basin_id": "b1", "massif_id": "alpes-nord",
+                                     "basin_uncertain": False}
+                   for i in ("900", "901")}
+        # une bascule franche l'après-midi, pour que la matière produise
+        # des événements chez les membres
+        for off in snaps:
+            for r in snaps[off]:
+                r["speed"] = [2.0 if (i % 24) < 10 else 25.0 for i in range(len(r["speed"]))]
+        obs_ev = [dict(o, speed=[2.0 if ((t % 86400) // 3600) < 10 else 25.0
+                                 for t in o["t"]]) for o in obs_j]
+        ev, _ = J.event_rows(DAY, snaps, obs_ev, zone_of, 0)
+        check("⭐ le banc n'est pas vide : les membres produisent des "
+              "événements", any(r["model"] == "icon_d2" for r in ev), True)
+        check("⛔ … et `bw_mix`, sur le MÊME vent, n'en produit aucun "
+              "(ligne synthétique)",
+              any(r["model"] in MX.MODELES_MELANGE for r in ev), False)
+
+        # ── le cache : la clé privée y est, la fenêtre ne la porte pas ──
+        cache = J.replay_read(root, DAY)
+        check("le cache de rejeu porte `_biais_fin`",
+              any(r.get("_biais_fin") for r in cache), True)
+        fen, _ = J.replay_window(root, DAY, None, 0, n_days=3)
+        check("… et `replay_window` la retire de la fenêtre (mémoire)",
+              any("_biais_fin" in r for r in fen), False)
+        check("… tout en gardant les lignes `bw_mix` dans la fenêtre",
+              any(r["model"] == MX.MODEL_MIX for r in fen), True)
+
+
+def test_l19_le_melange_est_note_jamais_classe():
+    print("── lot L19 : noté, jamais classé ──")
+    import melange as MX
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    daily = []
+    for j in range(15):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for i in range(830, 836):
+            for model, err in ((MX.MODEL_MIX, 2.0), ("icon_d2", 3.0),
+                               (MX.MODEL_MIX_TEMOIN, 2.5)):
+                daily.append({
+                    "day": d, "source": "pioupiou", "station_id": str(i),
+                    "model": model, "lead_h": 6, "regime": "fluxN",
+                    "n_hours": 18, "err_vec_med": err,
+                    "mse_model": err * err, "mse_persist": 100.0})
+    rows = J.rolling_scores(daily, zone_of, DAY)
+    fine = {r["model"]: r for r in rows
+            if r["zone_id"] == "b1:valley" and r["window_kind"] == "rolling15"}
+    check("les trois séries ont leur ligne (NOTÉES)",
+          sorted(fine), sorted([MX.MODEL_MIX, MX.MODEL_MIX_TEMOIN, "icon_d2"]))
+    check("⭐ `bw_mix` porte son erreur typique (2,0)",
+          fine[MX.MODEL_MIX]["typical_err_kmh"], 2.0)
+    check("⛔ AUCUN rang pour le mélange ni son témoin, alors qu'ils battent "
+          "icon de 33 %",
+          [fine[m]["rank"] for m in (MX.MODEL_MIX, MX.MODEL_MIX_TEMOIN)],
+          [None, None])
+    check("… sous le motif « en essai », comme les sous-séries du L10",
+          {fine[m]["rank_reason"] for m in MX.MODELES_MELANGE}, {"serie_en_essai"})
+    check("… et le classement corrigé dit pareil",
+          {fine[m]["rank_reason_corr"] for m in MX.MODELES_MELANGE},
+          {"serie_en_essai"})
+    check("icon, seul admis, garde une ligne classable (single_model ou rang)",
+          fine["icon_d2"]["rank_reason"] in ("single_model", "ok",
+                                              "window_too_short", "insufficient",
+                                              "not_separable", "tied"),
+          True)
+
+
+def test_l19_le_biais_fin_corrige_par_secteur_et_jamais_avec_j():
+    print("── lot L19 : le biais FIN, par secteur, sans fuite ──")
+    import biais_fin as BF
+    import tempfile
+    from pathlib import Path
+
+    # Le site : vent de NORD le matin (obs = 0,6 × prévu), vent de SUD
+    # l'après-midi (obs = 1,4 × prévu). La pente UNIQUE du S2 voit une
+    # moyenne (~1,0) et ne corrige presque rien ; la pente par secteur
+    # voit les deux.
+    def secteur(h):
+        return (0.0, 0.6) if 6 <= h < 13 else (180.0, 1.4)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        jours = [DAY - timedelta(days=k) for k in range(12)]
+        _archive_multi(root, jours, {"icon_d2": 1.0}, secteur_par_heure=secteur)
+        for d in reversed(jours[1:]):
+            J.replay_day(root, d, None, 0)
+
+        pf = J.prior_biais_fin(root, DAY)
+        cle = ("pioupiou:900", "icon_d2", 6)
+        check("un antécédent fin existe pour la balise", cle in pf, True)
+        if cle in pf:
+            p_n, niv_n, _ = pf[cle].pente_pour("N|matin")
+            p_s, niv_s, _ = pf[cle].pente_pour("S|aprem")
+            check("⭐ la cellule N|matin retrouve ×0,6", p_n, 0.6, 0.03)
+            check("… et S|aprem ×1,4", p_s, 1.4, 0.03)
+            check("… au niveau le plus fin",
+                  (niv_n, niv_s), ("secteur_heure", "secteur_heure"))
+
+        rows = J.replay_day(root, DAY, None, 0)
+        ligne = next(r for r in rows if r["lead_h"] == 6)
+        check("le brut porte tout le biais (> 3 km/h)", ligne["err_vec_med"] > 3.0, True)
+        check("⭐ le corrigé FIN est quasi nul (< 0,3 km/h)",
+              ligne["err_vec_med_corr_fin"] < 0.3, True)
+        check("⛔ … là où le S2, pente unique, laisse l'essentiel de l'erreur",
+              ligne["err_vec_med_corr"] > ligne["err_vec_med_corr_fin"] * 5, True)
+        check("le niveau dominant est dit", ligne["bias_fin_niveau"], "secteur_heure")
+        check("… et sur combien de journées il repose", ligne["bias_fin_n_days"], 11)
+        check("`mse_model_corr_fin` s'effondre aussi", ligne["mse_model_corr_fin"] < 0.2, True)
+
+        # ⛔ J NE SE CORRIGE JAMAIS AVEC J : sans antécédent, les colonnes
+        # se taisent — elles ne retombent pas sur les sommes du jour.
+        rows_nu, _ = J.daily_rows(
+            DAY, {off: J.snapshot_rows(root, DAY - timedelta(days=off), None)
+                  for off in J.LEAD_BY_OFFSET},
+            J.all_obs_rows(root, DAY, None),
+            J.all_obs_rows(root, DAY - timedelta(days=1), None), 0)
+        nue = next(r for r in rows_nu if r["lead_h"] == 6)
+        check("sans antécédent, `err_vec_med_corr_fin` est NUL",
+              nue["err_vec_med_corr_fin"], None)
+        check("… et `bias_fin_niveau` aussi", nue["bias_fin_niveau"], None)
+        check("… pendant que les sommes du jour, elles, partent au cache",
+              bool(nue.get(BF.CLE)), True)
+        check("l'antécédent fin de J n'a pas bougé après le rejeu de J",
+              sorted(J.prior_biais_fin(root, DAY)[cle].cellules)
+              == sorted(pf[cle].cellules), True)
+
+        # ── le banc qui doit savoir échouer : un site qui se RETOURNE ──
+        # Onze jours N=×0,6 / S=×1,4, puis un douzième INVERSÉ. La
+        # correction applique le passé et EMPIRE l'erreur — preuve qu'elle
+        # n'a pas vu J.
+        _archive_multi(root, [DAY], {"icon_d2": 1.0},
+                       secteur_par_heure=lambda h: (0.0, 1.4) if 6 <= h < 13
+                       else (180.0, 0.6))
+        J.replay_path(root, DAY).unlink()
+        rows_inv = J.replay_day(root, DAY, None, 0)
+        inv = next(r for r in rows_inv if r["lead_h"] == 6)
+        check("⛔ sur une journée retournée, le corrigé fin est PIRE que le brut",
+              inv["err_vec_med_corr_fin"] > inv["err_vec_med"], True)
+        check("⛔ … et l'antécédent fin de J n'a PAS bougé une fois J (retournée) "
+              "dans le cache : la cellule N|matin dit toujours ×0,6",
+              J.prior_biais_fin(root, DAY)[cle].pente_pour("N|matin")[0],
+              pf[cle].pente_pour("N|matin")[0], 1e-9)
+
+        # ── le repli : une cellule jamais vue retombe sur le S2 ──
+        # (vent d'OUEST le jour J : aucune cellule W dans l'antécédent)
+        _archive_multi(root, [DAY], {"icon_d2": 1.0},
+                       secteur_par_heure=lambda h: (270.0, 1.0))
+        J.replay_path(root, DAY).unlink()
+        rows_w = J.replay_day(root, DAY, None, 0)
+        w = next(r for r in rows_w if r["lead_h"] == 6)
+        check("un secteur jamais vu → le repli retombe sur la pente S2 "
+              "(`balise`)", w["bias_fin_niveau"], "balise")
+        check("… et `bias_fin_n_days` est alors celui du S2",
+              w["bias_fin_n_days"], w["bias_n_days"])
+        check("… et le corrigé fin ÉGALE le corrigé S2",
+              w["err_vec_med_corr_fin"], w["err_vec_med_corr"], 0.001)
+
+
+def test_l19_la_table_colonne_sql_et_la_base():
+    print("── lot L19 : six colonnes, un .sql, et la base qui ne les a pas ──")
+    import melange as MX
+    cols = J._SQL_PAR_COLONNE["model_verif_daily"]
+    neuves = ["err_vec_med_corr_fin", "mse_model_corr_fin", "bias_fin_niveau",
+              "bias_fin_n_days", "spread_kmh", "mix_n_models"]
+    check("les six colonnes neuves nomment le step69",
+          {cols.get(c) for c in neuves},
+          {"supabase_step69_lot_l19_melange_biais_fin.sql"})
+
+    class _SbSans:
+        def columns(self, table):
+            return {"day", "source", "station_id", "model", "lead_h",
+                    "err_vec_med"}
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        out = J._pour_la_base(_SbSans(), "model_verif_daily", [{
+            "day": "2026-09-04", "source": "pioupiou", "station_id": "900",
+            "model": MX.MODEL_MIX, "lead_h": 6, "err_vec_med": 1.0,
+            "spread_kmh": 2.0, "bias_fin_niveau": "secteur", "_biais_fin": {"N|matin": [1, 1, 1]},
+        }])
+    check("tant que le step69 n'est pas joué, les colonnes neuves ne partent "
+          "pas en base", "spread_kmh" in out[0] or "bias_fin_niveau" in out[0], False)
+    check("… la clé privée non plus, jamais", "_biais_fin" in out[0], False)
+    check("… et le journal NOMME le fichier à jouer",
+          "supabase_step69_lot_l19_melange_biais_fin.sql" in buf.getvalue(), True)
+    check("… mais la ligne `bw_mix` elle-même part (c'est une ligne, pas "
+          "une colonne)", out[0]["model"], MX.MODEL_MIX)
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -5532,7 +5889,12 @@ def main() -> int:
                test_l13_le_compte_dit_zero_ou_je_ne_sais_pas,
                test_l13_on_ne_lance_pas_un_delete_qui_ne_supprime_rien,
                test_l13_rank_corr_davant_step52_dit_a_ecrire_jamais_step40,
-               test_l13_la_table_colonne_sql_colle_aux_fichiers_reels):
+               test_l13_la_table_colonne_sql_colle_aux_fichiers_reels,
+               # ── lot L19 (04/09) : mélange, biais fin, dispersion ──
+               test_l19_le_melange_entre_dans_la_chaine_et_pese_le_meilleur,
+               test_l19_le_melange_est_note_jamais_classe,
+               test_l19_le_biais_fin_corrige_par_secteur_et_jamais_avec_j,
+               test_l19_la_table_colonne_sql_et_la_base):
         fn()
     print(f"\n{OK} assertions vertes, {KO} rouges.")
     return 1 if KO else 0

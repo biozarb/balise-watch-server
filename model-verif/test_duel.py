@@ -373,9 +373,13 @@ check("le journal nomme les deux modèles, le n et le verdict",
 print("── 8. LES TROIS PAIRES SUIVIES, ET LA REQUÊTE ──")
 # ══════════════════════════════════════════════════════════════════
 
-check("trois paires suivies", len(D.PAIRES_SUIVIES) == 3)
+# ⓘ Lot L19 (04/09/2026) : QUATRE paires — le mélange multi-modèle
+# `bw_mix` est jugé contre le produit servi, ici et pas au classement.
+check("quatre paires suivies", len(D.PAIRES_SUIVIES) == 4)
 check("… dont le duel de la question du lot",
       ("agrume", "agrume_pi") in D.PAIRES_SUIVIES)
+check("… dont le duel du lot L19, produit servi ↔ mélange",
+      ("agrume_pi", "bw_mix") in D.PAIRES_SUIVIES)
 check("… dont le TÉMOIN de chaîne agrume ↔ AROME HD",
       ("agrume", "meteofrance_arome_france_hd") in D.PAIRES_SUIVIES)
 check("… dont arome_r2 ↔ AROME HD (le plancher de chaîne)",
@@ -390,8 +394,8 @@ check("… et elle ne demande PAS toutes les colonnes",
       "select=*" not in q, q)
 
 vide = D.duels([])
-check("aucune donnée → trois lignes quand même, à zéro",
-      len(vide) == 3 and all(v["n_pairs"] == 0 for v in vide))
+check("aucune donnée → quatre lignes quand même, à zéro",
+      len(vide) == 4 and all(v["n_pairs"] == 0 for v in vide))
 check("… avec le motif dit, pas un silence",
       all(v["verdict"] == "too_few_pairs" for v in vide),
       f"{[v['verdict'] for v in vide]}")
