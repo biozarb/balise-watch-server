@@ -4492,8 +4492,8 @@ def test_l9b_les_moments_de_murphy_voyagent_sans_toucher_la_base():
     relu = J.replay_read(tmp, DAY)
     check("⭐ le cache de rejeu, lui, porte les six sommes",
           relu[0][MU_.MURPHY_KEY], rows[0][MU_.MURPHY_KEY])
-    check("… et la formule du cache est bien la 5 (les moments + "
-          "`mse_comb` l'ont fait passer de 4)", J.REPLAY_FORMULA, 5)
+    check("… et la formule du cache est bien la 6 (5 : moments + "
+          "`mse_comb` ; 6 : L9c/L19/L20, refermés le 04/09)", J.REPLAY_FORMULA, 6)
 
     # ── ⛔ ET LA MÉMOIRE, qui est la vraie contrainte (28/08) ─────────
     # La fenêtre rejouée porte 405 486 lignes en production. Y laisser

@@ -440,7 +440,18 @@ REPLAY_SUBDIR = "replay"
 #:     ⚠️ Passer à 6 rejouerait trente journées AVEC le mélange et le
 #:     fin d'un coup (~18 min + la mémoire) : à faire dans la même nuit
 #:     que le passage décidé le 02/09, pas avant.
-REPLAY_FORMULA = 5
+#: 6 — 04/09/2026, décision de Yann : les DEUX contrats rompus (L9c du
+#:     02/09 : `mse_comb_vec` ; L19/L20 du 04/09 : `bw_mix`, `*_fin`,
+#:     `spread_kmh`, `_biais_fin`, la ligne sœur AGRUME +24 h) sont
+#:     refermés d'un coup. ⛔ PAS PAR LE RUN NOCTURNE : le cache a été
+#:     RÉCHAUFFÉ EN JOURNÉE, du plus ancien au plus récent (donc avec
+#:     ses antécédents), par un rejeu à part sur le VPS — le run de la
+#:     nuit trouve trente caches valides et n'en rejoue aucun. C'est ce
+#:     qui évite de rejouer 30 journées à 2,1 Go de RSS (le 28/08 est
+#:     mort à 2 820). ⓘ Le chemin régime porte désormais `bw_mix`, les
+#:     colonnes fin et AGRUME +24 h sur toute la fenêtre, à la profondeur
+#:     des antécédents près (5 j pour les poids, 3 j pour le biais).
+REPLAY_FORMULA = 6
 
 
 class Abort(Exception):
