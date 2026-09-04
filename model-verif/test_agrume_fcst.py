@@ -392,14 +392,98 @@ def test_lead_6_sort_avec_un_score_connu():
             f"(lu {r['lead_exact_h']})")
 
 
+def _serie_arome(run_dt, n_heures=52, speed_kmh=30.0, dir_deg=270.0):
+    """Une ligne `arome_r2` telle qu'`arome_fcst.py` l'écrit (0-51 h)."""
+    return {"station_id": "70", "source": "pioupiou", "lat": 46.15, "lon": 6.19,
+            "model": "arome_r2", "fetched_at": run_dt.isoformat(),
+            "t0": int(run_dt.timestamp()), "step_s": 3600,
+            "speed": [speed_kmh] * n_heures, "dir": [dir_deg] * n_heures,
+            "arome_run": run_dt.strftime("%Y-%m-%dT%H:00:00Z")}
+
+
+def test_lead_24_par_la_ligne_soeur():
+    """⛔ LOT L20 (04/09/2026) — le +24 h SORT, par une ligne SŒUR lue dans
+    `arome_r2`, et l'échéance qu'elle porte est celle du run d'`arome_r2`.
+    Le banc d'avant (« le +24 h ne sort pas ») reste vrai pour la ligne
+    d'ORIGINE : c'est la première moitié de celui-ci.
+    """
+    print("\n▶ 8. le +24 h sort par la ligne sœur, et pas autrement")
+    obs = _obs_constantes(20.0, 270.0)
+    veille = _serie_agrume(JOUR - timedelta(days=1))
+    rows, _ = SC.daily_rows(JOUR, {0: [], 1: [veille], 2: []}, [obs], [], 7200)
+    verifie(not [r for r in rows if r["model"] == "agrume"],
+            "la ligne d'ORIGINE (0-24 h) ne donne toujours AUCUNE ligne +24 h "
+            "(une seule heure appariable)")
+
+    # ── la sœur, run identique (00 Z) ────────────────────────────────
+    arome = _serie_arome(JOUR - timedelta(days=1))
+    soeurs, bilan = A.prolonger_h24([veille], [arome])
+    verifie(len(soeurs) == 1 and bilan["prolongees"] == 1,
+            f"une ligne sœur par ligne AGRUME ({bilan})")
+    so = soeurs[0]
+    verifie(so["model"] == "agrume" and so["agrume_h24_copie"] is True
+            and so["agrume_h24_source"] == "arome_r2",
+            "la sœur porte le nom AGRUME et se DÉCLARE copie d'arome_r2")
+    verifie(all(v is None for v in so["speed"][:24])
+            and all(v == 30.0 for v in so["speed"][24:]),
+            "ses heures < 24 sont None, ses heures ≥ 24 sont celles d'arome_r2")
+    verifie(bilan["runs_identiques"] is True, "le bilan voit que les runs sont les mêmes")
+
+    rows, _ = SC.daily_rows(JOUR, {0: [], 1: [veille, so], 2: []}, [obs], [], 7200)
+    ag = [r for r in rows if r["model"] == "agrume"]
+    verifie(len(ag) == 1 and ag[0]["lead_h"] == 24 and ag[0]["n_hours"] == 24,
+            f"⭐ UNE ligne AGRUME en classe +24 h, 24 heures appariées "
+            f"({[(r['lead_h'], r['n_hours']) for r in ag]})")
+    verifie(ag and ag[0]["err_vec_med"] == 10.0,
+            "… et son erreur est celle d'arome_r2 (30 prévu, 20 observé : 10 km/h)")
+    # à l'offset 0, la sœur ne touche pas la journée du run
+    rows0, _ = SC.daily_rows(JOUR - timedelta(days=1), {0: [veille, so], 1: [], 2: []},
+                             [_obs_constantes(20.0, 270.0, JOUR - timedelta(days=1))],
+                             [], 7200)
+    ag0 = [r for r in rows0 if r["model"] == "agrume"]
+    verifie(len(ag0) == 1 and ag0[0]["lead_h"] == 6 and ag0[0]["err_vec_med"] == 5.0,
+            "⛔ à +6 h, la classe reste la ligne d'ORIGINE, bit à bit (25 → 5 km/h) "
+            "— la sœur n'y entre pas")
+
+    # ── runs DIFFÉRENTS (arome_r2 au 03 Z) : l'échéance dit la vérité ──
+    arome03 = _serie_arome(JOUR - timedelta(days=1) + timedelta(hours=3))
+    soeurs03, bilan03 = A.prolonger_h24([veille], [arome03])
+    verifie(bilan03["runs_identiques"] is False and "≠ AGRUME" in A.dire_h24(bilan03, veille["agrume_run"]),
+            "le journal DIT que le run d'arome_r2 n'est pas celui d'AGRUME")
+    so03 = soeurs03[0]
+    verifie(so03["fetched_at"] == arome03["fetched_at"] and so03["t0"] == arome03["t0"],
+            "⛔ la sœur porte le run d'AROME_R2 (t0, fetched_at), pas celui d'AGRUME")
+    rows03, _ = SC.daily_rows(JOUR, {0: [], 1: [veille, so03], 2: []}, [obs], [], 7200)
+    ag03 = next(r for r in rows03 if r["model"] == "agrume")
+    ar03 = next(r for r in SC.daily_rows(JOUR, {0: [], 1: [arome03], 2: []}, [obs], [], 7200)[0]
+                if r["model"] == "arome_r2")
+    verifie(abs(ag03["lead_exact_h"] - ar03["lead_exact_h"]) < 1e-9,
+            f"⭐ `lead_exact_h` d'AGRUME +24 h == celui d'arome_r2 +24 h "
+            f"({ag03['lead_exact_h']} vs {ar03['lead_exact_h']}) — aucune fraîcheur volée")
+    verifie(ag03["lead_exact_h"] < 35.0,
+            "… et il est bien plus court que celui d'un 00 Z (le 03 Z est plus frais)")
+
+    # ── pas de ligne arome_r2 → pas de sœur, et c'est compté ──────────
+    rien, b_rien = A.prolonger_h24([veille], [])
+    verifie(rien == [] and b_rien["sans_arome"] == 1 and "AUCUNE" in A.dire_h24(b_rien, None),
+            "sans ligne arome_r2, aucune sœur, et le journal le dit")
+    # ── la série PI a sa sœur aussi, avec 0 heure PI ──────────────────
+    pi = dict(veille, model="agrume_pi", agrume_pi_heures=6, agrume_pi_run="x")
+    s_pi, _ = A.prolonger_h24([pi], [arome])
+    verifie(s_pi and s_pi[0]["model"] == "agrume_pi" and s_pi[0]["agrume_pi_heures"] == 0,
+            "la sœur d'agrume_pi porte `agrume_pi_heures = 0` (PI ne touche aucune de ces heures)")
+
+
 def test_lead_24_ne_sort_aucune_ligne():
     """⛔ LA PROPRIÉTÉ QUI TIENT LA DÉCISION 1 DU LOT.
 
     Le run 00 Z de la veille ne touche la journée notée que par l'heure
     00 : une seule heure appariable, sous `MIN_HOURS_DAILY`. Si ce banc
-    tombe un jour, c'est que l'horizon d'AGRUME a bougé — et alors la
-    phrase « AGRUME n'a pas de score +24 h », écrite dans le README,
-    dans `stationScore.ts` et à l'écran, est devenue fausse.
+    tombe un jour, c'est que l'horizon de l'ARCHIVE AGRUME a bougé.
+    ⓘ Lot L20 (04/09/2026) : le +24 h existe désormais, mais par la ligne
+    SŒUR (`test_lead_24_par_la_ligne_soeur`) — cette propriété-ci reste
+    vraie pour la ligne d'origine, et c'est ce qui garantit que la
+    classe +6 h n'a pas bougé.
     """
     print("\n▶ 8. le +24 h ne sort pas, et c'est mesuré")
     obs = _obs_constantes(20.0, 270.0)
@@ -513,6 +597,7 @@ def main() -> int:
     test_garde_de_bucket()
     test_lead_6_sort_avec_un_score_connu()
     test_lead_24_ne_sort_aucune_ligne()
+    test_lead_24_par_la_ligne_soeur()
     test_run_absent()
     test_cle_et_bout_a_bout()
     print("\n" + "═" * 66)

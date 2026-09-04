@@ -183,17 +183,45 @@ def membres(rows_station: Sequence[dict]) -> list[dict]:
     for _, lectures in FAMILLES.items():
         gardee = next((m for m in lectures if m in presents), None)
         exclus_famille |= {m for m in lectures if m != gardee}
-    vus: set[str] = set()
+    # ⓘ Lot L20 (04/09) : un même modèle peut arriver en DEUX lignes —
+    # AGRUME et sa ligne sœur +24 h (heures 24-47 lues dans arome_r2,
+    # sous un autre run). Elles se FUSIONNENT par heure valide (la
+    # première l'emporte là où les deux parlent) : deux lignes d'un même
+    # modèle comptées comme deux membres lui donneraient deux voix.
+    par_modele: dict[str, dict] = {}
     for r in rows_station:
         m = r.get("model")
         if (m is None or m in MODELES_MELANGE or m in exclus_famille
-                or m in vus
                 or r.get("lead_h") is not None or r.get("synthese")
                 or int(r.get("step_s") or 0) != MIX_STEP_S
                 or not r.get("speed")):
             continue
-        vus.add(m)
-        out.append(r)
+        par_modele[m] = (r if m not in par_modele
+                         else fusionner(par_modele[m], r))
+    return list(par_modele.values())
+
+
+def fusionner(a: dict, b: dict) -> dict:
+    """Une ligne sur l'union des grilles de `a` et `b` (même pas), `a`
+    prioritaire là où les deux ont une valeur. `fetched_at` = le plus
+    ANCIEN des deux — même règle que `melanger` : pas de fraîcheur
+    volée."""
+    ta, tb = _times(a), _times(b)
+    t0 = min(ta[0], tb[0])
+    fin = max(ta[-1], tb[-1])
+    n = (fin - t0) // MIX_STEP_S + 1
+    speed: list = [None] * n
+    direction: list = [None] * n
+    for r, ts in ((b, tb), (a, ta)):          # b d'abord, a écrase
+        sp, di = r.get("speed") or [], r.get("dir") or []
+        for i, t in enumerate(ts):
+            j = (t - t0) // MIX_STEP_S
+            if i < len(sp) and S._finite(sp[i]):
+                speed[j] = sp[i]
+                direction[j] = di[i] if i < len(di) and S._finite(di[i]) else None
+    out = dict(a)
+    out.update({"t0": t0, "speed": speed, "dir": direction,
+                "fetched_at": min(a["fetched_at"], b["fetched_at"])})
     return out
 
 

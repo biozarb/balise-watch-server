@@ -113,6 +113,26 @@ m2 = {r["model"] for r in MX.membres(sans_hd)}
 check("sans la chaîne de référence, c'est `arome_r2` qui parle pour AROME",
       "arome_r2" in m2 and "agrume" not in m2, f"{m2}")
 
+# ⓘ Lot L20 : un même modèle en DEUX lignes (AGRUME + sa sœur +24 h,
+# sous un autre run) — une seule voix, fusionnée par heure valide.
+orig = ligne("agrume_pi", [10.0] * 25, [90.0] * 25,
+             fetched="2026-09-04T00:00:00+00:00")                          # 00 Z, 0-24
+soeur = ligne("agrume_pi", [None] * 21 + [30.0] * 31, [None] * 21 + [180.0] * 31,
+              t0=T0 + 3 * 3600, fetched="2026-09-04T03:00:00+00:00")       # 03 Z, h ≥ 24
+autre = ligne("ecmwf_ifs025", [5.0] * 48, [0.0] * 48)
+mm = MX.membres([orig, soeur, autre])
+check("⭐ deux lignes d'un même modèle ne font qu'UN membre",
+      sorted(r["model"] for r in mm) == ["agrume_pi", "ecmwf_ifs025"],
+      f"{[r['model'] for r in mm]}")
+fus = next(r for r in mm if r["model"] == "agrume_pi")
+check("… fusionné sur l'union des grilles (0 → 3 + 51 = 54 h, 55 cases)",
+      fus["t0"] == T0 and len(fus["speed"]) == 55, f"{fus['t0'], len(fus['speed'])}")
+check("… la première ligne l'emporte là où les deux parlent (h 24 : 10, pas 30)",
+      fus["speed"][24] == 10.0 and fus["speed"][25] == 30.0 and fus["speed"][10] == 10.0,
+      f"{fus['speed'][22:27]}")
+check("… et son fetched_at est le plus ANCIEN des deux",
+      fus["fetched_at"] == "2026-09-04T00:00:00+00:00")
+
 # ══════════════════════════════════════════════════════════════════
 print("── 3. LE MÉLANGE EN (u, v) ──")
 # ══════════════════════════════════════════════════════════════════

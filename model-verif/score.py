@@ -6631,6 +6631,11 @@ def main() -> int:
         # domaine perdu, une ingestion muette — se lirait comme un
         # simple flottement du total, ou ne se lirait pas du tout.
         n_pi = sum(1 for r in rows if r.get("model") == AGRUME_PI_MODEL)
+        # ⓘ Lot L20 (04/09) : les lignes SŒURS +24 h (heures 24-47 lues
+        # dans arome_r2) se déclarent ; sans ce compte, le message
+        # ci-dessous continuerait d'annoncer « AUCUNE ligne » à un offset
+        # qui en donne désormais.
+        n_h24 = sum(1 for r in rows if r.get("agrume_h24_copie"))
         # ⚠️ Le compte AGRUME se dit à chaque offset, y compris quand il
         # est destiné à ne rien produire. Une ligne « 0 » qui n'apparaît
         # jamais et une ligne qui manque se lisent pareil dans un
@@ -6640,9 +6645,11 @@ def main() -> int:
               + (f" — dont {n_ag} AGRUME" if n_ag else "")
               + (f" et {n_pi} AGRUME+PI" if n_pi else
                  " et AUCUNE ligne AGRUME+PI" if n_ag else "")
+              + (f", dont {n_h24} ligne(s) sœur(s) +24 h lue(s) dans "
+                 f"arome_r2 (lot L20)" if n_h24 else "")
               + (f", qui ne donneront AUCUNE ligne : horizon 24 h, moins de "
                  f"{MIN_HOURS_DAILY} heures appariables à cet offset"
-                 if n_ag and offset else ""))
+                 if n_ag and offset and not n_h24 else ""))
         # ⚠️ ET LA LIGNE QUI NOMME LE FLUX. « 1 partie sur 2 » sans son
         # flux se lit « il manque un flux sur trois » : `snapshot_rows`
         # en lit trois (`fcst`, `fcstagrume`, `fcstarome`) et seul

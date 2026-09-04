@@ -689,6 +689,14 @@ AGRUME sont publiés depuis longtemps : il n'y a aucune course.
   Écrire un `if offset == 0` produirait le même résultat en le faisant
   dépendre d'une constante lue ailleurs. Tenu par
   `test_agrume_fcst.py::test_lead_24_ne_sort_aucune_ligne`.
+  ⭐ **Lot L20 (04/09/2026) : AGRUME est noté à +24 h AUSSI**, par une
+  ligne SŒUR écrite dans le même flux — ses heures 24-47 sont lues dans
+  `fcstarome_{J}` (`arome_r2`, tuiles AROME 0-51 h), sous le run
+  d'`arome_r2` (`fetched_at`, `t0`), parce qu'au-delà de +6 h l'AGRUME
+  servi EST l'AROME brut. L'archive `agrume/colonnes/` s'arrête
+  toujours à 24 h ; la propriété ci-dessus reste vraie pour la ligne
+  d'origine (c'est ce qui garantit que +6 h n'a pas bougé). Tenu par
+  `test_lead_24_par_la_ligne_soeur`. +48 h reste impossible (horizon 51 h).
 - ⛔ **AGRUME ne consomme RIEN du quota Open-Meteo.** Il lit R2. Le
   tableau du § « Les modèles suivis » reste juste, et la conclusion
   « il ne reste aucune place » aussi — mais elle ne s'applique pas ici.

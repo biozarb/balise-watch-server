@@ -25,7 +25,14 @@
 #
 #  ═══ LES TROIS DÉCISIONS DE YANN, 13/08/2026 ═══
 #
-#  1. ⛔ **Lead +6 h SEUL.** `LEAD_BY_OFFSET = {0: 6, 1: 24, 2: 48}`
+#  1. ⛔ **Lead +6 h SEUL.** ⛔⛔ **LEVÉE LE 04/09/2026 (lot L20) — voir
+#     `prolonger_h24` ci-dessous.** La décision n'est pas contredite,
+#     elle est contournée par un autre chemin : l'archive `agrume/
+#     colonnes/` s'arrête toujours à 24 h (rien de plus n'est stocké),
+#     mais la classe +24 h est désormais servie par une ligne SŒUR dont
+#     les heures 24-47 sont LUES dans `fcstarome_{J}` (arome_r2, 0-51 h,
+#     déjà sur R2). Le reste du pavé ci-dessous décrit l'état d'avant.
+#     `LEAD_BY_OFFSET = {0: 6, 1: 24, 2: 48}`
 #     classe une ligne par l'écart en JOURS entre le fichier de
 #     snapshot et la journée notée, et `MIN_HOURS_DAILY` vaut 6.
 #     L'archive AGRUME s'arrête à +24 h : le run 00 Z de J ne touche la
@@ -149,7 +156,8 @@ from colonnes import Colonnes                               # noqa: E402
 from composite import facteur_cisaillement, poids_pi        # noqa: E402
 from pi import cles_du_run_colonnes                         # noqa: E402
 from profil import decorer_vent                             # noqa: E402
-from score import fcst_agrume_key                           # noqa: E402
+from score import fcst_agrume_key, fcst_arome_key, read_ndjson  # noqa: E402
+from score import _storage as _storage_score                 # noqa: E402
 
 # ══════════════════════════════════════════════════════════════════
 #  CONSTANTES
@@ -770,6 +778,131 @@ def lignes(col, man: dict, maille: str = MAILLE_DEFAUT, *,
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════
+#  AGRUME À +24 H — la ligne sœur lue dans `fcstarome_{J}` (lot L20, 04/09/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ CE QUE C'EST : au-delà de +6 h, l'AGRUME SERVI à l'écran EST
+#  l'AROME brut — AROME-PI ne porte que 6 h (`poids_pi` vaut 0 à 6 h,
+#  bancé). Noter AGRUME à +24 h, c'est donc noter AROME à +24 h sous le
+#  nom du produit que le pilote lit. Les heures 24-47 ne sont pas dans
+#  l'archive AGRUME (0-24 h, décision de stockage du 13/08 : 23 Go/an
+#  contre 93) ; elles sont dans `fcstarome_{J}`, écrit par
+#  `arome_fcst.py` à 07:00 Z le jour même sur les tuiles `arome/sol`
+#  (0-51 h) — la « route courte » du rapport de cohérence du 02/09,
+#  prise par l'ARCHIVE et non par les tuiles : les tuiles sont
+#  réécrites toutes les 3 h et, à 03:35 Z, elles portent déjà le run du
+#  lendemain (mesuré le 04/09).
+#
+#  ⛔ UNE LIGNE SŒUR, PAS UN PROLONGEMENT EN PLACE — et c'est ce qui
+#  tient l'honnêteté de l'échéance. Mesuré sur 13 journées (22/08 →
+#  03/09) : `arome_r2` est au run 03 Z **5 jours sur 13** quand AGRUME
+#  est toujours au 00 Z. Prolonger la ligne 00 Z avec des heures d'un
+#  run 03 Z lui aurait donné, sous l'étiquette « +24 h », des données
+#  3 h plus fraîches que son `fetched_at` — l'« avantage silencieux »
+#  refusé le 13/08. La ligne sœur porte SON run (`t0`, `fetched_at` =
+#  ceux d'`arome_r2`), donc `lead_exact_h` dit la vérité, et il est
+#  identique à celui d'`arome_r2` à +24 h. Décision de Yann du 04/09 :
+#  « copier arome_r2 même au run 03 Z » — la classe est couverte tous
+#  les jours, et l'échéance réelle voyage avec la ligne.
+#
+#  ⓘ Et à l'offset 0 (la journée du run), la ligne sœur ne touche pas la
+#  journée notée : ses heures < 24 sont `None`. Elle ne produit donc
+#  rien à +6 h — la classe +6 h reste la ligne d'origine, bit à bit.
+#
+#  ⓘ AU CLASSEMENT, `agrume_pi` à +24 h concourt comme à +6 h, contre
+#  `meteofrance_arome_france_hd` (Open-Meteo) — c'est déjà le cas
+#  aujourd'hui à +6 h — et `arome_r2` reste l'écarté du L2 quand la
+#  chaîne de référence est là. Décision de Yann du 04/09 : « classé
+#  comme AGRUME ». `agrume` (le témoin brut) reste `serie_temoin` (L18).
+#
+#  ⚠️ +48 h RESTE IMPOSSIBLE avec AROME : horizon 51 h, le run 00 Z de
+#  J-2 ne couvre que 4 h de J. Aucune ligne sœur n'est écrite pour ça.
+
+#: Le modèle dont les heures 24-47 sont copiées.
+H24_SOURCE = "arome_r2"
+
+#: Première échéance copiée, en heures APRÈS LE RUN AGRUME. 24 et non
+#: 25 : l'heure 24 est déjà dans l'archive AGRUME (0-24), mais elle est
+#: recopiée depuis `arome_r2` pour que la ligne sœur soit d'UN SEUL run.
+H24_DEBUT = 24
+
+
+def prolonger_h24(rows: list[dict], arome_rows: list[dict],
+                  crier=print) -> tuple[list[dict], dict]:
+    """Une ligne SŒUR par ligne `agrume` / `agrume_pi`, aux heures ≥ 24 h
+    après le run AGRUME, lue dans la ligne `arome_r2` de la même balise.
+
+    Rend `(lignes sœurs, bilan)`. Une balise sans ligne `arome_r2` n'a
+    pas de sœur, et se compte. La sœur porte le run d'`arome_r2` (`t0`,
+    `fetched_at`, `agrume_h24_run`) et se déclare (`agrume_h24_copie`,
+    `agrume_h24_source`) pour que `score.py` puisse la compter et que
+    personne ne la prenne pour de l'AGRUME calculé.
+    """
+    par_unite: dict[str, dict] = {}
+    for a in arome_rows:
+        if a.get("model") == H24_SOURCE and a.get("speed"):
+            par_unite.setdefault(f"{a['source']}:{a['station_id']}", a)
+    out: list[dict] = []
+    bilan = {"prolongees": 0, "sans_arome": 0, "vides": 0,
+             "run_arome": None, "runs_identiques": None}
+    for r in rows:
+        a = par_unite.get(f"{r['source']}:{r['station_id']}")
+        if a is None:
+            bilan["sans_arome"] += 1
+            continue
+        if bilan["run_arome"] is None:
+            bilan["run_arome"] = a.get("arome_run")
+            bilan["runs_identiques"] = (a.get("arome_run") == r.get("agrume_run"))
+        t_debut = int(r["t0"]) + H24_DEBUT * STEP_S
+        t0a, pas = int(a["t0"]), int(a.get("step_s") or STEP_S)
+        n = len(a["speed"])
+        dirs = a.get("dir") or [None] * n
+        speed = [a["speed"][i] if t0a + i * pas >= t_debut else None
+                 for i in range(n)]
+        direction = [dirs[i] if t0a + i * pas >= t_debut and i < len(dirs)
+                     else None for i in range(n)]
+        if all(v is None for v in speed):
+            bilan["vides"] += 1
+            continue
+        soeur = {
+            "station_id": r["station_id"], "source": r["source"],
+            "lat": r.get("lat"), "lon": r.get("lon"),
+            "model": r["model"],
+            # ⛔ LE RUN D'AROME_R2, pas celui d'AGRUME : c'est lui qui a
+            # produit ces heures, et `lead_exact_h` doit le dire.
+            "fetched_at": a["fetched_at"],
+            "t0": t0a, "step_s": pas,
+            "speed": speed, "dir": direction,
+            "agrume_run": r.get("agrume_run"),
+            "agrume_maille": r.get("agrume_maille"),
+            "agrume_h24_copie": True,
+            "agrume_h24_source": H24_SOURCE,
+            "agrume_h24_run": a.get("arome_run"),
+        }
+        if r["model"] == MODEL_PI:
+            # PI ne touche aucune de ces heures, et le compte le dit.
+            soeur["agrume_pi_heures"] = 0
+            soeur["agrume_pi_run"] = r.get("agrume_pi_run")
+        out.append(soeur)
+        bilan["prolongees"] += 1
+    return out, bilan
+
+
+def dire_h24(bilan: dict, run_agrume: str | None) -> str:
+    if not bilan["prolongees"]:
+        return (f"AGRUME +24 h : AUCUNE ligne sœur — {bilan['sans_arome']} "
+                f"balise(s) sans ligne {H24_SOURCE}, {bilan['vides']} vide(s)")
+    meme = bilan.get("runs_identiques")
+    return (f"AGRUME +24 h : {bilan['prolongees']} ligne(s) sœur(s) lue(s) "
+            f"dans {H24_SOURCE} (run {bilan['run_arome']}"
+            + (" — le même qu'AGRUME" if meme else
+               f" ≠ AGRUME {run_agrume} : la classe +24 h porte l'échéance "
+               f"réelle du run {H24_SOURCE}, pas celle d'AGRUME")
+            + f"), {bilan['sans_arome']} balise(s) sans ligne {H24_SOURCE}"
+            + (f", {bilan['vides']} vide(s)" if bilan["vides"] else ""))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="/var/lib/bw-model-verif")
@@ -788,6 +921,9 @@ def main() -> int:
                          "absent, pas d'un drapeau qu'on a oublié d'enlever")
     ap.add_argument("--dry-run", action="store_true",
                     help="tout lire, tout compter, n'écrire ni fichier ni R2")
+    ap.add_argument("--sans-h24", action="store_true",
+                    help="ne pas écrire les lignes sœurs +24 h (lot L20). "
+                         "⚠️ À la main seulement, même règle que --sans-pi")
     args = ap.parse_args()
 
     root = pathlib.Path(args.out)
@@ -868,6 +1004,28 @@ def main() -> int:
         print("❌ le run existe mais aucune balise n'a de vent 10 m — "
               "ce n'est pas un run vide, c'est un run cassé.", file=sys.stderr)
         return 1
+
+    # ── La classe +24 h : les lignes sœurs (lot L20) ──────────────────
+    # ⚠️ Sous `try` et JAMAIS bloquant : `fcstarome_{J}` peut manquer
+    # (bw-model-arome tombé ce jour-là, tuiles absentes) — la classe
+    # +24 h manque alors, se DIT, et la classe +6 h ne perd rien.
+    if args.sans_h24:
+        print("  (--sans-h24) lignes sœurs +24 h non produites")
+    else:
+        try:
+            arome_rows = read_ndjson(root, fcst_arome_key(day), _storage_score())
+            if not arome_rows:
+                print(f"  ⚠️ AGRUME +24 h : `{fcst_arome_key(day)}` absent "
+                      f"(local et R2) — aucune ligne sœur, la classe +24 h "
+                      f"manquera pour cette journée", file=sys.stderr)
+            else:
+                soeurs, bilan_h24 = prolonger_h24(rows, arome_rows)
+                print(f"  {dire_h24(bilan_h24, man.get('run'))}")
+                rows = rows + soeurs
+        except Exception as exc:                            # noqa: BLE001
+            print(f"  ⚠️ AGRUME +24 h : {type(exc).__name__} — {exc}. La "
+                  f"classe +6 h n'est pas affectée ; la classe +24 h "
+                  f"manquera pour cette journée.", file=sys.stderr)
 
     key = fcst_agrume_key(day)
     if args.dry_run:
