@@ -133,6 +133,51 @@ check("… la première ligne l'emporte là où les deux parlent (h 24 : 10, pas
 check("… et son fetched_at est le plus ANCIEN des deux",
       fus["fetched_at"] == "2026-09-04T00:00:00+00:00")
 
+# ⓘ Lot L22a : TROIS lignes d'un même modèle — l'origine (0-24 h), la
+# sœur +24 h (arome_r2) et la sœur +48 h (ecmwf_ifs025). La fusion se
+# replie deux fois ; c'est le pli qu'on vérifie, pas la première étape.
+s24 = ligne("agrume_pi", [None] * 24 + [30.0] * 24, [None] * 24 + [180.0] * 24,
+            fetched="2026-09-04T03:00:00+00:00",
+            agrume_h24_copie=True, agrume_h24_source="arome_r2")
+s48 = ligne("agrume_pi", [None] * 48 + [50.0] * 24, [None] * 48 + [270.0] * 24,
+            fetched="2026-09-04T03:19:00+00:00",
+            agrume_h48_copie=True, agrume_h48_source="ecmwf_ifs025")
+m3 = MX.membres([orig, s24, s48])
+check("⭐ TROIS lignes d'un même modèle ne font toujours qu'UN membre",
+      len(m3) == 1 and m3[0]["model"] == "agrume_pi", f"{len(m3)}")
+f3 = m3[0]
+check("… sur les 72 heures de l'union, sans trou entre les trois tranches",
+      len(f3["speed"]) == 72 and all(v is not None for v in f3["speed"]),
+      f"{len(f3['speed'])}, {f3['speed'].count(None)} trou(s)")
+check("… et chaque tranche vient de la bonne ligne (0-24 origine, "
+      "24-47 la sœur +24 h, 48-71 la sœur +48 h)",
+      f3["speed"][10] == 10.0 and f3["speed"][30] == 30.0
+      and f3["speed"][60] == 50.0,
+      f"{f3['speed'][10], f3['speed'][30], f3['speed'][60]}")
+check("… le fetched_at reste le plus ANCIEN des TROIS",
+      f3["fetched_at"] == "2026-09-04T00:00:00+00:00", f3["fetched_at"])
+
+# ⛔⛔ Lot L22a — UNE COPIE N'A PAS DE VOIX PROPRE, ET C'EST PAR ÉCHÉANCE.
+ecm = ligne("ecmwf_ifs025", [50.0] * 72, [270.0] * 72)
+aro = ligne("arome_r2", [30.0] * 52, [180.0] * 52)
+sc = [orig, s24, s48, ecm, aro]
+check("⛔ à +48 h, `agrume_pi` n'entre PAS : ses heures sont la ligne "
+      "`ecmwf_ifs025` recopiée, et ECMWF est là — deux voix pour un seul "
+      "modèle, refusé",
+      {r["model"] for r in MX.membres(sc, 48)} == {"ecmwf_ifs025", "arome_r2"},
+      f"{sorted(r['model'] for r in MX.membres(sc, 48))}")
+check("⛔ à +24 h non plus : ses heures 24-47 sont `arome_r2` recopié",
+      "agrume_pi" not in {r["model"] for r in MX.membres(sc, 24)},
+      f"{sorted(r['model'] for r in MX.membres(sc, 24))}")
+check("⭐ à +6 h il entre : là, c'est de l'AGRUME calculé, pas une copie",
+      "agrume_pi" in {r["model"] for r in MX.membres(sc, 6)},
+      f"{sorted(r['model'] for r in MX.membres(sc, 6))}")
+check("… et si le modèle COPIÉ est absent, la copie garde sa voix "
+      "(c'est alors la seule à porter ces heures)",
+      "agrume_pi" in {r["model"] for r in MX.membres([orig, s24, s48], 48)})
+check("sans `lead`, le comportement d'avant le L22a est inchangé",
+      "agrume_pi" in {r["model"] for r in MX.membres(sc)})
+
 # ══════════════════════════════════════════════════════════════════
 print("── 3. LE MÉLANGE EN (u, v) ──")
 # ══════════════════════════════════════════════════════════════════

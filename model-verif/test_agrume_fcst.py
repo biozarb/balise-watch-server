@@ -425,8 +425,17 @@ def test_lead_24_par_la_ligne_soeur():
             and so["agrume_h24_source"] == "arome_r2",
             "la sœur porte le nom AGRUME et se DÉCLARE copie d'arome_r2")
     verifie(all(v is None for v in so["speed"][:24])
-            and all(v == 30.0 for v in so["speed"][24:]),
-            "ses heures < 24 sont None, ses heures ≥ 24 sont celles d'arome_r2")
+            and all(v == 30.0 for v in so["speed"][24:48]),
+            "ses heures < 24 sont None, ses heures 24-47 sont celles d'arome_r2")
+    # ⛔ LOT L22a — ET LA FENÊTRE EST FERMÉE EN HAUT. `arome_r2` porte
+    # 0-51 h ; les heures 48-51 ne sont pas de la classe +24 h, elles
+    # tombent dans la journée de l'offset 2. Sans cette borne, la sœur
+    # +24 h fabriquait une SECONDE ligne AGRUME en classe +48 h (7 heures
+    # appariables quand `arome_r2` est au 03 Z, plancher à 6), faite
+    # d'AROME, en concurrence avec celle du L22a faite d'IFS.
+    verifie(all(v is None for v in so["speed"][48:]),
+            f"⭐ ses heures ≥ 48 sont None : la sœur +24 h ne déborde PAS "
+            f"sur la classe +48 h ({so['speed'][47:52]})")
     verifie(bilan["runs_identiques"] is True, "le bilan voit que les runs sont les mêmes")
 
     rows, _ = SC.daily_rows(JOUR, {0: [], 1: [veille, so], 2: []}, [obs], [], 7200)
@@ -465,13 +474,202 @@ def test_lead_24_par_la_ligne_soeur():
 
     # ── pas de ligne arome_r2 → pas de sœur, et c'est compté ──────────
     rien, b_rien = A.prolonger_h24([veille], [])
-    verifie(rien == [] and b_rien["sans_arome"] == 1 and "AUCUNE" in A.dire_h24(b_rien, None),
+    verifie(rien == [] and b_rien["sans_source"] == 1 and "AUCUNE" in A.dire_h24(b_rien, None),
             "sans ligne arome_r2, aucune sœur, et le journal le dit")
     # ── la série PI a sa sœur aussi, avec 0 heure PI ──────────────────
     pi = dict(veille, model="agrume_pi", agrume_pi_heures=6, agrume_pi_run="x")
     s_pi, _ = A.prolonger_h24([pi], [arome])
     verifie(s_pi and s_pi[0]["model"] == "agrume_pi" and s_pi[0]["agrume_pi_heures"] == 0,
             "la sœur d'agrume_pi porte `agrume_pi_heures = 0` (PI ne touche aucune de ces heures)")
+
+
+def _serie_ecmwf(jour, run_init=None, appel_h=3.32, n_heures=72,
+                 speed_kmh=35.0, dir_deg=270.0):
+    """Une ligne `ecmwf_ifs025` telle que `collect.py` l'écrit.
+
+    ⛔ LES TROIS HORLOGES SONT DIFFÉRENTES, ET C'EST LE POINT DU LOT :
+    `t0` = 00:00 Z du jour d'émission, `fetched_at` = l'heure de NOTRE
+    appel (~03:19 Z), `run_init` = le run IFS servi (mesuré : J-1 18 Z,
+    8 jours sur 8). Un banc qui les confondrait passerait au vert sur un
+    code qui stampe le mauvais run.
+    """
+    if run_init is None:
+        run_init = jour - timedelta(hours=6)      # J-1 18 Z
+    return {"station_id": "70", "source": "pioupiou", "lat": 46.15, "lon": 6.19,
+            "model": "ecmwf_ifs025",
+            "fetched_at": (jour + timedelta(hours=appel_h)).isoformat(),
+            "t0": int(jour.timestamp()), "step_s": 3600,
+            "speed": [speed_kmh] * n_heures, "dir": [dir_deg] * n_heures,
+            "run_init": int(run_init.timestamp()),
+            "run_avail": int((run_init + timedelta(hours=7)).timestamp())}
+
+
+def test_lead_48_par_la_ligne_soeur():
+    """⛔ LOT L22a (05/09/2026) — le +48 h SORT, par une SECONDE ligne
+    sœur, et ce n'est PAS de l'AROME : c'est l'IFS 0,25° d'`ecmwf_ifs025`.
+
+    Ce banc tient quatre propriétés que rien d'autre ne tient :
+    (a) la ligne d'origine (0-24 h) ne donne toujours rien à +48 h ;
+    (b) la sœur porte le run et l'échéance de la ligne IFS, pas ceux
+        d'AGRUME — `lead_exact_h` identique à celui d'`ecmwf_ifs025` ;
+    (c) le run stampé est `run_init` (le run du MODÈLE), pas
+        `fetched_at` (l'heure de notre appel) ;
+    (d) +6 h et +24 h ne bougent pas d'un bit quand la sœur +48 h
+        s'ajoute.
+    """
+    print("\n▶ 8 bis. le +48 h sort par la ligne sœur, et c'est de l'IFS")
+    obs = _obs_constantes(20.0, 270.0)
+    avant_hier = JOUR - timedelta(days=2)
+    origine = _serie_agrume(avant_hier)
+
+    # (a) la ligne d'ORIGINE ne touche pas la journée notée à +48 h
+    rows, _ = SC.daily_rows(JOUR, {0: [], 1: [], 2: [origine]}, [obs], [], 7200)
+    verifie(not [r for r in rows if r["model"] == "agrume"],
+            "la ligne d'ORIGINE (0-24 h) ne donne AUCUNE ligne +48 h")
+
+    ecm = _serie_ecmwf(avant_hier)
+    soeurs, bilan = A.prolonger_h48([origine], [ecm])
+    verifie(len(soeurs) == 1 and bilan["prolongees"] == 1
+            and bilan["source"] == "ecmwf_ifs025" and bilan["lead"] == 48,
+            f"une ligne sœur +48 h par ligne AGRUME ({bilan})")
+    so = soeurs[0]
+    verifie(so["model"] == "agrume" and so["agrume_h48_copie"] is True
+            and so["agrume_h48_source"] == "ecmwf_ifs025",
+            "la sœur porte le nom AGRUME et se DÉCLARE copie d'ecmwf_ifs025")
+    verifie(all(v is None for v in so["speed"][:48])
+            and all(v == 35.0 for v in so["speed"][48:]),
+            "ses heures < 48 sont None, ses heures ≥ 48 sont celles de l'IFS")
+
+    # (c) le run stampé est celui du MODÈLE, pas celui de l'appel d'API
+    verifie(so["agrume_h48_run"] == (avant_hier - timedelta(hours=6)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"),
+            f"⭐ `agrume_h48_run` = le run IFS (`run_init`, J-1 18 Z) et non "
+            f"l'heure de notre appel ({so['agrume_h48_run']})")
+    verifie(so["agrume_h48_run"][11:13] == "18" and so["fetched_at"][11:13] == "03",
+            "⛔ les deux horloges DIFFÈRENT dans la ligne écrite — run 18 Z, "
+            "appel 03 Z : confondre les deux ferait dire à l'archive qu'ECMWF "
+            "publie un run à 3 h du matin")
+    verifie(bilan["runs_identiques"] is False
+            and "≠ AGRUME" in A.dire_h48(bilan, origine["agrume_run"]),
+            "le journal DIT que le run IFS n'est pas celui d'AGRUME "
+            "(il ne l'est JAMAIS : 18 Z contre 00 Z)")
+
+    # (b) la classe sort, avec l'erreur posée et l'échéance de l'IFS
+    rows, _ = SC.daily_rows(JOUR, {0: [], 1: [], 2: [origine, so]},
+                            [obs], [], 7200)
+    ag = [r for r in rows if r["model"] == "agrume"]
+    verifie(len(ag) == 1 and ag[0]["lead_h"] == 48 and ag[0]["n_hours"] == 24,
+            f"⭐ UNE ligne AGRUME en classe +48 h, 24 heures appariées "
+            f"({[(r['lead_h'], r['n_hours']) for r in ag]})")
+    verifie(ag[0]["err_vec_med"] == 15.0,
+            "… et son erreur est celle de l'IFS (35 prévu, 20 observé)")
+    ec = next(r for r in SC.daily_rows(JOUR, {0: [], 1: [], 2: [ecm]},
+                                       [obs], [], 7200)[0]
+              if r["model"] == "ecmwf_ifs025")
+    verifie(abs(ag[0]["lead_exact_h"] - ec["lead_exact_h"]) < 1e-9,
+            f"⭐ `lead_exact_h` d'AGRUME +48 h == celui d'ecmwf_ifs025 +48 h "
+            f"({ag[0]['lead_exact_h']} vs {ec['lead_exact_h']}) — aucune "
+            f"fraîcheur volée, et aucune fraîcheur perdue non plus")
+    verifie(abs(ag[0]["err_vec_med"] - ec["err_vec_med"]) < 1e-12,
+            "⛔ ET LE SCORE EST RIGOUREUSEMENT ÉGAL À CELUI D'ECMWF : la "
+            "sœur est la MÊME ligne recopiée. À +48 h, tant que le L22b "
+            "n'est pas là, il n'y a AUCUN écart de chaîne à mesurer")
+
+    # ── les DEUX sœurs coexistent sur la même origine ────────────────
+    arome = _serie_arome(avant_hier)
+    s24, _ = A.prolonger_h24([origine], [arome])
+    s48, b48 = A.prolonger_h48([origine], [ecm])
+    verifie(len(s24) == 1 and len(s48) == 1
+            and "agrume_h48_copie" not in s24[0]
+            and "agrume_h24_copie" not in s48[0],
+            "chaque sœur ne déclare QUE sa propre classe")
+    # ⛔ et une sœur ne se prolonge JAMAIS elle-même
+    rien, b_rien = A.prolonger_h48(s24, [ecm])
+    verifie(rien == [] and b_rien["prolongees"] == 0,
+            "⛔ une ligne SŒUR ne donne pas de sœur : pas de copie de copie")
+
+    # ⛔⛔ ET LA SŒUR +24 H NE FABRIQUE PAS UNE SECONDE LIGNE À +48 H.
+    # C'est le défaut que le L22a a trouvé dans le L20 : `arome_r2` porte
+    # 0-51 h, et au run 03 Z ses heures 48-51 couvrent SEPT heures de la
+    # journée notée à +48 h — une de plus que `MIN_HOURS_DAILY`. Sans la
+    # borne haute `H24_FIN`, la case « agrume / +48 h » recevait DEUX
+    # lignes : celle-ci, faite d'AROME, et celle du L22a, faite d'IFS.
+    arome03 = _serie_arome(avant_hier + timedelta(hours=3))
+    s24_03, _ = A.prolonger_h24([origine], [arome03])
+    rows48, _ = SC.daily_rows(JOUR, {0: [], 1: [], 2: [origine] + s24_03 + s48},
+                              [obs], [], 7200)
+    ag48 = [r for r in rows48 if r["model"] == "agrume"]
+    verifie(len(ag48) == 1 and ag48[0]["n_hours"] == 24
+            and ag48[0]["err_vec_med"] == 15.0,
+            f"⭐⭐ UNE seule ligne AGRUME à +48 h, et c'est celle de l'IFS "
+            f"— la sœur +24 h d'un `arome_r2` au 03 Z ne déborde pas "
+            f"({[(r['lead_h'], r['n_hours'], r['err_vec_med']) for r in ag48]})")
+
+    # (d) +6 h et +24 h inchangés, bit à bit, avec la sœur +48 h en plus
+    hier = JOUR - timedelta(days=1)
+    o_hier = _serie_agrume(hier)
+    s24_hier, _ = A.prolonger_h24([o_hier], [_serie_arome(hier)])
+    s48_hier, _ = A.prolonger_h48([o_hier], [_serie_ecmwf(hier)])
+    sans, _ = SC.daily_rows(JOUR, {0: [_serie_agrume(JOUR)],
+                                   1: [o_hier] + s24_hier, 2: []},
+                            [obs], [], 7200)
+    avec, _ = SC.daily_rows(JOUR, {0: [_serie_agrume(JOUR)],
+                                   1: [o_hier] + s24_hier + s48_hier,
+                                   2: [origine, so]}, [obs], [], 7200)
+    cle = lambda r: (r["model"], r["lead_h"])                # noqa: E731
+    ref = {cle(r): r for r in sans if r["model"].startswith("agrume")}
+    now = {cle(r): r for r in avec if r["model"].startswith("agrume")}
+    verifie(all(now[k] == v for k, v in ref.items()),
+            f"⛔ les classes +6 h et +24 h sont IDENTIQUES avec et sans la "
+            f"sœur +48 h ({sorted(ref)} inchangées)")
+    verifie(("agrume", 48) in now and ("agrume", 48) not in ref,
+            "… et la classe +48 h est la SEULE ligne nouvelle")
+
+    # ── sans ligne IFS, aucune sœur, et le journal le dit ────────────
+    vide, b_vide = A.prolonger_h48([origine], [])
+    verifie(vide == [] and b_vide["sans_source"] == 1
+            and "AUCUNE" in A.dire_h48(b_vide, None),
+            "sans ligne ecmwf_ifs025, aucune sœur, et le journal le dit")
+    # ── et une ligne d'un AUTRE modèle ne sert pas de source ─────────
+    faux, b_faux = A.prolonger_h48([origine], [dict(ecm, model="gfs_global")])
+    verifie(faux == [] and b_faux["sans_source"] == 1,
+            "⛔ seule une ligne `ecmwf_ifs025` sert de source — `gfs_global` "
+            "est dans le MÊME fichier et ne doit jamais y passer")
+    # ── la série PI a sa sœur +48 h aussi, avec 0 heure PI ───────────
+    pi = dict(origine, model="agrume_pi", agrume_pi_heures=6, agrume_pi_run="x")
+    s_pi, _ = A.prolonger_h48([pi], [ecm])
+    verifie(s_pi and s_pi[0]["model"] == "agrume_pi"
+            and s_pi[0]["agrume_pi_heures"] == 0,
+            "la sœur d'agrume_pi porte `agrume_pi_heures = 0` (PI ne porte "
+            "que 6 h ; à +48 h il n'a rien touché)")
+
+
+def test_les_declarations_de_copie_concordent():
+    """⛔ LES DEUX FICHIERS DISENT LA MÊME CHOSE, ET C'EST COMPARÉ.
+
+    `melange.COPIES_PAR_LEAD` est le miroir de `CLASSES_SOEURS` : il est
+    écrit deux fois parce que `melange.py` ne doit dépendre ni de numpy
+    ni du paquet `agrume/`. Une divergence serait SILENCIEUSE — le
+    mélange donnerait deux voix à un modèle sans qu'aucun banc ne rougisse
+    (c'est le patron de `test_les_deux_cles_fcst_sont_la_meme_chaine`).
+    """
+    print("\n▶ 8 ter. les déclarations de copie concordent entre les deux fichiers")
+    import melange as MX
+    attendu = {lead: (f"{c['prefixe']}_copie", f"{c['prefixe']}_source")
+               for lead, c in A.CLASSES_SOEURS.items()}
+    verifie(MX.COPIES_PAR_LEAD == attendu,
+            f"⭐ `melange.COPIES_PAR_LEAD` == les champs de "
+            f"`CLASSES_SOEURS` ({MX.COPIES_PAR_LEAD} vs {attendu})")
+    # Et les champs annoncés sont bien ceux qu'une sœur porte VRAIMENT.
+    jour = JOUR - timedelta(days=2)
+    o = _serie_agrume(jour)
+    for lead, (champ_copie, champ_source) in attendu.items():
+        src = (_serie_arome(jour) if lead == 24 else _serie_ecmwf(jour))
+        soeur = A.prolonger(([o]), [src], lead)[0][0]
+        verifie(soeur.get(champ_copie) is True
+                and soeur.get(champ_source) == A.CLASSES_SOEURS[lead]["source"],
+                f"la sœur +{lead} h porte bien `{champ_copie}` et "
+                f"`{champ_source}` = {soeur.get(champ_source)}")
 
 
 def test_lead_24_ne_sort_aucune_ligne():
@@ -598,6 +796,8 @@ def main() -> int:
     test_lead_6_sort_avec_un_score_connu()
     test_lead_24_ne_sort_aucune_ligne()
     test_lead_24_par_la_ligne_soeur()
+    test_lead_48_par_la_ligne_soeur()
+    test_les_declarations_de_copie_concordent()
     test_run_absent()
     test_cle_et_bout_a_bout()
     print("\n" + "═" * 66)

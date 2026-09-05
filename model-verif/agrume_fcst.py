@@ -157,6 +157,13 @@ from composite import facteur_cisaillement, poids_pi        # noqa: E402
 from pi import cles_du_run_colonnes                         # noqa: E402
 from profil import decorer_vent                             # noqa: E402
 from score import fcst_agrume_key, fcst_arome_key, read_ndjson  # noqa: E402
+# ⛔ LOT L22a — `fcst_parties` ET `fcst_reduit_key`, PAS `fcst_key`.
+# `fcst/` est PARTITIONNÉ depuis le lot S0.6 : lire la seule clé
+# historique rendrait les modèles de la partie 1 et tairait les
+# autres, sans qu'une ligne ne le dise. Et `fcstreduit/` est une
+# AUTRE POPULATION (les quatre réseaux hors Pioupiou), pas une
+# partie : les deux se lisent, jamais l'un pour l'autre.
+from score import fcst_parties, fcst_reduit_key               # noqa: E402
 from score import _storage as _storage_score                 # noqa: E402
 
 # ══════════════════════════════════════════════════════════════════
@@ -816,8 +823,13 @@ def lignes(col, man: dict, maille: str = MAILLE_DEFAUT, *,
 #  chaîne de référence est là. Décision de Yann du 04/09 : « classé
 #  comme AGRUME ». `agrume` (le témoin brut) reste `serie_temoin` (L18).
 #
-#  ⚠️ +48 h RESTE IMPOSSIBLE avec AROME : horizon 51 h, le run 00 Z de
-#  J-2 ne couvre que 4 h de J. Aucune ligne sœur n'est écrite pour ça.
+#  ⚠️ +48 h RESTE IMPOSSIBLE AVEC AROME : horizon 51 h, le run 00 Z de
+#  J-2 ne couvre que 4 h de J. ⛔⛔ **ET C'EST POURQUOI LE +48 H CHANGE
+#  DE MODÈLE (lot L22a, 05/09/2026)** : la classe est servie par une
+#  SECONDE ligne sœur, lue dans `ecmwf_ifs025` — voir le pavé
+#  « AGRUME À +48 H » plus bas. Les deux sœurs coexistent sur la même
+#  ligne d'origine : la +24 h porte de l'AROME, la +48 h de l'IFS, et
+#  chacune se déclare.
 
 #: Le modèle dont les heures 24-47 sont copiées.
 H24_SOURCE = "arome_r2"
@@ -827,41 +839,192 @@ H24_SOURCE = "arome_r2"
 #: recopiée depuis `arome_r2` pour que la ligne sœur soit d'UN SEUL run.
 H24_DEBUT = 24
 
+#: ⛔⛔ ET LA SŒUR +24 H EST BORNÉE EN HAUT, DEPUIS LE L22a. `arome_r2`
+#: porte 0-51 h ; sans borne, la sœur +24 h emportait les heures 48-51,
+#: qui ne sont PAS de sa classe — elles tombent dans la journée de
+#: l'offset 2. Mesuré le 05/09 : avec un `arome_r2` au 03 Z (5 jours
+#: sur 13), ces heures couvrent 7 heures de la journée notée à +48 h,
+#: soit UNE DE PLUS que `MIN_HOURS_DAILY` — la sœur +24 h fabriquait
+#: donc, à elle seule, une SECONDE ligne AGRUME en classe +48 h, faite
+#: d'AROME, en concurrence avec celle du L22a faite d'IFS. Deux lignes
+#: d'un même modèle dans une même case, de deux provenances
+#: différentes : exactement ce que le lot L18 a écrit pour refuser.
+#: ⓘ À l'offset 1 (sa vraie classe), la borne ne retire RIEN : les
+#: heures 24-47 après le run couvrent la journée notée en entier.
+H24_FIN = 48
 
-def prolonger_h24(rows: list[dict], arome_rows: list[dict],
-                  crier=print) -> tuple[list[dict], dict]:
-    """Une ligne SŒUR par ligne `agrume` / `agrume_pi`, aux heures ≥ 24 h
-    après le run AGRUME, lue dans la ligne `arome_r2` de la même balise.
+# ══════════════════════════════════════════════════════════════════
+#  AGRUME À +48 H — la ligne sœur lue dans `ecmwf_ifs025` (lot L22a, 05/09/2026)
+# ══════════════════════════════════════════════════════════════════
+#
+#  ⛔ CE QUE C'EST, ET CE QUE ÇA N'EST PAS. À +48 h, AROME n'existe
+#  plus : son horizon est 51 h, le run 00 Z de J-2 ne couvre que 4 h de
+#  J, et TOUTE la famille AROME est à 0 ligne à cette échéance (mesuré
+#  au L20). La couture décidée par Yann le 04/09 est donc de prolonger
+#  AGRUME avec un AUTRE MODÈLE — ECMWF IFS 0,25°, celui qui gagne dans
+#  tous les massifs alpins à +48 h sur nos propres scores du 04/09
+#  (Alpes du Nord 3,6 km/h contre 4,5 pour ICON-EU et 4,9 pour ARPEGE).
+#  ⚠️ Une ligne AGRUME à +48 h n'est donc PAS de l'AROME sous un autre
+#  nom : c'est de l'IFS, et l'écran doit le dire (`agrumeLeadNote(48)`).
+#
+#  ⛔ LA SOURCE EST L'ARCHIVE OPEN-METEO DÉJÀ COLLECTÉE, PAS UN GRIB.
+#  `ecmwf_ifs025` est collecté chaque nuit aux mêmes balises, horaire,
+#  sur 72 h — mesuré le 05/09 sur 8 journées réelles (29/08 → 05/09) :
+#  659/659 lignes Pioupiou portent les heures 48-71, longueur 72,
+#  `step_s` 3600, `t0` = 00:00 Z du jour d'émission. Ce lot ne
+#  télécharge donc RIEN et ne consomme AUCUN quota : L22a est de la
+#  lecture d'archive. La vraie couture (grilles IFS dans le produit B,
+#  51 → 72 h) est le L22b, et elle est d'un autre ordre.
+#
+#  ⛔ ET IL FAUT LIRE DEUX FLUX, PAS UN — le piège de ce lot. `fcst/`
+#  ne porte que **Pioupiou** (659 balises) ; les quatre autres réseaux
+#  d'AGRUME (windsmobi, infoclimat, mf, aemet) ont leur `ecmwf_ifs025`
+#  dans `fcstreduit/` (lot S0.11), sous le MÊME nom de modèle, le MÊME
+#  pas et le MÊME `t0`. Mesuré le 05/09 sur la journée du 03/09 :
+#  `fcst/` seul apparie 1 144 des 4 414 lignes AGRUME (26 %) ;
+#  `fcstreduit/` en apporte 2 023 de plus. Lire un seul flux aurait
+#  donné une classe +48 h silencieusement réduite aux Pioupiou.
+#
+#  ⛔ LE RUN IFS SERVI N'EST PAS CELUI QUE `fetched_at` LAISSE CROIRE.
+#  Open-Meteo écrit dans `fetched_at` l'heure de NOTRE appel (03:19 Z),
+#  et sert — mesuré 8 jours sur 8 — le run IFS de **J-1 18 Z**, soit
+#  SIX HEURES DE PLUS QUE LE RUN 00 Z D'AGRUME. La ligne porte ce run
+#  en clair dans `run_init` : c'est lui qu'on stampe dans
+#  `agrume_h48_run`, jamais `fetched_at`. ⚠️ Conséquence à ne pas taire :
+#  `lead_exact_h` d'AGRUME +48 h se compte depuis 03:19 et vaut donc
+#  ~9,3 h de MOINS que l'échéance réelle du run IFS. Ce n'est pas un
+#  avantage volé à qui que ce soit — c'est EXACTEMENT le `lead_exact_h`
+#  qu'`ecmwf_ifs025` porte lui-même, puisque la sœur copie sa ligne : le
+#  biais est celui de la chaîne Open-Meteo, il est identique pour les
+#  deux séries, et il ne fabrique aucun écart entre elles.
+#
+#  ⛔⛔ ET LA SŒUR +48 H EST BIT À BIT LA LIGNE `ecmwf_ifs025`. Ce n'est
+#  pas « très proche », comme `agrume` l'est de `meteofrance_arome_
+#  france_hd` (+0,17 km/h d'écart de chaîne mesuré au L4) : c'est la
+#  MÊME ligne recopiée, donc un écart de chaîne EXACTEMENT NUL. L'écart
+#  annoncé au §5 du cadrage (« Open-Meteo interpole, nous non »)
+#  n'existera qu'au L22b, quand la donnée viendra de NOS grilles. Tant
+#  que L22a est seul, `agrume_pi` et `ecmwf_ifs025` auront à +48 h des
+#  scores rigoureusement égaux sur leur population commune — c'est une
+#  propriété, pas un bug, et le rapport du lot la dit en toutes lettres.
 
-    Rend `(lignes sœurs, bilan)`. Une balise sans ligne `arome_r2` n'a
-    pas de sœur, et se compte. La sœur porte le run d'`arome_r2` (`t0`,
-    `fetched_at`, `agrume_h24_run`) et se déclare (`agrume_h24_copie`,
-    `agrume_h24_source`) pour que `score.py` puisse la compter et que
-    personne ne la prenne pour de l'AGRUME calculé.
+
+#: Le modèle dont les heures ≥ 48 h sont copiées (décision du 04/09).
+H48_SOURCE = "ecmwf_ifs025"
+
+#: Première échéance copiée, en heures APRÈS LE RUN AGRUME. 48 : c'est
+#: la borne de la CLASSE (`LEAD_BY_OFFSET[2]`), pas celle de l'horizon
+#: d'AROME (51 h). Les heures 24-47 restent servies par la sœur +24 h.
+H48_DEBUT = 48
+
+#: Dernière échéance copiée (exclue). 72 : c'est ce qu'Open-Meteo sert
+#: pour `ecmwf_ifs025` (mesuré : 72 pas horaires, 8 jours sur 8), et
+#: c'est aussi la fin de la dernière classe (`LEAD_BY_OFFSET` s'arrête
+#: à l'offset 2). Publier au-delà écrirait des heures qu'AUCUNE classe
+#: ne note — de l'archive que personne ne relira, et une occasion de
+#: plus de déborder sur une classe voisine le jour où l'horizon change.
+H48_FIN = 72
+
+
+def _run_arome(a: dict) -> str | None:
+    """Le run qui a produit une ligne `arome_r2` — elle le porte en clair."""
+    return a.get("arome_run")
+
+
+def _run_ifs(a: dict) -> str | None:
+    """Le run qui a produit une ligne `ecmwf_ifs025`.
+
+    ⛔ `run_init`, JAMAIS `fetched_at` : le second est l'heure de notre
+    appel d'API (03:19 Z), le premier est le run du modèle (mesuré :
+    J-1 18 Z, 8 jours sur 8). Écrire `fetched_at` dans `agrume_h48_run`
+    ferait dire à l'archive qu'AGRUME +48 h vient d'un run de 03 h du
+    matin qui n'existe pas chez ECMWF.
     """
+    ri = a.get("run_init")
+    if ri is None:
+        return None
+    return datetime.fromtimestamp(int(ri), timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
+#: ⛔ LES DEUX CLASSES SŒURS, UN SEUL CORPS DE FONCTION. Le L20 avait
+#: écrit `prolonger_h24` pour un cas unique ; un copier-coller pour le
+#: +48 h aurait donné une seconde occasion de se tromper de run, de
+#: borne ou de déclaration — c'est-à-dire exactement les trois défauts
+#: que `mutations_l20.py` cherche. Les deux JEUX DE CONSTANTES restent
+#: séparés et nommés : c'est eux qu'on relit, pas le corps.
+CLASSES_SOEURS: dict[int, dict] = {
+    24: {"source": H24_SOURCE, "debut": H24_DEBUT, "fin": H24_FIN,
+         "prefixe": "agrume_h24", "run": _run_arome},
+    48: {"source": H48_SOURCE, "debut": H48_DEBUT, "fin": H48_FIN,
+         "prefixe": "agrume_h48", "run": _run_ifs},
+}
+
+
+def prolonger(rows: list[dict], source_rows: list[dict], lead: int,
+              crier=print) -> tuple[list[dict], dict]:
+    """Une ligne SŒUR par ligne `agrume` / `agrume_pi`, aux heures
+    ≥ `debut` h après le run AGRUME, lue dans la ligne du modèle source
+    de la même balise.
+
+    Rend `(lignes sœurs, bilan)`. Une balise sans ligne source n'a pas
+    de sœur, et se compte. La sœur porte le run de la SOURCE (`t0`,
+    `fetched_at`, `agrume_h{lead}_run`) et se déclare
+    (`agrume_h{lead}_copie`, `agrume_h{lead}_source`) pour que
+    `score.py` puisse la compter, que `melange.membres` ne lui donne pas
+    une voix qui appartient déjà au modèle copié, et que personne ne la
+    prenne pour de l'AGRUME calculé.
+
+    ⛔ `rows` DOIT ÊTRE LA LISTE D'ORIGINE, jamais une liste déjà
+    prolongée : appeler cette fonction sur ses propres sorties
+    fabriquerait des sœurs de sœurs — une ligne dont les heures
+    viendraient d'une copie d'une copie, et dont plus rien ne dirait
+    d'où elles sortent. `main` garde `origines` pour ça.
+    """
+    classe = CLASSES_SOEURS[lead]
+    source, debut, fin, prefixe = (classe["source"], classe["debut"],
+                                   classe["fin"], classe["prefixe"])
+    run_de = classe["run"]
     par_unite: dict[str, dict] = {}
-    for a in arome_rows:
-        if a.get("model") == H24_SOURCE and a.get("speed"):
+    for a in source_rows:
+        if a.get("model") == source and a.get("speed"):
             par_unite.setdefault(f"{a['source']}:{a['station_id']}", a)
     out: list[dict] = []
-    bilan = {"prolongees": 0, "sans_arome": 0, "vides": 0,
-             "run_arome": None, "runs_identiques": None}
+    bilan = {"lead": lead, "source": source, "prolongees": 0,
+             "sans_source": 0, "vides": 0, "run_source": None,
+             "runs_identiques": None}
+    # ⛔ AUCUNE SŒUR NE SE PROLONGE, NI ELLE-MÊME NI UNE AUTRE. La garde
+    # porte sur TOUTES les classes, pas seulement celle qu'on écrit : une
+    # sœur +24 h prolongée à +48 h porterait des heures IFS accrochées au
+    # `t0` d'`arome_r2` — une ligne dont le run, l'échéance et la source
+    # se contrediraient, et que plus rien ne saurait démêler une fois
+    # l'archive écrite. `main` passe les origines ; cette garde est ce
+    # qui rend l'ordre des appels indifférent.
+    declarations = tuple(f"{c['prefixe']}_copie" for c in CLASSES_SOEURS.values())
     for r in rows:
+        if any(r.get(d) for d in declarations):
+            continue
         a = par_unite.get(f"{r['source']}:{r['station_id']}")
         if a is None:
-            bilan["sans_arome"] += 1
+            bilan["sans_source"] += 1
             continue
-        if bilan["run_arome"] is None:
-            bilan["run_arome"] = a.get("arome_run")
-            bilan["runs_identiques"] = (a.get("arome_run") == r.get("agrume_run"))
-        t_debut = int(r["t0"]) + H24_DEBUT * STEP_S
+        if bilan["run_source"] is None:
+            bilan["run_source"] = run_de(a)
+            bilan["runs_identiques"] = (run_de(a) == r.get("agrume_run"))
+        t_debut = int(r["t0"]) + debut * STEP_S
+        # ⛔ LA FENÊTRE EST FERMÉE DES DEUX CÔTÉS. Voir `H24_FIN` : une
+        # borne basse seule laissait la sœur +24 h déborder sur la
+        # classe +48 h. Les deux bornes se comptent depuis le run
+        # AGRUME, jamais depuis le run de la source — c'est la classe
+        # qu'on découpe, pas l'horizon du modèle copié.
+        t_fin = int(r["t0"]) + fin * STEP_S
         t0a, pas = int(a["t0"]), int(a.get("step_s") or STEP_S)
         n = len(a["speed"])
         dirs = a.get("dir") or [None] * n
-        speed = [a["speed"][i] if t0a + i * pas >= t_debut else None
-                 for i in range(n)]
-        direction = [dirs[i] if t0a + i * pas >= t_debut and i < len(dirs)
-                     else None for i in range(n)]
+        dedans = [t_debut <= t0a + i * pas < t_fin for i in range(n)]
+        speed = [a["speed"][i] if dedans[i] else None for i in range(n)]
+        direction = [dirs[i] if dedans[i] and i < len(dirs) else None
+                     for i in range(n)]
         if all(v is None for v in speed):
             bilan["vides"] += 1
             continue
@@ -869,16 +1032,16 @@ def prolonger_h24(rows: list[dict], arome_rows: list[dict],
             "station_id": r["station_id"], "source": r["source"],
             "lat": r.get("lat"), "lon": r.get("lon"),
             "model": r["model"],
-            # ⛔ LE RUN D'AROME_R2, pas celui d'AGRUME : c'est lui qui a
-            # produit ces heures, et `lead_exact_h` doit le dire.
+            # ⛔ LE RUN DE LA SOURCE, pas celui d'AGRUME : c'est lui qui
+            # a produit ces heures, et `lead_exact_h` doit le dire.
             "fetched_at": a["fetched_at"],
             "t0": t0a, "step_s": pas,
             "speed": speed, "dir": direction,
             "agrume_run": r.get("agrume_run"),
             "agrume_maille": r.get("agrume_maille"),
-            "agrume_h24_copie": True,
-            "agrume_h24_source": H24_SOURCE,
-            "agrume_h24_run": a.get("arome_run"),
+            f"{prefixe}_copie": True,
+            f"{prefixe}_source": source,
+            f"{prefixe}_run": run_de(a),
         }
         if r["model"] == MODEL_PI:
             # PI ne touche aucune de ces heures, et le compte le dit.
@@ -889,18 +1052,42 @@ def prolonger_h24(rows: list[dict], arome_rows: list[dict],
     return out, bilan
 
 
-def dire_h24(bilan: dict, run_agrume: str | None) -> str:
+def prolonger_h24(rows: list[dict], arome_rows: list[dict],
+                  crier=print) -> tuple[list[dict], dict]:
+    """La classe +24 h (lot L20) — les heures 24-47 lues dans `arome_r2`."""
+    return prolonger(rows, arome_rows, 24, crier)
+
+
+def prolonger_h48(rows: list[dict], ecmwf_rows: list[dict],
+                  crier=print) -> tuple[list[dict], dict]:
+    """La classe +48 h (lot L22a) — les heures ≥ 48 h lues dans
+    `ecmwf_ifs025`, DEUX flux confondus (`fcst/` pour Pioupiou,
+    `fcstreduit/` pour les quatre autres réseaux)."""
+    return prolonger(rows, ecmwf_rows, 48, crier)
+
+
+def dire_soeurs(bilan: dict, run_agrume: str | None) -> str:
+    lead, source = bilan["lead"], bilan["source"]
     if not bilan["prolongees"]:
-        return (f"AGRUME +24 h : AUCUNE ligne sœur — {bilan['sans_arome']} "
-                f"balise(s) sans ligne {H24_SOURCE}, {bilan['vides']} vide(s)")
+        return (f"AGRUME +{lead} h : AUCUNE ligne sœur — "
+                f"{bilan['sans_source']} balise(s) sans ligne {source}, "
+                f"{bilan['vides']} vide(s)")
     meme = bilan.get("runs_identiques")
-    return (f"AGRUME +24 h : {bilan['prolongees']} ligne(s) sœur(s) lue(s) "
-            f"dans {H24_SOURCE} (run {bilan['run_arome']}"
+    return (f"AGRUME +{lead} h : {bilan['prolongees']} ligne(s) sœur(s) "
+            f"lue(s) dans {source} (run {bilan['run_source']}"
             + (" — le même qu'AGRUME" if meme else
-               f" ≠ AGRUME {run_agrume} : la classe +24 h porte l'échéance "
-               f"réelle du run {H24_SOURCE}, pas celle d'AGRUME")
-            + f"), {bilan['sans_arome']} balise(s) sans ligne {H24_SOURCE}"
+               f" ≠ AGRUME {run_agrume} : la classe +{lead} h porte "
+               f"l'échéance réelle du run {source}, pas celle d'AGRUME")
+            + f"), {bilan['sans_source']} balise(s) sans ligne {source}"
             + (f", {bilan['vides']} vide(s)" if bilan["vides"] else ""))
+
+
+def dire_h24(bilan: dict, run_agrume: str | None) -> str:
+    return dire_soeurs(bilan, run_agrume)
+
+
+def dire_h48(bilan: dict, run_agrume: str | None) -> str:
+    return dire_soeurs(bilan, run_agrume)
 
 
 def main() -> int:
@@ -923,6 +1110,9 @@ def main() -> int:
                     help="tout lire, tout compter, n'écrire ni fichier ni R2")
     ap.add_argument("--sans-h24", action="store_true",
                     help="ne pas écrire les lignes sœurs +24 h (lot L20). "
+                         "⚠️ À la main seulement, même règle que --sans-pi")
+    ap.add_argument("--sans-h48", action="store_true",
+                    help="ne pas écrire les lignes sœurs +48 h (lot L22a). "
                          "⚠️ À la main seulement, même règle que --sans-pi")
     args = ap.parse_args()
 
@@ -1005,7 +1195,15 @@ def main() -> int:
               "ce n'est pas un run vide, c'est un run cassé.", file=sys.stderr)
         return 1
 
-    # ── La classe +24 h : les lignes sœurs (lot L20) ──────────────────
+    # ── Les classes +24 h et +48 h : les lignes sœurs (L20, L22a) ─────
+    # ⛔ LES DEUX SE CALCULENT SUR `origines`, PAS SUR `rows`. Après le
+    # premier prolongement, `rows` contient déjà des sœurs ; les passer
+    # au second fabriquerait des sœurs de sœurs — des heures IFS
+    # accrochées à une ligne dont le `t0` est déjà celui d'arome_r2, et
+    # plus rien pour dire d'où elles sortent. `prolonger` a une garde,
+    # mais la garde n'est pas la raison : la raison est cette ligne-ci.
+    origines = list(rows)
+
     # ⚠️ Sous `try` et JAMAIS bloquant : `fcstarome_{J}` peut manquer
     # (bw-model-arome tombé ce jour-là, tuiles absentes) — la classe
     # +24 h manque alors, se DIT, et la classe +6 h ne perd rien.
@@ -1019,13 +1217,47 @@ def main() -> int:
                       f"(local et R2) — aucune ligne sœur, la classe +24 h "
                       f"manquera pour cette journée", file=sys.stderr)
             else:
-                soeurs, bilan_h24 = prolonger_h24(rows, arome_rows)
+                soeurs, bilan_h24 = prolonger_h24(origines, arome_rows)
                 print(f"  {dire_h24(bilan_h24, man.get('run'))}")
                 rows = rows + soeurs
         except Exception as exc:                            # noqa: BLE001
             print(f"  ⚠️ AGRUME +24 h : {type(exc).__name__} — {exc}. La "
                   f"classe +6 h n'est pas affectée ; la classe +24 h "
                   f"manquera pour cette journée.", file=sys.stderr)
+
+    # ⛔ LOT L22a — la classe +48 h, lue dans `ecmwf_ifs025`, DEUX FLUX.
+    # `fcst/` ne porte que Pioupiou ; les quatre autres réseaux d'AGRUME
+    # ont leur `ecmwf_ifs025` dans `fcstreduit/`. Mesuré le 05/09 sur la
+    # journée du 03/09 : 1 144 lignes AGRUME appariées par `fcst/` seul
+    # (26 % des 4 414), 2 023 lignes de plus offertes par `fcstreduit/`.
+    # Un seul flux aurait donné une classe +48 h réduite aux Pioupiou,
+    # sans qu'aucun voyant ne passe au rouge.
+    if args.sans_h48:
+        print("  (--sans-h48) lignes sœurs +48 h non produites")
+    else:
+        try:
+            st = _storage_score()
+            ecmwf_rows, bilan_parties = fcst_parties(root, day, st)
+            reduit_rows = read_ndjson(root, fcst_reduit_key(day), st)
+            ecmwf_rows = ecmwf_rows + reduit_rows
+            n_src = sum(1 for a in ecmwf_rows if a.get("model") == H48_SOURCE)
+            if not n_src:
+                print(f"  ⚠️ AGRUME +48 h : aucune ligne `{H48_SOURCE}` dans "
+                      f"`fcst/` ni `fcstreduit/` pour {day:%Y-%m-%d} "
+                      f"(bilan parties : {bilan_parties.get('etat')}) — "
+                      f"aucune ligne sœur, la classe +48 h manquera pour "
+                      f"cette journée", file=sys.stderr)
+            else:
+                soeurs48, bilan_h48 = prolonger_h48(origines, ecmwf_rows)
+                print(f"  {dire_h48(bilan_h48, man.get('run'))} "
+                      f"[{n_src} ligne(s) {H48_SOURCE} lues, dont "
+                      f"{sum(1 for a in reduit_rows if a.get('model') == H48_SOURCE)} "
+                      f"dans fcstreduit/]")
+                rows = rows + soeurs48
+        except Exception as exc:                            # noqa: BLE001
+            print(f"  ⚠️ AGRUME +48 h : {type(exc).__name__} — {exc}. Les "
+                  f"classes +6 h et +24 h ne sont pas affectées ; la classe "
+                  f"+48 h manquera pour cette journée.", file=sys.stderr)
 
     key = fcst_agrume_key(day)
     if args.dry_run:

@@ -46,14 +46,18 @@ MUTATIONS = [
      "H24_DEBUT = 24\n",
      "H24_DEBUT = 0\n"),
 
+    # ⚠️ Lot L22a (05/09) : `prolonger_h24` est devenue un cas de
+    # `prolonger(…, lead)`, paramétrée par `CLASSES_SOEURS`. Les deux
+    # motifs ci-dessous ont été réécrits sur le corps généralisé — ils
+    # mutent la MÊME propriété qu'au L20, à la même place.
     ("la sœur ne se déclare plus copie",
      AGRUME, B_AGRUME,
-     '            "agrume_h24_copie": True,\n',
-     '            "agrume_h24_copie": False,\n'),
+     '            f"{prefixe}_copie": True,\n',
+     '            f"{prefixe}_copie": False,\n'),
 
     ("le journal dit « le même run » même quand il diffère",
      AGRUME, B_AGRUME,
-     '            bilan["runs_identiques"] = (a.get("arome_run") == r.get("agrume_run"))',
+     '            bilan["runs_identiques"] = (run_de(a) == r.get("agrume_run"))',
      '            bilan["runs_identiques"] = True'),
 
     ("⭐ le mélange compte AGRUME DEUX fois (plus de fusion)",

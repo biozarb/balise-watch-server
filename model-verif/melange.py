@@ -108,6 +108,33 @@ FAMILLES: dict[str, tuple[str, ...]] = {
     "arome": ("meteofrance_arome_france_hd", "arome_r2", "agrume"),
 }
 
+#: ⛔⛔ UNE LIGNE QUI SE DÉCLARE COPIE N'A PAS DE VOIX PROPRE (lot L22a,
+#: 05/09/2026). `FAMILLES` refuse deux LECTURES d'un même modèle ; il ne
+#: voit pas le cas où une série CHANGE de modèle avec l'échéance.
+#:
+#: C'est pourtant exactement ce que les lignes sœurs font : à +24 h,
+#: `agrume`/`agrume_pi` portent de l'`arome_r2` recopié (L20) ; à +48 h,
+#: de l'`ecmwf_ifs025` recopié (L22a). Sans cette règle, le mélange de
+#: la classe +48 h recevait `ecmwf_ifs025` ET `agrume_pi` — deux membres
+#: aux valeurs RIGOUREUSEMENT ÉGALES (c'est la même ligne copiée), donc
+#: deux voix pour un seul modèle, et un poids doublé sans qu'une ligne
+#: ne le dise. Même chose à +24 h pour AROME, depuis le L20.
+#:
+#: ⛔ LA RÈGLE EST PAR ÉCHÉANCE, ET ELLE DOIT L'ÊTRE. À +6 h, `agrume`
+#: est de l'AGRUME calculé et garde sa voix ; c'est la MÊME ligne
+#: fusionnée qui, à +48 h, n'est qu'une copie. Exclure le modèle partout
+#: parce qu'une de ses lignes se déclare copie quelque part lui retirerait
+#: la seule échéance où il a quelque chose à dire.
+#:
+#: ⚠️ MIROIR DE `agrume_fcst.CLASSES_SOEURS`, écrit deux fois À DESSEIN :
+#: `melange.py` ne doit dépendre ni de numpy ni du paquet `agrume/`.
+#: `test_agrume_fcst.py::test_les_declarations_de_copie_concordent`
+#: compare les deux, champ par champ, plutôt que de faire confiance.
+COPIES_PAR_LEAD: dict[int, tuple[str, str]] = {
+    24: ("agrume_h24_copie", "agrume_h24_source"),
+    48: ("agrume_h48_copie", "agrume_h48_source"),
+}
+
 #: Le pas des séries qu'on mélange. La classe au quart d'heure (900 s)
 #: a ses propres sous-séries en essai ; on ne mélange pas deux pas.
 MIX_STEP_S = 3600
@@ -169,13 +196,19 @@ def est_temoin(unit: str, pas: int = MIX_TEMOIN_PAS) -> bool:
     return zlib.crc32(unit.encode("utf-8")) % pas == 0
 
 
-def membres(rows_station: Sequence[dict]) -> list[dict]:
+def membres(rows_station: Sequence[dict], lead: int | None = None) -> list[dict]:
     """Les lignes d'UNE balise et d'UN offset qui ont le droit d'entrer.
 
     Écartées : les lignes qui déclarent leur échéance (`lead_h` — classe
     courte et quart, L10/L11), les lignes déjà synthétiques (`synthese`),
-    les mélanges eux-mêmes, un autre pas que `MIX_STEP_S`, et les
-    doublons de famille (une lecture par famille, cf. `FAMILLES`).
+    les mélanges eux-mêmes, un autre pas que `MIX_STEP_S`, les doublons
+    de famille (une lecture par famille, cf. `FAMILLES`) et — à
+    l'échéance concernée — les séries qui s'y déclarent COPIE d'un modèle
+    présent (cf. `COPIES_PAR_LEAD`).
+
+    ⚠️ `lead` est la CLASSE (6, 24, 48), pas l'offset. Sans lui, la règle
+    des copies ne s'applique pas : les appelants qui ne le passent pas
+    (bancs d'avant le L22a) gardent le comportement d'avant.
     """
     out = []
     presents = {r.get("model") for r in rows_station}
@@ -183,6 +216,13 @@ def membres(rows_station: Sequence[dict]) -> list[dict]:
     for _, lectures in FAMILLES.items():
         gardee = next((m for m in lectures if m in presents), None)
         exclus_famille |= {m for m in lectures if m != gardee}
+    # ⛔ Les copies de CETTE échéance-ci, et d'aucune autre.
+    champs = COPIES_PAR_LEAD.get(lead) if lead is not None else None
+    if champs:
+        champ_copie, champ_source = champs
+        exclus_famille |= {r.get("model") for r in rows_station
+                           if r.get(champ_copie)
+                           and r.get(champ_source) in presents}
     # ⓘ Lot L20 (04/09) : un même modèle peut arriver en DEUX lignes —
     # AGRUME et sa ligne sœur +24 h (heures 24-47 lues dans arome_r2,
     # sous un autre run). Elles se FUSIONNENT par heure valide (la
@@ -337,7 +377,7 @@ def ajouter_melange(snapshots: dict[int, list[dict]],
         ajouts: list[dict] = []
         n_mix = n_tem = n_sans = 0
         for unit, lignes in par_unite.items():
-            membs = membres(lignes)
+            membs = membres(lignes, lead)
             if len(membs) < MIX_MIN_MEMBRES:
                 continue
             p = poids.get((unit, lead)) if lead is not None else None

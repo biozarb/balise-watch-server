@@ -6647,6 +6647,12 @@ def main() -> int:
         # ci-dessous continuerait d'annoncer « AUCUNE ligne » à un offset
         # qui en donne désormais.
         n_h24 = sum(1 for r in rows if r.get("agrume_h24_copie"))
+        # ⓘ Lot L22a (05/09) : les sœurs +48 h, lues dans `ecmwf_ifs025`
+        # (`fcst/` pour Pioupiou, `fcstreduit/` pour les quatre autres
+        # réseaux). Elles se comptent À PART des +24 h : les deux classes
+        # n'ont ni la même source, ni la même couverture de balises, et
+        # un total unique cacherait qu'une des deux s'est éteinte.
+        n_h48 = sum(1 for r in rows if r.get("agrume_h48_copie"))
         # ⚠️ Le compte AGRUME se dit à chaque offset, y compris quand il
         # est destiné à ne rien produire. Une ligne « 0 » qui n'apparaît
         # jamais et une ligne qui manque se lisent pareil dans un
@@ -6658,9 +6664,12 @@ def main() -> int:
                  " et AUCUNE ligne AGRUME+PI" if n_ag else "")
               + (f", dont {n_h24} ligne(s) sœur(s) +24 h lue(s) dans "
                  f"arome_r2 (lot L20)" if n_h24 else "")
+              + (f", dont {n_h48} ligne(s) sœur(s) +48 h lue(s) dans "
+                 f"ecmwf_ifs025 (lot L22a — à cette échéance, AGRUME "
+                 f"EST l'IFS 0,25°)" if n_h48 else "")
               + (f", qui ne donneront AUCUNE ligne : horizon 24 h, moins de "
                  f"{MIN_HOURS_DAILY} heures appariables à cet offset"
-                 if n_ag and offset and not n_h24 else ""))
+                 if n_ag and offset and not n_h24 and not n_h48 else ""))
         # ⚠️ ET LA LIGNE QUI NOMME LE FLUX. « 1 partie sur 2 » sans son
         # flux se lit « il manque un flux sur trois » : `snapshot_rows`
         # en lit trois (`fcst`, `fcstagrume`, `fcstarome`) et seul
