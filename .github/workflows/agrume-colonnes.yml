@@ -244,6 +244,7 @@ jobs:
             PWA/web/src/lib/rafraichissement.ts
             PWA/web/src/lib/piaf.ts
             PWA/web/src/lib/agrumeCache.ts
+            PWA/web/src/lib/coutureIfs.ts
           sparse-checkout-cone-mode: false
 
       # ══════════════════════════════════════════════════════════════
@@ -260,14 +261,23 @@ jobs:
       #  Cette étape existe pour que ce silence-là ne se reproduise pas :
       #  le motif se prouve, à l'endroit où il est écrit.
       # ══════════════════════════════════════════════════════════════
-      - name: Le sparse-checkout a bien ramené les cinq fichiers
+      # ⭐ 07/09 (lot L22b) — LE GARDE-FOU A MORDU, ET C'EST LUI QUI A
+      # NOMMÉ LE FICHIER MANQUANT. `agrumeProfile.ts` s'est mis à importer
+      # un SIXIÈME module (`coutureIfs.ts`, la couture IFS) ; le run #608
+      # s'est arrêté en 48 s, AVANT le moindre téléchargement, avec « À
+      # ajouter sous PWA/web/src/lib/ : coutureIfs.ts ». C'est exactement
+      # ce que l'étape « Aucun import relatif ne pointe hors du
+      # sparse-checkout » a été écrite pour faire — et c'est la deuxième
+      # fois qu'elle rattrape ce graphe (après `agrumeCache.ts`).
+      - name: Le sparse-checkout a bien ramené les six fichiers
         run: |
           manque=0
           for f in _web-repo-parite/PWA/web/src/lib/altitudeLayer.ts \
                    _web-repo-parite/PWA/web/src/lib/agrumeProfile.ts \
                    _web-repo-parite/PWA/web/src/lib/rafraichissement.ts \
                    _web-repo-parite/PWA/web/src/lib/piaf.ts \
-                   _web-repo-parite/PWA/web/src/lib/agrumeCache.ts; do
+                   _web-repo-parite/PWA/web/src/lib/agrumeCache.ts \
+                   _web-repo-parite/PWA/web/src/lib/coutureIfs.ts; do
             if [ -s "$f" ]; then
               echo "✓ $f ($(wc -c < "$f") o)"
             else
