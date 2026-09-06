@@ -426,6 +426,71 @@ def test_manifeste():
             "porte pas, et un silence se lirait « pas de turbulence »")
 
 
+def test_provenance_par_echeance():
+    """⛔ L'ÉCRAN DOIT POUVOIR DIRE « IFS » SUR CES HEURES-LÀ, ET SEULEMENT
+    SUR CELLES-LÀ. `provenance()` a la bonne granularité depuis le lot L
+    (échéance × bloc) : le lot L22b s'y branche au lieu d'inventer un
+    second canal — un canal de plus, c'est un endroit de plus où les deux
+    peuvent se contredire.
+    """
+    print("\n▶ 8. la provenance dit IFS échéance par échéance, et bloc par bloc")
+    from grille import Grille
+
+    lats = np.array([46.0, 45.975], dtype=np.float32)
+    lons = np.array([6.0, 6.025], dtype=np.float32)
+    zsol = np.zeros((2, 2), dtype=np.float32)
+    g = Grille("2026-09-06T00:00:00Z", [48, 51, 54, 57], lats, lons, zsol)
+
+    p0 = g.provenance()
+    verifie(all(e["blocs"]["hauteur"]["modele"] == "arome"
+                for e in p0["par_echeance"]),
+            "sans rallonge, toutes les échéances restent de l'AROME — le "
+            "lot L22b n'a rien changé au cas ordinaire")
+    verifie(p0["echeances_ifs"] == [],
+            "… et la liste des échéances cousues est vide, pas absente")
+
+    run = datetime(2026, 9, 6, 0, tzinfo=UTC)
+    g.ifs = I.bloc_manifeste(run, [54, 57])
+    g.steps_ifs = {54, 57}
+    p = g.provenance()
+
+    verifie(p["echeances_ifs"] == [54, 57],
+            f"les échéances cousues sont énumérées à la racine "
+            f"({p['echeances_ifs']})")
+    par = {e["echeance"]: e for e in p["par_echeance"]}
+    verifie(par[48]["blocs"]["hauteur"]["modele"] == "arome"
+            and par[54]["blocs"]["hauteur"]["modele"] == "ecmwf_ifs025",
+            "⭐ +48 h dit AROME, +54 h dit ECMWF — c'est l'ÉCHÉANCE qui "
+            "décide du modèle, pas le run")
+    verifie(par[54]["blocs"]["isobare"]["niveaux_natifs"] == list(I.NIVEAUX_COMMUNS)
+            and par[54]["blocs"]["isobare"]["niveaux_interpoles"] == list(I.NIVEAUX_DERIVES),
+            "⭐ le bloc isobare d'une échéance IFS dit QUELS niveaux sont "
+            "natifs et lesquels sont interpolés verticalement")
+    verifie("dérivé" in par[54]["blocs"]["hauteur"]["origine"]
+            and "natif" == par[54]["blocs"]["surface"]["origine"],
+            "⛔ les trois blocs d'une échéance IFS ne se valent PAS : "
+            "`hauteur` est dérivé en entier, `surface` est natif — les "
+            "traiter d'un bloc ferait dire « IFS » à trois fiabilités")
+    verifie("tke" in par[54]["blocs"]["hauteur"]["absents"]
+            and "cc" in par[54]["blocs"]["isobare"]["absents"],
+            "… et chaque bloc porte ce qui lui manque")
+    av = par[54]["blocs"]["hauteur"]["avertissement"]
+    verifie(av and "orographie" in av["cause"] and "0,81" in av["cause"],
+            "⭐⭐ le bloc hauteur porte l'AVERTISSEMENT du contrôle "
+            "d'acceptation, avec sa mesure — un écran qui sert `t` sur ces "
+            "heures peut dire d'où vient son incertitude")
+
+    mods = p["modeles"]
+    verifie("ecmwf_ifs025" in mods and mods["ecmwf_ifs025"]["trou_h"] == [51, 54],
+            "⛔ le TROU 51 → 54 h est PUBLIÉ : le client ne doit rien "
+            "dessiner entre les deux, et il ne peut le savoir que si "
+            "l'objet le dit")
+    verifie(mods["ecmwf_ifs025"]["resolution_temporelle_min"] == 180
+            and mods["arome"]["resolution_temporelle_min"] == 60,
+            "… et les deux modèles annoncent leur pas : 60 min pour AROME, "
+            "180 pour IFS — le client interpole en connaissance de cause")
+
+
 def main() -> int:
     print("═" * 66)
     print("  BANC DE LA RALLONGE IFS — lot L22b, 06/09/2026")
@@ -437,6 +502,7 @@ def main() -> int:
     test_interpolation_verticale()
     test_bloc_hauteur_derive()
     test_manifeste()
+    test_provenance_par_echeance()
     print("\n" + "═" * 66)
     if ECHECS:
         print(f"❌ {len(ECHECS)} assertion(s) en échec :")

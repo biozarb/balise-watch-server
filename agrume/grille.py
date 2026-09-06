@@ -459,6 +459,20 @@ class Grille:
         # donnerait des valeurs négatives un pas sur deux — pas une
         # erreur, un résultat.
         self._deaccumule = False
+        # ⛔ LOT L22b (06/09/2026) — QUELLES ÉCHÉANCES NE SONT PAS DE
+        # L'AROME. Le produit B est cousu : 0 → 51 h viennent d'AROME,
+        # 54 → 72 h d'ECMWF IFS 0,25°. `provenance()` doit le dire
+        # ÉCHÉANCE PAR ÉCHÉANCE — c'est déjà sa granularité — sinon
+        # l'écran sert de l'IFS sous une étiquette AROME, ce qui est
+        # exactement ce que `provenance()` a été écrit pour empêcher.
+        #
+        # ⚠️ Un DICTIONNAIRE et non un booléen : il porte le run IFS,
+        # les niveaux natifs et l'avertissement du contrôle d'acceptation
+        # (`ifs.bloc_manifeste`). Un drapeau aurait obligé le client à
+        # aller chercher ailleurs ce que la ligne concernée devrait
+        # porter — le défaut que `resolutionTemporelleMin` a déjà coûté.
+        self.ifs = None
+        self.steps_ifs = set()
         self.i_param = {p["nom"]: k for k, p in enumerate(PARAMS_GRILLE)}
         self.i_niveau = {n: k for k, n in enumerate(NIVEAUX_H_0025)}
         self.i_param_iso = {p["nom"]: k
@@ -709,10 +723,41 @@ class Grille:
         # à connaître un défaut implicite — et un défaut implicite est
         # ce qui se met à mentir en silence le jour où il change.
         ici = dict(modele="arome", run=self.run)
+        # ⛔ LOT L22b — L'ÉCHÉANCE DÉCIDE DU MODÈLE, PAS LE RUN. Une
+        # échéance cousue porte `modele: "ecmwf_ifs025"`, son run IFS, et
+        # ce que ses blocs doivent à une DÉRIVATION plutôt qu'à une
+        # mesure. ⚠️ Les trois blocs d'une échéance IFS ne se valent pas :
+        # `isobare` est natif sur 7 niveaux sur 14, `hauteur` est dérivé
+        # en entier, `surface` est presque vide. Les traiter d'un bloc
+        # aurait fait dire « IFS » à trois choses de fiabilités très
+        # différentes.
+        ifs_run = (self.ifs or {}).get("run_ifs")
+        natifs = (self.ifs or {}).get("niveaux_natifs") or []
+        interp = (self.ifs or {}).get("niveaux_interpoles") or []
+        absents = (self.ifs or {}).get("absents") or {}
+        avert = (self.ifs or {}).get("avertissement_temperature")
+
+        def _blocs_ifs():
+            la = dict(modele="ecmwf_ifs025", run=ifs_run)
+            return {
+                "hauteur": dict(la, origine="dérivé des niveaux isobares "
+                                "(gh − zsol), ancré sur le 10 m",
+                                absents=list(absents.get("hauteur", ())),
+                                avertissement=avert),
+                "isobare": dict(la, niveaux_natifs=list(natifs),
+                                niveaux_interpoles=list(interp),
+                                origine="natif sur les niveaux publiés, "
+                                        "interpolé en log p ailleurs",
+                                absents=list(absents.get("isobare", ()))),
+                "surface": dict(la, origine="natif",
+                                absents=list(absents.get("surface", ()))),
+            }
+
         par_echeance = [
             dict(echeance=int(s),
-                 blocs={"hauteur": dict(ici), "isobare": dict(ici),
-                        "surface": dict(ici)})
+                 blocs=(_blocs_ifs() if int(s) in self.steps_ifs
+                        else {"hauteur": dict(ici), "isobare": dict(ici),
+                              "surface": dict(ici)}))
             for s in self.steps]
 
         rafraichissement = None
@@ -753,6 +798,10 @@ class Grille:
         return dict(
             granularite="echeance x bloc",
             blocs=["hauteur", "isobare", "surface"],
+            # ⛔ LOT L22b — la liste des échéances cousues, en clair et à
+            # la racine : un client qui veut seulement savoir « où
+            # s'arrête AROME » n'a pas à balayer `par_echeance`.
+            echeances_ifs=sorted(self.steps_ifs),
             note=(
                 "provenance de CE QUI EST DANS CET OBJET, bloc par bloc et "
                 "échéance par échéance. ⛔ L'ÂGE N'EST PAS PUBLIÉ : il "
@@ -762,7 +811,21 @@ class Grille:
                 "et ils ne doivent pas être recopiés d'un côté à l'autre."),
             modeles=dict(
                 arome=dict(nom="AROME 0,025°", runs_par_jour=8,
-                           resolution_temporelle_min=60)),
+                           resolution_temporelle_min=60),
+                **({"ecmwf_ifs025": dict(
+                    nom="ECMWF IFS 0,25° (open data)", runs_par_jour=4,
+                    resolution_temporelle_min=180,
+                    run_ifs=ifs_run,
+                    # ⛔ LE TROU EST PUBLIÉ, PAS COMBLÉ. AROME s'arrête à
+                    # 51 h, la première échéance IFS cousue est à 54 :
+                    # entre les deux, le client ne doit RIEN dessiner.
+                    # Interpoler entre deux modèles dans une même courbe
+                    # ne se voit pas, et c'est bien le problème.
+                    trou_h=[51, 54],
+                    pourquoi=("AROME s'arrête à 51 h ; l'IFS 0,25° est "
+                              "premier dans tous les massifs alpins à "
+                              "+48 h sur nos propres scores du 04/09"))}
+                   if self.steps_ifs else {})),
             par_echeance=par_echeance,
             # ── ⛔ CE QUI N'EST PAS LÀ, DIT PLUTÔT QUE TU — arbitrage A9
             # ⚠️ Un domaine sans PI ne publie PAS un champ vide : il
