@@ -81,6 +81,7 @@ from quantification import (PARAM_ALTITUDE,  # noqa: E402
                             PARAMS_ISO, PARAMS_SURFACE, Abort,
                             balises_du_domaine, index_plats,
                             quantifier, verifier_grille)
+from ifs import DEBUT_H as I_DEBUT_H                        # noqa: E402
 from domaine import (GRID_3D, GRID_FINE, MAX_HOURS, MAX_HOURS_GRILLE,  # noqa: E402
                      MODEL_DIR, NIVEAUX_P, PAQUET_ISOBARES,
                      PAQUETS_INGESTION, PAQUETS_ISOBARES, PAQUETS_RALLONGE,
@@ -1062,6 +1063,12 @@ def main(argv=None):
     # qu'on oublie d'activer.
     p.add_argument("--sans-grille", action="store_true",
                    help="n'ingère PAS le produit B (grille 3D du domaine)")
+    # ⛔ MÊME DISCIPLINE QUE `--sans-grille` : la rallonge IFS se
+    # DÉSACTIVE, elle ne s'active pas. Elle ne coûte ni clé, ni quota,
+    # ni minute de runner en dehors de ses ~24 s de réseau ; en faire
+    # une option à cocher, c'est se garantir de l'oublier.
+    p.add_argument("--sans-ifs", action="store_true",
+                   help="ne pas coudre la rallonge IFS 54 → 72 h (lot L22b)")
     p.add_argument("--sortie", default=None,
                    help="dossier local où déposer npz + manifeste")
     a = p.parse_args(argv)
@@ -1286,6 +1293,47 @@ def main(argv=None):
         journal_horodate("│   par paramètre     : "
                          + " · ".join(f"{n} {v * 100:.0f}%" for n, v
                                       in gr.remplissage_par_parametre().items()))
+    # ══════════════════════════════════════════════════════════════
+    #  LA RALLONGE IFS (lot L22b) — 54 → 72 h, dans la MÊME passe
+    # ══════════════════════════════════════════════════════════════
+    #  ⛔ ELLE NE PART QUE SI LA RALLONGE AROME EST COMPLÈTE. Coudre du
+    #  54-72 h sur une grille qui s'arrête à 24 h laisserait un trou de
+    #  TRENTE heures au milieu de la coupe — et un trou au milieu se lit
+    #  comme une panne, alors qu'une coupe courte se lit comme un
+    #  horizon. La rallonge AROME est « au mieux » (13/08) ; celle-ci
+    #  est « au mieux de celle-là ».
+    #
+    #  ⚠️ ELLE EST ICI, APRÈS le bilan de l'ingestion et AVANT l'écriture
+    #  locale et la publication : les grilles sont déjà pleines d'AROME,
+    #  et la publication qui suit voit un run 0 → 72 h d'un seul tenant.
+    #  Une étape d'Action séparée aurait dû RELIRE ~1,1 Go depuis R2 et
+    #  republier `colonnes.bin` — c'est-à-dire se redonner le couple
+    #  (manifeste d'une génération, octets d'une autre) qui a produit le
+    #  HTTP 416 du 13/08. Voir l'en-tête d'`ingest_ifs.py`.
+    bilan_ifs = None
+    if grilles and not a.sans_ifs:
+        if max(steps) < a.max_heures_grille:
+            journal_horodate(
+                f"│ rallonge IFS        : NON tentée — la rallonge AROME "
+                f"s'est arrêtée à {max(steps)} h (attendu "
+                f"{a.max_heures_grille}) : coudre ici laisserait un trou "
+                f"de {I_DEBUT_H - max(steps)} h au milieu de la coupe")
+        else:
+            from ingest_ifs import appliquer as _rallonge_ifs  # noqa: PLC0415
+            grilles, bilan_ifs = _rallonge_ifs(
+                grilles, datetime.strptime(ref, "%Y-%m-%dT%H:%M:%SZ").replace(
+                    tzinfo=timezone.utc),
+                crier=journal_horodate)
+            if bilan_ifs.get("erreur"):
+                journal_horodate(f"│ rallonge IFS        : ABANDONNÉE — "
+                                 f"{bilan_ifs['erreur']}")
+            else:
+                journal_horodate(
+                    f"│ rallonge IFS        : run {bilan_ifs['run_ifs']}, "
+                    f"échéances {bilan_ifs['steps']}, "
+                    f"{bilan_ifs['octets'] / 1e6:.0f} Mo en "
+                    f"{bilan_ifs['secondes']:.0f} s")
+
     journal_horodate(f"│ durée totale        : {duree_min:.1f} min "
                      f"(alerte au-delà de {ALERTE_DUREE_MIN})")
     # ⚠️ Un incident n'est pas fatal, mais il ne doit pas être muet — cf.

@@ -255,6 +255,25 @@ def echeances_cousues(run_agrume: datetime, run_ifs: datetime,
             if (h + ecart_h) % PAS_IFS_H == 0 and h + ecart_h >= 0]
 
 
+def heures_agrume(steps_ifs, run_agrume: datetime, run_ifs: datetime):
+    """Les pas IFS traduits en HEURES APRÈS LE RUN AGRUME.
+
+    ⛔⛔ LE SIGNE, ET RIEN D'AUTRE. `heure_agrume = pas_ifs − (run_agrume
+    − run_ifs)`. L'inverser donne, pour un run IFS de 12 Z et un AGRUME
+    de 00 Z, des échéances 30 → 48 au lieu de 54 → 72 : la coupe est
+    décalée de VINGT-QUATRE heures, elle écrase des échéances AROME
+    existantes, et rien ne s'allume — le contenu reste lisse et les
+    tableaux ont la bonne forme.
+
+    ⓘ Écrite ICI et appelée deux fois plutôt que recopiée : la première
+    version de `ingest_ifs` la refaisait à la main, avec le signe à
+    l'envers, et `echeances_cousues` (qui l'a juste) ne pouvait pas le
+    voir.
+    """
+    ecart_h = int((run_agrume - run_ifs).total_seconds() // 3600)
+    return [int(s) - ecart_h for s in steps_ifs]
+
+
 def url_pas(run_ifs: datetime, step: int) -> str:
     return GABARIT.format(base=BASE_URL, jour=f"{run_ifs:%Y%m%d}",
                           heure=run_ifs.hour, step=step)

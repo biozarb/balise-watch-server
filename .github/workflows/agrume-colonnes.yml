@@ -56,6 +56,11 @@ on:
         required: false
         default: "24"
         type: string
+      sans_ifs:
+        description: "Ne PAS coudre la rallonge IFS 54 → 72 h (lot L22b)"
+        required: false
+        default: false
+        type: boolean
   schedule:
     # Filet de sécurité : le chemin normal reste le dispatch du VPS.
     #
@@ -420,9 +425,25 @@ jobs:
           # ⚠️ Il ne DÉCIDE toujours rien : `choisir_run()` tranche seul,
           # sur la couverture en échéances. Il sert à COMPTER — arbitrage
           # de Yann : « on ne change rien et on compte ».
+          # ⛔ LOT L22b (07/09) — LA RALLONGE IFS N'EST PAS UNE ÉTAPE
+          # DE PLUS, et c'est délibéré. Le cadrage du 04/09 en prévoyait
+          # une, après celle d'AROME ; une étape est un AUTRE PROCESSUS,
+          # qui aurait dû RELIRE ~1,1 Go du run qu'on vient de publier
+          # pour y ajouter sept échéances, puis republier `colonnes.bin`
+          # et les manifestes — c'est-à-dire se redonner le couple
+          # (manifeste d'une génération, octets d'une autre) qui a produit
+          # le HTTP 416 du 13/08. Elle vit donc DANS `ingest_colonnes`,
+          # après le remplissage AROME et avant la publication : une
+          # passe, une publication, un manifeste.
+          #
+          # ⚠️ Elle ne part que si la rallonge AROME est allée jusqu'à
+          # 51 h, et elle n'est JAMAIS bloquante : un run IFS absent
+          # laisse la coupe s'arrêter à 51 h, comme avant ce lot.
+          # Mesuré le 06/09 : +208 Mo de réseau, +24 s.
           python3 agrume/ingest_colonnes.py \
             --max-heures "${{ inputs.max_heures || '24' }}" \
             --run-vise "${{ inputs.run || '' }}" \
+            ${{ inputs.sans_ifs && '--sans-ifs' || '' }} \
             --sortie "$RUNNER_TEMP/agrume"
 
       - name: Disque restant après le run

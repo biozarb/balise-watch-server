@@ -659,6 +659,47 @@ class Grille:
         total = sum(a.size for a in blocs)
         return round(pleines / total, 4)
 
+    def etendre(self, steps_neufs, crier=print):
+        """UNE NOUVELLE grille, sur l'union des échéances, valeurs copiées.
+
+        ⛔ POURQUOI UNE NOUVELLE ET PAS UN `resize` EN PLACE. Les cinq
+        tableaux ont l'échéance en TROISIÈME axe (`h0025` est
+        `(param, niveau, échéance, lat, lon)`) : les agrandir en place
+        demanderait de décaler tout le contenu, et un `np.resize` — qui
+        ne réordonne rien — rendrait un tableau plein de valeurs
+        déplacées, toutes finies. On alloue, on copie par indice
+        d'échéance, on rend la neuve.
+
+        ⚠️ LE PRIX EST UN DOUBLEMENT MOMENTANÉ DE LA MÉMOIRE (~283 Mo →
+        ~566 Mo sur nord-alpes, mesuré). L'appelant doit lâcher
+        l'ancienne référence tout de suite ; `ingest_ifs.appliquer` le
+        fait domaine par domaine, jamais les trois ensemble.
+
+        ⛔ LES ÉCHÉANCES NEUVES SORTENT `NaN`, ET C'EST LE CONTRAT. Une
+        grille étendue mais non remplie ne doit RIEN publier de crédible :
+        `remplissage()` la montre vide, et l'appelant qui échouerait à la
+        remplir doit pouvoir jeter la neuve et republier l'ancienne.
+        """
+        neufs = sorted(set(int(s) for s in steps_neufs) - set(self.steps))
+        if not neufs:
+            return self
+        union = sorted(set(self.steps) | set(neufs))
+        g = Grille(self.run, union, self.lats, self.lons, self.zsol,
+                   domaine=self.domaine)
+        for s in self.steps:
+            a, b = self.i_step[s], g.i_step[s]
+            g.h0025[:, :, b] = self.h0025[:, :, a]
+            g.iso[:, :, b] = self.iso[:, :, a]
+            g.ziso[:, b] = self.ziso[:, a]
+            g.surf[:, b] = self.surf[:, a]
+            g.psol[b] = self.psol[a]
+        g._deaccumule = self._deaccumule
+        g.ifs = self.ifs
+        g.steps_ifs = set(self.steps_ifs)
+        crier(f"  grille [{self.domaine}] étendue : {len(self.steps)} → "
+              f"{len(union)} échéances ({g.octets() / 1e6:.0f} Mo en mémoire)")
+        return g
+
     def octets(self):
         return int(self.h0025.nbytes + self.iso.nbytes + self.ziso.nbytes
                    + self.surf.nbytes + self.psol.nbytes

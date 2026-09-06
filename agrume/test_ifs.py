@@ -74,6 +74,26 @@ def test_echeances_par_heure_valide():
 
     verifie(len(I.echeances_cousues(ag, ag)) == 7,
             "sept échéances, jamais huit : la fenêtre est fermée à 72 h")
+
+    # ⛔⛔ L'ALLER-RETOUR, ET C'EST LE DÉFAUT QUI A ÉTÉ ÉCRIT PUIS TROUVÉ.
+    # `ingest_ifs` refaisait la conversion à la main, avec le signe à
+    # l'envers : pour un run IFS 12 Z et un AGRUME 00 Z, il remplissait
+    # les échéances 30 → 48 au lieu de 54 → 72 — c'est-à-dire qu'il
+    # ÉCRASAIT des échéances AROME existantes, en silence.
+    for j, h_ifs in ((5, 18), (6, 0), (6, 6), (6, 12)):
+        r = datetime(2026, 9, j, h_ifs, tzinfo=UTC)
+        st = I.echeances_cousues(ag, r)
+        ret = I.heures_agrume(st, ag, r)
+        verifie(ret == list(range(I.DEBUT_H, I.FIN_H + 1, I.PAS_IFS_H)),
+                f"⭐⭐ run IFS {h_ifs:02d} Z : les pas {st} retraduits en "
+                f"heures AGRUME redonnent {ret} — et jamais 30 → 48, qui "
+                f"écraserait des échéances AROME") \
+            if h_ifs == 12 else None
+    verifie(all(I.heures_agrume(I.echeances_cousues(ag, datetime(2026, 9, j, h, tzinfo=UTC)),
+                                ag, datetime(2026, 9, j, h, tzinfo=UTC))
+                == list(range(I.DEBUT_H, I.FIN_H + 1, I.PAS_IFS_H))
+                for j, h in ((5, 18), (6, 0), (6, 6), (6, 12))),
+            "… et c'est vrai des quatre réseaux IFS, pas seulement du 12 Z")
     # ⛔ LA PROPRIÉTÉ GÉNÉRALE, sur les 4 réseaux IFS × les 2 runs AGRUME
     # admis (00 et 03 Z) : toute heure valide rendue tombe DANS la
     # fenêtre, et tout pas rendu est un multiple du pas natif.
@@ -491,6 +511,131 @@ def test_provenance_par_echeance():
             "180 pour IFS — le client interpole en connaissance de cause")
 
 
+def _monde(valeur):
+    """Un champ global constant, à la géométrie MESURÉE d'IFS."""
+    return np.full((I.SRC_NJ, I.SRC_NI), float(valeur), dtype=np.float32)
+
+
+def test_unites_et_remplissage():
+    """⛔ LE REMPLISSAGE D'UNE ÉCHÉANCE : les unités, et le champ de
+    surface qu'on oublie de régriller.
+
+    Les deux défauts que ce banc tient ont été COMMIS puis trouvés le
+    07/09 :
+      · poser un champ de surface BRUT (721 × 1440) dans une grille de
+        domaine — il a levé ici, et c'est une chance : sur un domaine
+        dont la forme aurait coïncidé avec un sous-tableau du monde,
+        numpy aurait accepté et publié la Sibérie sous le nom des Alpes ;
+      · publier des kelvins. Le produit B stocke la température en °C
+        (le float16 a un pas RELATIF : 0,25 K à 300 kelvins) — 273 de
+        trop se quantifieraient sans erreur et s'afficheraient comme une
+        canicule permanente.
+    """
+    print("\n▶ 9. remplir une échéance : les unités, et le régrillage de la surface")
+    import ingest_ifs as G
+    from grille import Grille
+    from quantification import PARAMS_0025, PARAMS_ISO
+
+    # ── les décalages recopiés doivent être ceux de `quantification` ──
+    dec_h = {p["nom"]: p.get("decalage", 0.0) for p in PARAMS_0025}
+    dec_iso = {p["nom"]: p.get("decalage", 0.0) for p in PARAMS_ISO}
+    verifie(all(abs(dec_h[n] - d) < 1e-9 for n, _i, _c, _l, d in G.CHAMPS_H),
+            "⭐ les décalages d'unité du bloc hauteur sont EXACTEMENT ceux "
+            "de `quantification.PARAMS_0025` — la seule duplication de ce "
+            "fichier, et elle est comparée")
+    verifie(all(abs(dec_iso[n] - d) < 1e-9 for n, _i, d in G.CHAMPS_ISO),
+            "… et ceux du bloc isobare ceux de `PARAMS_ISO`")
+
+    # ── un remplissage complet, sur des champs dont on sait tout ─────
+    lats = np.array([46.0, 45.975, 45.95], dtype=np.float32)
+    lons = np.array([6.0, 6.025], dtype=np.float32)
+    zsol = np.full((3, 2), 500.0, dtype=np.float32)
+    g = Grille("2026-09-06T00:00:00Z", [54], lats, lons, zsol)
+
+    alt = {1000: 150.0, 925: 800.0, 850: 1500.0, 700: 3100.0,
+           600: 4400.0, 500: 5800.0, 400: 7200.0}
+    champs = {}
+    for n in I.NIVEAUX_COMMUNS:
+        champs[("gh", n)] = _monde(alt[n])
+        champs[("u", n)] = _monde(10.0)
+        champs[("v", n)] = _monde(-4.0)
+        champs[("t", n)] = _monde(283.15)        # 10 °C en kelvins
+        champs[("r", n)] = _monde(55.0)
+    champs[("10u", 10)] = _monde(2.0)
+    champs[("10v", 10)] = _monde(-1.0)
+    champs[("2t", 2)] = _monde(293.15)           # 20 °C
+    champs[("msl", 0)] = _monde(101_500.0)       # Pa
+    champs[("sp", 0)] = _monde(95_000.0)         # Pa
+
+    G.remplir(g, champs, 54)
+    k = g.i_step[54]
+
+    verifie(np.allclose(np.asarray(g.h0025[g.i_param["u"], 0, k]), 2.0),
+            "⭐ le 10 m/sol du bloc hauteur vaut l'ancre `10u`, régrillée")
+    t_haut = np.asarray(g.h0025[g.i_param["t"], -1, k], dtype=np.float32)
+    verifie(np.all(np.abs(t_haut - 10.0) < 0.1),
+            f"⭐⭐ la température est en °C, pas en kelvins "
+            f"({np.nanmedian(t_haut):.1f} au lieu de 283) — 273 de trop se "
+            f"quantifieraient sans erreur")
+    verifie(np.all(np.abs(np.asarray(g.iso[g.i_param_iso['t'], 0, k]) - 10.0) < 0.1),
+            "… dans le bloc isobare aussi")
+
+    z850 = np.asarray(g.ziso[NIVEAUX_P.index(850), k], dtype=np.float32)
+    verifie(np.all(np.abs(z850 - 1500.0) < 1.0),
+            f"⭐⭐ `ziso` à 850 hPa vaut `gh` TEL QUEL ({z850[0, 0]:.0f} m, "
+            f"posé à 1500) — diviser par g, le réflexe venu du produit A "
+            f"où `z` est en m²/s², donnerait 153 m et ferait raccorder la "
+            f"colonne à 700 m au lieu de 7 000")
+
+    ps = np.asarray(g.psol[k], dtype=np.float32)
+    verifie(np.all(np.abs(ps - 950.0) < 0.1),
+            f"⭐ `psol` est en hPa ({ps[0, 0]:.0f}), pas en Pa — le "
+            f"facteur de `PARAM_PRESSION_SOL`")
+    pm = np.asarray(g.surf[g.i_param_surf["pression_mer"], k], dtype=np.float32)
+    verifie(np.all(np.abs(pm - 1015.0) < 0.5),
+            f"⭐ la pression mer aussi ({pm[0, 0]:.0f} hPa)")
+    verifie(ps.shape == (3, 2) and pm.shape == (3, 2),
+            "⭐⭐ les champs de SURFACE ont la forme du DOMAINE, pas celle "
+            "du monde — les poser bruts a levé le 07/09, et n'aurait pas "
+            "levé sur un domaine de forme complice")
+
+    tke = np.asarray(g.h0025[g.i_param["tke"], :, k], dtype=np.float32)
+    verifie(not np.isfinite(tke).any(),
+            "⛔ `tke` reste NaN : l'open data IFS ne le porte pas, et un "
+            "zéro se lirait « aucune turbulence »")
+
+
+def test_etendre():
+    """⛔ ÉTENDRE UNE GRILLE NE DÉPLACE RIEN."""
+    print("\n▶ 10. étendre une grille : les échéances d'avant ne bougent pas")
+    from grille import Grille
+    lats = np.array([46.0, 45.975], dtype=np.float32)
+    lons = np.array([6.0, 6.025], dtype=np.float32)
+    zsol = np.zeros((2, 2), dtype=np.float32)
+    g = Grille("2026-09-06T00:00:00Z", [0, 24, 51], lats, lons, zsol)
+    for k, s in enumerate(g.steps):
+        g.h0025[0, 0, k] = float(s)
+        g.ziso[0, k] = float(s) * 10.0
+
+    g2 = g.etendre([54, 57], crier=lambda *a: None)
+    verifie(g2.steps == [0, 24, 51, 54, 57],
+            f"les échéances sont l'UNION, triée ({g2.steps})")
+    verifie(all(np.allclose(np.asarray(g2.h0025[0, 0, g2.i_step[s]]), float(s))
+                for s in (0, 24, 51)),
+            "⭐⭐ chaque échéance d'avant se retrouve à SON heure — un "
+            "`resize` en place aurait rendu un tableau plein de valeurs "
+            "déplacées, toutes finies")
+    verifie(all(np.allclose(np.asarray(g2.ziso[0, g2.i_step[s]]), s * 10.0)
+                for s in (0, 24, 51)),
+            "… y compris sur `ziso`, dont l'axe des échéances est le second")
+    verifie(not np.isfinite(np.asarray(g2.h0025[0, 0, g2.i_step[54]])).any(),
+            "⛔ les échéances NEUVES sortent NaN : une grille étendue mais "
+            "non remplie ne publie rien de crédible")
+    verifie(g.etendre([0, 24], crier=lambda *a: None) is g,
+            "étendre avec des échéances déjà là rend la MÊME grille, sans "
+            "recopier 283 Mo pour rien")
+
+
 def main() -> int:
     print("═" * 66)
     print("  BANC DE LA RALLONGE IFS — lot L22b, 06/09/2026")
@@ -503,6 +648,8 @@ def main() -> int:
     test_bloc_hauteur_derive()
     test_manifeste()
     test_provenance_par_echeance()
+    test_unites_et_remplissage()
+    test_etendre()
     print("\n" + "═" * 66)
     if ECHECS:
         print(f"❌ {len(ECHECS)} assertion(s) en échec :")
