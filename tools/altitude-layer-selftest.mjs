@@ -1097,6 +1097,32 @@ console.log('\n── 11. ⛔ LE COUPLE (MANIFESTE, OCTETS) — deux génératio
     + '— on ne conclut pas d\'une absence',
     L.echeancesDansIndex({ runs: [{ run: RUN, domaine: DOM }] }, RUN, DOM)
       === null);
+  // ⛔ LOT L22b (07/09) — LE RUN N'EST PLUS CONTIGU, ET LE COMPTE DOIT
+  // TENIR. La rallonge IFS ajoute les échéances 54 → 72 h après un trou
+  // de 51 à 54 : l'index d'un run cousu porte donc `e00…e51` PUIS
+  // `e54…e72`, sans e52 ni e53. Un compte qui aurait supposé la
+  // contiguïté (par exemple `max(step) + 1`) annoncerait 73 échéances là
+  // où le manifeste en déclare 59 — et `verifierGeneration` refuserait
+  // TOUS les runs cousus, en accusant le cache.
+  {
+    const idxIfs = {
+      runs: [{
+        run: RUN, domaine: DOM,
+        cles: [`agrume/grille/${DOM}/${RUN}/e00.bin`,
+               `agrume/grille/${DOM}/${RUN}/e01.bin`,
+               `agrume/grille/${DOM}/${RUN}/e54.bin`,
+               `agrume/grille/${DOM}/${RUN}/e72.bin`,
+               CLE_COL, `agrume/grille/${DOM}/${RUN}/manifest.json`],
+      }],
+      ecrit_le: '2026-09-07T01:00:00Z',
+    };
+    verifier('⭐⭐ un run COUSU (échéances non contiguës, e00-e01 puis '
+      + 'e54-e72) se compte par ses clés, pas par son horizon',
+      L.echeancesDansIndex(idxIfs, RUN, DOM) === 4,
+      String(L.echeancesDansIndex(idxIfs, RUN, DOM)));
+    verifier('… et son manifeste de la bonne génération passe',
+      L.verifierGeneration(idxIfs, manifeste(4)) === undefined);
+  }
   verifier('le manifeste de la BONNE génération passe',
     L.verifierGeneration(idx, MAN) === undefined);
   {
