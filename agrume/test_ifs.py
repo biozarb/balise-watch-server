@@ -146,6 +146,47 @@ def test_choix_du_run():
             f"{demandes[-1].rsplit('-', 3)[-3] if demandes else '?'}h) — les "
             f"sept pas sont publiés au même instant, mesuré")
 
+    # ⛔ `_tete` LUI-MÊME, et pas seulement les injections. Les
+    # assertions ci-dessus passent un `tete` de banc : elles ne disent
+    # RIEN de la vraie fonction, qui est l'endroit où le 404 se traduit.
+    class _Faux(Exception):
+        def __init__(self, code):
+            self.code = code
+    import urllib.error as _ue
+    vrai_open = I.urllib.request.urlopen
+
+    class _Rep:
+        headers = {"Last-Modified": "Sun, 06 Sep 2026 19:34:00 GMT"}
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def _open_404(req, timeout=None):
+        raise _ue.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+    def _open_500(req, timeout=None):
+        raise _ue.HTTPError(req.full_url, 500, "Server Error", {}, None)
+
+    try:
+        I.urllib.request.urlopen = _open_404
+        vu_404 = I._tete("https://exemple/x.index") is None
+        I.urllib.request.urlopen = _open_500
+        try:
+            I._tete("https://exemple/x.index")
+            vu_500 = False
+        except _ue.HTTPError:
+            vu_500 = True
+        I.urllib.request.urlopen = lambda req, timeout=None: _Rep()
+        vu_ok = I._tete("https://exemple/x.index") is not None
+    finally:
+        I.urllib.request.urlopen = vrai_open
+    verifie(vu_404, "⭐⭐ `_tete` traduit un 404 en `None` — « pas encore "
+                    "publié » est une RÉPONSE, pas une panne")
+    verifie(vu_500, "⛔ … et laisse remonter un 500 : une panne chez ECMWF "
+                    "ne doit pas se lire « le run n'est pas là »")
+    verifie(vu_ok, "… et rend le `Last-Modified` quand l'objet est là")
+
     def tete_tout_absent(url):
         return None
     verifie(I.run_disponible(ag, maintenant, tete=tete_tout_absent,
@@ -323,6 +364,24 @@ def test_interpolation_verticale():
     croissant = all(out[k].mean() <= out[k + 1].mean() + 1e-6
                     for k in range(13))
     verifie(croissant, "… et l'ordre des niveaux est préservé (monotone)")
+
+    # ⛔⛔ L'IDENTITÉ QUI ÉPINGLE LES POIDS, ET PAS SEULEMENT LEUR ORDRE.
+    # Si le champ VAUT `log p` à chaque niveau natif, alors l'interpolé
+    # en log p doit valoir `log p` à chaque niveau cible — exactement.
+    # Sans cette assertion, échanger `w` et `1 − w` laisse un résultat
+    # encadré par ses voisins, donc monotone, donc invisible : chaque
+    # niveau fabriqué serait décalé d'un demi-intervalle, soit ~300 m sur
+    # l'axe vertical, et la coupe resterait lisse.
+    pile_lp = np.stack([np.full((3, 4), np.log(float(n)))
+                        for n in I.NIVEAUX_COMMUNS]).astype(np.float32)
+    out_lp = I.interpoler_log_p(pile_lp, poids)
+    attendu = np.array([np.log(float(n)) for n in NIVEAUX_P], dtype=np.float32)
+    ecart = max(abs(float(out_lp[k].mean()) - attendu[k])
+                for k in range(len(NIVEAUX_P)))
+    verifie(ecart < 1e-6,
+            f"⭐⭐ un champ égal à `log p` s'interpole en `log p` à chaque "
+            f"niveau cible (écart max {ecart:.1e}) — c'est ce qui épingle "
+            f"les poids, et pas seulement leur ordre")
 
     try:
         I.poids_log_p(cibles=(300,))
@@ -634,6 +693,23 @@ def test_etendre():
     verifie(g.etendre([0, 24], crier=lambda *a: None) is g,
             "étendre avec des échéances déjà là rend la MÊME grille, sans "
             "recopier 283 Mo pour rien")
+
+    # ⛔⛔ ET AVEC UNE ÉCHÉANCE INTERCALÉE, qui DÉCALE les indices. En
+    # production les échéances IFS (54-72) viennent toujours APRÈS les
+    # AROME (0-51), donc les indices ne bougent pas — et une copie qui
+    # recopierait `self.i_step[s]` au lieu de `g.i_step[s]` passerait
+    # inaperçue pour toujours. Ce cas-ci la démasque.
+    g3 = Grille("2026-09-06T00:00:00Z", [0, 51], lats, lons, zsol)
+    for k, s in enumerate(g3.steps):
+        g3.h0025[0, 0, k] = float(s)
+    g4 = g3.etendre([24], crier=lambda *a: None)
+    verifie(g4.steps == [0, 24, 51],
+            f"l'échéance intercalée se range à sa place ({g4.steps})")
+    verifie(np.allclose(np.asarray(g4.h0025[0, 0, g4.i_step[51]]), 51.0)
+            and not np.isfinite(np.asarray(g4.h0025[0, 0, g4.i_step[24]])).any(),
+            "⭐⭐ l'échéance 51 h reste à 51 h alors que son INDICE a changé "
+            "(1 → 2) — recopier l'indice d'origine l'aurait posée à 24 h, "
+            "avec des valeurs finies et parfaitement crédibles")
 
 
 def main() -> int:
