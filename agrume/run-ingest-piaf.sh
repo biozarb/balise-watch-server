@@ -38,6 +38,16 @@ COMPTEUR="${BW_PIAF_COMPTEUR:-$HOME/.bw-agrume-piaf-echecs}"
 # ⛔ 27/08 — LE VOYANT CLIGNOTAIT POUR UNE PASSE PERDUE SUR TRENTE-SIX.
 # Voir le pavé « CE QUE LE VOYANT SURVEILLE » plus bas.
 SEUIL_ECHECS="${BW_PIAF_SEUIL_ECHECS:-3}"
+# ⛔ 07/09 — ET IL CLIGNOTAIT AUSSI DANS L'AUTRE SENS. Les 05 et 06/09,
+# la passerelle a rendu 203 octets en HTTP 200 PAR BOUFFÉES pendant
+# ~8 h cumulées : trois passes perdues → DOWN, UNE passe qui passe →
+# UP, trois perdues → DOWN… Trente « voyant tombe » au journal, une
+# quinzaine de mails DOWN/UP dans la boîte de Yann pour UNE panne amont.
+# Le remède est symétrique au premier : le voyant, une fois tombé, ne se
+# relève qu'après SEUIL_REPRISE réussites CONSÉCUTIVES. Trente minutes
+# de passes fraîches, pas une passe chanceuse au milieu d'une bouffée.
+SEUIL_REPRISE="${BW_PIAF_SEUIL_REPRISE:-3}"
+REPRISE="$COMPTEUR.reprise"
 
 # ⚠️ LES ALERTES SE CHARGENT EN PREMIER — leçon du 03/08. Le tout premier
 # échec possible est « un fichier d'environnement est absent » ; si le
@@ -178,9 +188,23 @@ lire_compteur() {
 
 case "$code" in
   0)
+    n=$(lire_compteur)
+    if [ "$n" -ge "$SEUIL_ECHECS" ]; then
+      # ⛔ 07/09 — le voyant est TOMBÉ : une réussite isolée au milieu
+      # d'une bouffée ne le relève pas. On compte les réussites
+      # d'affilée, et on se tait jusqu'à SEUIL_REPRISE.
+      r=$(( $(tr -cd '0-9' < "$REPRISE" 2>/dev/null || echo 0) + 1 ))
+      if [ "$r" -lt "$SEUIL_REPRISE" ]; then
+        echo "$r" > "$REPRISE" 2>/dev/null || dire "⚠️ $REPRISE non inscriptible"
+        dire "✅ passe ingérée, reprise $r/$SEUIL_REPRISE — le voyant reste tombé (pas de ping)"
+        exit "$code"
+      fi
+      dire "✅ $r réussites CONSÉCUTIVES (seuil $SEUIL_REPRISE) — le voyant se relève"
+    fi
     # ⚠️ Remise à zéro AVANT le ping : si le ping échoue (réseau), on
     # veut quand même avoir enregistré que la chaîne est repartie.
     echo 0 > "$COMPTEUR" 2>/dev/null || dire "⚠️ $COMPTEUR non inscriptible"
+    rm -f "$REPRISE"
     pinguer "" "passe ingérée et écrite"
     ;;
   3)
@@ -192,6 +216,8 @@ case "$code" in
   *)
     n=$(( $(lire_compteur) + 1 ))
     echo "$n" > "$COMPTEUR" 2>/dev/null || dire "⚠️ $COMPTEUR non inscriptible"
+    # Un échec casse la série de réussites : la reprise repart de zéro.
+    rm -f "$REPRISE"
     if [ "$n" -ge "$SEUIL_ECHECS" ]; then
       dire "⛔ $n échecs CONSÉCUTIFS (seuil $SEUIL_ECHECS) — le voyant tombe"
       pinguer /fail "ingest_piaf.py a rendu le code $code — $n échecs consécutifs"

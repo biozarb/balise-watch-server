@@ -168,7 +168,40 @@ LATENCE_MESUREE_S = {0: 7 * 3600 + 34 * 60, 6: 6 * 3600 + 27 * 60,
 #: interpoler entre une échéance AROME et une échéance IFS mélangerait
 #: deux modèles dans une même courbe sans le dire.
 DEBUT_H = 54
-FIN_H = 72
+#: ⛔ 07/09/2026 — LA COUPE VA JUSQU'À SAMEDI, PAS JUSQU'À MERCREDI.
+#: Le cadrage du 04/09 s'arrêtait à 72 h ; retour de Yann le 07/09 :
+#: « on a ajouté IFS, qui devrait l'amener jusqu'à samedi au moins, mais
+#: on reste à mercredi ». Décision du même jour, prix chiffré avant :
+#: 144 h au pas de 3 h — soit 30 pas IFS au lieu de 7, ~22 Mo par pas et
+#: par run sur R2 (mesuré le 07/09 : +152 Mo pour 7 pas × 3 domaines),
+#: donc ≈ +1,5 Go à trois runs retenus : la jauge passe de 7,2 à
+#: ≈ 8,7 Go, et le seuil d'alerte du garde-fou R2 est relevé à 9,2 Go
+#: (palier 10 inchangé). Sur l'Action, ≈ +4 min de réseau (66 s pour
+#: 7 pas le 07/09).
+#:
+#: ⚠️ 144 est une INTENTION en heures AGRUME, pas une promesse : la
+#: fenêtre réellement cousue s'arrête à `PAS_MAX_3H − écart`, voir
+#: `echeances_cousues`. Pour un écart de 3 h (le cas nominal), la coupe
+#: va à +141 h ; à 9 h de recul, +135 h. Le manifeste publie les
+#: échéances RÉELLES (`echeances_ifs`), l'écran les lit — aucun 144 en
+#: dur nulle part ailleurs.
+FIN_H = 144
+
+#: ⛔⛔ LE DERNIER PAS AU PAS DE 3 H, MESURÉ LE 07/09/2026 — ET C'EST
+#: CE QUI BORNE VRAIMENT LA FENÊTRE. HEAD sur les `.index` des runs 00 Z
+#: du 07/09 et 18 Z du 06/09 :
+#:     00 Z : +72 200 · +90 200 · +93 200 · +144 200 · +147 404 · +150 200 · +240 200
+#:     18 Z : +72 200 · +90 200 · +93 200 · +144 200 · +147 404 · +150 404 · +240 404
+#: Donc : les QUATRE réseaux vont à 144 h au pas de 3 h ; au-delà, seuls
+#: 00 et 12 Z continuent, AU PAS DE 6 H, jusqu'à 240 h. Un pas +147 h
+#: n'existe pour personne. Sans cette borne, un AGRUME de 15 Z cousu au
+#: 12 Z demanderait le pas 147 (= 144 + 3 d'écart), le trouverait
+#: absent, et `run_disponible` reculerait de réseau en réseau jusqu'à
+#: n'en trouver AUCUN — la coupe retomberait à 51 h, en silence, chaque
+#: fois que la fenêtre demande plus que ce que le pas de 3 h peut donner.
+#: ⚠️ Régularité MESURÉE sur deux runs, comme la latence : si ECMWF
+#: allonge le pas de 3 h, c'est ce nombre qu'il faut remesurer.
+PAS_MAX_3H = 144
 
 #: Les 14 niveaux isobares publiés (mesuré sur l'index, pas déduit).
 NIVEAUX_IFS = (1000, 925, 850, 700, 600, 500, 400, 300, 250, 200, 150,
@@ -232,8 +265,16 @@ class AbsentIFS(Exception):
 # ══════════════════════════════════════════════════════════════════
 
 def echeances_cousues(run_agrume: datetime, run_ifs: datetime,
-                      debut_h: int = DEBUT_H, fin_h: int = FIN_H) -> list[int]:
+                      debut_h: int = DEBUT_H, fin_h: int = FIN_H,
+                      pas_max: int = PAS_MAX_3H) -> list[int]:
     """Les pas du run IFS dont l'HEURE VALIDE tombe dans la fenêtre.
+
+    ⛔ ET QUI EXISTENT AU PAS DE 3 H (07/09) : aucun pas au-delà de
+    `pas_max` n'est rendu, même si la fenêtre en heures AGRUME en
+    demande. La fenêtre se TRONQUE en haut (la coupe s'arrête à
+    `pas_max − écart`), elle ne s'arrondit pas et ne saute pas au pas
+    de 6 h : une frise qui passerait de 3 h en 3 h à 6 h en 6 h sans
+    le dire se lirait comme un trou, pas comme un horizon.
 
     ⛔ LE CHOIX SE FAIT PAR HEURE VALIDE, JAMAIS PAR NUMÉRO DE PAS. Le
     run IFS n'est presque jamais celui d'AGRUME (mesuré : 18 Z de la
@@ -252,7 +293,7 @@ def echeances_cousues(run_agrume: datetime, run_ifs: datetime,
         return []
     ecart_h = int(ecart_h)
     return [h + ecart_h for h in range(debut_h, fin_h + 1)
-            if (h + ecart_h) % PAS_IFS_H == 0 and h + ecart_h >= 0]
+            if (h + ecart_h) % PAS_IFS_H == 0 and 0 <= h + ecart_h <= pas_max]
 
 
 def heures_agrume(steps_ifs, run_agrume: datetime, run_ifs: datetime):
@@ -302,9 +343,10 @@ def run_disponible(run_agrume: datetime, maintenant: datetime | None = None,
     """Le run IFS le plus RÉCENT dont tous les pas de la fenêtre sont
     publiés, ou `None`.
 
-    ⛔ ON SONDE LE DERNIER PAS, ET LUI SEUL. Les sept pas d'un run sont
-    publiés au même instant (fait nº 2, mesuré) : sonder les sept
-    coûterait sept requêtes pour la même information. ⚠️ Ce raccourci
+    ⛔ ON SONDE LE DERNIER PAS, ET LUI SEUL. Les pas d'un run sont
+    publiés au même instant (fait nº 2, mesuré sur 54 → 72 h ; revérifié
+    le 07/09 sur +144 h, publié avec les autres) : sonder chaque pas
+    coûterait trente requêtes pour la même information. ⚠️ Ce raccourci
     REPOSE sur une mesure de deux jours — si un jour la coupe sort
     trouée en haut de fenêtre, c'est ICI qu'il faut revenir, et le
     manifeste porte `sonde` pour qu'on sache ce qui a été demandé.
@@ -701,7 +743,10 @@ def bloc_manifeste(run_ifs: datetime, steps_ifs, last_modified=None,
         publie_le=last_modified,
         pas_natif_h=PAS_IFS_H,
         echeances_ifs=list(steps_ifs),
+        # ⚠️ La fenêtre DEMANDÉE ; les échéances RÉELLES sont dans
+        # `echeances_ifs` (bornées par `PAS_MAX_3H − écart`, 07/09).
         fenetre_h=[DEBUT_H, FIN_H],
+        pas_max_3h=PAS_MAX_3H,
         niveaux_natifs=list(NIVEAUX_COMMUNS),
         niveaux_interpoles=list(NIVEAUX_DERIVES),
         interpolation_verticale="linéaire en log p entre les niveaux natifs",

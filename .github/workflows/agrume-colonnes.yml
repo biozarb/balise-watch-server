@@ -57,7 +57,7 @@ on:
         default: "24"
         type: string
       sans_ifs:
-        description: "Ne PAS coudre la rallonge IFS 54 → 72 h (lot L22b)"
+        description: "Ne PAS coudre la rallonge IFS 54 → 144 h (lot L22b, fenêtre du 07/09)"
         required: false
         default: false
         type: boolean

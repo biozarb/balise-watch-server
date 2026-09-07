@@ -86,7 +86,7 @@ passe() {  # passe <code de sortie du python>
 }
 
 pings() { tr '\n' ' ' < "$BAC/pings" 2>/dev/null | sed 's/ $//'; }
-raz()   { : > "$BAC/pings"; rm -f "$BAC/compteur"; }
+raz()   { : > "$BAC/pings"; rm -f "$BAC/compteur" "$BAC/compteur.reprise"; }
 
 echo "══════════════════════════════════════════════════════════════"
 echo "  BANC DU VOYANT — six passes perdues ne font pas une panne"
@@ -147,6 +147,26 @@ BW_BANC_PINGS="$BAC/pings" \
   bash "$ICI/run-ingest-piaf.sh" >/dev/null 2>&1
 verifier "/fail" "$(pings)" \
   "/fail IMMÉDIAT : une config cassée ne se rattrape pas en 10 min"
+
+# ── 6. tombé, le voyant ne se relève pas sur UNE passe chanceuse ──────
+echo
+echo "6. la bouffée des 05-06/09 : tombé, puis 1 réussite, 1 échec, 3 réussites"
+raz
+passe 1; passe 1; passe 1
+verifier "/fail" "$(pings)" "tombé au troisième échec"
+passe 0
+verifier "/fail" "$(pings)" "UNE réussite ne relève PAS le voyant (reprise 1/3)"
+passe 1
+verifier "/fail /fail" "$(pings)" "l'échec suivant casse la série, le voyant reste tombé"
+passe 0; passe 0
+verifier "/fail /fail" "$(pings)" "deux réussites d'affilée : toujours muet (2/3)"
+passe 0
+verifier "/fail /fail OK" "$(pings)" "la TROISIÈME relève le voyant — un seul UP"
+verifier "0" "$(cat "$BAC/compteur")" "le compteur est remis à zéro"
+verifier "absent" "$([ -e "$BAC/compteur.reprise" ] && echo présent || echo absent)" \
+  "et le compteur de reprise est effacé"
+passe 0
+verifier "/fail /fail OK OK" "$(pings)" "ensuite, chaque réussite pingue comme avant"
 
 echo
 echo "══════════════════════════════════════════════════════════════"

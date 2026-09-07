@@ -55,25 +55,31 @@ def test_echeances_par_heure_valide():
     print("\n▶ 1. l'échéance se choisit par l'heure VALIDE, pas par le numéro de pas")
     ag = datetime(2026, 9, 6, 0, tzinfo=UTC)
 
-    verifie(I.echeances_cousues(ag, ag) == [54, 57, 60, 63, 66, 69, 72],
-            "run IFS = run AGRUME : les pas SONT les heures (54 → 72)")
+    # ⓘ 07/09 : la fenêtre va à 144 h (décision de Yann, « jusqu'à
+    # samedi »), 31 pas quand l'écart est nul.
+    verifie(I.echeances_cousues(ag, ag) == list(range(54, 145, 3)),
+            "run IFS = run AGRUME : les pas SONT les heures (54 → 144)")
 
     # ⛔ le cas réel : IFS 12 Z de la veille au soir pour un AGRUME 00 Z
     veille = datetime(2026, 9, 5, 12, tzinfo=UTC)
-    att = [54 + 12, 57 + 12, 60 + 12, 63 + 12, 66 + 12, 69 + 12, 72 + 12]
+    # ⛔ 07/09 : décalés de +12 ET bornés à 144 — le pas 156 n'existe
+    # pas au pas de 3 h (mesuré), donc la fenêtre s'arrête à 132 h AGRUME.
+    att = [h + 12 for h in range(54, 145, 3) if h + 12 <= I.PAS_MAX_3H]
     verifie(I.echeances_cousues(ag, veille) == att,
             f"⭐ run IFS 12 h PLUS TÔT : les pas sont décalés de +12 "
-            f"({att[0]} → {att[-1]}), pas 54 → 72 — prendre le numéro "
-            f"servirait une coupe en avance de 12 h")
+            f"({att[0]} → {att[-1]}), pas 54 → 144 — prendre le numéro "
+            f"servirait une coupe en avance de 12 h ; et jamais au-delà "
+            f"de {I.PAS_MAX_3H}")
 
     # le run IFS mesuré le 06/09 : 12 Z du MÊME jour, AGRUME 00 Z
     meme = datetime(2026, 9, 6, 12, tzinfo=UTC)
-    verifie(I.echeances_cousues(ag, meme) == [42, 45, 48, 51, 54, 57, 60],
-            "run IFS 12 h PLUS TARD : pas 42 → 60, et ce sont bien les "
-            "heures 54 → 72 après AGRUME")
+    verifie(I.echeances_cousues(ag, meme) == list(range(42, 133, 3)),
+            "run IFS 12 h PLUS TARD : pas 42 → 132, et ce sont bien les "
+            "heures 54 → 144 après AGRUME")
 
-    verifie(len(I.echeances_cousues(ag, ag)) == 7,
-            "sept échéances, jamais huit : la fenêtre est fermée à 72 h")
+    verifie(len(I.echeances_cousues(ag, ag)) == 31
+            and max(I.echeances_cousues(ag, ag)) == 144,
+            "31 échéances, jamais 32 : la fenêtre est fermée à 144 h")
 
     # ⛔⛔ L'ALLER-RETOUR, ET C'EST LE DÉFAUT QUI A ÉTÉ ÉCRIT PUIS TROUVÉ.
     # `ingest_ifs` refaisait la conversion à la main, avec le signe à
@@ -84,16 +90,50 @@ def test_echeances_par_heure_valide():
         r = datetime(2026, 9, j, h_ifs, tzinfo=UTC)
         st = I.echeances_cousues(ag, r)
         ret = I.heures_agrume(st, ag, r)
-        verifie(ret == list(range(I.DEBUT_H, I.FIN_H + 1, I.PAS_IFS_H)),
-                f"⭐⭐ run IFS {h_ifs:02d} Z : les pas {st} retraduits en "
-                f"heures AGRUME redonnent {ret} — et jamais 30 → 48, qui "
-                f"écraserait des échéances AROME") \
+        # ⛔ 07/09 : la fenêtre se TRONQUE à `PAS_MAX_3H − écart` — pour
+        # un AGRUME 00 Z cousu au 12 Z de la veille (écart 12 h), la
+        # coupe va à +132 h, pas à +144.
+        ecart = int((ag - r).total_seconds() // 3600)
+        attendu = list(range(I.DEBUT_H, min(I.FIN_H, I.PAS_MAX_3H - ecart) + 1,
+                             I.PAS_IFS_H))
+        verifie(ret == attendu,
+                f"⭐⭐ run IFS {h_ifs:02d} Z : les pas {st[:3]}…{st[-1]} "
+                f"retraduits en heures AGRUME redonnent {ret[:3]}…{ret[-1]} "
+                f"(fin {I.PAS_MAX_3H} − {ecart} = {attendu[-1]}) — et jamais "
+                f"30 → 48, qui écraserait des échéances AROME") \
             if h_ifs == 12 else None
+    def _attendu(a, r):
+        ecart = int((a - r).total_seconds() // 3600)
+        return list(range(I.DEBUT_H, min(I.FIN_H, I.PAS_MAX_3H - ecart) + 1,
+                          I.PAS_IFS_H))
     verifie(all(I.heures_agrume(I.echeances_cousues(ag, datetime(2026, 9, j, h, tzinfo=UTC)),
                                 ag, datetime(2026, 9, j, h, tzinfo=UTC))
-                == list(range(I.DEBUT_H, I.FIN_H + 1, I.PAS_IFS_H))
+                == _attendu(ag, datetime(2026, 9, j, h, tzinfo=UTC))
                 for j, h in ((5, 18), (6, 0), (6, 6), (6, 12))),
             "… et c'est vrai des quatre réseaux IFS, pas seulement du 12 Z")
+    # ⛔⛔ 07/09 — AUCUN PAS AU-DELÀ DE 144 H N'EST DEMANDÉ, JAMAIS. Le
+    # pas +147 h n'existe sur aucun réseau (HEAD 404 mesuré le 07/09 sur
+    # 00 Z et 18 Z) ; le demander ferait reculer `run_disponible` de
+    # réseau en réseau jusqu'à ne rien trouver, et la coupe retomberait
+    # à 51 h en silence.
+    r12 = datetime(2026, 9, 6, 12, tzinfo=UTC)
+    ag15 = datetime(2026, 9, 6, 15, tzinfo=UTC)
+    st15 = I.echeances_cousues(ag15, r12)
+    verifie(st15 and max(st15) == I.PAS_MAX_3H == 144
+            and I.heures_agrume(st15, ag15, r12)[-1] == 141,
+            f"⭐⭐ AGRUME 15 Z cousu au 12 Z : le dernier pas demandé est "
+            f"+{max(st15)} h (jamais 147), la coupe va à "
+            f"+{I.heures_agrume(st15, ag15, r12)[-1]} h")
+    verifie(I.FIN_H == 144 and I.DEBUT_H == 54,
+            "la fenêtre demandée est 54 → 144 h (décision de Yann du 07/09 : "
+            "« jusqu'à samedi », pas de 3 h)")
+    verifie(len(st15) == 30,
+            f"30 pas IFS au lieu de 7 — c'est le prix chiffré (≈ +1,5 Go R2 "
+            f"à trois runs), pas une surprise ({len(st15)})")
+    # la troncature est CONTIGUË : aucun trou entre 54 et la fin
+    hs = I.heures_agrume(st15, ag15, r12)
+    verifie(hs == list(range(54, 142, 3)),
+            "… et la fenêtre tronquée est contiguë, de 3 h en 3 h, sans trou")
     # ⛔ LA PROPRIÉTÉ GÉNÉRALE, sur les 4 réseaux IFS × les 2 runs AGRUME
     # admis (00 et 03 Z) : toute heure valide rendue tombe DANS la
     # fenêtre, et tout pas rendu est un multiple du pas natif.
@@ -107,7 +147,7 @@ def test_echeances_par_heure_valide():
                 dedans &= (I.DEBUT_H <= hv <= I.FIN_H) and st % I.PAS_IFS_H == 0
     verifie(dedans,
             "⭐ sur les 4 réseaux IFS × les 2 runs AGRUME admis, toute "
-            "heure valide rendue est dans [54, 72] h après AGRUME, et tout "
+            "heure valide rendue est dans [54, 144] h après AGRUME, et tout "
             "pas est un multiple de 3 h")
     # ⚠️ En pratique le décalage est TOUJOURS un multiple de 3 h (AGRUME
     # à 00/03 Z contre IFS à 00/06/12/18 Z). S'il ne l'était pas, les
@@ -138,13 +178,13 @@ def test_choix_du_run():
     verifie(choix is not None and choix[0] == datetime(2026, 9, 6, 12, tzinfo=UTC),
             f"⭐ le 18 Z n'est pas publié : on recule au 12 Z "
             f"({choix and choix[0].isoformat()})")
-    verifie(choix and choix[1] == [42, 45, 48, 51, 54, 57, 60],
+    verifie(choix and choix[1] == list(range(42, 133, 3)),
             "… et les pas suivent le run choisi, pas la fenêtre nominale")
-    verifie(len(demandes) == 2 and demandes[-1].endswith("-60h-oper-fc.index"),
+    verifie(len(demandes) == 2 and demandes[-1].endswith("-132h-oper-fc.index"),
             f"⭐ UNE sonde par run, sur le DERNIER pas seulement "
             f"({len(demandes)} requêtes, la dernière : "
             f"{demandes[-1].rsplit('-', 3)[-3] if demandes else '?'}h) — les "
-            f"sept pas sont publiés au même instant, mesuré")
+            f"pas sont publiés au même instant, mesuré")
 
     # ⛔ `_tete` LUI-MÊME, et pas seulement les injections. Les
     # assertions ci-dessus passent un `tete` de banc : elles ne disent

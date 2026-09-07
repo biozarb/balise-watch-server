@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ══════════════════════════════════════════════════════════════════════
-#  agrume/ingest_ifs.py — LA RALLONGE IFS DU PRODUIT B (51 → 72 h)
+#  agrume/ingest_ifs.py — LA RALLONGE IFS DU PRODUIT B (51 → 72 h au lot ; 54 → 144 h depuis le 07/09, cf. ifs.py)
 #                                         (Lot L22b, 07/09/2026)
 #
 #  `ifs.py` porte le format et les conversions ; ce fichier-ci fait le

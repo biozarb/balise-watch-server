@@ -65,9 +65,20 @@ MUTATIONS = [
      "valide : la coupe est décalée du décalage entre les deux runs",
      IFS, BANC,
      "    return [h + ecart_h for h in range(debut_h, fin_h + 1)\n"
-     "            if (h + ecart_h) % PAS_IFS_H == 0 and h + ecart_h >= 0]",
+     "            if (h + ecart_h) % PAS_IFS_H == 0 and 0 <= h + ecart_h <= pas_max]",
      "    return [h for h in range(debut_h, fin_h + 1)\n"
-     "            if h % PAS_IFS_H == 0]"),
+     "            if h % PAS_IFS_H == 0 and h <= pas_max]"),
+
+    # ⛔ 07/09 — la borne de 144 h saute : un AGRUME 15 Z cousu au 12 Z
+    # demande le pas 147, qui n'existe sur aucun réseau ; en production
+    # `run_disponible` reculerait jusqu'à ne rien trouver et la coupe
+    # retomberait à 51 h, en silence.
+    ("⭐ la borne `PAS_MAX_3H` est ignorée : la fenêtre demande des pas "
+     "au-delà de 144 h, qui n'existent pas au pas de 3 h — la coupe "
+     "retombe à 51 h dès que l'écart n'est pas nul",
+     IFS, BANC,
+     "            if (h + ecart_h) % PAS_IFS_H == 0 and 0 <= h + ecart_h <= pas_max]",
+     "            if (h + ecart_h) % PAS_IFS_H == 0 and 0 <= h + ecart_h]"),
 
     ("la verticale s'interpole en `p` au lieu de `log p` : tout l'axe "
      "isobare glisse, régulièrement",

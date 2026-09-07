@@ -172,8 +172,16 @@ def corps_grib_invalide(octets):
     eccodes, pendant qu'on peut encore retenter.
     """
     if len(octets) < MIN_OCTETS_GRIB:
+        # ⚠️ 07/09 — ON DIT CE QU'IL Y A DEDANS. Les 05 et 06/09, la
+        # passerelle a rendu **203 octets en HTTP 200** pendant des
+        # heures (17 h–20 h, 23 h–0 h, 3 h, puis 20 h le lendemain) :
+        # 30 mails DOWN/UP, et pas UNE ligne de journal qui dise si
+        # c'était une saturation (`mw:code` 868502), un quota, ou une
+        # clé refusée. Sans le corps, on ne peut ni trancher ni
+        # rapporter à Météo-France. Cent soixante caractères suffisent.
+        apercu = octets[:160].decode("utf-8", "replace").replace("\n", " ")
         return (f"{len(octets)} octets, trop court pour un GRIB2 "
-                f"(plancher {MIN_OCTETS_GRIB})")
+                f"(plancher {MIN_OCTETS_GRIB}) — corps : {apercu!r}")
     if not octets.startswith(MAGIE_GRIB_DEBUT):
         return (f"ne commence pas par « GRIB » mais par {octets[:24]!r} — "
                 f"c'est un corps d'erreur servi en HTTP 200")
