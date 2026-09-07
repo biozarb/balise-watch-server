@@ -1,6 +1,37 @@
 #!/usr/bin/env python3
 """
-Ingestion ARPEGE -> calque isobares (Europe + monde, passé -> prévision).
+Ingestion ARPEGE -> calque isobares (Europe, passé -> prévision).
+
+⚠️ 07/09/2026 — REFONTE « deux versions, une source » (retour Yann : « les
+pilotes ne l'utilisent pas trop… on l'a remis en place mais mal »). Ce qui
+était cassé : le front n'affiche que la grille MONDE depuis le 24/07 (fin
+de l'incohérence Europe/Monde = deux runs), et le 30/07 cette grille a été
+passée à 10 hPa pour le quota, sur la prémisse — déjà fausse depuis six
+jours — qu'elle « n'est jamais affichée au-dessus du zoom 4 ». Mesuré le
+07/09 à 12:00 : dans un anticyclone 1020-1032 hPa sur la France, la grille
+Monde n'avait QUE 2 segments touchant la France (1000/1010), la grille
+Europe 219 — et c'est la grille Europe qui n'était jamais lue.
+
+Désormais :
+  - UNE SEULE grille, `meteofrance_arpege_europe` (0,1°, BBOX Europe +
+    Atlantique NE — la couverture des cartes de pression du Met Office,
+    modèle de la version simplifiée). La grille Monde est RETIRÉE et son
+    contenu purgé du bucket (`retire_grid`).
+  - DEUX fichiers par échéance, calculés sur le MÊME champ du MÊME run
+    (donc jamais d'incohérence entre les deux versions) :
+      `<iso>.json`        détaillé : contours 1 hPa (inchangé), coordonnées
+                          simplifiées (Douglas-Peucker) — ~1,5 Mo avant.
+      `<iso>.synop.json`  simplifié « synoptique » : champ lissé, contours
+                          tous les 4 hPa (convention Met Office), fragments
+                          courts filtrés, coordonnées simplifiées plus fort.
+    Les centres H/L sont détectés sur le champ LISSÉ et écrits dans les
+    deux fichiers.
+  - Le manifest porte `levelStepHpa` (détaillé) ET `synopStepHpa`
+    (simplifié). Un manifest précédent SANS `synopStepHpa` déclenche le
+    recalcul du passé (une seule fois) pour que chaque échéance ait ses
+    deux fichiers.
+Le front (IsobarsLayer.tsx) choisit la version selon le zoom, avec un
+forçage manuel (Auto / Synoptique / Détaillé).
 
 Source : Open-Meteo AWS Open Data (`s3://openmeteo`, gratuit, sans clé,
 licence CC-BY-4.0), layout `data_spatial/` — PAS le bucket meteofrance-pnt
@@ -69,13 +100,19 @@ import matplotlib.pyplot as plt
 
 import fsspec
 from omfiles import OmFileReader
-from scipy.ndimage import minimum_filter, maximum_filter
+from scipy.ndimage import minimum_filter, maximum_filter, gaussian_filter
 
 OM_BUCKET = "openmeteo"
+# 07/09/2026 : une seule grille (cf. en-tête). `arpege_world` est retirée —
+# elle n'a jamais été affichée au-dessus de 10 hPa de pas depuis le 30/07,
+# et c'est justement ce pas qui la rendait vide sur la France.
 MODELS = {
     "arpege_europe": "meteofrance_arpege_europe",
-    "arpege_world":  "meteofrance_arpege_world025",
 }
+# Grilles qui ont existé et dont le bucket doit être vidé (manifest +
+# échéances). Purge idempotente à chaque run (`retire_grid`) : sans
+# manifest, rien à faire — donc gratuit une fois le ménage fait.
+RETIRED_GRIDS = ("arpege_world",)
 # Pas de contourage, PAR GRILLE (30/07/2026 — dépassement de quota Storage).
 # Le pas fin 1 hPa a été introduit le 24/07 pour « avoir plus de détails quand
 # on zoome » : côté frontend, les lignes non-multiples de 5 ne sont révélées
@@ -90,20 +127,35 @@ MODELS = {
 # contrepartie visible. `hpaVisibleAtZoom` teste `hpa % 5`, pas
 # `manifest.levelStepHpa` : un géojson tout-multiples-de-5 s'affiche
 # intégralement à tous les zooms, aucun changement frontend nécessaire.
-LEVEL_STEP_HPA_BY_GRID = {
-    "arpege_europe": 1,     # zoom régional atteignable -> le détail sert
-    "arpege_world": 10,     # jamais affichée au-delà du zoom 4 — cf. ci-dessous
-}
-# 30/07/2026, 2e passe (le compte était encore à ~1,13 Go après la 1re) :
-# grille monde poussée de 5 à 10 hPa, mesurée à 236 Mo en 5 hPa -> ~118 Mo.
-# Toujours sans perte visible, pour la même raison qu'au-dessus :
-# `hpaVisibleAtZoom` (IsobarsLayer.tsx) teste `hpa % 5 === 0`, donc des
-# lignes tous les 10 hPa sont TOUTES multiples de 5 et TOUTES affichées —
-# aucun changement frontend, aucune ligne masquée. Et 10 hPa est la
-# convention des cartes synoptiques de grande échelle : sur une carte du
-# monde sous le zoom 4, c'est au moins aussi lisible que le 5 hPa.
-# La grille Europe reste à 1 hPa (c'est elle qu'on zoome).
-LEVEL_STEP_HPA = 1   # défaut de repli si une grille n'est pas dans la table
+#
+# ⛔ 07/09/2026 — la table par grille ci-dessus a été RETIRÉE avec la grille
+# Monde. Ce raisonnement était juste le 30/07 et faux depuis le 24/07 :
+# c'est la grille Monde que le front affichait, à tous les zooms. Leçon
+# (BUGS.md) : un pas de contourage « sans contrepartie visible » se vérifie
+# dans le code du front qui CHOISIT la grille, pas dans celui qui la
+# dessine.
+LEVEL_STEP_HPA = 1        # version DÉTAILLÉE (`<iso>.json`)
+SYNOP_STEP_HPA = 4        # version SIMPLIFIÉE (`<iso>.synop.json`), Met Office
+# Lissage du champ AVANT le contourage synoptique, en cellules de grille
+# (0,1° → 2,5 cellules ≈ 25 km). Sans lui, le 0,1° dessine les creux de
+# vallée et les bulles de chaleur de surface — du bruit à l'échelle
+# synoptique, et des dizaines de petites boucles fermées de 1-2 hPa qui
+# n'apparaissent sur aucune carte du Met Office. Assez faible pour ne
+# déplacer aucun centre réel de plus d'une cellule ou deux.
+SYNOP_SMOOTH_SIGMA_CELLS = 2.5
+# Segments de contour synoptique plus courts que ça (longueur cumulée en
+# degrés) : jetés. Ce sont les moignons de marching squares au bord de la
+# grille et les dernières boucles résiduelles après lissage.
+SYNOP_MIN_LENGTH_DEG = 1.5
+# Simplification Douglas-Peucker des tracés, tolérance en degrés.
+# Mesuré le 07/09 sur l'échéance Europe du 07/09 11:00 (1,0 Mo brut) :
+# 0,004° → 802 Ko, 0,01° → 683 Ko, 0,02° → 545 Ko. Le gain est modeste
+# parce que le poids du détaillé vient du NOMBRE de tracés (2 100 dont
+# des centaines de petites boucles 1 hPa), pas de leurs points. 0,01°
+# (~1 km, sous le pixel au zoom 7 où le détaillé apparaît) est retenu ;
+# le synoptique, déjà lissé et affiché sous le zoom 7, tolère 0,02°.
+SIMPLIFY_TOL_DEG_DETAIL = 0.01
+SIMPLIFY_TOL_DEG_SYNOP = 0.02
 FUTURE_HOURLY_UNTIL = 48      # horaire jusque-là, puis coarse
 FUTURE_COARSE_EVERY = 3
 PAST_STEP_HOURS = 6            # cadence des runs ARPEGE
@@ -127,7 +179,9 @@ PAST_RETENTION_H = int(os.environ.get("PAST_RETENTION_H", "72"))
 CENTER_WINDOW_DEG = 4.0         # rayon de la fenêtre de recherche (°) — assez
                                  # large pour ignorer le bruit de petite échelle
 CENTER_MIN_SEPARATION_DEG = 6.0 # fusionne les centres détectés trop proches
-MAX_CENTERS_PER_KIND = 6        # évite la surcharge visuelle (surtout grille monde)
+MAX_CENTERS_PER_KIND = 6        # évite la surcharge visuelle
+CENTER_MIN_PROMINENCE_HPA = 2.0 # 07/09 : amplitude minimale du champ dans la
+                                 # fenêtre pour qu'un extremum soit un centre
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 BUCKET  = os.environ.get("ISOBARS_BUCKET", "isobars")
@@ -216,15 +270,55 @@ def read_pressure(model, dt_utc, reference_time=None):
     return lon2d, lat2d, pressure
 
 # ── Contourage ─────────────────────────────────────────────────────────
-def isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA):
+def simplify_rdp(seg, tol):
+    """Douglas-Peucker itératif (pile, pas de récursion : un contour de
+    grille Europe fait couramment 2 000 points). `seg` : tableau (n, 2)
+    ; renvoie le sous-tableau des points conservés, extrémités comprises.
+    07/09/2026 — première simplification des tracés : les fichiers
+    pesaient 0,9 à 1,6 Mo par échéance, téléchargés à CHAQUE cran du
+    curseur sur téléphone."""
+    n = len(seg)
+    if n < 3 or tol <= 0:
+        return seg
+    keep = np.zeros(n, dtype=bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        a, b = stack.pop()
+        if b - a < 2:
+            continue
+        p, q = seg[a], seg[b]
+        d = q - p
+        norm = float(np.hypot(d[0], d[1]))
+        pts = seg[a + 1:b]
+        if norm < 1e-12:
+            dist = np.hypot(pts[:, 0] - p[0], pts[:, 1] - p[1])
+        else:
+            dist = np.abs(d[0] * (p[1] - pts[:, 1]) - d[1] * (p[0] - pts[:, 0])) / norm
+        i = int(np.argmax(dist))
+        if dist[i] > tol:
+            k = a + 1 + i
+            keep[k] = True
+            stack.append((a, k))
+            stack.append((k, b))
+    return seg[keep]
+
+def seg_length_deg(seg):
+    """Longueur cumulée d'un tracé en degrés (plan, sans cos(lat) — un
+    seuil de filtrage, pas une mesure)."""
+    d = np.diff(seg, axis=0)
+    return float(np.hypot(d[:, 0], d[:, 1]).sum())
+
+def isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA,
+                    tol_deg=SIMPLIFY_TOL_DEG_DETAIL, min_length_deg=0.0):
     """Contourage tous les `step_hpa` hPa -> GeoJSON FeatureCollection
     de LineString (une feature par segment de contour, propriété `hpa`).
     matplotlib fait le travail numérique (marching squares) ; on ne fait
     que relire ses segments, rien n'est affiché (backend Agg).
 
-    30/07/2026 : le pas est désormais un PARAMÈTRE (cf.
-    LEVEL_STEP_HPA_BY_GRID) et non plus une constante globale — la grille
-    monde n'a pas besoin du pas fin."""
+    30/07/2026 : le pas est un PARAMÈTRE. 07/09/2026 : chaque tracé est
+    simplifié (`simplify_rdp`, `tol_deg`) et, si `min_length_deg` > 0,
+    les tracés trop courts sont jetés (version synoptique)."""
     pmin, pmax = float(np.nanmin(pressure)), float(np.nanmax(pressure))
     lo = np.floor(pmin / step_hpa) * step_hpa
     hi = np.ceil(pmax / step_hpa) * step_hpa + step_hpa
@@ -239,6 +333,10 @@ def isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA):
         for seg in segs:
             if len(seg) < 2:
                 continue
+            seg = np.asarray(seg, dtype=float)
+            if min_length_deg > 0 and seg_length_deg(seg) < min_length_deg:
+                continue
+            seg = simplify_rdp(seg, tol_deg)
             features.append({
                 "type": "Feature",
                 "properties": {"hpa": round(float(level))},
@@ -249,6 +347,21 @@ def isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA):
             })
     plt.close(fig)
     return {"type": "FeatureCollection", "features": features}
+
+def smooth_pressure(pressure):
+    """Champ lissé pour la version synoptique et la détection des centres
+    (cf. SYNOP_SMOOTH_SIGMA_CELLS). `mode='nearest'` : pas de repli vers
+    zéro au bord de la grille, qui creuserait une fausse dépression sur
+    tout le pourtour."""
+    return gaussian_filter(pressure, sigma=SYNOP_SMOOTH_SIGMA_CELLS, mode="nearest")
+
+def synop_geojson(lon2d, lat2d, pressure_smooth):
+    """Version SIMPLIFIÉE (07/09/2026, modèle : cartes de pression de
+    surface du Met Office) : contours tous les SYNOP_STEP_HPA sur le champ
+    lissé, fragments courts jetés, tracés simplifiés plus fort."""
+    return isobars_geojson(lon2d, lat2d, pressure_smooth, step_hpa=SYNOP_STEP_HPA,
+                           tol_deg=SIMPLIFY_TOL_DEG_SYNOP,
+                           min_length_deg=SYNOP_MIN_LENGTH_DEG)
 
 def find_centers(lon2d, lat2d, pressure):
     """Repère les centres de basse/haute pression : un point est un centre
@@ -272,8 +385,14 @@ def find_centers(lon2d, lat2d, pressure):
 
     local_min = minimum_filter(pressure, size=size, mode="nearest")
     local_max = maximum_filter(pressure, size=size, mode="nearest")
-    is_low = pressure <= local_min
-    is_high = pressure >= local_max
+    # 07/09/2026 : un extremum local doit aussi DÉPASSER de la nappe.
+    # Sans ce seuil, un champ plat rempli quand même ses 6 places par
+    # type avec des ondulations de 0,2 hPa — et l'écran montrait des H
+    # et des L au milieu de rien. Prominence = amplitude du champ dans
+    # la fenêtre de recherche autour du point.
+    prominence = local_max - local_min
+    is_low = (pressure <= local_min) & (prominence >= CENTER_MIN_PROMINENCE_HPA)
+    is_high = (pressure >= local_max) & (prominence >= CENTER_MIN_PROMINENCE_HPA)
 
     candidates = {
         "L": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]))
@@ -333,7 +452,8 @@ def sb_upload(path, body, cache_control=CACHE_IMMUABLE):
 
 def echeances_publiees(key):
     """Les échéances DÉJÀ dans le bucket, lues dans le manifest du run
-    précédent. Renvoie `(set d'ISO, manifest_lu)`.
+    précédent. Renvoie `(set d'ISO, manifest_lu, synop_ok)` — le troisième
+    dit si ces échéances ont aussi leur version synoptique (07/09/2026).
 
     03/08/2026 — remplace `sb_exists()` (un `HEAD` par échéance) ET le
     `ListObjects` paginé de `purge_stale()`. Les deux étaient gratuits
@@ -377,10 +497,19 @@ def echeances_publiees(key):
     if not isinstance(brut, dict) or not isinstance(brut.get("times"), list):
         print(f"  manifest '{key}' absent ou illisible — "
               f"aucune purge, tout sera recalculé")
-        return set(), False
+        return set(), False, False
     times = {t for t in brut["times"] if isinstance(t, str)}
-    print(f"  manifest précédent : {len(times)} échéance(s) déjà publiée(s)")
-    return times, True
+    # 07/09/2026 : le passé n'est « déjà là » que s'il a SES DEUX fichiers.
+    # Un manifest antérieur à la refonte (sans `synopStepHpa`, ou avec un
+    # autre pas) décrit un bucket où `<iso>.synop.json` n'existe pas —
+    # on recalcule alors tout le passé, une seule fois : le manifest
+    # écrit par ce run portera le bon pas. Même mécanique que le
+    # rattrapage `centers` du 23/07, mais automatique.
+    synop_ok = brut.get("synopStepHpa") == SYNOP_STEP_HPA \
+        and brut.get("levelStepHpa") == LEVEL_STEP_HPA
+    print(f"  manifest précédent : {len(times)} échéance(s) déjà publiée(s)"
+          + ("" if synop_ok else " — SANS version synoptique : passé recalculé"))
+    return times, True, synop_ok
 
 # ── Construction de la série temporelle (passé + prévision) ────────────
 def future_times(reference_time, valid_times):
@@ -467,9 +596,44 @@ def purge_stale(key, publiees, keep_isos, manifest_lu):
         print(f"  (DRY_RUN — purge de '{key}' non exécutée : "
               f"{len(doomed)} échéance(s) auraient été supprimées)")
         return 0
-    removed = sum(1 for iso in doomed if STORE.delete(f"{key}/{iso}.json"))
+    # 07/09/2026 : deux fichiers par échéance. Le `.synop.json` peut ne
+    # pas exister (échéance antérieure à la refonte) — `delete` d'une clé
+    # absente est sans effet, on ne compte que le fichier principal.
+    removed = 0
+    for iso in doomed:
+        if STORE.delete(f"{key}/{iso}.json"):
+            removed += 1
+        STORE.delete(f"{key}/{iso}.synop.json")
     print(f"  purge '{key}' : {removed}/{len(doomed)} échéance(s) "
           f"obsolète(s) supprimée(s)")
+    return removed
+
+def retire_grid(key):
+    """07/09/2026 — vide le bucket d'une grille RETIRÉE (cf. RETIRED_GRIDS) :
+    ses échéances (les deux fichiers, par prudence) puis son manifest, en
+    DERNIER — si le run s'interrompt avant, le manifest reste et le
+    prochain run reprend le ménage là où il en était. Sans manifest :
+    rien à faire, un seul `GetObject` (Class B) par run. Aucun listing,
+    pour la même raison que `purge_stale` (Class A chez R2).
+    ⚠️ Les orphelins que ce manifest ne liste pas ne sont pas vus — c'est
+    le rôle de `tools/purge_isobars_orphans.py`, à repasser une fois."""
+    brut = STORE.get_json(f"{key}/manifest.json")
+    if not isinstance(brut, dict) or not isinstance(brut.get("times"), list):
+        print(f"— {key} : grille retirée, plus de manifest, rien à purger —")
+        return 0
+    times = [t for t in brut["times"] if isinstance(t, str)]
+    if DRY_RUN:
+        print(f"— {key} : grille retirée (DRY_RUN — {len(times)} échéance(s) "
+              f"+ manifest auraient été supprimés) —")
+        return 0
+    removed = 0
+    for iso in times:
+        if STORE.delete(f"{key}/{iso}.json"):
+            removed += 1
+        STORE.delete(f"{key}/{iso}.synop.json")
+    STORE.delete(f"{key}/manifest.json")
+    print(f"— {key} : grille retirée, {removed}/{len(times)} échéance(s) "
+          f"et le manifest supprimés —")
     return removed
 
 def process_grid(key, model):
@@ -488,13 +652,14 @@ def process_grid(key, model):
         print("  ⚙️ FORCE_REPROCESS_PAST=1 — le passé déjà en storage sera relu/réécrit "
               "(rattrapage centers, cf. commit du 23/07)")
 
-    step_hpa = LEVEL_STEP_HPA_BY_GRID.get(key, LEVEL_STEP_HPA)
-    print(f"  contourage : {step_hpa} hPa")
+    print(f"  contourage : détaillé {LEVEL_STEP_HPA} hPa + synoptique "
+          f"{SYNOP_STEP_HPA} hPa (lissage σ = {SYNOP_SMOOTH_SIGMA_CELLS} cellules)")
 
     # UNE lecture (Class B) qui remplace ~90 HeadObject + un ListObjects
     # (Class A) — cf. `echeances_publiees`. Elle sert deux fois : au
     # skip-if-exists ci-dessous, et à la purge en fin de fonction.
-    publiees, manifest_lu = echeances_publiees(key)
+    publiees, manifest_lu, synop_ok = echeances_publiees(key)
+    reprocess_past = FORCE_REPROCESS_PAST or not synop_ok
 
     manifest_times, done, future_done = [], 0, 0
     for dt in all_times:
@@ -509,7 +674,7 @@ def process_grid(key, model):
         # revisité). `FORCE_REPROCESS_PAST` (flag explicite, défaut off,
         # cf. plus haut) permet de forcer un rattrapage ponctuel sans
         # dégrader l'efficacité/idempotence du cron normal.
-        if is_past and iso in publiees and not FORCE_REPROCESS_PAST:
+        if is_past and iso in publiees and not reprocess_past:
             manifest_times.append(iso)      # déjà là, immuable, on ne refait rien
             continue
         # Débogage 23/07/2026 (S3 réel, cf. read_pressure) : pour la
@@ -520,9 +685,22 @@ def process_grid(key, model):
         if result is None:
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
-        geo = isobars_geojson(*result, step_hpa=step_hpa)
-        geo["centers"] = find_centers(*result)
+        lon2d, lat2d, pressure = result
+        # 07/09/2026 : les centres H/L sont détectés sur le champ LISSÉ —
+        # sur le champ brut 0,1°, un creux thermique de vallée ou une
+        # bulle côtière de 1 hPa suffisait à voler la place d'un vrai
+        # centre (MAX_CENTERS_PER_KIND = 6). Les deux fichiers reçoivent
+        # les MÊMES centres : un pilote qui bascule de version ne doit pas
+        # voir un H changer de place.
+        smooth = smooth_pressure(pressure)
+        centers = find_centers(lon2d, lat2d, smooth)
+        geo = isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA)
+        geo["centers"] = centers
         sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
+        synop = synop_geojson(lon2d, lat2d, smooth)
+        synop["centers"] = centers
+        sb_upload(f"{key}/{iso}.synop.json",
+                  json.dumps(synop, separators=(",", ":")).encode())
         manifest_times.append(iso)
         done += 1
         if not is_past:
@@ -532,7 +710,8 @@ def process_grid(key, model):
     manifest = dict(
         model=model, referenceTime=reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        levelStepHpa=step_hpa, times=manifest_times,
+        levelStepHpa=LEVEL_STEP_HPA, synopStepHpa=SYNOP_STEP_HPA,
+        times=manifest_times,
         # Débogage 23/07/2026 : basé AVANT sur `len(future)` (compte
         # DEMANDÉ, cf. `future_times`) plutôt que sur ce qui a RÉUSSI à
         # être téléversé (`future_done`, entrées passées + prévision
@@ -562,6 +741,10 @@ def main():
     # froid (bucket vide → toute la fenêtre est produite d'un coup), pas
     # une projection. C'est bien ce majorant qu'il faut donner au
     # plafond : il doit tenir le pire run, pas le run moyen.
+    # 07/09/2026 : une grille, DEUX fichiers par échéance → même majorant
+    # de 200 objets (79 × 2 + manifest = 159 à froid) ; le stockage
+    # baisse (plus de grille Monde, tracés simplifiés) — 188 Mo reste un
+    # majorant sûr tant que la mesure réelle n'a pas été relevée.
     plafond = verifier_dimensionnement("arpege-isobars", objets_par_run=200,
                                        runs_par_jour=4, mo_par_run=188)
 
@@ -601,6 +784,13 @@ def main():
     total = 0
     for key, model in MODELS.items():
         total += process_grid(key, model)
+    # Après la grille vivante, jamais avant : si le ménage échoue, le
+    # calque a déjà ses nouvelles échéances.
+    for key in RETIRED_GRIDS:
+        try:
+            retire_grid(key)
+        except Exception as e:  # noqa: BLE001 — non bloquant, même règle que purge_stale
+            print(f"— {key} : purge de la grille retirée en échec ({e}), on continue —")
     print(f"Terminé : {total} échéance(s) (re)calculée(s) au total dans '{BUCKET}'.")
     STORE.bilan()
 
