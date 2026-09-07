@@ -992,7 +992,8 @@ def test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime():
     # ⛔ LA FENÊTRE GLISSANTE (497 Mo sondés le 28/08) doit mourir entre
     # son dernier lecteur et le rejeu d'archive. C'est LA ligne dont
     # l'absence a coûté la nuit du 28/08.
-    p_roll = pos("scores = rolling_scores(daily, zone_of, as_of)", "rolling_scores")
+    p_roll = pos("scores = rolling_scores(daily, zone_of, as_of, sur_place=True)",
+                 "rolling_scores")
     p_oubli = pos("        daily = None" + chr(10), "l'oubli de `daily`")
     p_replay = pos("units, bilan_replay = replay_window(", "replay_window")
     check("`daily` est relâché APRÈS son dernier lecteur", p_oubli > p_roll, True)
@@ -1003,9 +1004,68 @@ def test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime():
     # doit mourir avant la fenêtre glissante ET avant le rejeu.
     p_j0 = pos("        n_prior, n_clim = len(prior), len(clim)" + chr(10),
                "l'oubli du chemin J-0")
-    p_daily = pos('daily = sb.select("model_verif_daily"', "lecture de la fenêtre")
+    p_daily = pos('daily = sb.select_par_cle(', "lecture de la fenêtre")
     check("le chemin J-0 est oublié avant la lecture de la fenêtre "
           "glissante", p_j0 < p_daily, True)
+
+    # ⛔⛔ ET LA FENÊTRE SE LIT PAR CLÉ, JAMAIS PAR DÉCALAGE (07/09/2026).
+    # C'est la TROISIÈME table à y passer, après `model_character`
+    # (25/08) et `model_verif_event` (02/09) — et celle-ci a coûté deux
+    # nuits de notation, les 05 et 06/09 : trois `57014 statement
+    # timeout` à l'offset 650 000 sur 784 372 lignes.
+    #
+    # ⚠️ Ce banc regarde le SOURCE et pas un comportement, comme les
+    # gardes d'ordre au-dessus : un `select(` sur cette table serait
+    # syntaxiquement valide, passerait tous les autres bancs, et ne se
+    # verrait qu'en production, une nuit, quand la table aura assez
+    # grossi. C'est exactement la classe de défaut qui a mis neuf jours
+    # à réapparaître.
+    check("⭐⭐ la fenêtre glissante se lit par CLÉ (`select_par_cle` sur "
+          "`day`), pas par décalage — trois tables ont payé ce défaut",
+          'sb.select_par_cle(\n            "model_verif_daily", "day",' in src,
+          True)
+    check("… et plus aucun `select(\"model_verif_daily\"` par décalage "
+          "ne subsiste dans `main`",
+          'sb.select("model_verif_daily"' not in src, True)
+
+    # ⛔⛔ ET L'ORDRE EST LA CLÉ PRIMAIRE COMPLÈTE (07/09, mutation nº 3).
+    # `select_par_cle` exige que `cle` soit la PREMIÈRE colonne de
+    # `order` ET que `order` reste la clé primaire entière : raccourci
+    # d'une colonne, deux pages peuvent se recouvrir ou se sauter. La
+    # mutation qui retirait `fcst_src` laissait le banc VERT, parce
+    # qu'il ne regardait que le nom de la table.
+    #
+    # ⚠️ ON TIENT LA CONSTANTE, PAS UNE CHAÎNE RECOPIÉE. Le motif était
+    # écrit quatre fois dans `score.py` (upsert, jumeau `_pres`, duel,
+    # fenêtre) : quatre endroits à modifier séparément, donc quatre
+    # occasions de les désaccorder. Un seul nom, et le banc vérifie que
+    # c'est bien LUI qui sert d'ordre.
+    check("⭐ la clé primaire de `model_verif_daily` est écrite UNE fois",
+          J.CLE_DAILY, "day,source,station_id,model,lead_h,fcst_src")
+    check("⭐⭐ … et c'est ELLE qui ordonne la fenêtre glissante — pas "
+          "une chaîne recopiée qu'on peut raccourcir sans rien casser",
+          'sb.select_par_cle(\n            "model_verif_daily", "day",\n'
+          '            order=CLE_DAILY,' in src, True)
+    check("… `day` est bien la PREMIÈRE colonne de cet ordre (c'est ce "
+          "qui rend le bornage sûr)",
+          J.CLE_DAILY.split(",")[0], "day")
+    check("plus aucune copie littérale de la clé ne subsiste dans "
+          "`score.py`",
+          pathlib.Path(J.__file__).read_text(encoding="utf-8").count(
+              '"day,source,station_id,model,lead_h,fcst_src"'), 1)
+
+    # ⓘ LE SEUL DÉCALAGE QUI RESTE SUR CETTE TABLE, ET IL EST MESURÉ.
+    # Le duel lit 30 jours par `select` classique. Mesuré le 07/09 sur
+    # la production : 37 528 lignes, offset le plus profond 36 528,
+    # DERNIÈRE page en 0,19 s contre 8 s de coupure. Il n'est pas
+    # converti parce qu'il n'en a pas besoin — mais le banc EXIGE que
+    # ce chiffre soit écrit à côté, sinon « petite » redevient une
+    # supposition, ce qu'elle a été du 27/08 au 07/09.
+    check("⭐ la lecture du duel dit sa profondeur MESURÉE, pas « elle "
+          "est petite »",
+          "offset le plus profond 36 528" in src, True)
+    check("… et elle dit le seuil qui la ferait basculer",
+          "sonde_duel_offset.py" in src, True)
     for nom in ("snapshots", "obs_day", "obs_prev", "clim", "prior",
                 "banded", "poids_comb"):
         check(f"`{nom}` est bien relâché", f"{nom} = " in
@@ -1043,6 +1103,75 @@ def test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime():
                   "l'oubli de la fenêtre rejouée"):
         check(f"le run jalonne sa mémoire après « {etape} »",
               f'jalon_memoire("{etape}")' in src, True)
+
+
+def test_memoire_rolling_scores_sur_place_incident_07_09():
+    """La copie par ligne de `rolling_scores` — 687 Mo, et son drapeau.
+
+    ⛔ CE QUI EST EN JEU, MESURÉ SUR LA PRODUCTION LE 07/09/2026. La
+    lecture de la fenêtre rend 784 372 lignes et pèse 1 266 Mo ; la
+    copie `r = dict(d)` en ajoutait **687**, pour écrire UN champ. Sur
+    un VPS de 3 825 Mo dont le run culmine déjà à 3,2 Go avec 896 Mo
+    d'échange, c'est la moitié de la marge dépensée pour rien. Remesuré
+    avec le correctif, le même jour, le même jeu : **+47 Mo en 0,7 s**
+    au lieu de +687 en 2,1 — pic 1 314 Mo au lieu de 1 953.
+
+    ⛔ MAIS LA MUTATION DOIT RESTER DEMANDÉE. Ce banc tient les deux
+    bouts : la voie par défaut ne touche PAS l'argument (tout le reste
+    du fichier en dépend), la voie `sur_place` donne EXACTEMENT le même
+    résultat, et `main` ne peut passer `True` que tant qu'il oublie
+    `daily` juste après.
+    """
+    print("── mémoire : `rolling_scores(sur_place=)` (incident 07/09) ──")
+    daily = _daily_agrume(ZONE_L18, (("icon_d2", 5.0),
+                                     (J.AGRUME_MODEL, 3.0),
+                                     (J.AGRUME_PI_MODEL, 4.0)))
+    copie = [dict(d) for d in daily]
+
+    # ⭐ LA VOIE PAR DÉFAUT NE TOUCHE RIEN. C'est ce qui autorise les
+    # trente autres bancs qui appellent `rolling_scores` à relire leur
+    # `daily` après coup sans le savoir.
+    rows_defaut = J.rolling_scores(daily, ZONE_L18, DAY)
+    check("⭐ par défaut, l'argument ressort INTACT (aucun `unit` ajouté)",
+          daily == copie, True)
+    check("… et aucune ligne lue ne porte `unit` après un appel par défaut",
+          any("unit" in d for d in daily), False)
+
+    # ⭐ ET LA VOIE `sur_place` DONNE LE MÊME RÉSULTAT. Sinon le gain de
+    # mémoire serait payé par un score différent, ce qui ne serait pas
+    # une optimisation mais un changement de produit.
+    daily2 = [dict(d) for d in copie]
+    rows_place = J.rolling_scores(daily2, ZONE_L18, DAY, sur_place=True)
+    cle = lambda r: (r.get("zone_id"), r.get("model"), r.get("lead_h"),
+                     r.get("metric"), r.get("window_kind"), r.get("regime"))
+    check("⭐⭐ `sur_place=True` rend EXACTEMENT les mêmes lignes que la "
+          "copie — le gain de mémoire ne change aucun score",
+          sorted(rows_place, key=cle) == sorted(rows_defaut, key=cle), True)
+    check("… et il a bien écrit `unit` DANS les lignes lues (c'est tout "
+          "le principe : pas de second dictionnaire)",
+          all(d.get("unit") == f"{d['source']}:{d['station_id']}"
+              for d in daily2), True)
+    check("… `unit` mis à part, les lignes mutées sont inchangées",
+          [{k: v for k, v in d.items() if k != "unit"} for d in daily2],
+          copie)
+
+    # ⛔ ET LE LIEN AVEC `main`. Le `True` n'est légal que parce que
+    # `daily = None` suit. Les deux doivent bouger ensemble, sinon le
+    # jour où quelqu'un rallonge la vie de `daily`, il relira des lignes
+    # mutées sans qu'aucun banc ne rougisse.
+    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+    src = src[src.index("def main() -> int:"):]
+    p_place = src.index("sur_place=True)")
+    check("`main` demande la mutation explicitement",
+          "rolling_scores(daily, zone_of, as_of, sur_place=True)" in src, True)
+    check("⭐⭐ … et il oublie `daily` DANS LES LIGNES QUI SUIVENT — "
+          "c'est la seule chose qui rend la mutation légale",
+          "daily = None" in src[p_place:p_place + 1600], True)
+    # ⚠️ On compte les APPELS, pas les occurrences du mot : le pavé
+    # juste au-dessus de l'appel écrit `sur_place=True` lui aussi, et
+    # compter le mot ferait rougir le banc pour un commentaire.
+    check("aucun autre appel de `rolling_scores` ne mute en production",
+          src.count("rolling_scores(daily, zone_of, as_of, sur_place=True)"), 1)
 
 
 
@@ -5882,6 +6011,8 @@ def main() -> int:
                test_memoire_rss_lit_bien_vmrss_et_le_rend_en_mo,
                test_memoire_rss_suit_une_allocation_reelle,
                test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime,
+               # ── 07/09 : la copie par ligne de la fenêtre (687 Mo) ──
+               test_memoire_rolling_scores_sur_place_incident_07_09,
                # ── lot LR (01/09) : le rejeu qui republiait le jour ──
                test_lr_le_rejeu_ancien_ne_republie_pas_le_classement,
                # ── lot L13 (01/09) : les deux dettes ops de l'audit ──

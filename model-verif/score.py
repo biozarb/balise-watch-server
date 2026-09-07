@@ -307,6 +307,24 @@ SKILL_MIN_REF_MSE = 1.0
 #: Fenêtre du score glissant (§8.4).
 ROLLING_DAYS = 15
 
+#: ⛔ LA CLÉ PRIMAIRE DE `model_verif_daily`, ÉCRITE UNE SEULE FOIS
+#: (07/09/2026, incident des nuits des 05 et 06/09).
+#:
+#: Elle était recopiée à QUATRE endroits : la clé d'upsert, la clé du
+#: jumeau `model_verif_daily_pres`, l'ordre de lecture du duel, et
+#: l'ordre de la fenêtre glissante. Quatre chaînes identiques qu'on
+#: pouvait modifier séparément — et la quatrième est justement celle
+#: dont `select_par_cle` exige qu'elle soit la clé primaire COMPLÈTE :
+#: raccourcie d'une colonne, deux pages peuvent se recouvrir ou se
+#: sauter, la fenêtre est fausse, et rien ne rougit. Mutation nº 3 du
+#: 07/09 : le banc laissait passer `fcst_src` en moins.
+#:
+#: ⚠️ ELLE EST L'ORDRE **ET** LA CLÉ, et ce n'est pas un raccourci :
+#: `select_par_cle` borne sur `day` (la tête de cet ordre) et attaque
+#: l'index de la clé primaire directement. L'ordre DOIT donc être cet
+#: index-là, pas un tri qui lui ressemble.
+CLE_DAILY = "day,source,station_id,model,lead_h,fcst_src"
+
 RETENTION_DAILY_D = 30
 RETENTION_EVENT_D = 90
 RETENTION_SCORE_D = 7
@@ -4341,7 +4359,8 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
     return rows
 
 
-def rolling_scores(daily: list[dict], zone_of: dict[str, dict], as_of: datetime):
+def rolling_scores(daily: list[dict], zone_of: dict[str, dict],
+                   as_of: datetime, sur_place: bool = False):
     """Le score « 15 jours glissants » du §8, depuis `model_verif_daily`.
 
     ⚠️ Le rééchantillonnage se fait par BLOCS DE JOURS CONSÉCUTIFS
@@ -4355,12 +4374,56 @@ def rolling_scores(daily: list[dict], zone_of: dict[str, dict], as_of: datetime)
     couverture réelle pour un intervalle annoncé à 95 % (cf.
     `test_inference.py`, section 4). C'est une fabrique de faux
     gagnants, pas une imprécision.
+
+    ⛔ `sur_place` — 687 Mo, MESURÉS SUR LA PRODUCTION LE 07/09/2026.
+    Cette fonction recopiait CHAQUE ligne lue (`r = dict(d)`) pour y
+    ajouter UN champ, `unit`. Sur la fenêtre du 07/09 — 784 372 lignes,
+    1 266 Mo une fois lues — la copie a coûté **+687 Mo en 2,1 s**, soit
+    1 953 Mo pour une sonde qui ne fait rien d'autre, sur un VPS de
+    3 825 Mo dont 3 421 étaient disponibles au départ : il en restait
+    990. Le run de la nuit, lui, porte déjà tout le reste, et il a
+    culminé à 3,2 Go avec 896 Mo d'échange. La copie n'est pas une
+    imprécision de style, c'est la moitié de la marge.
+
+    ⭐ ET LE CORRECTIF, MESURÉ SUR LE MÊME JEU, LE MÊME JOUR :
+
+        copie par ligne (`dict(d)`)  +687 Mo en 2,1 s  → pic 1 953 Mo
+        écriture sur place            **+47 Mo en 0,7 s** → pic 1 314 Mo
+
+    640 Mo rendus et trois fois plus rapide, pour le même champ écrit
+    et — le banc le vérifie ligne à ligne — exactement les mêmes scores.
+    Les 47 Mo qui restent sont les chaînes `unit` elles-mêmes, qu'il
+    faut bien fabriquer : c'est le coût irréductible, l'autre était le
+    coût du dictionnaire jumeau.
+
+    ⚠️ ET POURQUOI UN DRAPEAU PLUTÔT QUE DE SUPPRIMER LA COPIE. `unit`
+    n'est pas lu qu'ici : `_case_rows` (zone, comptage des balises),
+    `murphy.py` et `inference.py` (`unit_key`) le lisent tous sur ces
+    mêmes lignes. Le champ doit donc EXISTER sur la ligne — le calculer
+    au vol chez trois lecteurs, dont un générique, coûterait plus cher
+    en surface qu'il ne rapporte. Reste à l'écrire SANS copier, c'est-
+    à-dire dans la ligne lue : une mutation de l'argument.
+
+    ⛔ Une mutation silencieuse de l'argument d'appel est exactement ce
+    que ce projet refuse. Elle est donc DEMANDÉE, jamais supposée : par
+    défaut (`sur_place=False`) le comportement est celui d'avant, copie
+    comprise, et tous les bancs le vérifient sur cette voie-là. Seul
+    `main` passe `sur_place=True`, et il peut le faire parce qu'il fait
+    `daily = None` à la ligne suivante : PERSONNE ne relit ces lignes
+    après. ⚠️ SI CE `daily = None` DISPARAÎT UN JOUR, ce `True` doit
+    disparaître avec lui — un banc de `test_score.py` tient les deux
+    ensemble.
     """
-    units = []
-    for d in daily:
-        r = dict(d)
-        r["unit"] = f"{d['source']}:{d['station_id']}"
-        units.append(r)
+    if sur_place:
+        for d in daily:
+            d["unit"] = f"{d['source']}:{d['station_id']}"
+        units = daily
+    else:
+        units = []
+        for d in daily:
+            r = dict(d)
+            r["unit"] = f"{d['source']}:{d['station_id']}"
+            units.append(r)
     return _case_rows(units, zone_of, as_of, "rolling15", "all",
                       MIN_STATIONS_ZONE)
 
@@ -5866,7 +5929,7 @@ def _upsert_daily(sb, rows: list[dict]) -> int:
     lignes écartées resteront celles qui déclarent une échéance que la
     base ne connaît pas.
     """
-    cle = "day,source,station_id,model,lead_h,fcst_src"
+    cle = CLE_DAILY
     try:
         return sb.upsert("model_verif_daily", rows, cle)
     except Abort as exc:
@@ -6902,7 +6965,7 @@ def main() -> int:
             if p_rows:
                 n = sb.upsert("model_verif_daily_pres",
                               _pour_la_base(sb, "model_verif_daily_pres", p_rows),
-                              "day,source,station_id,model,lead_h,fcst_src")
+                              CLE_DAILY)
                 print(f"  → model_verif_daily_pres : {n} lignes")
     except Exception as exc:                       # noqa: BLE001
         print(f"  ⚠️ pression (S1) : {type(exc).__name__} — {exc}. "
@@ -6917,6 +6980,27 @@ def main() -> int:
     # (audit §2.4). Mais il ne lit QUE quatre modèles, un lead et un
     # réseau, sur sept colonnes : quelques dizaines de milliers de
     # lignes contre les centaines de milliers de la fenêtre entière.
+    #
+    # ⛔ ET C'EST LE SEUL `select(` PAR DÉCALAGE QUI RESTE SUR CETTE
+    # TABLE — celui de la fenêtre glissante vient de coûter deux nuits.
+    # Il n'a PAS été converti, et pas par oubli : MESURÉ le 07/09 sur la
+    # production, pendant le même incident,
+    #
+    #     37 528 lignes, 38 pages, offset le plus profond 36 528
+    #     la DERNIÈRE page, seule : **0,19 s** — la coupure est à 8 s
+    #
+    # soit quarante fois la marge. Le filtre serveur fait ici ce que le
+    # filtre `lead_h=6` ne faisait PAS sur la table entière (cf. le pavé
+    # de `select_par_cle`) : il ne sauve pas parce qu'il filtre, il sauve
+    # parce que la tranche est vingt fois moins profonde — 36 528 contre
+    # 784 372. Convertir sans mesurer aurait été un geste de peur.
+    #
+    # ⚠️ CE QUI LE FERA BASCULER, ET COMMENT LE VOIR VENIR. La profondeur
+    # de CETTE tranche, pas la taille de la table : un cinquième modèle
+    # suivi, un second réseau, ou un second `lead_h` la multiplient
+    # d'autant. `sonde_duel_offset.py` rend les quatre chiffres
+    # ci-dessus en une commande ; au-delà de ~2 s sur la dernière page,
+    # passer à `select_par_cle` sur `day` comme la fenêtre.
     #
     # ⛔ ET IL EST ICI, HORS DU `else: (zone_of non vide)` OÙ IL AVAIT
     # D'ABORD ÉTÉ ÉCRIT. Le duel ne connaît AUCUNE zone : il apparie des
@@ -6937,7 +7021,7 @@ def main() -> int:
                        ).strftime("%Y-%m-%d")
         daily_duel = sb.select(
             "model_verif_daily", DUEL.query_duel(depuis_duel),
-            order="day,source,station_id,model,lead_h,fcst_src")
+            order=CLE_DAILY)
         # ── lot L17 : les doublons d'inscription sortent du duel aussi ─
         #
         # ⛔ POURQUOI ICI ET PAS DANS `duel.py`. Le duel lit une requête
@@ -7167,11 +7251,58 @@ def main() -> int:
         _publish_events(st, ev_scores, as_of, rejets, retenues, args.dry_run)
 
         since = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
-        daily = sb.select("model_verif_daily", f"?day=gte.{since}",
-                          order="day,source,station_id,model,lead_h,fcst_src")
+        # ⛔⛔ PAGINATION PAR CLÉ, ET LA TROISIÈME TABLE À Y PASSER
+        # (07/09/2026). Cette lecture était la DERNIÈRE du run à paginer
+        # par décalage, et elle a tué la notation les 05 et 06/09 : trois
+        # `57014 statement timeout` de suite à l'offset 650 000, deux
+        # runs consécutifs en échec, alerte e-mail partie.
+        #
+        # ⚠️ CE N'EST PAS UN DÉFAUT NEUF : c'est le MÊME que le 25/08
+        # (`model_character`, d'où `select_par_cle`) et que le 02/09
+        # (`model_verif_event`, d'où `cle_unique`). Il a fallu trois
+        # tables pour que la leçon soit complète — celle-ci n'a pu
+        # prendre NI l'un NI l'autre correctif, parce que sa clé primaire
+        # a SIX colonnes : `cle_unique` exige une colonne unique et lève.
+        # `select_par_cle`, elle, avance sur la PREMIÈRE colonne de
+        # l'ordre (`day`) et lit chaque valeur entière par offsets bornés
+        # à sa propre taille.
+        #
+        # ⛔ MESURÉ SUR LA PRODUCTION LE 07/09, et c'est ce qui tranche :
+        #
+        #   par DÉCALAGE, sur la fenêtre entière (784 372 lignes)
+        #     offset       0 → 200 en 0,19 s
+        #     offset 100 000 → 200 en 3,91 s
+        #     offset 500 000 → 200 en 16,12 s
+        #     offset 650 000 → ⛔ 57014, les trois essais expirent
+        #
+        #   par CLÉ, dans UNE journée (`day=eq.`, 69 164 lignes)
+        #     offset      0 → 200 en 0,24 s
+        #     offset 10 000 → 200 en 0,14 s
+        #     offset 50 000 → 200 en 0,16 s     ⟵ PLAT
+        #
+        # L'index de la clé primaire porte `day` en tête : borner sur
+        # `day` rend le décalage inoffensif, parce qu'il ne parcourt
+        # jamais que la journée en cours.
+        #
+        # ⚠️ ET LA FENÊTRE A DOUBLÉ EN NEUF JOURS : 332 307 lignes
+        # sondées le 28/08 (cf. le pavé mémoire plus bas), **784 372 le
+        # 07/09**. Ce n'est pas une dérive, ce sont les lots : `bw_mix` et
+        # son témoin (L19), la classe courte et la classe au quart
+        # (L10/L11), les lignes sœurs (L20), et la classe +48 h qui
+        # arrive (L22a). Chaque série nouvelle multiplie cette table.
+        daily = sb.select_par_cle(
+            "model_verif_daily", "day",
+            order=CLE_DAILY,
+            query=f"?day=gte.{since}")
 
         t_roll = time.monotonic()
-        scores = rolling_scores(daily, zone_of, as_of)
+        # ⛔ `sur_place=True` : 687 Mo évités, mesurés le 07/09 (+47 Mo
+        # au lieu de +687, pic 1 314 Mo au lieu de 1 953). Voir le pavé
+        # de `rolling_scores`. Légal ICI et NULLE PART AILLEURS parce que
+        # `daily = None` est trois lignes plus bas — les lignes mutées
+        # ne sont jamais relues. Déplacer ce `None`, c'est retirer ce
+        # `True`.
+        scores = rolling_scores(daily, zone_of, as_of, sur_place=True)
         print(f"  score glissant : {len(scores)} lignes "
               f"({time.monotonic() - t_roll:.1f} s)")
         # ⛔ 497 Mo, SONDÉS SUR LA PRODUCTION LE 28/08 : `daily` porte
@@ -7181,6 +7312,20 @@ def main() -> int:
         # tout le chemin régime, qui est justement le plus gros
         # consommateur du run. C'est le plus lourd des blocs morts de
         # cette nuit-là, et le plus facile à relâcher.
+        #
+        # ⛔ ET CE N'EST PLUS 497 Mo : **1 266 Mo, remesurés le 07/09**
+        # (784 372 lignes × 1 693 octets, 31 colonnes, 139,4 s de
+        # lecture). Le bloc mort a plus que doublé en dix jours, pour la
+        # même raison que la fenêtre — les lots. Ce `None` n'est donc
+        # pas un soin de propreté, c'est le geste qui rend la nuit
+        # possible : sans lui la sonde seule tenait 1 953 Mo sur un VPS
+        # qui en a 3 825.
+        #
+        # ⓘ PROCHAIN LEVIER, PAS ENCORE TIRÉ : `select=*` ramène les 31
+        # colonnes de la table. Les restreindre à celles que
+        # `_case_rows` lit vraiment couperait la lecture ET la mémoire
+        # dans le même geste. Non fait ici — une colonne oubliée éteint
+        # une métrique en silence, et cet incident-ci se répare d'abord.
         daily = None
         gc.collect()
         jalon_memoire("l'oubli de la fenêtre glissante")
