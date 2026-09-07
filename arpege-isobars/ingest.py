@@ -182,6 +182,12 @@ CENTER_MIN_SEPARATION_DEG = 6.0 # fusionne les centres détectés trop proches
 MAX_CENTERS_PER_KIND = 6        # évite la surcharge visuelle
 CENTER_MIN_PROMINENCE_HPA = 2.0 # 07/09 : amplitude minimale du champ dans la
                                  # fenêtre pour qu'un extremum soit un centre
+# Version de l'algorithme des centres, écrite dans le manifest. Les centres
+# vivent DANS les fichiers par échéance (immuables, skip-if-exists) : changer
+# `find_centers` sans incrémenter ceci laisserait le passé avec les anciens
+# centres jusqu'à sa sortie de fenêtre (72 h). Incrémenter force un recalcul
+# du passé, une fois. 2 = exclusion du bord de grille (07/09, 2e run).
+CENTERS_VERSION = 2
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 BUCKET  = os.environ.get("ISOBARS_BUCKET", "isobars")
@@ -393,6 +399,15 @@ def find_centers(lon2d, lat2d, pressure):
     prominence = local_max - local_min
     is_low = (pressure <= local_min) & (prominence >= CENTER_MIN_PROMINENCE_HPA)
     is_high = (pressure >= local_max) & (prominence >= CENTER_MIN_PROMINENCE_HPA)
+    # 07/09/2026, vu sur le premier run réel : trois « L » posés PILE sur
+    # le bord de la grille (lat 20,0 ; lon 42,0 ; lon −24,6 à lat 20) —
+    # avec `mode='nearest'`, un champ qui décroît jusqu'au bord y a
+    # mécaniquement son minimum local. Un centre n'est crédible que si sa
+    # fenêtre de recherche tient ENTIÈREMENT dans la grille.
+    is_low[:hw_j, :] = is_low[-hw_j:, :] = False
+    is_low[:, :hw_i] = is_low[:, -hw_i:] = False
+    is_high[:hw_j, :] = is_high[-hw_j:, :] = False
+    is_high[:, :hw_i] = is_high[:, -hw_i:] = False
 
     candidates = {
         "L": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]))
@@ -506,7 +521,8 @@ def echeances_publiees(key):
     # écrit par ce run portera le bon pas. Même mécanique que le
     # rattrapage `centers` du 23/07, mais automatique.
     synop_ok = brut.get("synopStepHpa") == SYNOP_STEP_HPA \
-        and brut.get("levelStepHpa") == LEVEL_STEP_HPA
+        and brut.get("levelStepHpa") == LEVEL_STEP_HPA \
+        and brut.get("centersVersion") == CENTERS_VERSION
     print(f"  manifest précédent : {len(times)} échéance(s) déjà publiée(s)"
           + ("" if synop_ok else " — SANS version synoptique : passé recalculé"))
     return times, True, synop_ok
@@ -711,7 +727,7 @@ def process_grid(key, model):
         model=model, referenceTime=reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         levelStepHpa=LEVEL_STEP_HPA, synopStepHpa=SYNOP_STEP_HPA,
-        times=manifest_times,
+        centersVersion=CENTERS_VERSION, times=manifest_times,
         # Débogage 23/07/2026 : basé AVANT sur `len(future)` (compte
         # DEMANDÉ, cf. `future_times`) plutôt que sur ce qui a RÉUSSI à
         # être téléversé (`future_done`, entrées passées + prévision
