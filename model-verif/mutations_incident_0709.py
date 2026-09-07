@@ -156,6 +156,43 @@ MUTATIONS = [
      '        daily = None\n        gc.collect()\n'
      '        jalon_memoire("l\'oubli de la fenêtre glissante")',
      '        jalon_memoire("l\'oubli de la fenêtre glissante")'),
+
+    # ══════════════════════════════════════════════════════════════
+    #  LA LECTURE TARDIVE — le run mort la base déjà écrite
+    # ══════════════════════════════════════════════════════════════
+    ("⭐⭐ LA FAUTE DU 07/09 À 09:24, remise telle quelle : la dispersion "
+     "se relit sur `units` DANS le méta, c'est-à-dire après l'oubli de "
+     "la fenêtre rejouée. `TypeError: 'NoneType' object is not "
+     "iterable` — après 3 089 s de run et APRÈS les 116 425 lignes de "
+     "`model_score_zone` : la base à moitié à jour et le journal rouge",
+     SCORE, B_SCORE,
+     '        bilan_disp = MX.bilan_dispersion(units)\n',
+     ''),
+
+    ("le méta republie la TABLE et non le résultat : identique tant que "
+     "`units` vit, mortel dès qu'on l'oublie — et c'est exactement "
+     "l'ordre du fichier",
+     SCORE, B_SCORE,
+     '                           "dispersion": bilan_disp,',
+     '                           "dispersion": MX.bilan_dispersion(units),'),
+
+    ("la dispersion est calculée APRÈS l'oubli au lieu d'avant : la "
+     "variable existe, le nom est le bon, et elle vaut `None`",
+     SCORE, B_SCORE,
+     '        bilan_disp = MX.bilan_dispersion(units)\n'
+     '        # ⓘ Dernier lecteur de la fenêtre rejouée',
+     '        # ⓘ Dernier lecteur de la fenêtre rejouée'),
+
+    # ══════════════════════════════════════════════════════════════
+    #  ET LE BANC LUI-MÊME — un garde aveugle est pire qu'aucun garde
+    # ══════════════════════════════════════════════════════════════
+    ("⭐ `sans_commentaires` cesse d'effacer et rend le texte brut : les "
+     "gardes « plus aucune lecture après l'oubli » redeviennent "
+     "sensibles aux COMMENTAIRES, donc rouges dès qu'on explique le "
+     "défaut qu'ils gardent — le banc qu'on finit par contourner",
+     B_SCORE, B_SCORE,
+     '        lignes[l1 - 1] = s[:c1] + " " * (c2 - c1) + s[c2:]',
+     '        lignes[l1 - 1] = s'),
 ]
 
 

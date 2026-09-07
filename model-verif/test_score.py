@@ -24,6 +24,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import tokenize
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -34,6 +35,38 @@ import inference as I    # noqa: E402  (lot L3 : BOOTSTRAP_ITERATIONS)
 OK = KO = 0
 DAY = datetime(2026, 8, 5)
 DAY_MS = int(DAY.replace(tzinfo=timezone.utc).timestamp()) * 1000
+
+
+def sans_commentaires(texte: str) -> str:
+    """Le même source, commentaires effacés — MAIS AUX MÊMES POSITIONS.
+
+    ⛔ POURQUOI IL A FALLU L'ÉCRIRE (07/09/2026). Les gardes « plus
+    aucune lecture de X après son oubli » cherchaient X dans le texte
+    BRUT. Résultat : le commentaire qui EXPLIQUE la faute — « c'est le
+    même défaut que `len(prior)` du 28/08 » — faisait rougir le banc,
+    et la seule façon de le rendre vert était de ne plus écrire
+    pourquoi. Un banc qui punit l'explication du défaut qu'il garde est
+    un banc qu'on finit par contourner.
+
+    ⚠️ ET IL EFFACE, IL NE SUPPRIME PAS. Chaque commentaire est remplacé
+    par autant d'espaces : les décalages du fichier sont IDENTIQUES, donc
+    tous les motifs multi-lignes des autres gardes (`select_par_cle(\\n
+    ...`) continuent de matcher, et les `index()` restent comparables
+    entre les deux versions. `untokenize` aurait réécrit la mise en
+    forme et cassé la moitié du fichier de bancs.
+
+    ⓘ Les DOCSTRINGS restent : ce sont des chaînes, pas des
+    commentaires. C'est voulu — une docstring qui nommerait une variable
+    morte est aussi une trace à corriger.
+    """
+    lignes = texte.splitlines(keepends=True)
+    for tok in tokenize.generate_tokens(io.StringIO(texte).readline):
+        if tok.type != tokenize.COMMENT:
+            continue
+        (l1, c1), (_, c2) = tok.start, tok.end
+        s = lignes[l1 - 1]
+        lignes[l1 - 1] = s[:c1] + " " * (c2 - c1) + s[c2:]
+    return "".join(lignes)
 
 
 def check(label, got, want, tol=1e-6):
@@ -982,8 +1015,13 @@ def test_memoire_rss_suit_une_allocation_reelle():
 
 def test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime():
     print("── mémoire : l'ordre des oublis dans `main` (28/08) ──")
-    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
-    src = src[src.index("def main() -> int:"):]
+    brut = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+    src = brut[brut.index("def main() -> int:"):]
+    # ⛔ LE CODE SEUL, pour les gardes « plus aucune lecture après
+    # l'oubli » : un commentaire qui NOMME la faute ne doit pas rougir.
+    # Voir `sans_commentaires` — les positions sont identiques, donc
+    # `src` et `code` s'indexent de la même façon.
+    code = sans_commentaires(brut)[brut.index("def main() -> int:"):]
 
     def pos(motif, quoi):
         check(f"`{quoi}` est présent dans `main`", motif in src, True)
@@ -1080,9 +1118,38 @@ def test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime():
     check("le méta publie `n_clim` et non `len(clim)`",
           '"climatology_stations": n_clim,' in src, True)
     check("plus aucun `len(prior)` après l'oubli",
-          "len(prior)" in src[p_j0 + 200:], False)
+          "len(prior)" in code[p_j0 + 200:], False)
     check("plus aucun `len(clim)` après l'oubli",
-          "len(clim)" in src[p_j0 + 200:], False)
+          "len(clim)" in code[p_j0 + 200:], False)
+
+    # ⛔⛔ ET LA MÊME RÈGLE POUR LA FENÊTRE REJOUÉE (07/09/2026).
+    #
+    # `units = None` a exactement la même conséquence que `prior = None`,
+    # et elle s'est produite : le méta publié lisait
+    # `MX.bilan_dispersion(units)` APRÈS l'oubli. En production le 07/09
+    # à 09:24, `TypeError: 'NoneType' object is not iterable` — après
+    # 3 089 s de run et, surtout, APRÈS l'écriture des 116 425 lignes de
+    # `model_score_zone`. La base à moitié à jour et le journal en
+    # rouge : le pire des deux mondes.
+    #
+    # ⚠️ ON TIENT LA CLASSE, PAS LE CAS. Le banc du 28/08 nommait
+    # `len(prior)` et `len(clim)` un par un ; il n'a donc rien dit
+    # lorsqu'un TROISIÈME lecteur tardif est apparu sur une AUTRE table.
+    # Ici on interdit toute mention de `units` après son oubli, quelle
+    # que soit la fonction qui la lit — c'est la seule formulation qui
+    # aurait attrapé celle-là avant la production.
+    p_oubli_units = pos("        units = None" + chr(10),
+                        "l'oubli de la fenêtre rejouée")
+    apres = code[p_oubli_units + len("        units = None\n"):]
+    check("⭐⭐ plus AUCUNE lecture de `units` après son oubli — c'est la "
+          "faute du 07/09, et elle a coûté un run mort la base déjà "
+          "écrite",
+          "units" in apres, False)
+    check("… et la dispersion est calculée AVANT l'oubli, pas après",
+          src.index("bilan_disp = MX.bilan_dispersion(units)")
+          < p_oubli_units, True)
+    check("… c'est bien le RÉSULTAT qui est publié, pas la table",
+          '"dispersion": bilan_disp,' in src, True)
 
     # ⓘ Et le ramasse-miettes est appelé : sans lui, les cycles de
     # références (une ligne qui pointe sa case, une case qui liste ses

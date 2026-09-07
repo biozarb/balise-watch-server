@@ -7450,6 +7450,27 @@ def main() -> int:
                  f"{stabilite['shared_days']} jour(s) partagé(s)"
                  if stabilite["kendall_tau"] is not None else ""))
         print(f"     ⓘ {stabilite['covers']}")
+        # ⛔ LA DISPERSION SE CALCULE ICI, PENDANT QUE `units` EXISTE
+        # ENCORE (07/09/2026). Elle était lue DANS le méta publié, une
+        # centaine de lignes plus bas — c'est-à-dire APRÈS l'oubli
+        # ci-dessous : `TypeError: 'NoneType' object is not iterable`,
+        # constaté en production le 07/09 à 09:24, après 3 089 s de run.
+        #
+        # ⛔ ET LE PRIX EXACT DE CE DÉFAUT, parce qu'il dit pourquoi il
+        # faut le traiter comme une faute et pas comme une étourderie :
+        # `model_score_zone` VENAIT D'ÊTRE ÉCRITE — 116 425 lignes. Le
+        # run est mort en publiant le méta, donc avec les scores en base
+        # et le journal en rouge. Un échec qui laisse la base à moitié
+        # à jour est plus coûteux qu'un échec franc : personne ne sait,
+        # en lisant l'alerte, ce qui a été écrit et ce qui manque.
+        #
+        # ⚠️ C'EST LE MÊME DÉFAUT QUE `len(prior)` DU 28/08, à la même
+        # ligne près : une valeur relue après que son bloc a été
+        # relâché. Le remède est le même — on garde le RÉSULTAT, pas la
+        # table. `bilan_dispersion` rend un petit dictionnaire (dix
+        # déciles et un rho) ; c'est lui qui survit à l'oubli, pas les
+        # 405 486 balise-jours qui l'ont produit.
+        bilan_disp = MX.bilan_dispersion(units)
         # ⓘ Dernier lecteur de la fenêtre rejouée : `units` porte
         # 405 486 balise-jours (mesuré le 28/08, ~1 598 octets par ligne
         # en mémoire, soit ~650 Mo), et la publication qui suit n'en lit
@@ -7517,7 +7538,12 @@ def main() -> int:
                                "pairs_with_prior": n_prior_fin,
                                "witness": part_temoin_fin,
                            },
-                           "dispersion": MX.bilan_dispersion(units),
+                           # ⛔ LE RÉSULTAT, PAS LA TABLE — `units` est
+                           # `None` ici depuis l'oubli de la fenêtre
+                           # rejouée. Voir le pavé là-haut : le lire
+                           # ici a tué le run du 07/09 APRÈS l'écriture
+                           # des 116 425 lignes de score.
+                           "dispersion": bilan_disp,
                            # ⛔⛔ LA RÉSERVE VOYAGE AVEC LES COLONNES
                            # QU'ELLE QUALIFIE (arbitrage de Yann,
                            # 02/09/2026, volet c du lot L9).
