@@ -12,6 +12,16 @@ on:
   schedule:
     - cron: "0 2,8,14,20 * * *"   # UTC — runs ARPEGE 00/06/12/18Z + 2h
   workflow_dispatch: {}
+  # 07/09/2026 : un changement de la chaîne d'ingestion déclenche son
+  # propre run — pas de `gh` ni de token sur le poste, et attendre le
+  # prochain cron (jusqu'à 6 h) pour voir si le script tourne, c'est
+  # trop long. `skip-if-exists` rend le run gratuit s'il n'y a rien de
+  # neuf à produire.
+  push:
+    branches: [main]
+    paths:
+      - "arpege-isobars/**"
+      - ".github/workflows/arpege-isobars.yml"
 
 concurrency:
   group: arpege-isobars
