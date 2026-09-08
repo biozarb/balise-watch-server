@@ -59,6 +59,14 @@ coïncident à la frontière Europe/Monde. Conséquences dans ce fichier :
     pas encore lue par le web, mais le lot fronts en aura besoin et un
     changement de version coûte un recalcul complet du passé.
 
+⚠️ 08/09/2026 (soir) — FRONTS sur le synoptique Monde (demande Yann : « un
+rendu comme le Met Office », fronts compris). Détection OBJECTIVE (Hewson
+1998) sur θe à 850 hPa lue dans le MÊME `.om` que la pression ; froid /
+chaud / stationnaire par le vent normal au front, occlusions par la crête
+de θe près d'un L. Écrits dans le `.synop.json` Monde (clé `fronts`), le
+manifest porte `frontsVersion`. Étiquetés « détection automatique » côté
+web — ce n'est PAS une analyse de prévisionniste. Détail : § Fronts.
+
 Source : Open-Meteo AWS Open Data (`s3://openmeteo`, gratuit, sans clé,
 licence CC-BY-4.0), layout `data_spatial/` — PAS le bucket meteofrance-pnt
 (OVH) utilisé pour AROME : celui-ci ne contient QUE de l'AROME, vérifié en
@@ -189,6 +197,11 @@ GRIDS = {
         # des artefacts de projection (des cercles autour du pôle). On
         # coupe AVANT le contourage : ni tracés ni centres polaires.
         lat_clip_deg=80.0,
+        # 08/09/2026 (lot fronts) : les fronts sont détectés sur CETTE
+        # grille seulement (vue synoptique), dans le même fichier
+        # `.synop.json` — même run, même échéance, jamais un second
+        # fichier ni un second manifest (piège des deux runs du 24/07).
+        fronts=True,
     ),
 }
 # Grilles qui ont existé et dont le bucket doit être vidé (manifest +
@@ -335,24 +348,64 @@ def read_pressure(model, dt_utc, reference_time=None):
 
     Retourne (lon2d, lat2d, pressure) ou None si absent (fichier purgé /
     pas encore publié — pas une erreur, cf. appelants)."""
+    res = read_fields(model, dt_utc, ("pressure_msl",), reference_time)
+    if res is None:
+        return None
+    lon2d, lat2d, fields = res
+    return lon2d, lat2d, fields["pressure_msl"]
+
+# 08/09/2026 (lot fronts) — les 4 champs 850 hPa du même fichier `.om`
+# que la pression : zéro requête de plus, une lecture par variable.
+# ⛔ Chaque nouvelle variable est un champ retourné en puissance (leçon du
+# calque à l'envers) : `banc_fronts_08-09.py --orientation` a comparé ces
+# quatre champs à l'API Open-Meteo sur 12 points (dont Le Cap, Wellington,
+# New York, Tokyo) le 08/09 — écart 0,02 °C / 0,04 m/s lus sud→nord, 13 °C
+# / 8 m/s lus à l'envers. Unités VÉRIFIÉES : T en °C, RH en %, u/v en m/s,
+# u vers l'est, v vers le nord (confrontés à vitesse + direction de l'API).
+FRONT_FIELDS = ("temperature_850hPa", "relative_humidity_850hPa",
+                "wind_u_component_850hPa", "wind_v_component_850hPa")
+# Taille de bloc de lecture par modèle (cf. `read_fields`) : 1 Mo là où
+# l'on lit cinq variables par fichier, 64 Ko ailleurs.
+OM_BLOCK_SIZE = {"meteofrance_arpege_world025": 1 << 20}
+
+def read_fields(model, dt_utc, names, reference_time=None):
+    """Lit plusieurs variables (grille complète) du même `.om`. Renvoie
+    (lon2d, lat2d, {nom: tableau}) ou None si le fichier est absent.
+    Même convention d'axes que `read_pressure` (sud → nord)."""
     run_dt = reference_time if reference_time is not None else dt_utc
     run_dir = run_dt.strftime("%Y/%m/%d/%H00Z")
     fname = dt_utc.strftime("%Y-%m-%dT%H%M")
     uri = f"s3://{OM_BUCKET}/data_spatial/{model}/{run_dir}/{fname}.om"
+    # Taille de bloc : 64 Ko suffisaient pour UNE variable (~350 Ko lus
+    # par fichier). MESURÉ le 08/09 (conteneur neuf, S3 anonyme, une
+    # échéance Monde, 5 variables) : 9,7 s en blocs de 64 Ko, 4,1 s en
+    # blocs de 1 Mo — la lecture domine le run (le calcul des fronts fait
+    # 2,5 s), et 79 échéances × 20 s frôlaient le `timeout-minutes: 30`
+    # du workflow.
+    # ⛔ La taille de bloc est une propriété du MODÈLE, pas de l'appel :
+    # le blockcache refuse de rouvrir un fichier avec une autre taille
+    # (`BlocksizeMismatchError`), et `past_times` sonde chaque fichier
+    # passé avec `read_pressure` (une variable) AVANT que `process_grid`
+    # ne le relise avec les cinq. Une première version faisait dépendre
+    # la taille du nombre de variables : le rejeu DRY_RUN du 08/09 est
+    # mort dessus à la première échéance passée — en prod, ç'aurait été
+    # le run.
+    block = OM_BLOCK_SIZE.get(model, 65536)
     backend = fsspec.open(
         f"blockcache::{uri}", mode="rb",
-        s3={"anon": True, "default_block_size": 65536},
+        s3={"anon": True, "default_block_size": block},
         blockcache={"cache_storage": "/tmp/om_cache_isobars"},
     )
+    fields = {}
     try:
         with OmFileReader(backend) as root:
-            p = root.get_child_by_name("pressure_msl")
-            pressure = p.read_array((...))
+            for n in names:
+                fields[n] = root.get_child_by_name(n).read_array((...))
             bbox = _BBOX_RE.search(root.get_child_by_name("crs_wkt").read_scalar())
             south, west, north, east = (float(x) for x in bbox.groups())
     except FileNotFoundError:
         return None
-    nj, ni = pressure.shape
+    nj, ni = fields[names[0]].shape
     # ⛔ 08/09/2026 — CORRECTIF : LE CALQUE ÉTAIT RETOURNÉ NORD-SUD DEPUIS
     # LE 23/07. Cette ligne disait `linspace(north, south)` (« jScan
     # descendant »), convention GRIB2 d'AROME recopiée ici. Mais ces
@@ -379,7 +432,7 @@ def read_pressure(model, dt_utc, reference_time=None):
     lat = np.linspace(south, north, nj)
     lon = np.linspace(west, east, ni)
     lon2d, lat2d = np.meshgrid(lon, lat)
-    return lon2d, lat2d, pressure
+    return lon2d, lat2d, fields
 
 # ── Contourage ─────────────────────────────────────────────────────────
 def simplify_rdp(seg, tol):
@@ -566,6 +619,363 @@ def find_centers(lon2d, lat2d, pressure, max_per_kind=6):
                     for lat, lon, hpa, prom in kept]
     return centers
 
+# ── Fronts (08/09/2026 — Hewson 1998, sur θe à 850 hPa) ───────────────
+# Demande Yann (07-08/09) : « le but serait d'avoir un rendu comme le Met
+# Office », fronts compris. Un front du Met Office est tracé À LA MAIN par
+# un prévisionniste ; le nôtre est une ligne mathématique dans UN champ
+# (θe à 850 hPa, ARPEGE 0,25°). Il est étiqueté « détection automatique »
+# partout où il apparaît (dock, légende) — jamais présenté comme une
+# analyse. Pas de données inventées : un front détecté n'est pas inventé,
+# mais sa nature l'est, et elle doit être lisible.
+#
+# La méthode, en cinq champs 2-D sur la grille Monde, par échéance, en
+# UNITÉS MÉTRIQUES (dx = R·cos φ·dλ, dy = R·dφ — ⛔ pas en degrés : une
+# maille de 0,25° fait 28 km en longitude à l'équateur et 14 km à 60° N,
+# un gradient en degrés rendrait les fronts nord-sud deux fois plus forts
+# que les fronts est-ouest aux latitudes tempérées) :
+#   1. τ = θe(T, RH, 850 hPa) par Bolton (1980). Hewson utilise θw ; θw
+#      est une fonction MONOTONE de θe, donc les zéros de dérivées (où se
+#      trouve le front) sont pratiquement les mêmes, seuls les SEUILS
+#      changent d'échelle (θe varie ~1,5-2× plus que θw dans l'air chaud).
+#   2. τ lissé (gaussien, σ = FRONTS['smooth_sigma_cells'], périodique en
+#      longitude) : le locateur est une DÉRIVÉE TROISIÈME du champ — sans
+#      lissage, c'est du bruit.
+#   3. G = |∇τ| (intensité de la zone barocline), ŝ = ∇τ/G (vers l'air
+#      CHAUD), TFP = −∇G · ŝ (paramètre frontal thermique, Renard &
+#      Clarke 1965). En traversant une zone barocline du froid vers le
+#      chaud, G monte puis redescend : TFP est < 0 sur le bord froid,
+#      nul AU MILIEU de la zone, > 0 et MAXIMAL sur le bord chaud.
+#   4. ⚠️ Le front synoptique est sur le BORD CHAUD de la zone barocline
+#      (Hewson §2) — c'est-à-dire là où TFP est MAXIMAL le long de ŝ, PAS
+#      là où TFP = 0 (ça, c'est le cœur de la zone). Le locateur est donc
+#      L = ∇(TFP) · ŝ = 0, contouré au niveau 0 (marching squares, la même
+#      routine que les isobares), puis MASQUÉ : on ne garde que les
+#      portions où TFP ≥ K2 (un maximum, donc côté chaud — les minima de
+#      TFP, côté froid, sont négatifs et tombent) ET où la zone barocline
+#      adjacente est assez forte, max(G) sur ~140 km ≥ K1 (Hewson évalue
+#      G un peu côté froid parce que sur le bord chaud G décroît déjà —
+#      un max local fait le même office). ⛔ Sans ces deux masques, un
+#      locateur trouve TOUJOURS des lignes : les zéros d'une dérivée sont
+#      partout. Puis les morceaux < min_length_km sont jetés.
+#   5. Classification par le VENT NORMAL AU FRONT : v_n = v₈₅₀ · ŝ (m/s,
+#      positif quand le vent souffle de l'air froid vers l'air chaud).
+#      v_n > seuil → l'air froid avance → FRONT FROID ; v_n < −seuil →
+#      FRONT CHAUD ; entre les deux → STATIONNAIRE. ⚠️ Le prompt de reprise
+#      écrivait « A = −v·∇τ > 0 → froid » : c'est le signe INVERSE
+#      (−v·∇τ > 0 est une advection CHAUDE). Corrigé ici, et vérifié sur
+#      le banc synthétique (`banc_fronts_08-09.py --synthetique`).
+#   6. OCCLUSIONS (demande Yann 08/09 : « occlusions aussi en v1 »). Hewson
+#      ne les localise pas directement. On prend la définition classique :
+#      l'occlusion est la CRÊTE de θe (la « langue chaude » rejetée en
+#      altitude) qui relie le L au point triple. Détectée comme ligne de
+#      crête du champ τ (gradient parallèle à un vecteur propre du
+#      hessien : Q = (τx²−τy²)τxy − τxτy(τxx−τyy) = 0, avec la courbure
+#      TRANSVERSE au gradient nettement négative), gardée seulement à moins
+#      de `occl_max_dist_km` d'un L de prominence suffisante et raccordée
+#      à moins de `occl_join_km` d'un front froid/chaud. ⚠️ C'est la partie
+#      la moins établie : `FRONTS['occlusions']` la coupe sans toucher au
+#      reste.
+# Géométrie de sortie : moyenne glissante (un front est une courbe douce)
+# puis RDP (même tolérance que le synop). Chaque front : {kind, coords,
+# side, strength}. `side` : côté des symboles PAR RAPPORT À L'ORDRE DES
+# POINTS, +1 = à GAUCHE quand on parcourt le tracé (repère géographique,
+# nord en haut). Froid / chaud / occlus : le côté vers lequel le front
+# AVANCE (chaud pour un froid, froid pour un chaud, sens de v_n pour un
+# occlus). Stationnaire : le côté de l'air CHAUD (le web y pose les
+# triangles et les demi-cercles de l'autre côté). ⚠️ Marching squares ne
+# garantit AUCUNE orientation des points : le côté est calculé depuis ŝ,
+# jamais déduit de l'ordre.
+# Latitudes : rien au-delà de ±FRONTS['lat_max'] (la zone barocline
+# polaire est permanente et sans intérêt pour un pilote, et Mercator y
+# ment).
+# ⚠️ Limite connue (v1) : là où 850 hPa est SOUS le relief (Tibet,
+# Groenland, Antarctique, Andes), T850 est une extrapolation et peut
+# produire des fronts fantômes. Pas de `surface_pressure` dans le `.om`
+# (vérifié le 08/09) pour les masquer proprement — à regarder sur les
+# échéances réelles avant de décider d'un masque statique.
+FRONTS_VERSION = 1
+R_EARTH_M = 6_371_000.0
+FRONTS = dict(
+    # ⚠️ Tous ces seuils sont CALIBRÉS sur l'échéance réelle contre la
+    # carte Met Office de la même heure (banc_fronts_08-09.py, note du
+    # 08/09) — pas recopiés de Hewson, dont la maille (~100 km) et le
+    # champ (θw) diffèrent. Les valeurs essayées et leur effet sont dans
+    # la note projet.
+    # MESURÉ le 08/09 (échéance 12:00, globe ±70°) : |∇θe| médian 1,6 K/
+    # 100 km, p90 4,4, p99 8,8 ; TFP p90 2,0, p99 5,6 K/(100 km)². Les
+    # seuils de départ (1,5 / 0,5, esprit Hewson) donnaient 885 fronts
+    # sur le globe ; 4,5 / 2,5 → 228 ; 5,5 / 3,5 → 139 (13 dans la fenêtre
+    # Met Office, dont le front froid Manche→Biscaye→Galice et le système
+    # du L 993 atlantique au bon endroit) ; 5,5 / 3,5 avec σ = 4 → 53, en
+    # perdant le L 993. Retenu : 5,5 / 3,5, σ = 3.
+    smooth_sigma_cells=3.0,      # lissage de θe avant les dérivées (0,25° → ~85 km)
+    grad_min_k_100km=5.5,        # K1 : max(|∇θe|) sur ~140 km ≥ K1 (K/100 km)
+    tfp_min_k_100km2=3.5,        # K2 : TFP ≥ K2 sur le bord chaud (K/(100 km)²)
+    min_length_km=500.0,         # morceaux plus courts jetés
+    lat_max=70.0,                # rien au-delà (zone barocline polaire)
+    # MESURÉ le 08/09 sur le globe : sans ce plancher, 35 « stationnaires »
+    # sur 80 fronts, dont l'essentiel entre 10 et 25° N (Sahel, Arabie,
+    # Inde) — des contrastes d'HUMIDITÉ de mousson, pas des fronts. Aucun
+    # service ne trace de fronts sous 20-25° ; les cartes Met Office
+    # s'arrêtent à 30° N.
+    lat_min=20.0,
+    # Boîtes (ouest, sud, est, nord) où 850 hPa est SOUS le sol : T850 y
+    # est extrapolée et produisait un paquet de fronts sur le plateau
+    # tibétain (vu le 08/09). Masque STATIQUE, faute de `surface_pressure`
+    # dans le `.om`. Andes / Rocheuses : pas masquées (v1), à surveiller.
+    mask_boxes=((73.0, 27.0, 105.0, 40.0),),   # plateau tibétain
+    vn_stationary_ms=2.0,        # |v·ŝ| en deçà → stationnaire
+    smooth_window_pts=5,         # moyenne glissante du tracé (points)
+    # Occlusions — MESURÉ le 08/09 : courbure 1 / prominence 4 / 1 500 km
+    # → 63 occlusions pour 18 fronts froids (impossible) ; 3 / 8 → 16 ;
+    # 5 / 8 / 1 000 km → 4 sur le globe, 1 dans la fenêtre Met Office,
+    # près du L 993 où le Met Office en trace une. Celle du L 989 (Écosse)
+    # n'est PAS trouvée : la crête de θe y est trop faible. Sévère, donc.
+    occlusions=True,             # interrupteur de la détection des occlusions
+    occl_sigma_cells=4.0,        # lissage (plus fort) pour la crête de θe
+    occl_curv_min=5.0,           # courbure transverse ≤ −K3 (K/(100 km)²)
+    occl_max_dist_km=1000.0,     # à moins de … d'un L
+    occl_low_prominence_hpa=8.0, # … de prominence ≥ …
+    occl_join_km=400.0,          # raccordé à un front froid/chaud à moins de …
+    occl_min_length_km=300.0,
+)
+
+def theta_e(t_c, rh_pct, p_hpa=850.0):
+    """θe (K) — Bolton (1980), Mon. Wea. Rev. 108, 1046-1053 :
+      es(T) = 6,112·exp(17,67·T/(T+243,5))        (éq. 10, T en °C, hPa)
+      e = RH·es ; r = 0,622·e/(p−e)               (rapport de mélange, kg/kg)
+      T_L = 1/(1/(T_K−55) − ln(RH)/2840) + 55     (éq. 22, niveau de condensation)
+      θe = T_K·(1000/p)^(0,2854·(1−0,28·r))·exp[(3,376/T_L − 0,00254)·r·1000·(1+0,81·r)]
+                                                  (éq. 38, r en kg/kg ici)
+    Test (banc) : T = 10 °C, RH = 80 %, 850 hPa → 318,0 K, recalculé à la
+    main le 08/09 (es = 12,27 hPa, r = 7,27 g/kg, T_L = 279,1 K)."""
+    t_c = np.asarray(t_c, dtype=np.float64)
+    rh = np.clip(np.asarray(rh_pct, dtype=np.float64), 1.0, 100.0) / 100.0
+    t_k = t_c + 273.15
+    es = 6.112 * np.exp(17.67 * t_c / (t_c + 243.5))
+    e = rh * es
+    r = 0.622 * e / (p_hpa - e)
+    t_l = 1.0 / (1.0 / (t_k - 55.0) - np.log(rh) / 2840.0) + 55.0
+    return (t_k * (1000.0 / p_hpa) ** (0.2854 * (1.0 - 0.28 * r))
+            * np.exp((3.376 / t_l - 0.00254) * r * 1000.0 * (1.0 + 0.81 * r)))
+
+def grad_m(f, lat1d, dlat_deg, dlon_deg, periodic_lon=True):
+    """∂f/∂x, ∂f/∂y en unités de f PAR MÈTRE, différences centrées.
+    x = est (R·cos φ·dλ), y = nord (R·dφ). Longitude PÉRIODIQUE sur la
+    grille Monde (−180 → 179,75 : la colonne suivant 179,75 est −180)."""
+    dy = R_EARTH_M * np.radians(dlat_deg)
+    dx = R_EARTH_M * np.radians(dlon_deg) * np.cos(np.radians(lat1d))[:, None]
+    dx = np.where(np.abs(dx) < 1.0, 1.0, dx)      # pôle : évite la division par ~0
+    if periodic_lon:
+        fx = (np.roll(f, -1, axis=1) - np.roll(f, 1, axis=1)) / (2.0 * dx)
+    else:
+        fx = np.gradient(f, axis=1) / dx
+    fy = np.gradient(f, axis=0) / dy
+    return fx, fy
+
+def _smooth(f, sigma, periodic_lon=True):
+    return gaussian_filter(f, sigma=sigma, mode=("nearest", "wrap" if periodic_lon else "nearest"))
+
+def _grid_steps(lon2d, lat2d):
+    lat1d, lon1d = lat2d[:, 0], lon2d[0, :]
+    dlat = (lat1d[-1] - lat1d[0]) / max(len(lat1d) - 1, 1)
+    dlon = (lon1d[-1] - lon1d[0]) / max(len(lon1d) - 1, 1)
+    return lat1d, lon1d, float(dlat), float(dlon)
+
+def front_fields(lon2d, lat2d, t850_c, rh850, u850, v850, cfg=FRONTS):
+    """Les champs du §2 : τ lissé, G (K/m), ŝ, TFP (K/m²), le locateur
+    L = ∇TFP·ŝ, v_n = v·ŝ (m/s) et, pour les occlusions, la crête de τ.
+    Tout est renvoyé dans un dict ; les seuils ne sont PAS appliqués ici
+    (c'est `front_locator` qui masque) — le banc peut ainsi mesurer les
+    distributions avant de choisir K1/K2."""
+    lat1d, lon1d, dlat, dlon = _grid_steps(lon2d, lat2d)
+    periodic = abs((lon1d[-1] - lon1d[0]) + dlon - 360.0) < 1e-6
+    tau = _smooth(theta_e(t850_c, rh850), cfg["smooth_sigma_cells"], periodic)
+    tx, ty = grad_m(tau, lat1d, dlat, dlon, periodic)
+    g = np.hypot(tx, ty)
+    g_safe = np.where(g < 1e-12, 1e-12, g)
+    sx, sy = tx / g_safe, ty / g_safe
+    gx, gy = grad_m(g, lat1d, dlat, dlon, periodic)
+    tfp = -(gx * sx + gy * sy)
+    lx, ly = grad_m(tfp, lat1d, dlat, dlon, periodic)
+    loc = lx * sx + ly * sy
+    us = _smooth(np.asarray(u850, dtype=np.float64), cfg["smooth_sigma_cells"], periodic)
+    vs = _smooth(np.asarray(v850, dtype=np.float64), cfg["smooth_sigma_cells"], periodic)
+    vn = us * sx + vs * sy
+    # ~140 km : 5 cellules sur 0,25°, indépendant de la latitude en lignes,
+    # un peu plus large en km vers l'équateur — un majorant, c'est voulu.
+    g_near = maximum_filter(g, size=5, mode=("nearest", "wrap" if periodic else "nearest"))
+    out = dict(tau=tau, g=g, sx=sx, sy=sy, tfp=tfp, loc=loc, vn=vn, g_near=g_near,
+               lat1d=lat1d, lon1d=lon1d, dlat=dlat, dlon=dlon, periodic=periodic)
+    if cfg["occlusions"]:
+        tau2 = _smooth(theta_e(t850_c, rh850), cfg["occl_sigma_cells"], periodic)
+        ax, ay = grad_m(tau2, lat1d, dlat, dlon, periodic)
+        axx, axy = grad_m(ax, lat1d, dlat, dlon, periodic)
+        _, ayy = grad_m(ay, lat1d, dlat, dlon, periodic)
+        # Q = 0 : gradient parallèle à un vecteur propre du hessien (crête
+        # ou vallée) ; `curv_t` = dérivée seconde PERPENDICULAIRE au
+        # gradient — nettement négative sur une crête.
+        q = (ax * ax - ay * ay) * axy - ax * ay * (axx - ayy)
+        n2 = ax * ax + ay * ay
+        n2 = np.where(n2 < 1e-24, 1e-24, n2)
+        curv_t = (ay * ay * axx - 2.0 * ax * ay * axy + ax * ax * ayy) / n2
+        out.update(occl_q=q, occl_curv=curv_t, occl_g=np.sqrt(n2))
+    return out
+
+def _zero_contours(lon2d, lat2d, field):
+    """Lignes de niveau 0 de `field` (marching squares matplotlib, comme
+    les isobares). Renvoie une liste de tableaux (n, 2) lon/lat."""
+    fig, ax = plt.subplots()
+    cs = ax.contour(lon2d, lat2d, field, levels=[0.0])
+    segs = [np.asarray(s, dtype=float) for s in cs.allsegs[0] if len(s) >= 2]
+    plt.close(fig)
+    return segs
+
+def _sample(field, lon, lat, F):
+    """Interpolation bilinéaire d'un champ aux points (lon, lat)."""
+    from scipy.ndimage import map_coordinates
+    j = (lat - F["lat1d"][0]) / F["dlat"]
+    i = (lon - F["lon1d"][0]) / F["dlon"]
+    return map_coordinates(field, [j, i], order=1, mode="nearest")
+
+def _length_km(seg):
+    """Longueur d'un tracé lon/lat en km (plan local, cos φ)."""
+    if len(seg) < 2:
+        return 0.0
+    lat_m = np.radians((seg[1:, 1] + seg[:-1, 1]) / 2.0)
+    dx = np.radians(np.diff(seg[:, 0])) * np.cos(lat_m)
+    dy = np.radians(np.diff(seg[:, 1]))
+    return float(np.hypot(dx, dy).sum() * R_EARTH_M / 1000.0)
+
+def _runs(mask):
+    """Plages consécutives de True → liste de (début, fin exclusive)."""
+    out, start = [], None
+    for k, m in enumerate(mask):
+        if m and start is None:
+            start = k
+        elif not m and start is not None:
+            out.append((start, k)); start = None
+    if start is not None:
+        out.append((start, len(mask)))
+    return out
+
+def _smooth_seg(seg, window):
+    """Moyenne glissante sur le tracé, extrémités conservées."""
+    if window < 3 or len(seg) < window:
+        return seg
+    k = np.ones(window) / window
+    out = seg.copy()
+    for c in (0, 1):
+        out[:, c] = np.convolve(np.pad(seg[:, c], (window // 2, window // 2), mode="edge"), k, mode="valid")
+    return out
+
+def _left_is_warm(seg, sx, sy):
+    """+1 si l'air chaud (ŝ) est à GAUCHE en parcourant le tracé dans
+    l'ordre des points (repère géographique, nord en haut), −1 sinon.
+    Moyenne sur le tracé : robuste aux points où la tangente vacille."""
+    d = np.diff(seg, axis=0)
+    cos = np.cos(np.radians((seg[1:, 1] + seg[:-1, 1]) / 2.0))
+    dx, dy = d[:, 0] * cos, d[:, 1]
+    # normale gauche de (dx, dy) = (−dy, dx)
+    mid_sx, mid_sy = (sx[1:] + sx[:-1]) / 2.0, (sy[1:] + sy[:-1]) / 2.0
+    return 1 if float(np.sum(-dy * mid_sx + dx * mid_sy)) >= 0 else -1
+
+def _geo_mask(lon, lat, cfg):
+    """Vrai là où un front a le DROIT d'exister : bande de latitude
+    [lat_min, lat_max] (deux hémisphères) et hors des `mask_boxes`."""
+    ok = (np.abs(lat) <= cfg["lat_max"]) & (np.abs(lat) >= cfg.get("lat_min", 0.0))
+    for w, s, e, n in cfg.get("mask_boxes", ()):
+        ok &= ~((lon >= w) & (lon <= e) & (lat >= s) & (lat <= n))
+    return ok
+
+def front_locator(lon2d, lat2d, F, cfg=FRONTS, tol_deg=0.05):
+    """Fronts froids / chauds / stationnaires (§2.4-2.5). Renvoie une
+    liste de dicts {kind, coords, side, strength, vn}."""
+    k1 = cfg["grad_min_k_100km"] * 1e-5           # K/100 km → K/m
+    k2 = cfg["tfp_min_k_100km2"] * 1e-10          # K/(100 km)² → K/m²
+    fronts = []
+    for seg in _zero_contours(lon2d, lat2d, F["loc"]):
+        lon, lat = seg[:, 0], seg[:, 1]
+        keep = ((_sample(F["tfp"], lon, lat, F) >= k2)
+                & (_sample(F["g_near"], lon, lat, F) >= k1)
+                & _geo_mask(lon, lat, cfg))
+        for a, b in _runs(keep):
+            part = seg[a:b]
+            if len(part) < 3 or _length_km(part) < cfg["min_length_km"]:
+                continue
+            sx = _sample(F["sx"], part[:, 0], part[:, 1], F)
+            sy = _sample(F["sy"], part[:, 0], part[:, 1], F)
+            vn = float(np.mean(_sample(F["vn"], part[:, 0], part[:, 1], F)))
+            strength = float(np.mean(_sample(F["g"], part[:, 0], part[:, 1], F))) * 1e5
+            warm_left = _left_is_warm(part, sx, sy)
+            if vn > cfg["vn_stationary_ms"]:
+                kind, side = "cold", warm_left            # avance vers le chaud
+            elif vn < -cfg["vn_stationary_ms"]:
+                kind, side = "warm", -warm_left           # avance vers le froid
+            else:
+                kind, side = "stationary", warm_left      # côté de l'air chaud
+            coords = simplify_rdp(_smooth_seg(part, cfg["smooth_window_pts"]), tol_deg)
+            fronts.append(dict(kind=kind, side=side, strength=round(strength, 2),
+                               vn=round(vn, 1), coords=coords))
+    return fronts
+
+def occlusion_locator(lon2d, lat2d, F, centers, fronts, cfg=FRONTS, tol_deg=0.05):
+    """§6 — crêtes de θe près d'un L, raccordées à un front. Le côté des
+    symboles est le sens d'avance (signe de v_n)."""
+    if not cfg["occlusions"] or "occl_q" not in F:
+        return []
+    lows = [c for c in centers if c["kind"] == "L"
+            and c.get("prominence", 0) >= cfg["occl_low_prominence_hpa"]]
+    if not lows or not fronts:
+        return []
+    k3 = cfg["occl_curv_min"] * 1e-10
+    ends = np.array([p for f in fronts for p in (f["coords"][0], f["coords"][-1])], dtype=float)
+
+    def dist_km(lon, lat, lon0, lat0):
+        return (np.hypot(np.radians(lon - lon0) * np.cos(np.radians((lat + lat0) / 2.0)),
+                         np.radians(lat - lat0)) * R_EARTH_M / 1000.0)
+
+    out = []
+    for seg in _zero_contours(lon2d, lat2d, F["occl_q"]):
+        lon, lat = seg[:, 0], seg[:, 1]
+        near_low = np.zeros(len(seg), dtype=bool)
+        for c in lows:
+            near_low |= dist_km(lon, lat, c["lon"], c["lat"]) <= cfg["occl_max_dist_km"]
+        keep = ((_sample(F["occl_curv"], lon, lat, F) <= -k3)
+                & near_low & _geo_mask(lon, lat, cfg))
+        for a, b in _runs(keep):
+            part = seg[a:b]
+            if len(part) < 3 or _length_km(part) < cfg["occl_min_length_km"]:
+                continue
+            # raccord : une extrémité de la crête à moins de occl_join_km
+            # d'une extrémité d'un front froid/chaud (le point triple)
+            joined = False
+            for p in (part[0], part[-1]):
+                if np.any(dist_km(ends[:, 0], ends[:, 1], p[0], p[1]) <= cfg["occl_join_km"]):
+                    joined = True; break
+            if not joined:
+                continue
+            vn = float(np.mean(_sample(F["vn"], part[:, 0], part[:, 1], F)))
+            sx = _sample(F["sx"], part[:, 0], part[:, 1], F)
+            sy = _sample(F["sy"], part[:, 0], part[:, 1], F)
+            # sens d'avance = sens de v_n le long de ŝ
+            side = _left_is_warm(part, sx, sy) * (1 if vn >= 0 else -1)
+            strength = float(np.mean(_sample(F["g"], part[:, 0], part[:, 1], F))) * 1e5
+            coords = simplify_rdp(_smooth_seg(part, cfg["smooth_window_pts"]), tol_deg)
+            out.append(dict(kind="occluded", side=side, strength=round(strength, 2),
+                            vn=round(vn, 1), coords=coords))
+    return out
+
+def fronts_features(lon2d, lat2d, t850_c, rh850, u850, v850, centers, cfg=FRONTS, tol_deg=0.05):
+    """Chaîne complète → liste de fronts sérialisables (clé `fronts` du
+    `.synop.json`, cf. `process_grid`)."""
+    F = front_fields(lon2d, lat2d, t850_c, rh850, u850, v850, cfg)
+    fronts = front_locator(lon2d, lat2d, F, cfg, tol_deg)
+    fronts += occlusion_locator(lon2d, lat2d, F, centers, fronts, cfg, tol_deg)
+    return [dict(kind=f["kind"], side=int(f["side"]), strength=f["strength"], vn=f["vn"],
+                 coords=[[round(float(x), 3), round(float(y), 3)] for x, y in f["coords"]])
+            for f in fronts]
+
 # ── Upload Supabase Storage (mêmes conventions que arome-wind/ingest.py) ─
 # ── Upload : adaptateur vers le module partagé ────────────────────────
 # 03/08/2026 — `sb_upload()` existait en CINQ exemplaires quasi
@@ -614,7 +1024,14 @@ def manifest_profil(cfg):
         p["levelStepHpa"] = LEVEL_STEP_HPA
     if "synop" in cfg["variants"]:
         p["synopStepHpa"] = SYNOP_STEP_HPA
+    # 08/09/2026 : `frontsVersion` n'est écrit que pour la grille qui
+    # produit des fronts. Absent du manifest précédent → le passé est
+    # recalculé une fois (79 échéances, cf. `reprocess_past`).
+    if cfg.get("fronts"):
+        p["frontsVersion"] = FRONTS_VERSION
     return p
+
+PROFIL_KEYS = ("levelStepHpa", "synopStepHpa", "centersVersion", "frontsVersion")
 
 def echeances_publiees(key, attendu):
     """Les échéances DÉJÀ dans le bucket, lues dans le manifest du run
@@ -678,8 +1095,7 @@ def echeances_publiees(key, attendu):
     # (`.get()` vaut None des deux côtés) : c'est ce qui fait qu'une
     # grille qui PERD une version voit son passé recalculé, pas seulement
     # une grille qui en gagne une.
-    profil_ok = all(brut.get(k) == attendu.get(k)
-                    for k in ("levelStepHpa", "synopStepHpa", "centersVersion"))
+    profil_ok = all(brut.get(k) == attendu.get(k) for k in PROFIL_KEYS)
     print(f"  manifest précédent : {len(times)} échéance(s) déjà publiée(s)"
           + ("" if profil_ok else " — profil différent : passé recalculé"))
     return times, True, profil_ok, brut
@@ -864,6 +1280,8 @@ def process_grid(key, cfg):
         quoi.append(f"détaillé {LEVEL_STEP_HPA} hPa")
     if "synop" in variants:
         quoi.append(f"synoptique {SYNOP_STEP_HPA} hPa")
+    if cfg.get("fronts"):
+        quoi.append(f"fronts (Hewson, θe 850 hPa, v{FRONTS_VERSION})")
     print(f"  contourage : {' + '.join(quoi)} (lissage σ = "
           f"{cfg['smooth_sigma_cells']} cellules"
           + (f", latitudes bornées à ±{cfg['lat_clip_deg']:g}°" if cfg["lat_clip_deg"] else "")
@@ -897,15 +1315,19 @@ def process_grid(key, cfg):
         # prévision, `run_dir` doit rester celui du run de référence — on
         # passe donc `reference_time` explicitement ici (seulement pour le
         # futur ; le passé garde `reference_time=None`, cf. docstring).
-        result = read_pressure(model, dt, reference_time=None if is_past else reference_time)
+        # 08/09/2026 (fronts) : les 4 champs 850 hPa sont lus dans le MÊME
+        # fichier que la pression, en une seule ouverture.
+        names = ("pressure_msl",) + (FRONT_FIELDS if cfg.get("fronts") else ())
+        result = read_fields(model, dt, names, reference_time=None if is_past else reference_time)
         if result is None:
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
+        lon_full, lat_full, fields = result
         # 08/09/2026 : la coupe en latitude vient AVANT tout le reste —
         # lissage, centres et contourage travaillent sur la même grille,
         # sinon un centre pourrait être détecté là où aucune isobare n'est
         # tracée.
-        lon2d, lat2d, pressure = clip_latitude(*result, cfg["lat_clip_deg"])
+        lon2d, lat2d, pressure = clip_latitude(lon_full, lat_full, fields["pressure_msl"], cfg["lat_clip_deg"])
         # 07/09/2026 : les centres H/L sont détectés sur le champ LISSÉ —
         # sur le champ brut 0,1°, un creux thermique de vallée ou une
         # bulle côtière de 1 hPa suffisait à voler la place d'un vrai
@@ -923,6 +1345,15 @@ def process_grid(key, cfg):
             synop = synop_geojson(lon2d, lat2d, smooth, cfg["synop_tol_deg"],
                                   cfg["synop_min_length_deg"])
             synop["centers"] = centers
+            if cfg.get("fronts"):
+                # Même run, même échéance, même fichier : un pilote ne
+                # verra jamais des fronts d'un run et des isobares d'un
+                # autre. Les centres (avec `prominence`) servent aux
+                # occlusions.
+                f850 = [clip_latitude(lon_full, lat_full, fields[n], cfg["lat_clip_deg"])[2]
+                        for n in FRONT_FIELDS]
+                synop["fronts"] = fronts_features(lon2d, lat2d, *f850, centers,
+                                                  tol_deg=cfg["synop_tol_deg"])
             sb_upload(f"{key}/{iso}.synop.json",
                       json.dumps(synop, separators=(",", ":")).encode())
         manifest_times.append(iso)
