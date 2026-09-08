@@ -38,13 +38,21 @@ assert out.tolist() == [[0, 0], [2, 0], [3, 1], [5, 1]], out.tolist()  # le Z, s
 print("1. simplify_rdp ✔", out.tolist())
 
 # 2. les deux versions
-smooth = ingest.smooth_pressure(p)
+# ⚠️ 08/09/2026 : lissage, longueur minimale et tolérance RDP sont passés
+# PAR GRILLE (`ingest.GRIDS`) — les mêmes 2,5 cellules ne font pas la même
+# distance sur 0,1° et sur 0,25°. Ce banc travaille sur un champ Europe
+# 0,1°, il prend donc le profil Europe. (Sans cette mise à jour il
+# plantait : `smooth_pressure` prend maintenant un σ, `synop_geojson` une
+# tolérance et une longueur, et `SYNOP_MIN_LENGTH_DEG` n'existe plus.)
+cfg = ingest.GRIDS["arpege_europe"]
+smooth = ingest.smooth_pressure(p, cfg["smooth_sigma_cells"])
 detail = ingest.isobars_geojson(lon2d, lat2d, p)
-synop = ingest.synop_geojson(lon2d, lat2d, smooth)
+synop = ingest.synop_geojson(lon2d, lat2d, smooth,
+                             cfg["synop_tol_deg"], cfg["synop_min_length_deg"])
 hpas = sorted({f["properties"]["hpa"] for f in synop["features"]})
 assert all(h % ingest.SYNOP_STEP_HPA == 0 for h in hpas), hpas
 for f in synop["features"]:
-    assert ingest.seg_length_deg(np.array(f["geometry"]["coordinates"])) >= ingest.SYNOP_MIN_LENGTH_DEG - 0.05
+    assert ingest.seg_length_deg(np.array(f["geometry"]["coordinates"])) >= cfg["synop_min_length_deg"] - 0.05
 sz = lambda g: len(json.dumps(g, separators=(",", ":")))
 nd, ns = sz(detail), sz(synop)
 print(f"2. détaillé {len(detail['features'])} lignes / {nd/1e3:.0f} Ko ; "
@@ -52,7 +60,8 @@ print(f"2. détaillé {len(detail['features'])} lignes / {nd/1e3:.0f} Ko ; "
 assert ns < nd / 3, "la version synoptique devrait peser bien moins"
 
 # 3. centres
-centers = ingest.find_centers(lon2d, lat2d, smooth)
+centers = ingest.find_centers(lon2d, lat2d, smooth,
+                              max_per_kind=cfg["max_centers_per_kind"])
 L = [c for c in centers if c["kind"] == "L"]; H = [c for c in centers if c["kind"] == "H"]
 assert L and abs(L[0]["lat"] - 55) < 1 and abs(L[0]["lon"] + 15) < 1, L
 assert H and abs(H[0]["lat"] - 45) < 1 and abs(H[0]["lon"] - 10) < 1, H

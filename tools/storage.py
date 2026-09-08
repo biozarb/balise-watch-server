@@ -261,11 +261,35 @@ class _Supabase:
         raise Abort(f"upload {path} : échec après {tries} tentatives — {last}")
 
     def get(self, path):
+        """Renvoie les octets, ou None si l'objet n'existe pas.
+
+        ⛔ 08/09/2026 — SUPABASE STORAGE RÉPOND **400**, PAS 404, POUR UN
+        OBJET ABSENT. Ce `if e.code == 404` seul a fait échouer le premier
+        run de la grille Monde (`arpege_world`, run #192) : la chaîne lit
+        le manifest du run précédent pour savoir ce qui existe déjà, et
+        sur une grille NEUVE ce manifest n'existe pas — la lecture levait
+        `HTTPError: HTTP Error 400: Bad Request` et tuait le run juste
+        après que l'Europe eut fini.
+
+        ⚠️ Ce défaut existait depuis toujours et restait invisible parce
+        que le seul appelant qui pouvait lire une clé absente était
+        `retire_grid()`, appelé dans un `try/except` non bloquant : le run
+        imprimait « purge en échec, on continue » et personne n'y voyait
+        un bug de la couche de stockage. C'est la première fois qu'on
+        DÉMARRE une grille au lieu d'en retirer une.
+
+        400 est donc traité comme 404. Le sens est le même pour tous les
+        appelants — « pas d'état connu » — et la conséquence est du bon
+        côté : `purge_stale` REFUSE de supprimer quoi que ce soit sans
+        état fiable, et tout est recalculé. `get_range` a le même
+        `if e.code == 404` : il n'est pas touché ici (un Range sur une clé
+        absente n'est jamais une situation normale pour son appelant),
+        mais si la question se pose un jour, la réponse est ici."""
         try:
             with urllib.request.urlopen(self._req(path, "GET"), timeout=60) as r:
                 return r.read()
         except urllib.error.HTTPError as e:
-            if e.code == 404:
+            if e.code in (400, 404):
                 return None
             raise
 
