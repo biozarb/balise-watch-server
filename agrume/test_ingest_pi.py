@@ -602,6 +602,143 @@ def main():
              "la migration ne mange pas ce qu'elle vient d'écrire",
              len(_idx2["runs"]) == len(_DPI))
 
+    # ── ⛔⛔ UNE SUPPRESSION QUI REND `False` EST UN ÉCHEC ────────────
+    # 08/09/2026. La nuit du 07 au 08, R2 a rendu des `InternalError` en
+    # rafale. Le journal du VPS a écrit, au run de 22:53 :
+    #     ⚠️ purge agrume/pi/grille/pyrenees/2026-09-07T17:00:00Z/
+    #        grille.npz (r2) : … InternalError …
+    #     purge : 4 clés supprimées          ← et AUCUN échec compté
+    # La clé est sortie de l'index à la rotation et est restée dans le
+    # bucket : le garde-fou R2 l'a nommée le lendemain matin.
+    #
+    # ⛔ C'EST LE MÊME BUG QUE L3b (17/08), CORRIGÉ DANS
+    # `rafraichissement.py` CE JOUR-LÀ ET PAS ICI. `Storage.delete` NE
+    # LÈVE PAS : la façade attrape tout et rend `False`. Un
+    # `try/except Exception` seul n'attrape donc RIEN.
+    #
+    # ⚠️ CE BANC NE VÉRIFIE PAS « le code a un `if not` » : il vérifie le
+    # COMPORTEMENT sous la forme d'échec réelle (retour `False`, aucune
+    # exception). C'est la seule façon dont un banc pouvait voir L3b, et
+    # c'est la seule façon dont il verra le prochain frère.
+    class _FauxStoreSourd(_FauxStore):
+        """La façade d'aujourd'hui : elle ne lève pas, elle rend False."""
+        def delete(self, k):
+            self.supprimes.append(k)
+            return False
+
+    _st3 = _FauxStoreSourd()
+    for _r in _runs[:4]:                      # 4 runs ⇒ le 1er est purgé
+        IP.purger(_st3, _r, _cles(_r), journal=lambda *a, **k: None)
+    _idx3 = _json.loads(_st3.objets[_CLE])
+    _perdues = sorted(c for d in _DPI for c in PI.cles_du_run_grille(
+        _runs[0], d))
+    verifier("⛔⛔ une suppression qui rend `False` (et ne LÈVE pas) est "
+             "comptée comme un échec et atterrit dans `restes` — sinon la "
+             "clé sort de l'index sans quitter le bucket : un objet EN "
+             "LIGNE et HORS INDEX, invisible et payé pour toujours "
+             "(mesuré en production le 07/09)",
+             sorted(_idx3.get("restes") or []) == _perdues,
+             f"{len(_idx3.get('restes') or [])} reste(s) pour "
+             f"{len(_perdues)} suppression(s) refusée(s)")
+
+    # … et le réessai du run suivant, une fois R2 revenu à lui, doit
+    # vider `restes`. Un compteur qui ne redescend jamais est un compteur
+    # qu'on apprend à ignorer.
+    _st3.delete = lambda k: (_st3.supprimes.append(k), True)[1]
+    # ⚠️ ON REMET LE COMPTEUR À ZÉRO, sinon « les clés perdues ont été
+    # supprimées » serait vrai par HASARD : le faux store SOURD les a
+    # déjà empilées dans `supprimes` en rendant `False`. Sans cette
+    # ligne, ce second contrôle passe au vert même sans le correctif —
+    # exactement le faux positif qui apprend à ignorer un banc.
+    _st3.supprimes = []
+    IP.purger(_st3, _runs[4], _cles(_runs[4]), journal=lambda *a, **k: None)
+    _idx4 = _json.loads(_st3.objets[_CLE])
+    verifier("… et le run suivant, R2 revenu à lui, REPREND ces restes et "
+             "vide le compteur",
+             not (_idx4.get("restes") or [])
+             and all(c in _st3.supprimes for c in _perdues),
+             f"{len(_idx4.get('restes') or [])} reste(s), "
+             f"{sum(1 for c in _perdues if c in _st3.supprimes)}/"
+             f"{len(_perdues)} clé(s) réessayée(s)")
+
+    # ── ⛔⛔ « INDEXÉES AU PROCHAIN RUN » EST UNE PROMESSE FRAGILE ────
+    # Reconstitution EXACTE de la nuit du 07 au 08/09/2026 (orage
+    # d'`InternalError` chez R2), à la minute :
+    #   22:42  les TROIS grilles du réseau 20 Z sont écrites, puis
+    #          `st.put(index)` ÉCHOUE. Journal : « purge NON faite — les
+    #          grilles sont écrites et indexées au prochain run. »
+    #   22:53  le run suivant reprend le MÊME réseau (l'index ne le
+    #          connaît pas), mais cette fois c'est `nord-alpes` qui
+    #          échoue. L'index part SANS elle.
+    #   ⇒ les deux objets de 22:42 sont EN LIGNE et réclamés par PERSONNE.
+    # Le garde-fou R2 les a nommés le lendemain à 04:54.
+    #
+    # ⛔ LA PROMESSE NE TIENT QUE SI LE RUN SUIVANT RÉÉCRIT LES MÊMES
+    # CLÉS. Rien ne le garantit — c'est même l'inverse qui s'est produit.
+    # Une grille qu'on n'a pas pu écrire doit donc partir aux RESTES : on
+    # ne sait pas si elle est en ligne, et supprimer une clé absente est
+    # gratuit et sans erreur chez R2.
+    _runA = "2026-09-07T20:00:00Z"
+    _dr = sorted(_DPI)[0]                     # le domaine qui va rater
+    _st5 = _FauxStore()
+    # 22:42 — l'index n'a JAMAIS été publié : le faux store est vierge,
+    # et les six objets du réseau 20 Z sont réputés en ligne.
+    _perdues5 = sorted(PI.cles_du_run_grille(_runA, _dr))
+    _ecrites5 = {d: PI.cles_du_run_grille(_runA, d)
+                 for d in _DPI if d != _dr}
+    # 22:53 — même réseau, `_dr` rate, les autres passent.
+    IP.purger(_st5, _runA, _ecrites5, ratees={_dr: _perdues5},
+              journal=lambda *a, **k: None)
+    _idx5 = _json.loads(_st5.objets[_CLE])
+    verifier("⛔⛔ une grille NON ÉCRITE est VISÉE PAR LA PURGE de ce "
+             "run-là : une passe antérieure a pu la laisser en ligne, et "
+             "l'index publié sans elle ne la réclamerait jamais — c'est "
+             "le motif des deux orphelins "
+             "`nord-alpes/2026-09-07T20:00:00Z` du 08/09",
+             all(c in _st5.supprimes for c in _perdues5),
+             f"{sum(1 for c in _perdues5 if c in _st5.supprimes)}/"
+             f"{len(_perdues5)} clé(s) visées")
+    verifier("… et comme la suppression a abouti, `restes` retombe à zéro "
+             "— un compteur qui ne redescend jamais n'est pas un compteur",
+             not (_idx5.get("restes") or []),
+             f"{len(_idx5.get('restes') or [])} reste(s)")
+    verifier("… et les domaines qui, EUX, ont réussi sont bien indexés — "
+             "un run à moitié écrit reste un run à moitié utile",
+             {e["domaine"] for e in _idx5["runs"]} == set(_DPI) - {_dr})
+
+    # ⚠️ ET SI R2 EST ENCORE FÂCHÉ, la clé ne se perd pas pour autant :
+    # elle reste dans `restes` et le réseau suivant la reprend. C'est la
+    # conjonction des deux correctifs du jour — sans la lecture de la
+    # valeur de retour, cette suppression refusée serait comptée comme
+    # une réussite et la clé sortirait de l'index sans quitter le bucket.
+    _st7 = _FauxStoreSourd()
+    IP.purger(_st7, _runA, _ecrites5, ratees={_dr: _perdues5},
+              journal=lambda *a, **k: None)
+    _idx7 = _json.loads(_st7.objets[_CLE])
+    verifier("⛔ …et si R2 refuse ENCORE la suppression, la clé reste "
+             "dans `restes` au lieu de disparaître des radars",
+             sorted(c for c in (_idx7.get("restes") or [])
+                    if c in _perdues5) == _perdues5,
+             f"{len(_idx7.get('restes') or [])} reste(s)")
+
+    # ── ⛔ …MAIS PAS SI L'INDEX LES RÉCLAME DÉJÀ POUR CE RUN ──────────
+    # Une passe antérieure a pu réussir l'écriture ET l'index. Les objets
+    # sont alors EN SERVICE : les verser aux restes, c'est programmer la
+    # suppression d'une grille que le client lit.
+    _st6 = _FauxStore()
+    IP.purger(_st6, _runA, _cles(_runA), journal=lambda *a, **k: None)
+    _st6.supprimes = []
+    IP.purger(_st6, _runA, {}, ratees={_dr: _perdues5},
+              journal=lambda *a, **k: None)
+    _idx6 = _json.loads(_st6.objets[_CLE])
+    verifier("⛔ …mais une grille que l'index RÉCLAME DÉJÀ pour ce run "
+             "n'est PAS versée aux restes : elle est en service, et une "
+             "purge qui la viserait effacerait ce que le client lit",
+             not (_idx6.get("restes") or [])
+             and not any(c in _st6.supprimes for c in _perdues5),
+             f"{len(_idx6.get('restes') or [])} reste(s), "
+             f"{len(_st6.supprimes)} suppression(s)")
+
     # ⛔ ET LE FRÈRE SUIVANT, MÉCANIQUEMENT. Un banc qui ne teste qu'UN
     # site d'appel ne protège que celui-là ; c'est justement ce qui a
     # manqué. On compte donc les arguments de TOUS les appels à

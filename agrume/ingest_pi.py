@@ -528,10 +528,14 @@ def ecrire(colonnes, cadres, bilan, journal=crier):
     # écrite. Elles ne dépendent d'aucune façon les unes des autres — le
     # seul couplage entre domaines, c'est la requête, et elle a déjà
     # rendu ses octets à ce stade.
-    ecrites = {}
+    ecrites, ratees = {}, {}
     for nom, cadre in cadres.items():
+        # ⚠️ LES CLÉS SE CALCULENT AVANT LE `try` : en cas d'échec, il
+        # faut pouvoir les NOMMER pour les verser aux restes (voir
+        # `purger`). Elles sont déterministes — run + domaine — donc les
+        # avoir hors du filet ne coûte rien.
+        g_npz, g_man = cles_du_run_grille(cadre.grille.run, nom)
         try:
-            g_npz, g_man = cles_du_run_grille(cadre.grille.run, nom)
             st.put(g_npz, cadre.grille.npz(),
                    cache_control="public, max-age=3600",
                    content_type="application/octet-stream")
@@ -542,14 +546,15 @@ def ecrire(colonnes, cadres, bilan, journal=crier):
             journal(f"  ✅ grille écrite : {g_npz} "
                     f"({cadre.grille.octets() / 1e6:.1f} Mo en mémoire)")
         except Exception as e:                               # noqa: BLE001
+            ratees[nom] = [g_npz, g_man]
             journal(f"  ⚠️ grille {nom} NON écrite ({type(e).__name__}: {e}) "
                     f"— le run reste VERT : elle est régénérée au réseau "
                     f"suivant, l'archive des colonnes ne l'est pas.")
 
     # ── 3. La purge, UNE FOIS pour tous les domaines ──────────────────
-    if ecrites:
+    if ecrites or ratees:
         try:
-            purger(st, colonnes.run, ecrites, journal=journal)
+            purger(st, colonnes.run, ecrites, ratees=ratees, journal=journal)
         except Exception as e:                               # noqa: BLE001
             journal(f"  ⚠️ purge NON faite ({type(e).__name__}: {e}) — les "
                     f"grilles sont écrites et indexées au prochain run.")
@@ -628,7 +633,7 @@ def _migrer_index_legs(index, journal=crier):
                 restes=restes)
 
 
-def purger(st, run, cles_par_domaine, journal=crier):
+def purger(st, run, cles_par_domaine, ratees=None, journal=crier):
     """Index d'abord, suppression ensuite. ⚠️ L'ordre évite les orphelins
     invisibles — c'est la démonstration du §« purge » de `grille.py`, et
     elle s'applique mot pour mot ici.
@@ -644,6 +649,44 @@ def purger(st, run, cles_par_domaine, journal=crier):
         INDEX_VIDE, produit="AGRUME PI — index des grilles en ligne",
         retention_runs=RETENTION_RUNS, runs=[], restes=[])
     index = _migrer_index_legs(index, journal=journal)
+
+    # ⛔⛔ LES GRILLES QU'ON N'A PAS PU ÉCRIRE CE RUN-CI VONT AUX RESTES.
+    #
+    # Mesuré le 07/09 : à 22:42 le run écrit les trois domaines puis
+    # ÉCHOUE à publier l'index (`PutObject: InternalError`) — le journal
+    # promet « indexées au prochain run ». À 22:53 le run suivant reprend
+    # le MÊME réseau, mais cette fois c'est la grille `nord-alpes` qui
+    # échoue : l'index est publié SANS elle, alors que ses deux objets
+    # sont en ligne depuis 22:42. La promesse ne tient que si le run
+    # suivant réécrit les mêmes clés — et il n'y a aucune raison qu'il y
+    # arrive. Résultat : `nord-alpes/2026-09-07T20:00:00Z/{grille.npz,
+    # manifest.json}` en ligne, réclamés par personne, pour toujours.
+    #
+    # ⚠️ On ne les réécrit pas (on n'a plus les octets) et on ne les
+    # indexe pas (on ne sait pas si elles sont là) : on les verse aux
+    # RESTES, c'est-à-dire à la liste des suppressions à retenter. Une
+    # clé absente se supprime sans erreur et sans frais chez R2 — le seul
+    # cas où l'on se trompe ne coûte rien, et le cas où l'on a raison
+    # récupère les octets.
+    #
+    # ⛔ SAUF SI L'INDEX LES RÉCLAME DÉJÀ pour ce run : une passe
+    # antérieure aurait alors réussi à les écrire ET à les indexer, et
+    # elles sont EN SERVICE. `index_apres` refuse déjà de supprimer une
+    # clé encore référencée (garde-fou de `grille.py`), mais on ne
+    # s'appuie pas sur un filet pour ne pas viser à côté.
+    if ratees:
+        deja = {(e.get("run"), e.get("domaine"))
+                for e in (index.get("runs") or [])}
+        perdues = [c for d, cles in sorted(ratees.items())
+                   if (run, d) not in deja for c in (cles or [])]
+        if perdues:
+            index = dict(index,
+                         restes=list(index.get("restes") or []) + perdues)
+            journal(f"  ⟳ {len(perdues)} clé(s) de grille NON écrite(s) "
+                    f"({', '.join(sorted(ratees))}) versée(s) aux restes — "
+                    f"une passe antérieure a pu les laisser EN LIGNE, et "
+                    f"aucun index ne les réclamerait")
+
     a_supprimer = []
     for domaine, cles in sorted(cles_par_domaine.items()):
         # ⚠️ `domaine` n'est pas décoratif : sans lui, `cles` atterrit
@@ -661,8 +704,33 @@ def purger(st, run, cles_par_domaine, journal=crier):
            cache_control="no-store", content_type="application/json")
     echecs = []
     for cle in a_supprimer:
+        # ⛔⛔ ON LIT LA VALEUR DE RETOUR. C'est le correctif L3b du
+        # 17/08 — appliqué ce jour-là à `rafraichissement.py`, et OUBLIÉ ICI.
+        #
+        # `Storage.delete` (tools/storage.py) NE LÈVE JAMAIS : la façade
+        # attrape tout, journalise « ⚠️ purge … » et rend `False` — « une
+        # purge ne doit jamais être bloquante », correctif du 30/07. Le
+        # `try/except Exception` seul n'attrapait donc RIEN : `echecs`
+        # restait vide quoi qu'il arrive, `restes` ne se remplissait
+        # jamais, la clé n'était jamais réessayée au run suivant — et elle
+        # sortait de l'index à la rotation de rétention (3 runs, 3 h).
+        # ⇒ un objet EN LIGNE et HORS INDEX : invisible, jamais purgé,
+        # définitivement payé.
+        #
+        # ⛔ MESURÉ EN PRODUCTION LE 07/09 à 22:53 CEST (orage
+        # d'InternalError côté R2) :
+        # `agrume/pi/grille/pyrenees/2026-09-07T17:00:00Z/grille.npz`. Le
+        # journal a bien dit « ⚠️ purge … », et la ligne de bilan a compté
+        # « 4 clés supprimées » SANS UN SEUL ÉCHEC. La branche
+        # « N échecs (réessayés au run suivant) » ci-dessous était du code
+        # MORT, exactement comme dans `rafraichissement.py` avant L3b.
+        #
+        # ⚠️ Le `try` reste, mais en second rideau : la façade
+        # d'AUJOURD'HUI ne lève pas, un backend de DEMAIN pourrait. Les
+        # deux chemins mènent au même endroit — `restes`, donc un réessai.
         try:
-            st.delete(cle)
+            if not st.delete(cle):
+                echecs.append(cle)
         except Exception:                                    # noqa: BLE001
             echecs.append(cle)
     if a_supprimer:

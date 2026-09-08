@@ -6,6 +6,63 @@
 
 ---
 
+## 08/09/2026 — un correctif posé sur UN des deux frères, et une promesse que le run suivant ne pouvait pas tenir
+
+La jauge R2 a crié au matin : **3 orphelins sous `agrume/pi/grille/`
+(0,010 Go)**, figés. Cause commune : dans la nuit du 07 au 08, R2 a
+rendu des `InternalError` en rafale (PutObject ET DeleteObject) pendant
+une dizaine de minutes. Deux mécanismes distincts en ont fait des
+orphelins.
+
+**Piège nº 1 — ⛔⛔ UN CORRECTIF APPLIQUÉ LÀ OÙ LE BUG A ÉTÉ TROUVÉ, PAS
+PARTOUT OÙ IL VIT.** `Storage.delete` (`tools/storage.py`) NE LÈVE
+JAMAIS : la façade attrape tout, journalise « ⚠️ purge … » et rend
+`False` — « une purge ne doit jamais être bloquante », correctif du
+30/07. Le 17/08 (L3b), on a découvert que `rafraichissement.py`
+n'écoutait que les exceptions, donc n'attrapait RIEN, donc ne remplissait
+jamais `restes` : la clé sortait de l'index sans quitter le bucket. Le
+correctif a été posé **dans ce fichier-là**. `ingest_pi.purger()`, qui
+appelle la MÊME façade dans le MÊME bucket à trois lignes près, est
+resté bugué trois semaines. Journal du 07/09 à 22:53, mot pour mot :
+`⚠️ purge …pyrenees/2026-09-07T17:00:00Z/grille.npz : InternalError`
+suivi de `purge : 4 clés supprimées` — **sans un seul échec compté**.
+*Quand un banc trouve un bug de CONTRAT (ici : « cette méthode rend un
+booléen, elle ne lève pas »), grepper tous les appels de la méthode, pas
+seulement corriger le site où il a fait mal.* Même famille que le
+`TypeError` d'`index_apres` du 13/08 — et le banc de ce jour-là comptait
+déjà statiquement les arguments de TOUS les appels, exactement pour ça.
+
+**Piège nº 2 — ⛔ « INDEXÉES AU PROCHAIN RUN » N'EST PAS UNE REPRISE,
+C'EST UN VŒU.** À 22:42, les trois grilles du réseau 20 Z partent, puis
+`st.put(index)` échoue : le journal promet « les grilles sont écrites et
+indexées au prochain run ». À 22:53, le run suivant reprend le même
+réseau (l'index ne le connaît pas) — mais cette fois c'est `nord-alpes`
+qui rate, et l'index part **sans elle**. Les deux objets de 22:42 sont
+en ligne, réclamés par personne, définitivement. *Une reprise qui repose
+sur « le prochain run refera la même chose » suppose que le prochain run
+réussira là où celui-ci a échoué — c'est-à-dire exactement ce qu'un
+incident en cours rend improbable.* ⇒ une grille NON écrite verse
+désormais ses clés aux `restes` (suppression à retenter) : on ne sait
+pas si elle est en ligne, et supprimer une clé absente est gratuit et
+sans erreur chez R2. Le seul cas où l'on se trompe ne coûte rien.
+Garde-fou : jamais si l'index réclame déjà ce (run, domaine) — la grille
+serait alors EN SERVICE.
+
+**Fix** : `agrume/ingest_pi.py` (lecture de la valeur de retour de
+`delete`, + `purger(…, ratees=…)`), 4 contrôles ajoutés à
+`test_ingest_pi.py` §11 — vérifiés ROUGES sans le correctif, VERTS avec.
+Et `tools/purge_pi_grille_orphans.py` enfin posé dans le dépôt : il
+avait été écrit le 13/08 et jamais déposé (le pont était tombé en fin de
+session), si bien que le nettoyage du 16/08 s'est refait à la main.
+*Un outil de nettoyage qui n'existe qu'en mémoire d'une session est un
+outil qu'il faudra réinventer, sous pression, la fois suivante.*
+
+**⚠️ Ce qui a bien marché** : le garde-fou R2 a nommé les trois clés le
+lendemain matin, une par une, 6 h après les faits — c'est exactement ce
+pour quoi le rapprochement bucket ↔ index a été écrit le 16/08.
+
+---
+
 ## 02/09/2026 (vérification de cohérence des lots L1 → L15) — la somme des lots a débordé un `smallint`, et un `except` a caché Murphy trois nuits
 
 Relecture de tout ce que les lots ont livré depuis le 27/08 : code,
