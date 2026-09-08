@@ -30,8 +30,14 @@ concurrency:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30   # bien moins volumineux que arome-wind : lecture
-                           # partielle .om (~350 Ko/échéance/grille mesuré)
+    # 08/09/2026 (fronts) : le run #195 — 79 échéances Monde avec les 4
+    # champs 850 hPa en plus de la pression + 79 Europe — a duré 25 min
+    # 32 s, contre 10 min pour le #194 sans fronts et 30 min de plafond.
+    # Trop juste : un run normal recalcule toutes les échéances FUTURES
+    # (67 par grille), donc ce n'est pas le seul premier run qui coûte.
+    # 45 min laisse de la marge ; la lecture S3 domine (mesuré : le calcul
+    # des fronts fait ~2 s par échéance), à optimiser si ça grimpe encore.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
