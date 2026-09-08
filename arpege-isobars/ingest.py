@@ -33,6 +33,32 @@ Désormais :
 Le front (IsobarsLayer.tsx) choisit la version selon le zoom, avec un
 forçage manuel (Auto / Synoptique / Détaillé).
 
+⚠️ 08/09/2026 — LE SYNOPTIQUE PASSE AU MONDE (retour Yann : « on a moyen
+d'avoir le synoptique sur le monde et pas que sur l'Europe ? »). La règle
+« une source pour les deux versions » devient « UNE GRILLE PAR VERSION » :
+
+  arpege_world  (meteofrance_arpege_world025, 0,25°, globe)
+      → `<iso>.synop.json` SEUL, 4 hPa, latitudes bornées à ±80°
+  arpege_europe (meteofrance_arpege_europe, 0,1°, Europe)
+      → `<iso>.json` SEUL, détaillé 1 hPa, au-delà du zoom 7
+
+Ce n'est PAS le retour de la bascule du 24/07 (deux grilles pour la même
+information, deux runs, deux champs → incohérence à chaque zoom) : ici
+chaque version n'a qu'une source possible, et c'est de toute façon le
+MÊME modèle ARPEGE des deux côtés, à la même cadence de runs — les H/L
+coïncident à la frontière Europe/Monde. Conséquences dans ce fichier :
+  · `GRIDS` remplace `MODELS` : lissage, longueur minimale, tolérance
+    RDP, nombre de centres et coupe en latitude sont PAR GRILLE (les
+    mêmes 2,5 cellules ne font pas la même distance sur 0,1° et 0,25°) ;
+  · le manifest ne porte QUE les pas des versions réellement produites
+    (`manifest_profil`) — le web doit accepter un manifest sans détail ;
+  · `retire_variant` supprime, une fois, les `.synop.json` Europe qui
+    n'ont plus de producteur (`purge_stale` ne voit que les échéances
+    sorties de la fenêtre, pas une version disparue) ;
+  · `centers` porte désormais sa `prominence` (CENTERS_VERSION = 3) :
+    pas encore lue par le web, mais le lot fronts en aura besoin et un
+    changement de version coûte un recalcul complet du passé.
+
 Source : Open-Meteo AWS Open Data (`s3://openmeteo`, gratuit, sans clé,
 licence CC-BY-4.0), layout `data_spatial/` — PAS le bucket meteofrance-pnt
 (OVH) utilisé pour AROME : celui-ci ne contient QUE de l'AROME, vérifié en
@@ -103,16 +129,73 @@ from omfiles import OmFileReader
 from scipy.ndimage import minimum_filter, maximum_filter, gaussian_filter
 
 OM_BUCKET = "openmeteo"
-# 07/09/2026 : une seule grille (cf. en-tête). `arpege_world` est retirée —
-# elle n'a jamais été affichée au-dessus de 10 hPa de pas depuis le 30/07,
-# et c'est justement ce pas qui la rendait vide sur la France.
-MODELS = {
-    "arpege_europe": "meteofrance_arpege_europe",
+# ⚠️ 08/09/2026 — LE SYNOPTIQUE PASSE AU MONDE (demande Yann : « on a moyen
+# d'avoir le synoptique sur le monde et pas que sur l'Europe ? »). DEUX
+# grilles à nouveau, mais — et c'est toute la différence avec le 24/07 —
+# elles ne se disputent plus le même rôle : UNE VERSION PAR GRILLE.
+#   arpege_world  0,25°, monde entier  → `<iso>.synop.json` SEUL (4 hPa)
+#   arpege_europe 0,1°,  Europe        → `<iso>.json` SEUL (détaillé 1 hPa)
+# Le front ne « bascule » donc plus d'une grille à l'autre pour la MÊME
+# information : il change de VERSION (synoptique sous le zoom 7, détaillé
+# au-delà), et chaque version n'a qu'une source possible. L'incohérence du
+# 24/07 (deux grilles, deux runs, deux champs pour la même échéance) reste
+# impossible pour une autre raison : c'est le MÊME modèle ARPEGE des deux
+# côtés, même cadence de runs, donc les H/L coïncident à la frontière.
+# ⛔ Et `arpege_world` sort de RETIRED_GRIDS : l'y laisser purgerait la
+# grille à chaque run, juste après l'avoir écrite.
+GRIDS = {
+    "arpege_europe": dict(
+        model="meteofrance_arpege_europe",
+        variants=("detail",),
+        # 0,1° ≈ 11 km : σ = 2,5 cellules ≈ 28 km (réglage du 07/09). Le
+        # champ lissé ne sert plus ici qu'à la DÉTECTION DES CENTRES —
+        # plus aucun `.synop.json` Europe n'est produit.
+        smooth_sigma_cells=2.5,
+        synop_min_length_deg=1.5,
+        synop_tol_deg=0.02,
+        max_centers_per_kind=6,
+        lat_clip_deg=None,          # BBOX 20→72 N : rien à couper
+    ),
+    "arpege_world": dict(
+        model="meteofrance_arpege_world025",
+        variants=("synop",),
+        # 0,25° ≈ 28 km : σ = 1,7 cellule ≈ 47 km. Le lissage est exprimé
+        # en CELLULES par gaussian_filter, mais c'est bien une distance
+        # qu'on vise — 2,5 cellules ici auraient fait 70 km, et 2,5 est
+        # une valeur calée sur une maille 2,5× plus fine. Un lissage un
+        # peu plus fort qu'en Europe est SOUHAITABLE : le monde se lit
+        # aux zooms 1-4.
+        smooth_sigma_cells=1.7,
+        # Le vrai filtre des micro-boucles est côté web, en PIXELS
+        # (`FEATURE_MIN_PX`, lot du 08/09). Celui-ci ne jette que les
+        # moignons de marching squares : 2° sur 0,25° ≈ 8 cellules.
+        # RDP : 0,05° ≈ 0,5 px au zoom 4 (0,02° en Europe, où le détaillé
+        # se regarde au zoom 7).
+        synop_min_length_deg=2.0,
+        synop_tol_deg=0.05,
+        # 6 était pensé pour l'Europe seule ; sur le globe, un H et un L
+        # par système. MESURÉ le 08/09 (échéance 12:00, banc) : après le
+        # filtre de séparation 6° et la prominence 2 hPa, le champ ne
+        # fournit que 75 candidats par type — au-delà, le plafond ne
+        # mord plus. 60 le laisse donc quasi inopérant en pratique tout
+        # en gardant une borne. ⚠️ Et il faut être large : le tri est
+        # « le plus extrême d'abord », donc un plafond de 20 sur le
+        # GLOBE gardait les tempêtes australes et laissait l'Europe sans
+        # aucun H (constaté au banc). Coût : 8 Ko de centres pour 261 Ko
+        # de fichier. La fusion visuelle des centres trop proches à
+        # l'écran est déjà côté web (90 px, 08/09).
+        max_centers_per_kind=60,
+        # Web Mercator s'arrête à 85° et les contours au-delà de 80° sont
+        # des artefacts de projection (des cercles autour du pôle). On
+        # coupe AVANT le contourage : ni tracés ni centres polaires.
+        lat_clip_deg=80.0,
+    ),
 }
 # Grilles qui ont existé et dont le bucket doit être vidé (manifest +
 # échéances). Purge idempotente à chaque run (`retire_grid`) : sans
 # manifest, rien à faire — donc gratuit une fois le ménage fait.
-RETIRED_GRIDS = ("arpege_world",)
+# ⛔ VIDE depuis le 08/09 : `arpege_world` est redevenue une grille VIVANTE.
+RETIRED_GRIDS = ()
 # Pas de contourage, PAR GRILLE (30/07/2026 — dépassement de quota Storage).
 # Le pas fin 1 hPa a été introduit le 24/07 pour « avoir plus de détails quand
 # on zoome » : côté frontend, les lignes non-multiples de 5 ne sont révélées
@@ -136,17 +219,11 @@ RETIRED_GRIDS = ("arpege_world",)
 # dessine.
 LEVEL_STEP_HPA = 1        # version DÉTAILLÉE (`<iso>.json`)
 SYNOP_STEP_HPA = 4        # version SIMPLIFIÉE (`<iso>.synop.json`), Met Office
-# Lissage du champ AVANT le contourage synoptique, en cellules de grille
-# (0,1° → 2,5 cellules ≈ 25 km). Sans lui, le 0,1° dessine les creux de
-# vallée et les bulles de chaleur de surface — du bruit à l'échelle
-# synoptique, et des dizaines de petites boucles fermées de 1-2 hPa qui
-# n'apparaissent sur aucune carte du Met Office. Assez faible pour ne
-# déplacer aucun centre réel de plus d'une cellule ou deux.
-SYNOP_SMOOTH_SIGMA_CELLS = 2.5
-# Segments de contour synoptique plus courts que ça (longueur cumulée en
-# degrés) : jetés. Ce sont les moignons de marching squares au bord de la
-# grille et les dernières boucles résiduelles après lissage.
-SYNOP_MIN_LENGTH_DEG = 1.5
+# ⚠️ 08/09/2026 — le lissage (σ), la longueur minimale d'un tracé, la
+# tolérance RDP du synoptique et le nombre de centres sont désormais
+# PAR GRILLE (cf. `GRIDS` plus haut) : les mêmes 2,5 cellules ne font pas
+# la même distance sur une maille 0,1° et sur une maille 0,25°. Les
+# valeurs Europe du 07/09 y sont reprises telles quelles.
 # Simplification Douglas-Peucker des tracés, tolérance en degrés.
 # Mesuré le 07/09 sur l'échéance Europe du 07/09 11:00 (1,0 Mo brut) :
 # 0,004° → 802 Ko, 0,01° → 683 Ko, 0,02° → 545 Ko. Le gain est modeste
@@ -155,7 +232,6 @@ SYNOP_MIN_LENGTH_DEG = 1.5
 # (~1 km, sous le pixel au zoom 7 où le détaillé apparaît) est retenu ;
 # le synoptique, déjà lissé et affiché sous le zoom 7, tolère 0,02°.
 SIMPLIFY_TOL_DEG_DETAIL = 0.01
-SIMPLIFY_TOL_DEG_SYNOP = 0.02
 FUTURE_HOURLY_UNTIL = 48      # horaire jusque-là, puis coarse
 FUTURE_COARSE_EVERY = 3
 PAST_STEP_HOURS = 6            # cadence des runs ARPEGE
@@ -179,7 +255,9 @@ PAST_RETENTION_H = int(os.environ.get("PAST_RETENTION_H", "72"))
 CENTER_WINDOW_DEG = 4.0         # rayon de la fenêtre de recherche (°) — assez
                                  # large pour ignorer le bruit de petite échelle
 CENTER_MIN_SEPARATION_DEG = 6.0 # fusionne les centres détectés trop proches
-MAX_CENTERS_PER_KIND = 6        # évite la surcharge visuelle
+                                # ⚠️ 08/09 : le NOMBRE max de centres est
+                                # par grille (`GRIDS`) — 6 en Europe, 20
+                                # sur le monde.
 CENTER_MIN_PROMINENCE_HPA = 2.0 # 07/09 : amplitude minimale du champ dans la
                                  # fenêtre pour qu'un extremum soit un centre
 # Version de l'algorithme des centres, écrite dans le manifest. Les centres
@@ -187,7 +265,12 @@ CENTER_MIN_PROMINENCE_HPA = 2.0 # 07/09 : amplitude minimale du champ dans la
 # `find_centers` sans incrémenter ceci laisserait le passé avec les anciens
 # centres jusqu'à sa sortie de fenêtre (72 h). Incrémenter force un recalcul
 # du passé, une fois. 2 = exclusion du bord de grille (07/09, 2e run).
-CENTERS_VERSION = 2
+# 3 = `prominence` (hPa) écrite dans chaque centre + nombre de centres par
+# grille (08/09). La prominence n'est pas encore lue par le web : elle est
+# écrite MAINTENANT parce que le lot fronts en aura besoin et qu'un
+# `CENTERS_VERSION` coûte un recalcul complet du passé — autant n'en payer
+# qu'un.
+CENTERS_VERSION = 3
 
 DRY_RUN = os.environ.get("DRY_RUN") == "1"
 BUCKET  = os.environ.get("ISOBARS_BUCKET", "isobars")
@@ -270,7 +353,30 @@ def read_pressure(model, dt_utc, reference_time=None):
     except FileNotFoundError:
         return None
     nj, ni = pressure.shape
-    lat = np.linspace(north, south, nj)     # jScan descendant, cf. NOTES_TECHNIQUES
+    # ⛔ 08/09/2026 — CORRECTIF : LE CALQUE ÉTAIT RETOURNÉ NORD-SUD DEPUIS
+    # LE 23/07. Cette ligne disait `linspace(north, south)` (« jScan
+    # descendant »), convention GRIB2 d'AROME recopiée ici. Mais ces
+    # fichiers ne sont PAS du GRIB2 : dans le layout `data_spatial`
+    # d'Open-Meteo, la première ligne du tableau est la plus AU SUD. Tout
+    # le champ était donc symétrisé autour du milieu de la BBOX (Europe :
+    # lat′ = 92 − lat).
+    #
+    # Mesuré le 08/09 sur l'échéance 12:00, 8 points, contre l'API
+    # Open-Meteo (même fournisseur, même modèle, `pressure_msl`) :
+    #   lecture nord→sud : 13,35 hPa d'écart moyen
+    #   lecture sud→nord :  0,04 hPa
+    # Et l'anomalie notée le 07/09 — « un L à 975 hPa au large du Maroc
+    # (31,4 N / −12,5 W), réel ou artefact de la source ? » — était ce
+    # bug : à ce point la pression valait 1020,1 hPa, et 972,5 hPa à son
+    # miroir 60,6 N. Une dépression islandaise dessinée sur le Maroc.
+    #
+    # ⚠️ Ce qui a rendu le bug invisible six semaines : une carte
+    # d'isobares retournée reste une carte d'isobares plausible. Elle n'a
+    # ni valeur aberrante, ni trou, ni erreur de dimension — seulement
+    # des systèmes au mauvais endroit. Le seul contrôle qui l'attrape est
+    # une comparaison à une source INDÉPENDANTE en un point connu, et
+    # c'est ce que fait désormais `banc_monde_08-09.py --orientation`.
+    lat = np.linspace(south, north, nj)
     lon = np.linspace(west, east, ni)
     lon2d, lat2d = np.meshgrid(lon, lat)
     return lon2d, lat2d, pressure
@@ -354,29 +460,44 @@ def isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA,
     plt.close(fig)
     return {"type": "FeatureCollection", "features": features}
 
-def smooth_pressure(pressure):
-    """Champ lissé pour la version synoptique et la détection des centres
-    (cf. SYNOP_SMOOTH_SIGMA_CELLS). `mode='nearest'` : pas de repli vers
-    zéro au bord de la grille, qui creuserait une fausse dépression sur
-    tout le pourtour."""
-    return gaussian_filter(pressure, sigma=SYNOP_SMOOTH_SIGMA_CELLS, mode="nearest")
+def smooth_pressure(pressure, sigma_cells):
+    """Champ lissé pour la version synoptique et la détection des centres.
+    `sigma_cells` vient de `GRIDS` (08/09) : c'est une DISTANCE qu'on vise
+    (~28 km en Europe, ~47 km sur le monde), exprimée dans l'unité que
+    demande `gaussian_filter`. `mode='nearest'` : pas de repli vers zéro
+    au bord de la grille, qui creuserait une fausse dépression sur tout le
+    pourtour."""
+    return gaussian_filter(pressure, sigma=sigma_cells, mode="nearest")
 
-def synop_geojson(lon2d, lat2d, pressure_smooth):
+def synop_geojson(lon2d, lat2d, pressure_smooth, tol_deg, min_length_deg):
     """Version SIMPLIFIÉE (07/09/2026, modèle : cartes de pression de
     surface du Met Office) : contours tous les SYNOP_STEP_HPA sur le champ
     lissé, fragments courts jetés, tracés simplifiés plus fort."""
     return isobars_geojson(lon2d, lat2d, pressure_smooth, step_hpa=SYNOP_STEP_HPA,
-                           tol_deg=SIMPLIFY_TOL_DEG_SYNOP,
-                           min_length_deg=SYNOP_MIN_LENGTH_DEG)
+                           tol_deg=tol_deg, min_length_deg=min_length_deg)
 
-def find_centers(lon2d, lat2d, pressure):
+def clip_latitude(lon2d, lat2d, pressure, lat_clip_deg):
+    """08/09/2026 — coupe la grille au-delà de ±`lat_clip_deg` (80° sur le
+    monde). Deux raisons, et aucune n'est esthétique :
+      · Web Mercator s'arrête à ~85° : au-delà, rien n'est affichable ;
+      · entre 80 et 90°, un contourage en lon/lat produit des cercles
+        concentriques autour du pôle qui sont un artefact de la
+        PROJECTION de la grille, pas un système météo.
+    Couper AVANT le contourage évite aussi de payer ces tracés dans le
+    fichier. Sans effet si `lat_clip_deg` est None (grille Europe)."""
+    if not lat_clip_deg:
+        return lon2d, lat2d, pressure
+    keep = np.abs(lat2d[:, 0]) <= lat_clip_deg
+    return lon2d[keep, :], lat2d[keep, :], pressure[keep, :]
+
+def find_centers(lon2d, lat2d, pressure, max_per_kind=6):
     """Repère les centres de basse/haute pression : un point est un centre
     s'il est le min/max strict de son voisinage (fenêtre CENTER_WINDOW_DEG).
     Filtre exhaustif (scipy.ndimage min/max_filter, vectorisé) — PAS un
     sous-échantillonnage : un test naïf par pas de grille a raté le vrai
     minimum d'une carte (932 hPa non détecté) en ne testant qu'un point sur
     N, cf. vérif locale 23/07/2026. Fusionne ensuite les détections proches
-    et ne garde que les MAX_CENTERS_PER_KIND plus marqués par type (le plus
+    et ne garde que les `max_per_kind` plus marqués par type (le plus
     loin de 1013,25 hPa d'abord). Le sens de rotation du vent (cyclonique/
     anticyclonique) n'est PAS calculé ici : il ne dépend que du type (L/H)
     et de l'hémisphère (signe de `lat`), donc c'est le frontend qui
@@ -409,26 +530,40 @@ def find_centers(lon2d, lat2d, pressure):
     is_high[:hw_j, :] = is_high[-hw_j:, :] = False
     is_high[:, :hw_i] = is_high[:, -hw_i:] = False
 
+    # 08/09/2026 : la `prominence` (amplitude du champ dans la fenêtre, en
+    # hPa) est CONSERVÉE et écrite dans le fichier. Elle ne servait qu'à
+    # filtrer ; le lot fronts en aura besoin pour hiérarchiser les centres,
+    # et l'écrire maintenant évite un `CENTERS_VERSION` de plus (= un
+    # recalcul complet du passé) plus tard.
     candidates = {
-        "L": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]))
-              for j, i in zip(*np.where(is_low))],
-        "H": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]))
-              for j, i in zip(*np.where(is_high))],
+        "L": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]),
+               float(prominence[j, i])) for j, i in zip(*np.where(is_low))],
+        "H": [(float(lat2d[j, i]), float(lon2d[j, i]), float(pressure[j, i]),
+               float(prominence[j, i])) for j, i in zip(*np.where(is_high))],
     }
+
+    def dlon_wrap(a, b):
+        """Écart de longitude en tenant compte de l'antiméridien : sur la
+        grille Monde (−180→180), 179 et −179 sont voisins de 2°, pas de
+        358°. Sans ça, deux détections du MÊME centre à cheval sur 180°
+        seraient gardées toutes les deux."""
+        d = abs(a - b) % 360.0
+        return min(d, 360.0 - d)
 
     centers = []
     for kind, pts in candidates.items():
         pts.sort(key=lambda p: abs(p[2] - 1013.25), reverse=True)  # + extrême d'abord
         kept = []
-        for lat, lon, hpa in pts:
+        for lat, lon, hpa, prom in pts:
             if any(abs(lat - k[0]) < CENTER_MIN_SEPARATION_DEG and
-                   abs(lon - k[1]) < CENTER_MIN_SEPARATION_DEG for k in kept):
+                   dlon_wrap(lon, k[1]) < CENTER_MIN_SEPARATION_DEG for k in kept):
                 continue  # trop proche d'un centre déjà retenu (plus marqué)
-            kept.append((lat, lon, hpa))
-            if len(kept) >= MAX_CENTERS_PER_KIND:
+            kept.append((lat, lon, hpa, prom))
+            if len(kept) >= max_per_kind:
                 break
         centers += [{"kind": kind, "lat": round(lat, 2), "lon": round(lon, 2),
-                     "hpa": round(hpa, 1)} for lat, lon, hpa in kept]
+                     "hpa": round(hpa, 1), "prominence": round(prom, 1)}
+                    for lat, lon, hpa, prom in kept]
     return centers
 
 # ── Upload Supabase Storage (mêmes conventions que arome-wind/ingest.py) ─
@@ -465,10 +600,28 @@ STORE = None
 def sb_upload(path, body, cache_control=CACHE_IMMUABLE):
     return STORE.put(path, body, cache_control=cache_control)
 
-def echeances_publiees(key):
+def manifest_profil(cfg):
+    """08/09/2026 — les champs du manifest qui décrivent CE QUI EST PRODUIT
+    pour cette grille. Ils servent deux fois : écrits dans le manifest, et
+    comparés à celui du run précédent pour décider d'un recalcul du passé.
+
+    ⚠️ `levelStepHpa` est ABSENT du manifest Monde (aucun `<iso>.json`
+    détaillé n'existe pour cette grille) et `synopStepHpa` absent de celui
+    d'Europe. Le web doit accepter les deux formes — c'est exactement ce
+    qui lui dit quelle version il peut demander à quelle grille."""
+    p = {"centersVersion": CENTERS_VERSION}
+    if "detail" in cfg["variants"]:
+        p["levelStepHpa"] = LEVEL_STEP_HPA
+    if "synop" in cfg["variants"]:
+        p["synopStepHpa"] = SYNOP_STEP_HPA
+    return p
+
+def echeances_publiees(key, attendu):
     """Les échéances DÉJÀ dans le bucket, lues dans le manifest du run
-    précédent. Renvoie `(set d'ISO, manifest_lu, synop_ok)` — le troisième
-    dit si ces échéances ont aussi leur version synoptique (07/09/2026).
+    précédent. Renvoie `(set d'ISO, manifest_lu, profil_ok, manifest_brut)`
+    — le troisième dit si ces échéances ont été produites avec le PROFIL
+    attendu par ce run (versions produites + `centersVersion`, cf.
+    `manifest_profil`) ; sinon le passé est recalculé une fois.
 
     03/08/2026 — remplace `sb_exists()` (un `HEAD` par échéance) ET le
     `ListObjects` paginé de `purge_stale()`. Les deux étaient gratuits
@@ -512,20 +665,24 @@ def echeances_publiees(key):
     if not isinstance(brut, dict) or not isinstance(brut.get("times"), list):
         print(f"  manifest '{key}' absent ou illisible — "
               f"aucune purge, tout sera recalculé")
-        return set(), False, False
+        return set(), False, False, None
     times = {t for t in brut["times"] if isinstance(t, str)}
-    # 07/09/2026 : le passé n'est « déjà là » que s'il a SES DEUX fichiers.
-    # Un manifest antérieur à la refonte (sans `synopStepHpa`, ou avec un
-    # autre pas) décrit un bucket où `<iso>.synop.json` n'existe pas —
-    # on recalcule alors tout le passé, une seule fois : le manifest
-    # écrit par ce run portera le bon pas. Même mécanique que le
-    # rattrapage `centers` du 23/07, mais automatique.
-    synop_ok = brut.get("synopStepHpa") == SYNOP_STEP_HPA \
-        and brut.get("levelStepHpa") == LEVEL_STEP_HPA \
-        and brut.get("centersVersion") == CENTERS_VERSION
+    # 07/09/2026 : le passé n'est « déjà là » que s'il porte les fichiers
+    # que CE run produirait. Un manifest antérieur (sans `synopStepHpa`,
+    # avec un autre pas, ou d'une époque où cette grille produisait les
+    # DEUX versions) décrit un bucket dont le contenu ne correspond plus —
+    # on recalcule alors tout le passé, une seule fois : le manifest écrit
+    # par ce run portera le bon profil. Même mécanique que le rattrapage
+    # `centers` du 23/07, mais automatique.
+    # ⚠️ La comparaison porte sur les TROIS clés, absence comprise
+    # (`.get()` vaut None des deux côtés) : c'est ce qui fait qu'une
+    # grille qui PERD une version voit son passé recalculé, pas seulement
+    # une grille qui en gagne une.
+    profil_ok = all(brut.get(k) == attendu.get(k)
+                    for k in ("levelStepHpa", "synopStepHpa", "centersVersion"))
     print(f"  manifest précédent : {len(times)} échéance(s) déjà publiée(s)"
-          + ("" if synop_ok else " — SANS version synoptique : passé recalculé"))
-    return times, True, synop_ok
+          + ("" if profil_ok else " — profil différent : passé recalculé"))
+    return times, True, profil_ok, brut
 
 # ── Construction de la série temporelle (passé + prévision) ────────────
 def future_times(reference_time, valid_times):
@@ -652,8 +809,42 @@ def retire_grid(key):
           f"et le manifest supprimés —")
     return removed
 
-def process_grid(key, model):
-    print(f"— {key} ({model}) —")
+def retire_variant(key, keep_isos, brut_prec, variants):
+    """08/09/2026 — supprime les fichiers d'une VERSION qu'une grille ne
+    produit plus. Cas réel du jour : l'Europe ne produit plus de
+    `<iso>.synop.json` (le synoptique est passé au Monde), et
+    `purge_stale` ne sait pas les voir — elle ne supprime que les
+    ÉCHÉANCES sorties de la fenêtre, or celles-ci restent.
+
+    Se déclenche sur le manifest PRÉCÉDENT : s'il annonçait la version et
+    que le profil de ce run ne l'a plus. Donc une seule fois — le manifest
+    que ce run vient d'écrire ne l'annonce plus. Non bloquant, et
+    silencieux quand il n'y a rien à faire (aucun appel au stockage)."""
+    if not isinstance(brut_prec, dict):
+        return 0
+    obsoletes = []
+    if brut_prec.get("synopStepHpa") is not None and "synop" not in variants:
+        obsoletes.append(".synop.json")
+    if brut_prec.get("levelStepHpa") is not None and "detail" not in variants:
+        obsoletes.append(".json")
+    if not obsoletes:
+        return 0
+    if DRY_RUN:
+        print(f"  (DRY_RUN — retrait de version sur '{key}' non exécuté : "
+              f"{len(keep_isos)} × {', '.join(obsoletes)})")
+        return 0
+    removed = 0
+    for iso in keep_isos:
+        for suffixe in obsoletes:
+            if STORE.delete(f"{key}/{iso}{suffixe}"):
+                removed += 1
+    print(f"  retrait de version sur '{key}' : {removed} fichier(s) "
+          f"{', '.join(obsoletes)} supprimé(s)")
+    return removed
+
+def process_grid(key, cfg):
+    model, variants = cfg["model"], cfg["variants"]
+    print(f"— {key} ({model}) — version(s) : {', '.join(variants)} —")
     meta = latest_json(model)
     reference_time = datetime.strptime(
         meta["reference_time"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -668,14 +859,23 @@ def process_grid(key, model):
         print("  ⚙️ FORCE_REPROCESS_PAST=1 — le passé déjà en storage sera relu/réécrit "
               "(rattrapage centers, cf. commit du 23/07)")
 
-    print(f"  contourage : détaillé {LEVEL_STEP_HPA} hPa + synoptique "
-          f"{SYNOP_STEP_HPA} hPa (lissage σ = {SYNOP_SMOOTH_SIGMA_CELLS} cellules)")
+    quoi = []
+    if "detail" in variants:
+        quoi.append(f"détaillé {LEVEL_STEP_HPA} hPa")
+    if "synop" in variants:
+        quoi.append(f"synoptique {SYNOP_STEP_HPA} hPa")
+    print(f"  contourage : {' + '.join(quoi)} (lissage σ = "
+          f"{cfg['smooth_sigma_cells']} cellules"
+          + (f", latitudes bornées à ±{cfg['lat_clip_deg']:g}°" if cfg["lat_clip_deg"] else "")
+          + ")")
 
+    attendu = manifest_profil(cfg)
     # UNE lecture (Class B) qui remplace ~90 HeadObject + un ListObjects
-    # (Class A) — cf. `echeances_publiees`. Elle sert deux fois : au
-    # skip-if-exists ci-dessous, et à la purge en fin de fonction.
-    publiees, manifest_lu, synop_ok = echeances_publiees(key)
-    reprocess_past = FORCE_REPROCESS_PAST or not synop_ok
+    # (Class A) — cf. `echeances_publiees`. Elle sert trois fois : au
+    # skip-if-exists ci-dessous, à la purge en fin de fonction, et au
+    # ménage ponctuel des `.synop.json` Europe (`retire_variant`).
+    publiees, manifest_lu, profil_ok, brut_prec = echeances_publiees(key, attendu)
+    reprocess_past = FORCE_REPROCESS_PAST or not profil_ok
 
     manifest_times, done, future_done = [], 0, 0
     for dt in all_times:
@@ -701,22 +901,30 @@ def process_grid(key, model):
         if result is None:
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
-        lon2d, lat2d, pressure = result
+        # 08/09/2026 : la coupe en latitude vient AVANT tout le reste —
+        # lissage, centres et contourage travaillent sur la même grille,
+        # sinon un centre pourrait être détecté là où aucune isobare n'est
+        # tracée.
+        lon2d, lat2d, pressure = clip_latitude(*result, cfg["lat_clip_deg"])
         # 07/09/2026 : les centres H/L sont détectés sur le champ LISSÉ —
         # sur le champ brut 0,1°, un creux thermique de vallée ou une
         # bulle côtière de 1 hPa suffisait à voler la place d'un vrai
-        # centre (MAX_CENTERS_PER_KIND = 6). Les deux fichiers reçoivent
-        # les MÊMES centres : un pilote qui bascule de version ne doit pas
-        # voir un H changer de place.
-        smooth = smooth_pressure(pressure)
-        centers = find_centers(lon2d, lat2d, smooth)
-        geo = isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA)
-        geo["centers"] = centers
-        sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
-        synop = synop_geojson(lon2d, lat2d, smooth)
-        synop["centers"] = centers
-        sb_upload(f"{key}/{iso}.synop.json",
-                  json.dumps(synop, separators=(",", ":")).encode())
+        # centre. Quand une grille produit ses deux versions, elles
+        # reçoivent les MÊMES centres : un pilote qui bascule de version
+        # ne doit pas voir un H changer de place.
+        smooth = smooth_pressure(pressure, cfg["smooth_sigma_cells"])
+        centers = find_centers(lon2d, lat2d, smooth,
+                               max_per_kind=cfg["max_centers_per_kind"])
+        if "detail" in variants:
+            geo = isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA)
+            geo["centers"] = centers
+            sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
+        if "synop" in variants:
+            synop = synop_geojson(lon2d, lat2d, smooth, cfg["synop_tol_deg"],
+                                  cfg["synop_min_length_deg"])
+            synop["centers"] = centers
+            sb_upload(f"{key}/{iso}.synop.json",
+                      json.dumps(synop, separators=(",", ":")).encode())
         manifest_times.append(iso)
         done += 1
         if not is_past:
@@ -726,8 +934,12 @@ def process_grid(key, model):
     manifest = dict(
         model=model, referenceTime=reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         generatedAt=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        levelStepHpa=LEVEL_STEP_HPA, synopStepHpa=SYNOP_STEP_HPA,
-        centersVersion=CENTERS_VERSION, times=manifest_times,
+        # 08/09/2026 : `levelStepHpa` / `synopStepHpa` ne sont écrits que
+        # pour les versions RÉELLEMENT produites par cette grille (cf.
+        # `manifest_profil`). Le manifest décrit ce qui existe dans le
+        # bucket, pas ce que le script sait faire.
+        **attendu,
+        times=manifest_times,
         # Débogage 23/07/2026 : basé AVANT sur `len(future)` (compte
         # DEMANDÉ, cf. `future_times`) plutôt que sur ce qui a RÉUSSI à
         # être téléversé (`future_done`, entrées passées + prévision
@@ -744,6 +956,10 @@ def process_grid(key, model):
     # échoue en cours de route, le manifest précédent reste servi et on ne
     # veut surtout pas avoir déjà supprimé les échéances qu'il liste.
     purge_stale(key, publiees, manifest_times, manifest_lu)
+    # 08/09/2026 : et le ménage de la version que cette grille ne produit
+    # PLUS (les `.synop.json` Europe). Après `purge_stale`, donc sur la
+    # liste des échéances qui restent.
+    retire_variant(key, manifest_times, brut_prec, variants)
     return done
 
 def main():
@@ -761,6 +977,10 @@ def main():
     # de 200 objets (79 × 2 + manifest = 159 à froid) ; le stockage
     # baisse (plus de grille Monde, tracés simplifiés) — 188 Mo reste un
     # majorant sûr tant que la mesure réelle n'a pas été relevée.
+    # 08/09/2026 : DEUX grilles, UN fichier par échéance chacune → même
+    # ordre de grandeur (79 × 2 + 2 manifests = 160 à froid). Le poids
+    # ajouté par le Monde est celui d'un synoptique 0,25° sur le globe —
+    # mesuré au DRY_RUN avant le premier run réel, cf. la note du jour.
     plafond = verifier_dimensionnement("arpege-isobars", objets_par_run=200,
                                        runs_par_jour=4, mo_par_run=188)
 
@@ -798,8 +1018,8 @@ def main():
     STORE = Storage("arpege-isobars", "ISOBARS_BUCKET", "isobars", plafond)
 
     total = 0
-    for key, model in MODELS.items():
-        total += process_grid(key, model)
+    for key, cfg in GRIDS.items():
+        total += process_grid(key, cfg)
     # Après la grille vivante, jamais avant : si le ménage échoue, le
     # calque a déjà ses nouvelles échéances.
     for key in RETIRED_GRIDS:
