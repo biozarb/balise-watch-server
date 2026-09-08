@@ -21,6 +21,12 @@ Même forme, même tuilage, mêmes `times[]` ; un champ de plus,
 `gustTimes`, qui dit à quelles échéances la rafale existe (elle est
 absente à τ = 0). Cf. GUST_SN plus bas.
 
+08/09/2026 — QUATRIÈME préfixe : `arome/lod/…`, la PYRAMIDE DE NIVEAUX
+(0,05° et 0,2°) pour la vue large, dérivée du même tableau numpy que les
+tuiles : un fichier BINAIRE par échéance couvrant tout le domaine, au
+lieu d'une tuile 2° portant les 44 échéances. Cf. le bloc « PYRAMIDE »
+plus bas, et `tools/lod-selftest.py` pour le critère d'acceptation.
+
 Stockage (03/08/2026) : l'upload passe par `tools/storage.py`, un seul
 module pour les 5 chaînes, avec deux implémentations derrière la même
 signature. La destination se choisit par variable d'environnement :
@@ -32,8 +38,9 @@ signature. La destination se choisit par variable d'environnement :
   WIND_GRID_BUCKET optionnel, défaut wind-grid
   DRY_RUN=1 pour tester le calcul/tuilage sans rien téléverser.
 """
-import os, sys, json, math, time
+import os, sys, json, math, time, gzip, struct
 from datetime import datetime, timezone, timedelta
+import numpy as np      # déjà une dépendance d'eccodes — rien à installer en plus
 from eccodes import (codes_grib_new_from_file, codes_get, codes_get_values,
                      codes_release)
 
@@ -555,6 +562,266 @@ def build_grids(uv_by_step, meta, steps, times, kind, level, step_deg, orog=None
         g["points"].append(pt)
     return tiles
 
+# ══════════════════════════════════════════════════════════════════════
+#  PYRAMIDE DE NIVEAUX — `arome/lod/` (08/09/2026)
+# ══════════════════════════════════════════════════════════════════════
+# POURQUOI. En vue large (z < WIND_GRID_MIN_ZOOM = 8 côté client) le
+# calque refuse de charger. Mesuré : une tuile `arome/sol/{tLat}_{tLon}`
+# = 2°×2° à 0,01°, `speed[]`+`dir[]` pour les 44 échéances, ~12 Mo ; la
+# BBOX entière = 63 tuiles = 606 Mo. À l'écran on regarde UNE échéance :
+# on paie 44 fois ce qu'on affiche, pour chaque bout d'espace. Ce
+# découpage est le bon en zoom (le curseur de temps glisse sans réseau)
+# et le mauvais en dézoom. ⇒ Pour les niveaux grossiers on l'INVERSE :
+# un fichier par échéance, couvrant tout le domaine.
+#
+# CE QUE C'EST. Deux niveaux (LOD_LEVELS) dérivés DU MÊME tableau numpy
+# que les tuiles, pendant que u/v du run sont en mémoire — pas un octet
+# de GRIB en plus, et la cohérence avec les tuiles 0,01° est garantie par
+# construction : `fenetre_bbox` reprend l'arithmétique de
+# `sample_indices` et VÉRIFIE que ce sont les mêmes points.
+# Par cellule, TROIS grandeurs (arbitrage Yann 08/09, « moyenne + max ») :
+#   speed = ‖moyenne(u), moyenne(v)‖ × 3,6 → longueur des flèches /
+#           déplacement des particules (lot 3) ;
+#   dir2  = direction de ce vecteur moyen, convention météo (d'où vient
+#           le vent), en PAS DE 2° (0-179) — l'échelle des flèches n'a
+#           pas besoin de mieux ;
+#   max   = max de hypot(u, v) × 3,6 sur le bloc → COULEUR DE FOND. La
+#           crête ventilée ne disparaît pas quand on dézoome.
+# ⛔ MOYENNER EN u/v, JAMAIS PAR L'ANGLE. Un bloc où le vent tourne de
+#    180° entre deux vallées rend un vecteur moyen court : c'est VRAI (le
+#    flux net y est faible) et `max` dit le reste. Ne pas « corriger ».
+# Pour la RAFALE : `speed` = moyenne vectorielle de la rafale, `max` =
+# max de la rafale. `speedMean` (le vent moyen embarqué dans la tuile
+# rafale) reste au niveau 0,01° SEULEMENT — l'index le dit, le client ne
+# dessine l'anneau / la flèche fantôme qu'à ce niveau.
+#
+# FORMAT : binaire, pas JSON — 3 octets par point contre ~6,7 mesurés en
+# JSON (`speed` 2,78 + `dir` 3,91). Un objet =
+#   magic b"BWL1" · uint32 LE = longueur de l'en-tête · en-tête JSON
+#   utf-8 · plans uint8 à plat, LIGNE 0 = SUD, COLONNE 0 = OUEST.
+#   Sentinelle 255 = pas de donnée (NaN du GRIB) ; vitesses bornées 254.
+#   `perTime` : un fichier par échéance, plans [speed, dir2, max].
+#   `allTimes` (niveau le plus grossier) : toutes les échéances dans UN
+#   fichier, plans [speed, dir2, max] répétés par échéance, dans l'ordre
+#   de `times` de l'en-tête.
+#   Téléversé PRÉ-GZIPPÉ (`Content-Encoding: gzip`) : Cloudflare ne
+#   compresse pas `application/octet-stream` d'office. Mesuré le 08/09
+#   sur le run 15Z : 224 → 125 Ko au niveau 0,05° (56 %), 14 → 10 Ko au
+#   0,2°. `Cache-Control` = CACHE_REECRIT : ces objets sont RÉÉCRITS EN
+#   PLACE à chaque run (`t{i}.bin`, `all.bin`), aucun orphelin, aucune
+#   purge à écrire.
+# ⭐ CHAQUE .bin PORTE SON RUN ET SA GÉOMÉTRIE DANS L'EN-TÊTE — leçon du
+#    22/08 (BUGS.md, « préférer un objet qui se décrit lui-même ») : dans
+#    un bucket mutable, l'index et les objets ne sont jamais cohérents
+#    pendant le téléversement. Le client compare `run` de l'en-tête au
+#    `run` de `index.json` et REFUSE de mélanger deux runs ; et il lit
+#    niveaux, mailles et grandeurs DANS l'index — pas une troisième liste
+#    `LEVELS` recopiée côté client (BUGS : `LEVELS` déjà dupliqué).
+# ⚠️ ORIENTATION : les latitudes AROME DÉCROISSENT avec j (jScan = 0,
+#    mesuré le 08/09 sur 001 ET 0025). `sous_fenetre` retourne la fenêtre
+#    AVANT de bloquer, pour que la ligne 0 soit le SUD. Un reshape depuis
+#    le mauvais coin donne une grille à l'envers sans que numpy ne
+#    bronche — c'est le défaut des isobares du 08/09, six semaines à
+#    l'envers. Le selftest vérifie le bloc (0,0) contre le GRIB relu à la
+#    main, coin sud-ouest.
+# ⚠️ BORD : 1 101 lignes / 1 701 colonnes ne sont divisibles ni par 5 ni
+#    par 20. On TRONQUE le dernier bloc partiel (nord / est) et on
+#    l'écrit dans l'en-tête (`truncated`) ; padder avec des zéros
+#    inventerait un vent calme.
+# ⚠️ MÉMOIRE : la branche SOL est à ~3,5 Go de pic (31/08). Ici tout se
+#    calcule ÉCHÉANCE PAR ÉCHÉANCE sur la sous-fenêtre (1101×1701 en
+#    float64 = 15 Mo par tableau, ~100 Mo de transitoires), jamais une
+#    pyramide de 44 échéances gardée à côté. Estimation, à confirmer sur
+#    le premier run (la ligne « pyramide … en N s » du log).
+LOD_PREFIX = f"{MODEL_DIR}/lod"
+LOD_LEVELS = (0.05, 0.2)              # degrés — le client les lit DANS l'index
+LOD_LAYOUT = {0.05: "perTime", 0.2: "allTimes"}
+LOD_MAGIC  = b"BWL1"
+LOD_NODATA = 255                      # uint8 : pas de donnée
+LOD_VMAX   = 254                      # km/h, borne haute hors sentinelle
+LOD_ELEV_NODATA = -32768              # int16 : pas d'orographie à ce point
+LOD_PLANES = ["speed", "dir2", "max"]
+LOD_UNITS  = dict(speed="km/h", dir2="degrés/2, convention météo (d'où vient le vent)",
+                  max="km/h, max des points du bloc")
+
+def fenetre_bbox(meta, step_deg):
+    """Fenêtre BBOX dans la grille native, sous forme de tranches numpy
+    (j0, j1, i0, i1, dec), à la décimation `dec` = round(step_deg / di).
+
+    MÊME arithmétique que `sample_indices` (même expression de lat/lon,
+    même test d'appartenance), et VÉRIFIÉE contre lui : si les indices
+    retenus ne forment pas un rectangle contigu de la même taille que la
+    liste des points des tuiles, on n'écrit rien. C'est ce qui garantit
+    qu'un bloc du LOD est la moyenne des points que la tuile 0,01° montre
+    au même endroit — et pas d'un voisinage décalé d'un point."""
+    dec = max(1, round(step_deg / meta["di"]))
+    lat_j = lambda j: meta["lat0"] + (meta["dj"] * j if meta["jScan"] == 1 else -meta["dj"] * j)  # noqa: E731
+    js = [j for j in range(0, meta["Nj"], dec)
+          if BBOX["latmin"] <= lat_j(j) <= BBOX["latmax"]]
+    is_ = [i for i in range(0, meta["Ni"], dec)
+           if BBOX["lonmin"] <= meta["lon0"] + meta["di"] * i <= BBOX["lonmax"]]
+    if not js or not is_:
+        raise SystemExit("lod : fenêtre BBOX vide dans la grille native — on n'écrit rien.")
+    contigu = (js[-1] - js[0] == dec * (len(js) - 1)
+               and is_[-1] - is_[0] == dec * (len(is_) - 1))
+    n_tuiles = len(sample_indices(meta, step_deg))
+    if not contigu or n_tuiles != len(js) * len(is_):
+        raise SystemExit(f"lod : fenêtre BBOX {len(js)}×{len(is_)} (contiguë={contigu}) "
+                         f"≠ les {n_tuiles} points des tuiles — on n'écrit rien.")
+    return js[0], js[-1] + 1, is_[0], is_[-1] + 1, dec
+
+def sous_fenetre(values, meta, fen):
+    """Champ natif (1-D eccodes) → sous-fenêtre BBOX 2-D en float64,
+    LIGNE 0 = SUD, colonne 0 = ouest. float64 pour que hypot/atan2
+    donnent, à l'entier près, ce que `_ms()` donne aux tuiles."""
+    j0, j1, i0, i1, dec = fen
+    a = values.reshape(meta["Nj"], meta["Ni"])[j0:j1:dec, i0:i1:dec]
+    if meta["jScan"] != 1:
+        a = a[::-1, :]                # cf. ⚠️ ORIENTATION ci-dessus
+    return a.astype(np.float64)
+
+def lod_geometrie(meta, fen, facteur):
+    """Géométrie d'un niveau : `lat0`/`lon0` = CENTRE de la cellule (0,0)
+    (= centre de masse des points natifs moyennés), pas son bord ;
+    `dLat`/`dLon` = pas entre centres. Le client place l'échantillon là."""
+    j0, j1, i0, i1, dec = fen
+    natif = meta["di"] * dec
+    nrows, ncols = len(range(j0, j1, dec)), len(range(i0, i1, dec))
+    rows, cols = nrows // facteur, ncols // facteur
+    lat_j = lambda j: meta["lat0"] + (meta["dj"] * j if meta["jScan"] == 1 else -meta["dj"] * j)  # noqa: E731
+    lat_sud = min(lat_j(j0), lat_j(j1 - 1))
+    lon_ouest = meta["lon0"] + meta["di"] * i0
+    return dict(rows=rows, cols=cols,
+                lat0=round(lat_sud + natif * (facteur - 1) / 2, 4),
+                lon0=round(lon_ouest + natif * (facteur - 1) / 2, 4),
+                dLat=round(natif * facteur, 4), dLon=round(natif * facteur, 4),
+                block=facteur, nativeStep=round(natif, 4),
+                truncated=dict(north=nrows - rows * facteur, east=ncols - cols * facteur))
+
+def lod_bloc(U, V, meta, fen, facteur):
+    """→ (speed, dir2, max) : trois tableaux uint8 (rows, cols), ligne 0 =
+    SUD. Même garde-fou que `_ms()` — NaN / non fini / > 500 km/h n'est
+    pas une donnée — appliqué POINT PAR POINT avant la moyenne : un point
+    invalide ne pèse pas dans le bloc, et un bloc sans aucun point valide
+    rend la sentinelle, jamais 0."""
+    u, v = sous_fenetre(U, meta, fen), sous_fenetre(V, meta, fen)
+    spd_n = np.hypot(u, v) * 3.6
+    valide = np.isfinite(spd_n) & (spd_n <= 500)
+    f = facteur
+    R, C = u.shape[0] // f, u.shape[1] // f
+    blocs = lambda a: a[:R * f, :C * f].reshape(R, f, C, f)          # noqa: E731
+    n = blocs(valide).sum(axis=(1, 3))
+    ok = n > 0
+    um = blocs(np.where(valide, u, 0.0)).sum(axis=(1, 3)) / np.maximum(n, 1)
+    vm = blocs(np.where(valide, v, 0.0)).sum(axis=(1, 3)) / np.maximum(n, 1)
+    mx = blocs(np.where(valide, spd_n, -np.inf)).max(axis=(1, 3))
+    spd = np.hypot(um, vm) * 3.6
+    drc = (270 - np.degrees(np.arctan2(vm, um))) % 360
+    # np.rint = arrondi au pair le plus proche, comme le round() de `_ms()`.
+    b_speed = np.where(ok, np.clip(np.rint(spd), 0, LOD_VMAX), LOD_NODATA).astype(np.uint8)
+    b_dir = np.where(ok, np.rint(drc / 2).astype(np.int64) % 180, LOD_NODATA).astype(np.uint8)
+    b_max = np.where(ok, np.clip(np.rint(mx), 0, LOD_VMAX), LOD_NODATA).astype(np.uint8)
+    return b_speed, b_dir, b_max
+
+def lod_encoder(entete, plans):
+    """magic · uint32 LE (longueur en-tête) · en-tête JSON · plans à plat,
+    le tout gzippé (mtime=0 : deux runs identiques donnent le même
+    objet, utile pour comparer)."""
+    h = json.dumps(entete, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    brut = LOD_MAGIC + struct.pack("<I", len(h)) + h + b"".join(p.tobytes() for p in plans)
+    return gzip.compress(brut, compresslevel=6, mtime=0)
+
+def lod_upload(chemin, body):
+    return sb_upload(chemin, body, content_type="application/octet-stream",
+                     content_encoding="gzip")
+
+def publier_lod(uv, meta, steps, times, kind, level, step_deg, ref, index, chemin_kind):
+    """Écrit les niveaux de la pyramide pour un (kind, level) et complète
+    `index["entries"]`. Renvoie le nombre d'objets écrits.
+
+    `uv` peut ne pas avoir toutes les échéances de `steps` (rafale à
+    τ = 0) : on n'écrit PAS de fichier pour celles-là et on ne les liste
+    pas dans `times` de l'entrée — une échéance qui n'existe pas n'est
+    pas un plan de sentinelles, elle est absente (règle du 28/08)."""
+    fen = fenetre_bbox(meta, step_deg)
+    natif = meta["di"] * fen[4]
+    dispo = [(i, s) for i, s in enumerate(steps) if s in uv]
+    n = 0
+    for lod in LOD_LEVELS:
+        facteur = round(lod / natif)
+        if facteur < 1 or abs(facteur * natif - lod) > 1e-9:
+            raise SystemExit(f"lod : {lod}° n'est pas un multiple entier du pas natif "
+                             f"{natif}° ({kind}) — on n'écrit rien.")
+        geo = lod_geometrie(meta, fen, facteur)
+        base = dict(run=ref, kind=kind, level=level, lod=lod, planes=LOD_PLANES,
+                    dtype="uint8", nodata=LOD_NODATA, units=LOD_UNITS, **geo)
+        entree = dict(base, times=[times[i] for i, _ in dispo],
+                      layout=LOD_LAYOUT[lod])
+        if LOD_LAYOUT[lod] == "allTimes":
+            plans = []
+            for _, s in dispo:
+                plans.extend(lod_bloc(uv[s][0], uv[s][1], meta, fen, facteur))
+            chemin = f"{LOD_PREFIX}/{lod:g}/{chemin_kind}/all.bin"
+            lod_upload(chemin, lod_encoder(dict(base, layout="allTimes",
+                                                times=entree["times"]), plans))
+            entree["path"] = chemin
+            n += 1
+        else:
+            chemins = []
+            for i, s in dispo:
+                chemin = f"{LOD_PREFIX}/{lod:g}/{chemin_kind}/t{i:02d}.bin"
+                lod_upload(chemin, lod_encoder(dict(base, layout="perTime", time=times[i]),
+                                               lod_bloc(uv[s][0], uv[s][1], meta, fen, facteur)))
+                chemins.append(chemin)
+                n += 1
+            entree["paths"] = chemins    # zippé avec `times`, un chemin par échéance
+        index["entries"].append(entree)
+    return n
+
+def publier_lod_elev(orog, meta, step_deg, index):
+    """Orographie AROME aux niveaux de la pyramide, pour le masquage
+    sous-relief des flèches d'ALTITUDE côté client (même rôle que `elev`
+    dans les tuiles alt). Au niveau natif (bloc 1) c'est EXACTEMENT
+    `elev_at` ; aux blocs > 1, la MOYENNE du bloc, arrondie — pas le min
+    (qui montrerait des flèches là où seule une vallée les laisse
+    passer). int16 LE, mètres AMSL. Un fichier par niveau, statique,
+    réécrit en place à chaque run (2 objets)."""
+    if orog is None:
+        return 0
+    fen = fenetre_bbox(meta, step_deg)
+    j0, j1, i0, i1, dec = fen
+    js, is_ = np.arange(j0, j1, dec), np.arange(i0, i1, dec)
+    lats = meta["lat0"] + (meta["dj"] * js if meta["jScan"] == 1 else -meta["dj"] * js)
+    if meta["jScan"] != 1:
+        lats = lats[::-1]
+    lons = meta["lon0"] + meta["di"] * is_
+    lats, lons = np.round(lats, 3), np.round(lons, 3)     # comme sample_indices → elev_at
+    om = orog["meta"]
+    oi = np.rint((lons - om["lon0"]) / om["di"]).astype(np.int64)
+    oj = (np.rint((om["lat0"] - lats) / om["dj"]) if om["jScan"] != 1
+          else np.rint((lats - om["lat0"]) / om["dj"])).astype(np.int64)
+    ok = ((oj >= 0) & (oj < om["Nj"]))[:, None] & ((oi >= 0) & (oi < om["Ni"]))[None, :]
+    E = np.asarray(orog["values"], dtype=np.float64).reshape(om["Nj"], om["Ni"])[
+        np.clip(oj, 0, om["Nj"] - 1)[:, None], np.clip(oi, 0, om["Ni"] - 1)[None, :]]
+    natif = meta["di"] * dec
+    n = 0
+    for lod in LOD_LEVELS:
+        f = round(lod / natif)
+        geo = lod_geometrie(meta, fen, f)
+        R, C = geo["rows"], geo["cols"]
+        blocs = lambda a: a[:R * f, :C * f].reshape(R, f, C, f)          # noqa: E731
+        cnt = blocs(ok).sum(axis=(1, 3))
+        moy = blocs(np.where(ok, E, 0.0)).sum(axis=(1, 3)) / np.maximum(cnt, 1)
+        plan = np.where(cnt > 0, np.rint(moy), LOD_ELEV_NODATA).astype("<i2")
+        chemin = f"{LOD_PREFIX}/elev/{lod:g}.bin"
+        entete = dict(run=index["run"], kind="elev", lod=lod, planes=["elev"], dtype="int16",
+                      nodata=LOD_ELEV_NODATA, units=dict(elev="m AMSL, moyenne du bloc"),
+                      layout="static", **geo)
+        lod_upload(chemin, lod_encoder(entete, [plan]))
+        index["elev"].append(dict(entete, path=chemin))
+        n += 1
+    return n
+
 # ── Upload Supabase Storage ───────────────────────────────────────────
 # ── Upload : adaptateur vers le module partagé ────────────────────────
 # 03/08/2026 — `sb_upload()` existait en CINQ exemplaires quasi
@@ -584,8 +851,10 @@ from storage import (Storage, verifier_dimensionnement, Abort,   # noqa: E402
 STORE = None
 
 
-def sb_upload(path, body, cache_control=CACHE_REECRIT):
-    return STORE.put(path, body, cache_control=cache_control)
+def sb_upload(path, body, cache_control=CACHE_REECRIT, **kw):
+    # `**kw` (08/09/2026, pyramide) : `content_type` / `content_encoding`
+    # pour les .bin pré-gzippés. Les appelants JSON ne changent pas.
+    return STORE.put(path, body, cache_control=cache_control, **kw)
 
 def merge_parse(files, want, dtype=None):
     merged, meta = {}, None
@@ -655,9 +924,32 @@ def main():
     # ⓘ Écritures : +63/run = +504/jour, ~15 k/mois de plus sur un palier
     # de 1 M — sans effet, mais la ligne journalisée ci-dessous le montre
     # au run près plutôt que de le laisser deviner.
-    plafond = verifier_dimensionnement("arome-wind", objets_par_run=568,
-                                       runs_par_jour=8, mo_par_run=1680)
+    # ⚠️ 08/09/2026 (pyramide `arome/lod/`) : 568 -> ~975 objets et
+    # 1 680 -> ~1 735 Mo. Le poste qui bouge est les ÉCRITURES, pas le
+    # stockage : le niveau 0,05° écrit UN OBJET PAR ÉCHÉANCE et par
+    # grandeur (9 grandeurs × ~44 échéances ≈ 395), le 0,2° un objet par
+    # grandeur (9), plus 2 orographies et 1 index. Le nombre d'échéances
+    # varie avec l'heure du run (keep_step) : 1 000 est la BORNE, la ligne
+    # [compteurs] de fin de run donne le compte réel. ≈ 8 000/jour ≈
+    # 240 k/mois, 24 % du palier Class A — sous le seuil d'arrêt de 50 %.
+    # Si ce chiffre devait grimper, regrouper le 0,05° par JOUR (3
+    # fichiers) plutôt que par échéance, PAS relever le seuil.
+    # Stockage : ~55 Mo gzippés (estimation depuis 125 Ko × 395 + 9 × 10 Ko
+    # mesurés sur le run 15Z du 08/09), réécrits en place — stationnaire.
+    plafond = verifier_dimensionnement("arome-wind", objets_par_run=1000,
+                                       runs_par_jour=8, mo_par_run=1735)
     STORE = Storage("arome-wind", "WIND_GRID_BUCKET", "wind-grid", plafond)
+
+    # Index de la pyramide : le client y lit niveaux, mailles, grandeurs,
+    # `times[]` et chemins — RIEN n'est recopié côté client. Écrit en fin
+    # de run, juste avant le manifeste (`generatedAt` à ce moment-là).
+    index_lod = dict(run=ref, generatedAt=None, levels=list(LOD_LEVELS),
+                     format=dict(magic=LOD_MAGIC.decode(), header="uint32 LE = longueur, puis JSON utf-8",
+                                 order="ligne 0 = sud, colonne 0 = ouest, row-major",
+                                 planes=LOD_PLANES, nodata=LOD_NODATA, encoding="gzip",
+                                 speedMeanOnlyAt=STEP_SOL),
+                     entries=[], elev=[])
+    t_lod = 0.0
 
     manifest = dict(run=ref, generatedAt=datetime.now(timezone.utc)
                     .strftime("%Y-%m-%dT%H:%M:%SZ"), gridSol=GRID_SOL, gridAlt=GRID_ALT,
@@ -701,6 +993,11 @@ def main():
         total += 1
     manifest["solTimes"] = times
     print(f"  {len(times)} échéances, tuiles téléversées (cumul {total})")
+    t0 = time.time()
+    n = publier_lod(uv, meta, steps, times, "sol", None, STEP_SOL, ref, index_lod, "sol")
+    t_lod += time.time() - t0
+    total += n
+    print(f"  pyramide sol : {n} objets en {time.time() - t0:.1f} s (cumul {total})")
     del data, uv        # ⭐ libéré AVANT de construire les tuiles rafale :
                         # les composantes u/v (~1,8 Go) partent, seules les
                         # listes de vitesses déjà calculées restent (~0,8 Go,
@@ -754,6 +1051,14 @@ def main():
         manifest["gustTimes"] = gust_times
         print(f"  {len(gust_times)}/{len(times)} échéances renseignées, "
               f"tuiles téléversées (cumul {total})")
+        # Pyramide de la rafale : `uvg` n'a pas τ = 0, donc pas de fichier
+        # t00 et `times` de l'entrée = `gust_times` — rien d'inventé.
+        t0 = time.time()
+        n = publier_lod(uvg, meta, steps, times, "rafale", None, STEP_SOL, ref, index_lod, "rafale")
+        t_lod += time.time() - t0
+        total += n
+        print(f"  pyramide rafale : {n} objets en {time.time() - t0:.1f} s (cumul {total})")
+        del uvg
     else:
         # Pas de repli, pas de tuile écrite : mieux vaut un calque qui
         # n'apparaît pas qu'un calque qui montre autre chose que la
@@ -788,6 +1093,30 @@ def main():
             total += 1
         manifest["levels"].append(lvl)
         print(f"  {lvl} hPa : {len(times)} échéances OK (cumul {total})")
+        t0 = time.time()
+        n = publier_lod(uv, meta, steps, times, "alt", lvl, STEP_ALT, ref, index_lod, f"alt/{lvl}")
+        t_lod += time.time() - t0
+        total += n
+        print(f"    pyramide {lvl} hPa : {n} objets en {time.time() - t0:.1f} s (cumul {total})")
+    # Orographie aux niveaux de la pyramide (masquage sous-relief des
+    # flèches d'altitude côté client) — sur la géométrie de la grille ALT.
+    if meta is not None:
+        t0 = time.time()
+        n = publier_lod_elev(orog, meta, STEP_ALT, index_lod)
+        t_lod += time.time() - t0
+        total += n
+        print(f"  pyramide orographie : {n} objets (cumul {total})")
+    del data
+
+    # ⭐ L'index de la pyramide est écrit APRÈS tous ses objets (comme le
+    # manifeste) : pendant le téléversement, c'est l'en-tête de chaque
+    # .bin qui fait foi, et le client refuse un `run` différent de celui
+    # de l'index.
+    index_lod["generatedAt"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    sb_upload(f"{LOD_PREFIX}/index.json", json.dumps(index_lod, ensure_ascii=False).encode("utf-8"))
+    total += 1
+    manifest["lodIndex"] = f"{LOD_PREFIX}/index.json"
+    print(f"Pyramide : {len(index_lod['entries'])} entrées, {t_lod:.1f} s de calcul+téléversement")
 
     manifest["uploaded"] = total
     sb_upload(f"{MODEL_DIR}/manifest.json", json.dumps(manifest).encode())

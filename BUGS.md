@@ -6,6 +6,43 @@
 
 ---
 
+## 08/09/2026 (pyramide `arome/lod/`) — un `reshape` par blocs ne sait pas dans quel coin il commence
+
+Piège **pris d'avance**, pas payé — parce que le calque isobares venait
+de passer six semaines à l'envers (web/BUGS.md, 08/09) pour la même
+raison. Les latitudes AROME **décroissent** avec `j` (`jScansPositively
+= 0`, mesuré sur les grilles 001 et 0025). Un
+`a.reshape(R, f, C, f).mean(axis=(1, 3))` moyenne des blocs f×f depuis
+le coin (0,0) du tableau — donc depuis le **nord-ouest** — et donne une
+grille dont la ligne 0 est le nord, sans qu'aucune ligne ne lève. Si le
+lecteur suppose « ligne 0 = sud » (la convention naturelle d'un `lat0 +
+r × dLat` positif), toute la carte est retournée, et un vent de nord sur
+les Alpes se lit sur les Pyrénées.
+
+Ce qui protège, dans `arome-wind/ingest.py` :
+
+1. `sous_fenetre()` **retourne la fenêtre** (`[::-1, :]` quand `jScan
+   != 1`) AVANT de bloquer, et la convention est écrite dans l'en-tête
+   de chaque `.bin` (`order: ligne 0 = sud`) et dans `index.json` — le
+   lecteur n'a rien à supposer ;
+2. la **troncature** du dernier bloc partiel (1 101 et 1 701 ne sont
+   divisibles ni par 5 ni par 20) tombe alors au **nord / est**, et
+   l'en-tête le dit (`truncated`). Padder avec des zéros aurait inventé
+   un vent calme sur une ligne de cellules ;
+3. `tools/lod-selftest.py` recalcule le bloc (0,0) **à la main** depuis
+   le GRIB relu indépendamment, sur le coin sud-ouest, ET vérifie que
+   le coin nord-est en diffère — un contrôle d'orientation sur un champ
+   uniforme est vert quelle que soit l'orientation (cf. « un contrôle
+   VERT qui ne prouvait rien », 20/08).
+
+Et un second, plus discret : la grille ALT est **décimée** (un point sur
+deux du 0,025°). Le recalcul « à la main » d'un bloc doit ne garder que
+les nœuds multiples de 0,05°, sinon il moyenne 64 points là où la
+pyramide — et les tuiles — n'en voient que 16, et le test est faux sans
+être rouge.
+
+---
+
 ## 08/09/2026 — un correctif posé sur UN des deux frères, et une promesse que le run suivant ne pouvait pas tenir
 
 La jauge R2 a crié au matin : **3 orphelins sous `agrume/pi/grille/`
