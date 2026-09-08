@@ -42,6 +42,26 @@ const ici = dirname(fileURLToPath(import.meta.url));
 const MOD = join(ici, "..", "..", "web", "src", "lib", "piaf.ts");
 const P = await import(process.env.BW_PIAF_MODULE || MOD);
 
+// ⛔ 08/09/2026 — LE §4 A CHANGÉ DE MODULE, PARCE QUE LE PRODUIT A
+// CHANGÉ DE LANGAGE DE COULEUR. La refonte du calque radar (`73fa1d5`,
+// dépôt web) a retiré de `piaf.ts` les sept teintes catégorielles
+// (`COULEURS_PLUIE`) et `palierPluie` : la pluie à venir, les tuiles
+// RainViewer et la tuile décalée par le vent partagent désormais UNE
+// rampe, indexée sur une grandeur physique commune (le mm/h), dans
+// `lib/rainPalette.ts`.
+//
+// ⚠️ Le banc, lui, testait encore les deux symboles disparus — et
+// `P.COULEURS_PLUIE.length` a levé un `TypeError` qui a fait tomber la
+// CI, donc TOUTE l'ingestion AGRUME (runs #646 et #647), le banc de
+// parité passant AVANT le téléchargement. Le graphe du dépôt web bouge,
+// la liste `sparse-checkout` et les bancs de CE dépôt doivent suivre :
+// c'est la troisième fois (agrumeCache 25/08, coutureIfs 07/09).
+//
+// ⛔ PAS DE GARDE « si le module est absent, on saute ». Un banc qui se
+// saute tout seul est le faux vert que ce dépôt refuse partout ailleurs.
+const MOD_RAMPE = join(ici, "..", "..", "web", "src", "lib", "rainPalette.ts");
+const R = await import(process.env.BW_RAIN_PALETTE_MODULE || MOD_RAMPE);
+
 const PROD = process.argv.includes("--production");
 const BASE = process.env.BW_R2_BASE
   || "https://pub-7a401bae4fe54a6c8dbdd6b5a33a7bec.r2.dev";
@@ -251,31 +271,143 @@ section("3. le couple (index, manifeste, octets)", () => {
 });
 
 // ══════════════════════════════════════════════════════════════════════
-// 4. LES PALIERS DE COULEUR
+// 4. LA RAMPE COMMUNE, EN mm/h — ET LA COUTURE AVEC LE CUMUL
+//
+// ⛔ `lib/rainPalette.ts` n'avait AUCUN banc, nulle part, le jour où il
+// est entré en production. Il porte pourtant la seule réponse à « où est
+// la pluie ? » pour TROIS calques à la fois : une rampe fausse ne lève
+// rien, ne casse aucune requête, et rend trois cartes lisses, colorées
+// et plausibles. C'est la définition même de ce que ce banc existe pour
+// attraper.
 // ══════════════════════════════════════════════════════════════════════
-section("4. les paliers, en mm SUR LA TRANCHE", () => {
-  const p = P.PALIERS_PLUIE_MM5;
-  verifier("autant de teintes que de paliers",
-    P.COULEURS_PLUIE.length === p.length,
-    `${P.COULEURS_PLUIE.length} teintes / ${p.length} paliers`);
-  verifier("sous le premier palier → `-1`, donc rien de peint (une bruine "
-    + "que le radar voit et qu’un pilote ne sent pas)",
-    P.palierPluie(p[0] - 1e-6) === -1 && P.palierPluie(0) === -1);
-  verifier("chaque palier est atteint EXACTEMENT à sa borne inférieure",
-    p.every((v, k) => P.palierPluie(v) === k),
-    p.map((v, k) => `${v}→${P.palierPluie(v)}`).join(" "));
-  verifier("au-delà du dernier palier on sature, on ne déborde pas du "
-    + "tableau", P.palierPluie(1e6) === P.COULEURS_PLUIE.length - 1);
+section("4. la rampe commune (mm/h), et la couture avec le cumul", () => {
+  const LUT_N = 256;
+
+  // ── le seuil et la saturation ─────────────────────────────────────
+  verifier("sous le seuil → `-1`, donc rien de peint (une bruine que le "
+    + "radar voit et qu’un pilote ne sent pas)",
+    R.indicePluie(R.PLUIE_MIN_MMH - 1e-9) === -1 && R.indicePluie(0) === -1,
+    `seuil ${R.PLUIE_MIN_MMH} mm/h`);
+  verifier("le seuil LUI-MÊME est le premier indice peint, pas un refus",
+    R.indicePluie(R.PLUIE_MIN_MMH) === 0);
+  verifier("au-delà du maximum on sature, on ne déborde pas de la LUT",
+    R.indicePluie(R.PLUIE_MAX_MMH) === LUT_N - 1
+    && R.indicePluie(1e6) === LUT_N - 1);
   // ⛔ NaN ET Infinity ne peignent RIEN, ni l’un ni l’autre. Une valeur
   // non finie veut dire « rien à en dire » — la même règle que le
-  // rafraîchissement PI. Peindre le palier maximum sur un Infinity
-  // ferait une averse noire là où le décodage a déraillé.
+  // rafraîchissement PI. Peindre l’indice maximum sur un Infinity ferait
+  // un orage violet là où le décodage a déraillé.
   verifier("une valeur non finie ne peint rien, y compris `Infinity`",
-    P.palierPluie(NaN) === -1 && P.palierPluie(Infinity) === -1
-    && P.palierPluie(-Infinity) === -1);
-  verifier("⚠️ l’équivalence horaire est une ÉQUIVALENCE, pas le décodage : "
-    + "0,4 mm/5 min ↔ 4,8 mm/h",
+    R.indicePluie(NaN) === -1 && R.indicePluie(Infinity) === -1
+    && R.indicePluie(-Infinity) === -1);
+
+  // ── l’échelle est LOGARITHMIQUE, et c’est vérifiable ──────────────
+  // ⚠️ Une rampe passée en linéaire reste une rampe : mêmes teintes,
+  // même légende, même dégradé CSS. Seule la RÉPARTITION change — et
+  // toute la pluie utile s’écrase alors dans les deux premiers pour cent
+  // de la rampe. Rien à l’écran ne dirait laquelle des deux on regarde.
+  const milieuGeo = Math.sqrt(R.PLUIE_MIN_MMH * R.PLUIE_MAX_MMH);
+  verifier("⛔ le MILIEU de la rampe est la moyenne GÉOMÉTRIQUE, pas "
+    + "l’arithmétique — la pluie se lit en décades",
+    Math.abs(R.indicePluie(milieuGeo) - (LUT_N - 1) / 2) <= 0.5,
+    `${milieuGeo.toFixed(2)} mm/h → ${R.indicePluie(milieuGeo)}`);
+  verifier("⛔ SABOTAGE : en échelle LINÉAIRE, ce même point tomberait "
+    + "dans le premier vingtième de la rampe",
+    Math.round(((milieuGeo - R.PLUIE_MIN_MMH)
+      / (R.PLUIE_MAX_MMH - R.PLUIE_MIN_MMH)) * (LUT_N - 1)) < LUT_N / 20);
+  const echantillons = [0.2, 0.5, 1, 2, 4, 8, 15, 30, 60, 150];
+  verifier("l’indice est monotone croissant sur toute la rampe",
+    echantillons.every((v, k) => k === 0
+      || R.indicePluie(v) > R.indicePluie(echantillons[k - 1])));
+  verifier("`mmhDeIndice` est bien la réciproque de `indicePluie` aux "
+    + "deux bornes",
+    Math.abs(R.mmhDeIndice(0) - R.PLUIE_MIN_MMH) < 1e-9
+    && Math.abs(R.mmhDeIndice(LUT_N - 1) - R.PLUIE_MAX_MMH) < 1e-9);
+
+  // ── la LUT elle-même ──────────────────────────────────────────────
+  verifier("la LUT fait 256 × RGBA", R.LUT_PLUIE.length === LUT_N * 4);
+  // ⚠️ C’est CE point qui répond au retour pilote (« gros pixels, pas
+  // lisible ») : le fond de carte doit rester lisible sous une bruine et
+  // disparaître sous un orage. Un alpha constant, ou décroissant, rend
+  // exactement la carte qu’on vient de refaire.
+  let alphaOk = true;
+  for (let i = 1; i < LUT_N; i++) {
+    if (R.LUT_PLUIE[i * 4 + 3] < R.LUT_PLUIE[(i - 1) * 4 + 3]) alphaOk = false;
+  }
+  verifier("⛔ l’alpha MONTE avec l’intensité, jamais l’inverse — c’est "
+    + "lui qui garde le fond de carte lisible sous une bruine",
+    alphaOk,
+    `${R.LUT_PLUIE[3]} → ${R.LUT_PLUIE[(LUT_N - 1) * 4 + 3]}`);
+  verifier("les arrêts de la rampe sont ordonnés et couvrent [min, max]",
+    R.ARRETS_PLUIE.every((a, k) => k === 0 || a[0] > R.ARRETS_PLUIE[k - 1][0])
+    && R.ARRETS_PLUIE[0][0] === R.PLUIE_MIN_MMH
+    && R.ARRETS_PLUIE[R.ARRETS_PLUIE.length - 1][0] === R.PLUIE_MAX_MMH);
+  verifier("chaque étiquette de légende tombe DANS la rampe, bornes "
+    + "comprises",
+    R.LEGENDE_PLUIE_MMH.every((v) =>
+      R.positionLegende(v) >= 0 && R.positionLegende(v) <= 1
+      && R.indicePluie(v) >= 0));
+
+  // ── Marshall-Palmer, la conversion de RainViewer ──────────────────
+  // ⚠️ Z = 200·R^1,6 : à 1 mm/h, Z = 200, soit 23,01 dBZ. Ce point-là
+  // est une IDENTITÉ de la relation, pas une valeur mesurée — s’il
+  // bouge, c’est l’exposant ou le coefficient qui a bougé.
+  verifier("⛔ Marshall-Palmer : 23,01 dBZ ↔ 1,000 mm/h",
+    Math.abs(R.dbzVersMmh(10 * Math.log10(200)) - 1) < 1e-9,
+    `${R.dbzVersMmh(10 * Math.log10(200)).toFixed(6)} mm/h`);
+  verifier("la conversion dBZ → mm/h est strictement croissante",
+    [-10, 0, 15, 30, 45, 60].every((d, k, t) =>
+      k === 0 || R.dbzVersMmh(d) > R.dbzVersMmh(t[k - 1])));
+
+  // ── la tuile RainViewer repeinte, de bout en bout ─────────────────
+  // ⛔ Ce contrôle est le BRANCHEMENT, pas le calcul : il prouve que la
+  // tuile passe par la MÊME LUT que la pluie à venir. Deux calques qui
+  // se croient sur la même échelle et n’y sont pas, c’est exactement la
+  // carte qu’on vient de refaire.
+  const tuile = new Uint8ClampedArray([
+    0, 0, 0, 0,          // pixel vide : ne doit pas être touché
+    99, 97, 89, 20,      // entrée exacte de la table, −10 dBZ ≈ 0,009 mm/h
+    193, 0, 0, 255,      // entrée exacte de la table, 50 dBZ ≈ 48,6 mm/h
+  ]);
+  R.repeindreTuileRainViewer(tuile);
+  verifier("un pixel totalement transparent reste intact",
+    tuile[0] === 0 && tuile[1] === 0 && tuile[2] === 0 && tuile[3] === 0);
+  verifier("⛔ un pixel SOUS le seuil (−10 dBZ, une bruine) est rendu "
+    + "TRANSPARENT, pas peint en pâle",
+    tuile[7] === 0);
+  const iAverse = R.indicePluie(R.dbzVersMmh(50));
+  verifier("⛔ un pixel d’averse (50 dBZ) prend EXACTEMENT la couleur de "
+    + "la LUT commune à son mm/h",
+    iAverse >= 0
+    && tuile[8] === R.LUT_PLUIE[iAverse * 4]
+    && tuile[9] === R.LUT_PLUIE[iAverse * 4 + 1]
+    && tuile[10] === R.LUT_PLUIE[iAverse * 4 + 2]
+    && tuile[11] === R.LUT_PLUIE[iAverse * 4 + 3],
+    `50 dBZ → ${R.dbzVersMmh(50).toFixed(1)} mm/h → indice ${iAverse}`);
+
+  // ── LA COUTURE : le cumul du producteur rejoint la rampe ──────────
+  // ⛔⛔ C’est le seul endroit du dépôt où les deux modules se parlent,
+  // et c’est le seul qui pouvait casser en silence : `PALIERS_PLUIE_MM5`
+  // documente l’ordre de grandeur de la donnée AGRUME (mm sur 5 min), la
+  // rampe est bornée en mm/h, et rien d’autre ne vérifie que la première
+  // tient dans la seconde.
+  const p = P.PALIERS_PLUIE_MM5;
+  verifier("⚠️ l’équivalence horaire est une ÉQUIVALENCE, pas le "
+    + "décodage : 0,4 mm/5 min ↔ 4,8 mm/h",
     Math.abs(P.equivalentMmH(0.4, 5) - 4.8) < 1e-9);
+  verifier("⛔ le plus PETIT palier du producteur est AU-DESSUS du seuil "
+    + "de la rampe — rien de ce qu’il juge significatif n’est invisible",
+    P.equivalentMmH(p[0], 5) > R.PLUIE_MIN_MMH,
+    `${p[0]} mm/5 min = ${P.equivalentMmH(p[0], 5)} mm/h > ${R.PLUIE_MIN_MMH}`);
+  verifier("⛔ le plus GRAND palier du producteur ne SATURE pas la rampe "
+    + "— une averse d’été garde une couleur qui lui est propre",
+    P.equivalentMmH(p[p.length - 1], 5) < R.PLUIE_MAX_MMH
+    && R.indicePluie(P.equivalentMmH(p[p.length - 1], 5)) < LUT_N - 1,
+    `${p[p.length - 1]} mm/5 min = ${P.equivalentMmH(p[p.length - 1], 5)} mm/h`);
+  verifier("chaque palier du producteur tombe sur un indice DISTINCT de "
+    + "la rampe — sinon deux intensités se peignent pareil",
+    new Set(p.map((v) => R.indicePluie(P.equivalentMmH(v, 5)))).size === p.length,
+    p.map((v) => R.indicePluie(P.equivalentMmH(v, 5))).join(" "));
 });
 
 // ══════════════════════════════════════════════════════════════════════

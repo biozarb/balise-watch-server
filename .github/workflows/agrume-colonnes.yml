@@ -245,6 +245,7 @@ jobs:
             PWA/web/src/lib/piaf.ts
             PWA/web/src/lib/agrumeCache.ts
             PWA/web/src/lib/coutureIfs.ts
+            PWA/web/src/lib/rainPalette.ts
           sparse-checkout-cone-mode: false
 
       # ══════════════════════════════════════════════════════════════
@@ -269,7 +270,19 @@ jobs:
       # ce que l'étape « Aucun import relatif ne pointe hors du
       # sparse-checkout » a été écrite pour faire — et c'est la deuxième
       # fois qu'elle rattrape ce graphe (après `agrumeCache.ts`).
-      - name: Le sparse-checkout a bien ramené les six fichiers
+      # ⭐ 08/09 — SEPTIÈME FICHIER : `rainPalette.ts`. La refonte du calque
+      # radar a sorti les couleurs de la pluie de `piaf.ts` vers une rampe
+      # COMMUNE aux trois calques. Le §4 du banc `piaf-client-selftest`
+      # testait les symboles disparus : `TypeError`, CI rouge, et TOUTE
+      # l'ingestion AGRUME à l'arrêt (runs #646 et #647), le banc passant
+      # AVANT le téléchargement.
+      # ⚠️ Le contrôle d'imports relatifs ci-dessous ne pouvait PAS le
+      # voir : `rainPalette.ts` n'est importé par personne en relatif, il
+      # l'est en alias `@/lib/…` depuis les composants de carte — qui ne
+      # sont pas dans le sparse-checkout et n'ont pas à y être. C'est une
+      # dépendance du BANC, pas du graphe des modules ; elle s'écrit donc
+      # ici, à la main, et nulle part ailleurs.
+      - name: Le sparse-checkout a bien ramené les sept fichiers
         run: |
           manque=0
           for f in _web-repo-parite/PWA/web/src/lib/altitudeLayer.ts \
@@ -277,7 +290,8 @@ jobs:
                    _web-repo-parite/PWA/web/src/lib/rafraichissement.ts \
                    _web-repo-parite/PWA/web/src/lib/piaf.ts \
                    _web-repo-parite/PWA/web/src/lib/agrumeCache.ts \
-                   _web-repo-parite/PWA/web/src/lib/coutureIfs.ts; do
+                   _web-repo-parite/PWA/web/src/lib/coutureIfs.ts \
+                   _web-repo-parite/PWA/web/src/lib/rainPalette.ts; do
             if [ -s "$f" ]; then
               echo "✓ $f ($(wc -c < "$f") o)"
             else
@@ -409,6 +423,12 @@ jobs:
             tools/piaf-client-selftest.mjs
         env:
           BW_PIAF_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/piaf.ts
+          # ⛔ 08/09 — le §4 de ce banc a changé de module : les couleurs
+          # de la pluie vivent désormais dans la rampe COMMUNE. Sans ce
+          # chemin, le banc retomberait sur son défaut
+          # `../../web/src/lib/…` — l'arborescence du Mac de Yann, qui
+          # n'existe pas sur le runner.
+          BW_RAIN_PALETTE_MODULE: ${{ github.workspace }}/_web-repo-parite/PWA/web/src/lib/rainPalette.ts
 
       - name: Ingérer les colonnes
         env:
