@@ -136,8 +136,19 @@ def main(argv=None):
         sys.exit("⛔ doublons dans la liste — la corriger plutôt que de "
                  "compter deux fois la même suppression.")
 
-    bucket = os.environ.get("AGRUME_BUCKET") or os.environ.get(
-        "R2_BUCKET") or "balise-watch-grids"
+    # ⛔⛔ ON NE LIT PAS `R2_BUCKET`, ET C'EST LE PIÈGE DU 10/08.
+    # `~/.balise-watch-r2.env` pose `R2_BUCKET=balise-watch-packs` pour
+    # la chaîne des packs ; `run-ingest-pi.sh` le RÉÉCRIT (ligne « export
+    # R2_BUCKET=${AGRUME_R2_BUCKET:-balise-watch-grids} ») juste avant
+    # d'appeler le producteur. Un outil qui hérite de l'environnement
+    # sans faire la même chose viserait le mauvais compartiment — et
+    # `head` y rendrait « absente » pour TOUTES les clés, ce qui se lit
+    # exactement comme « il n'y a rien à supprimer ». Un faux
+    # soulagement, donc, et pas une erreur.
+    bucket = os.environ.get("AGRUME_R2_BUCKET") or "balise-watch-grids"
+    if bucket != "balise-watch-grids":
+        print(f"⚠️ compartiment forcé : {bucket!r} (défaut "
+              f"`balise-watch-grids`)")
     cli, bucket = _client(bucket)
     print(f"bucket : {bucket} · {len(cles)} clé(s) candidate(s) · "
           + ("APPLY" if APPLY else "À BLANC (APPLY=1 pour supprimer)"))
