@@ -48,7 +48,7 @@ const arg = (nom, defaut) => {
   return i > 0 && process.argv[i + 1] ? process.argv[i + 1] : defaut;
 };
 const SEUILS = arg('--seuils', '40,50,55,60,70').split(',').map(Number);
-const SAUT_MIN = Number(arg('--saut', '0'));
+const SAUT_MIN = Number(arg('--saut', String(R.DEFAUTS.sautMinKmh)));
 const ETA_MAX = Number(arg('--eta', '120'));
 
 const base = process.env.WIND_GRID_BASE_URL || 'https://pub-7a401bae4fe54a6c8dbdd6b5a33a7bec.r2.dev';
@@ -62,26 +62,30 @@ const now = Date.now();
 // ⚠️ `decos.json` est un tableau de TUPLES : [lat, lon, nom, altM, secteurs].
 const sites = decos.filter(d => Array.isArray(d) && Number.isFinite(d[0]) && Number.isFinite(d[1]));
 console.log(`\nrun ${carte.run} · âge ${lecteur.etat().runAgeMin} min · ${sites.length} décollages dans decos.json`);
-if (SAUT_MIN > 0) console.log(`filtre : le pic doit dépasser le fond de ≥ ${SAUT_MIN} km/h`);
+console.log(`saut exigé pour une CELLULE : ≥ ${SAUT_MIN} km/h au-dessus du fond du moment`);
 
 for (const seuil of SEUILS) {
-  let dedans = 0, hit = 0, sousEta = 0;
+  let dedans = 0, hit = 0, cell = 0, sousEta = 0;
   const pics = [];
   for (const [lat, lon] of sites) {
-    const r = R.rafalePi(carte, lat, lon, now, { seuilKmh: seuil });
+    const r = R.rafalePi(carte, lat, lon, now, { seuilKmh: seuil, sautMinKmh: SAUT_MIN });
     if (r.refus) continue;
     dedans++;
     if (r.picKmh != null) pics.push(r.picKmh);
     if (!r.hit) continue;
-    if (SAUT_MIN > 0 && !(r.sautKmh >= SAUT_MIN)) continue;
     hit++;
-    if (r.etaMin <= ETA_MAX) sousEta++;
+    // ⛔ `cellule` = franchit le seuil ET se détache du fond. C'est ce
+    // qui pousse ; `hit` seul est ce qui parlerait à 41 % des sites un
+    // jour de tramontane.
+    if (r.cellule) cell++;
+    if (r.cellule && r.etaMin <= ETA_MAX) sousEta++;
   }
   pics.sort((a, b) => a - b);
   const q = p => pics[Math.min(pics.length - 1, Math.floor(pics.length * p))];
   console.log(
-    `seuil ${String(seuil).padStart(3)} km/h : ${String(hit).padStart(4)} sites en alerte sur ${dedans} dans l'emprise `
-    + `(${(100 * hit / Math.max(1, dedans)).toFixed(1)} %), dont ${sousEta} à ETA ≤ ${ETA_MAX} min`
-    + (seuil === SEUILS[0] ? `  · pic médian ${q(0.5)} km/h, p90 ${q(0.9)}, max ${pics[pics.length - 1]}` : ''));
+    `seuil ${String(seuil).padStart(3)} km/h : ${String(hit).padStart(4)} franchissements (${(100 * hit / Math.max(1, dedans)).toFixed(1)} %)`
+    + ` · ${String(cell).padStart(4)} CELLULES (${(100 * cell / Math.max(1, dedans)).toFixed(1)} %)`
+    + ` · ${sousEta} à ETA ≤ ${ETA_MAX} min`
+    + (seuil === SEUILS[0] ? `  · sur ${dedans} décollages dans l'emprise · pic médian ${q(0.5)} km/h, p90 ${q(0.9)}, max ${pics[pics.length - 1]}` : ''));
 }
 console.log('\n⚠️ À rejouer sur trois jours CALMES et sur un orage réel avant de poser PI_RAFALE_ENABLED=1.\n');

@@ -204,11 +204,16 @@ const PUSH_LABELS = {
         eta: r => {
           const quand = r.etaMin === 0 ? 'en ce moment' : `vers ${new Date(r.etaAtMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })} (~${r.etaMin} min)`;
           const dou = r.secteur ? ` par le ${r.secteur}` : '';
-          const fond = (r.baseKmh != null && r.sautKmh != null && r.sautKmh >= 15) ? `, contre ${r.baseKmh} km/h en ce moment` : '';
+          const fond = (r.baseKmh != null && r.sautHitKmh != null) ? `, contre ${r.baseKmh} km/h en ce moment` : '';
           const loin = (r.cpaKm != null && r.etaMin > 0 && r.cpaKm >= 2) ? `, front à ~${Math.round(r.cpaKm)} km` : '';
           // ⛔ L'ÂGE EST TOUJOURS DIT, frais ou pas (arbitrage Yann 09/09). Un run AROME-PI frais a DÉJÀ une heure : le taire ferait passer une prévision d'il y a une heure pour une mesure de maintenant.
           const age = r.fraicheur === 'ancienne' ? `, run ancien (${r.runAgeMin} min)` : ` (${r.runAgeMin} min)`;
-          return `Rafales jusqu'à ${r.gustKmh} km/h prévues ${quand}${dou}${fond}${loin} — prévision Météo-France AROME-PI, run de ${r.runHHMM}${age}. Source : Météo-France, Licence Ouverte 2.0. Une prévision, pas une mesure : vérifie les balises avant de décoller.`;
+          // ⛔ LE SEUIL EST NOMMÉ, ET C'EST CELUI DU PILOTE. Sans ça, le
+          // push a l'air d'un jugement de l'app (« 47 km/h, c'est
+          // beaucoup ? ») au lieu d'être ce qu'il est : le franchissement
+          // du nombre que CE pilote a réglé pour CE site.
+          const seuil = r.seuilKmh != null ? ` — au-delà de ton seuil de ${Math.round(r.seuilKmh)} km/h` : '';
+          return `Rafales jusqu'à ${r.gustKmh} km/h prévues ${quand}${dou}${fond}${loin}${seuil}. Prévision Météo-France AROME-PI, run de ${r.runHHMM}${age} — une PRÉVISION sur une maille de 2 km, pas une mesure : vérifie les balises avant de décoller. Source : Météo-France, Licence Ouverte 2.0.`;
         },
       },
       // ── Le texte d'une alerte de phénomène, PAR FAMILLE ───────────
@@ -360,10 +365,11 @@ const PUSH_LABELS = {
         eta: r => {
           const quand = r.etaMin === 0 ? 'right now' : `around ${new Date(r.etaAtMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })} (~${r.etaMin} min)`;
           const dou = r.secteur ? ` from the ${r.secteur}` : '';
-          const fond = (r.baseKmh != null && r.sautKmh != null && r.sautKmh >= 15) ? `, against ${r.baseKmh} km/h right now` : '';
+          const fond = (r.baseKmh != null && r.sautHitKmh != null) ? `, against ${r.baseKmh} km/h right now` : '';
           const loin = (r.cpaKm != null && r.etaMin > 0 && r.cpaKm >= 2) ? `, front ~${Math.round(r.cpaKm)} km away` : '';
           const age = r.fraicheur === 'ancienne' ? `, ageing run (${r.runAgeMin} min)` : ` (${r.runAgeMin} min old)`;
-          return `Gusts up to ${r.gustKmh} km/h expected ${quand}${dou}${fond}${loin} — Météo-France AROME-PI forecast, run of ${r.runHHMM}${age}. Source: Météo-France, Licence Ouverte 2.0. A forecast, not a measurement: check the beacons before taking off.`;
+          const seuil = r.seuilKmh != null ? ` — above your ${Math.round(r.seuilKmh)} km/h threshold` : '';
+          return `Gusts up to ${r.gustKmh} km/h expected ${quand}${dou}${fond}${loin}${seuil}. Météo-France AROME-PI forecast, run of ${r.runHHMM}${age} — a FORECAST on a 2 km grid cell, not a measurement: check the beacons before taking off. Source: Météo-France, Licence Ouverte 2.0.`;
         },
       },
       // Miroir exact du bloc `fr` — même découpage par famille, mêmes
@@ -2239,12 +2245,56 @@ const FW_GUST_PI_ETA_MAX_MIN = Number(process.env.FW_GUST_PI_ETA_MAX_MIN) || 120
 //: Seuil de rafale, en km/h — surchargeable SANS réingérer une seule
 //: passe (les octets sont en m/s et ne portent aucun seuil).
 const FW_GUST_PI_SEUIL_KMH = Number(process.env.FW_GUST_PI_SEUIL_KMH) || PI_RAFALE.DEFAUTS.seuilKmh;
+//: ⛔ LA SECONDE CONDITION. La rafale doit dépasser le FOND du moment
+//: d'au moins ce saut — c'est ce qui distingue une CELLULE d'un RÉGIME
+//: venté, et le seuil absolu ne le peut pas. Mesuré le 09/09 sur les
+//: 2 066 décollages dans l'emprise : au seuil de 30 km/h (celui que
+//: « Surveiller ce site » pose en dur), 857 sites franchissaient — 41,5 %
+//: — et 36 seulement voyaient une vraie cellule. Sans cette condition,
+//: ancrer le seuil sur la surveillance ne suffit pas : les seuils des
+//: pilotes ont été réglés pour du vent MESURÉ à un anémomètre, pas pour
+//: un maximum de modèle sur une maille de 2 km réduite par MAXIMUM.
+const FW_GUST_PI_SAUT_MIN_KMH = Number(process.env.FW_GUST_PI_SAUT_MIN_KMH) || PI_RAFALE.DEFAUTS.sautMinKmh;
 const piRafaleLecteur = new PI_RAFALE.LecteurRafale({ baseUrl: WIND_GRID_BASE_URL, fetch, journal: m => console.log(m) });
 /** La rafale prévue en un point, sur le run en RAM (jamais de réseau
- *  ici : le rafraîchissement est fait par l'appelant). */
-function rafalePiAt(lat, lon, nowMs = Date.now()) {
+ *  ici : le rafraîchissement est fait par l'appelant).
+ *
+ *  ⛔⛔ LE SEUIL EST UN ARGUMENT, ET C'EST TOUT LE SUJET (retour Yann,
+ *  09/09). Un nombre global — 40 km/h pour tout le monde — ne veut rien
+ *  dire : mesuré le 09/09, il mettait 325 décollages sur 2 066 en alerte
+ *  un jour de tramontane ordinaire. 40 km/h sur un site de Chartreuse
+ *  est un événement ; sur un site de Corbières, c'est mardi.
+ *
+ *  Le seuil pertinent existe déjà en base et c'est le pilote qui l'a
+ *  posé : `user_watched.seuil_rafale`, en km/h, pour CETTE balise ou CE
+ *  site. On ne fabrique donc aucun chiffre — on lit le sien.
+ *  `FW_GUST_PI_SEUIL_KMH` n'est plus qu'un REPLI, pour les lignes dont la
+ *  colonne est nulle. C'est la lecture `??` du foehn (`user_foehn_watch
+ *  .threshold_hpa ?? foehn_axes.threshold_hpa`), transposée.
+ *
+ *  ⚠️ Le seuil de `user_watched` a été réglé pour du vent MESURÉ par une
+ *  balise. Ici il juge une rafale PRÉVUE par un modèle, sur une maille de
+ *  2 km réduite par MAXIMUM. Ce n'est pas la même grandeur, et le push le
+ *  dit — mais c'est le seul nombre au monde qui exprime « au-delà de ça,
+ *  je ne veux plus être là », et l'inventer ailleurs serait pire. */
+function rafalePiAt(lat, lon, seuilKmh = FW_GUST_PI_SEUIL_KMH, nowMs = Date.now()) {
   if (!PI_RAFALE_READ) return null;
-  return PI_RAFALE.rafalePi(piRafaleLecteur.courante(), lat, lon, nowMs, { seuilKmh: FW_GUST_PI_SEUIL_KMH });
+  return PI_RAFALE.rafalePi(piRafaleLecteur.courante(), lat, lon, nowMs,
+    { seuilKmh, sautMinKmh: FW_GUST_PI_SAUT_MIN_KMH });
+}
+/** Le seuil de rafale de CETTE ligne surveillée, ou le repli. */
+function seuilRafaleDe(w) {
+  const s = Number(w?.seuil_rafale);
+  return Number.isFinite(s) && s > 0 ? s : FW_GUST_PI_SEUIL_KMH;
+}
+/** `"43.1000|2.5000"` → `{ lat, lon }`, ou null. La clé de site EST la
+ *  coordonnée du décollage (web/src/lib/decos.ts : `siteKey`), ce qui
+ *  permet de lire la prévision AU DÉCOLLAGE plutôt qu'aux balises qui
+ *  l'entourent. */
+function coordsDuSite(cle) {
+  const [a, b] = String(cle).split('|');
+  const lat = Number(a), lon = Number(b);
+  return (Number.isFinite(lat) && Number.isFinite(lon)) ? { lat, lon } : null;
 }
 /** « 15:00 » heure de Paris, pour nommer un run dans un push. */
 function piRafaleRunHHMM(runIso) {
@@ -6004,6 +6054,10 @@ app.get('/precip-piaf/health', (req, res) => {
 // quand la chaîne ne pousse pas encore (`pousse: false`). C'est ce qui
 // permet d'OBSERVER le seuil sur des jours réels avant de l'ouvrir.
 // Même forme et même contrat que /precip-signal.
+// ⚠️ Les clés sont soit un `beacon_id` (balise posée à la main), soit
+// `site:<lat|lon>` (geste « Surveiller ce site »), comme les scopes de
+// `user_flightwatch_alerts`. Demander un `beacon_id` d'un site rendra
+// `null` : c'est le site qui porte le signal, pas ses balises.
 app.get('/rafale-signal', (req, res) => {
   const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
   const signals = {};
@@ -6030,12 +6084,23 @@ app.get('/rafale-pi', async (req, res) => {
 // dernier échec, et ce que la chaîne fait vraiment (lit ? pousse ?).
 // Lecture seule, donnée publique — même politique que /precip-piaf/health.
 app.get('/rafale-pi/health', (req, res) => {
+  const vals = [...gustPiSignalCache.values()];
   res.json({
     lit: PI_RAFALE_READ, pousse: PI_RAFALE_ENABLED,
-    seuils: { ...PI_RAFALE.DEFAUTS, seuilKmh: FW_GUST_PI_SEUIL_KMH },
+    // ⛔ `seuilKmh` n'est QU'UN REPLI. Le seuil qui décide est celui de
+    // la surveillance (`user_watched.seuil_rafale`) — par balise, ou le
+    // plus bas du groupe pour un site. Publier le repli sans le dire
+    // laisserait croire à un seuil unique, qui est précisément ce que ce
+    // lot a cessé de faire.
+    seuilVenuDe: 'user_watched.seuil_rafale (par balise, min du groupe pour un site)',
+    seuilRepliKmh: FW_GUST_PI_SEUIL_KMH,
+    sautMinKmh: FW_GUST_PI_SAUT_MIN_KMH,
+    autresSeuils: { ...PI_RAFALE.DEFAUTS, seuilKmh: undefined },
     etaMaxMin: FW_GUST_PI_ETA_MAX_MIN,
-    sitesEvalues: gustPiSignalCache.size,
-    sitesActifs: [...gustPiSignalCache.values()].filter(v => v?.detected).length,
+    evalues: gustPiSignalCache.size,
+    parSite: [...gustPiSignalCache.keys()].filter(k => k.startsWith('site:')).length,
+    parBalise: [...gustPiSignalCache.keys()].filter(k => !k.startsWith('site:')).length,
+    actifs: vals.filter(v => v?.detected).length,
     ...piRafaleLecteur.etat(),
   });
 });
@@ -7666,6 +7731,13 @@ async function pollAndNotify() {
     // (`origin_site` non nul). Une balise posée à la main garde son push
     // individuel : c'est la règle d'appartenance du lot 4.
     const windByUserSite = new Map();
+    // Lot 2 « cellule qui approche » : le même groupement, pour la
+    // rafale PRÉVUE. ⛔ Il ne se contente pas de grouper le réveil : il
+    // change le POINT DE LECTURE. `origin_site` EST la coordonnée du
+    // décollage, donc on lit la prévision AU DÉCOLLAGE — là où le pilote
+    // sera — au lieu de la lire aux trois balises qui l'entourent et de
+    // pousser trois fois pour la même cellule.
+    const gustPiByUserSite = new Map();
     // decos.json (nom des sites) : chargé une fois par poll, hors de la
     // boucle. Échec = pas de nom, jamais d'erreur — cf. loadDecoNames.
     await loadDecoNames();
@@ -7854,32 +7926,60 @@ async function pollAndNotify() {
       // calibré qui pousse, c'est un pilote qui apprend à ignorer.
       //
       // ⚠️ `gust_pi`, PAS `gust_front` : voir le pavé du module plus haut.
-      if (PI_RAFALE_READ && fwPrefsForUser.sig_gust_pi && rel.lat != null && rel.lon != null) {
-        const gust = rafalePiAt(rel.lat, rel.lon);
-        const gustArrive = !!(gust && !gust.refus && gust.hit && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
-        gustPiSignalCache.set(String(w.beacon_id), {
-          detected: gustArrive, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED,
-          rafale: gust ? { ...gust, runHHMM: piRafaleRunHHMM(gust.run) } : null,
-        });
-        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.gust_pi;
-        await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'gust_pi', level: 2,
-          active: gustArrive, notify: notify && PI_RAFALE_ENABLED,
-          buildPush: () => ({
-            title: `💨 ${rel.nom}`,
-            body: lbl.eta({ ...gust, runHHMM: piRafaleRunHHMM(gust.run) }),
-            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
-            tag: `fw-gust_pi-${w.beacon_id}`, requireInteraction: false,
-            data: {
-              url: '/', kind: 'flightwatch', signal: 'gust_pi', level: 2,
-              scope: String(w.beacon_id), voice: false,
-              value: gust.gustKmh, unit: 'km/h', source: 'arome-pi',
-              run: gust.run, runAgeMin: gust.runAgeMin, etaMin: gust.etaMin,
-              bearingDeg: gust.bearingDeg, cpaKm: gust.cpaKm,
-              baseKmh: gust.baseKmh, sautKmh: gust.sautKmh, seuilKmh: gust.seuilKmh,
-            },
-          }),
-        });
+      if (PI_RAFALE_READ && fwPrefsForUser.sig_gust_pi) {
+        // ⛔⛔ LE SEUIL VIENT DE LA SURVEILLANCE, PAS D'UNE CONSTANTE
+        // (retour Yann, 09/09). `user_watched.seuil_rafale` est le
+        // nombre que CE pilote a posé pour CETTE balise : « au-delà, je
+        // ne veux plus être là ». Un 40 global mettait 325 décollages
+        // sur 2 066 en alerte un jour de tramontane ordinaire — juste,
+        // et inutile.
+        const seuilKmh = seuilRafaleDe(w);
+        if (w.origin_site) {
+          // ── Ligne née d'un geste « Surveiller ce site » ─────────────
+          // On n'évalue rien ici : on accumule, et le site est lu UNE
+          // fois après la boucle, à sa propre coordonnée. Trois balises
+          // autour d'un même déco voient la même cellule à 2 km près ;
+          // pousser trois fois, c'est apprendre au pilote à ignorer.
+          const gkey = `${w.user_id}|${w.origin_site}`;
+          const g = gustPiByUserSite.get(gkey) || {
+            userId: w.user_id, originSite: w.origin_site,
+            beacons: [], seuilKmh: null,
+          };
+          g.beacons.push(String(w.beacon_id));
+          // ⚠️ Le PLUS BAS des seuils du groupe — même règle que
+          // `repeat_interval_min` au lot 5 : sur un groupe, le doute se
+          // tranche du côté qui pousse.
+          g.seuilKmh = g.seuilKmh === null ? seuilKmh : Math.min(g.seuilKmh, seuilKmh);
+          gustPiByUserSite.set(gkey, g);
+        } else if (rel.lat != null && rel.lon != null) {
+          // ── Balise posée à la main : on lit à la balise ─────────────
+          const gust = rafalePiAt(rel.lat, rel.lon, seuilKmh);
+          const gustArrive = !!(gust && !gust.refus && gust.cellule && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
+          gustPiSignalCache.set(String(w.beacon_id), {
+            detected: gustArrive, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED,
+            seuilKmh, seuilSource: Number(w.seuil_rafale) > 0 ? 'pilote' : 'defaut',
+            rafale: gust ? { ...gust, runHHMM: piRafaleRunHHMM(gust.run) } : null,
+          });
+          const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.gust_pi;
+          await evaluateFwSignal({
+            userId: w.user_id, scope: String(w.beacon_id), signal: 'gust_pi', level: 2,
+            active: gustArrive, notify: notify && PI_RAFALE_ENABLED,
+            buildPush: () => ({
+              title: `💨 ${rel.nom}`,
+              body: lbl.eta({ ...gust, runHHMM: piRafaleRunHHMM(gust.run) }),
+              icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+              tag: `fw-gust_pi-${w.beacon_id}`, requireInteraction: false,
+              data: {
+                url: '/', kind: 'flightwatch', signal: 'gust_pi', level: 2,
+                scope: String(w.beacon_id), voice: false,
+                value: gust.gustKmh, unit: 'km/h', source: 'arome-pi',
+                run: gust.run, runAgeMin: gust.runAgeMin, etaMin: gust.etaMin,
+                bearingDeg: gust.bearingDeg, cpaKm: gust.cpaKm,
+                baseKmh: gust.baseKmh, sautKmh: gust.sautHitKmh, seuilKmh: gust.seuilKmh, sautMinKmh: gust.sautMinKmh,
+              },
+            }),
+          });
+        }
       }
 
       // ── Lot 2/2b flightwatch : chute de pression rapide ────────────
@@ -8322,6 +8422,66 @@ async function pollAndNotify() {
             url: '/', kind: 'siteWatch', signal: 'wind_threshold',
             scope, originSite: g.originSite,
             beacons: g.beacons.map(b => b.id),
+          },
+        }),
+      });
+    }
+
+    // ── Lot 2 « cellule qui approche » : la rafale PRÉVUE, PAR SITE ───
+    // ⛔⛔ ICI ON NE GROUPE PAS UN RÉVEIL, ON CHANGE DE POINT DE LECTURE.
+    // Le push de seuil vent ci-dessus groupe des MESURES : chaque balise
+    // a vu ce qu'elle a vu, et le corps les nomme une par une. Une
+    // PRÉVISION, elle, ne se mesure nulle part : elle se lit sur une
+    // maille de 2 km. Trois balises autour d'un même décollage tombent
+    // dans la même maille ou dans ses voisines — les interroger
+    // séparément ne produirait pas trois informations, mais la même
+    // trois fois.
+    //
+    // `origin_site` EST la coordonnée du décollage (`siteKey`,
+    // web/src/lib/decos.ts : `${lat.toFixed(4)}|${lon.toFixed(4)}`). On
+    // lit donc la prévision LÀ OÙ LE PILOTE SERA, et pas là où sont les
+    // anémomètres. C'est la seule chose que ce lot peut faire mieux que
+    // la mesure, et c'est exactement pour ça qu'il existe.
+    //
+    // ⚠️ Le seuil du groupe est le PLUS BAS de ses balises (posé dans la
+    // boucle) — même règle que `repeat_interval_min` au lot 5 : sur un
+    // groupe, le doute se tranche du côté qui pousse.
+    for (const g of gustPiByUserSite.values()) {
+      const c = coordsDuSite(g.originSite);
+      const scope = `site:${g.originSite}`;
+      if (!c) {
+        // Une clé de site illisible n'est pas un site sans rafale : on le
+        // DIT plutôt que de laisser un cache vide passer pour un calme.
+        gustPiSignalCache.set(scope, { detected: false, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED, rafale: null, refusLocal: 'cle-de-site-illisible' });
+        continue;
+      }
+      const gust = rafalePiAt(c.lat, c.lon, g.seuilKmh);
+      const gustArrive = !!(gust && !gust.refus && gust.cellule && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
+      const site = siteLabelFromKey(g.originSite);
+      gustPiSignalCache.set(scope, {
+        detected: gustArrive, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED,
+        seuilKmh: g.seuilKmh, originSite: g.originSite, site,
+        beacons: g.beacons,
+        rafale: gust ? { ...gust, runHHMM: piRafaleRunHHMM(gust.run) } : null,
+      });
+      const lbl = pushLabels(langByUser.get(g.userId)).flightwatch.gust_pi;
+      await evaluateFwSignal({
+        userId: g.userId, scope, signal: 'gust_pi', level: 2,
+        active: gustArrive, notify: activeByUser.has(g.userId) && PI_RAFALE_ENABLED,
+        buildPush: () => ({
+          title: `💨 ${site}`,
+          body: lbl.eta({ ...gust, runHHMM: piRafaleRunHHMM(gust.run) }),
+          icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+          // Un tag PAR SITE : les push d'un même décollage se remplacent
+          // dans le tiroir au lieu de s'y empiler.
+          tag: `fw-gust_pi-site-${g.originSite}`, requireInteraction: false,
+          data: {
+            url: '/', kind: 'siteWatch', signal: 'gust_pi', level: 2,
+            scope, originSite: g.originSite, beacons: g.beacons, voice: false,
+            value: gust.gustKmh, unit: 'km/h', source: 'arome-pi',
+            run: gust.run, runAgeMin: gust.runAgeMin, etaMin: gust.etaMin,
+            bearingDeg: gust.bearingDeg, cpaKm: gust.cpaKm,
+            baseKmh: gust.baseKmh, sautKmh: gust.sautHitKmh, seuilKmh: gust.seuilKmh, sautMinKmh: gust.sautMinKmh,
           },
         }),
       });

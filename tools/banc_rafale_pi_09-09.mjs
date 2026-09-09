@@ -278,6 +278,60 @@ section('6. Le seuil, la contiguïté, et les verdicts sans contact');
 }
 
 // ══════════════════════════════════════════════════════════════════════
+section('6 bis. L\'ANCRAGE — le seuil vient de la surveillance');
+//  ⛔ La correction du 09/09. Deux pilotes, le MÊME site, le MÊME run :
+//  celui des Corbières a réglé 55 km/h parce que la tramontane y souffle
+//  tous les jours ; celui de Chartreuse a réglé 30. Une cellule à
+//  48 km/h doit réveiller le second et laisser le premier tranquille.
+{
+  const carte = fabriquer({ centre: trajectoire({ deDeg: 225, vKmh: 30, d0Km: 37.5 }), kmh: 48, fondKmh: 22 });
+  const corbieres = R.rafalePi(carte, SITE.lat, SITE.lon, MAINTENANT_MS, { seuilKmh: 55 });
+  const chartreuse = R.rafalePi(carte, SITE.lat, SITE.lon, MAINTENANT_MS, { seuilKmh: 30 });
+  check('une cellule à 48 km/h ne réveille PAS le seuil 55', corbieres.hit === false);
+  check('…et réveille le seuil 30', chartreuse.hit === true, `${chartreuse.gustKmh} km/h`);
+  check('le seuil appliqué est RENDU, pour que le push le nomme',
+    corbieres.seuilKmh === 55 && chartreuse.seuilKmh === 30);
+  check('…y compris dans un refus', R.rafalePi(carte, 47.26, 11.39, MAINTENANT_MS, { seuilKmh: 55 }).seuilKmh === 55);
+  check('le PIC, lui, ne dépend pas du seuil : les deux voient 48 km/h',
+    corbieres.picKmh === chartreuse.picKmh && Math.abs(corbieres.picKmh - 48) <= 2);
+  // SABOTAGE : revenir à un seuil global effacerait la distinction.
+  const global = [55, 30].map(() => R.rafalePi(carte, SITE.lat, SITE.lon, MAINTENANT_MS));
+  check('SABOTAGE seuil global : les deux pilotes reçoivent le MÊME verdict — c\'est exactement ce que la correction du 09/09 supprime',
+    global[0].hit === global[1].hit && global[0].seuilKmh === R.DEFAUTS.seuilKmh);
+  // Le repli sert quand la surveillance ne porte rien.
+  check(`le repli du module vaut ${R.DEFAUTS.seuilKmh} km/h, et n'est qu'un repli`,
+    R.rafalePi(carte, SITE.lat, SITE.lon, MAINTENANT_MS).seuilKmh === R.DEFAUTS.seuilKmh);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+section('6 ter. LE SAUT — une cellule, ou seulement du vent ?');
+//  ⛔ La seconde correction du 09/09, et elle est aussi importante que
+//  l'ancrage. Deux runs, MÊME rafale annoncée (55 km/h), MÊME seuil (30) :
+//  l'un sur un fond calme à 12 km/h, l'autre un jour de tramontane à
+//  48 km/h continus. Le premier est une cellule. Le second est mardi.
+{
+  const cellule = fabriquer({ centre: trajectoire({ deDeg: 225, vKmh: 30, d0Km: 37.5 }), kmh: 55, fondKmh: 12 });
+  const regime = fabriquer({ centre: trajectoire({ deDeg: 225, vKmh: 30, d0Km: 37.5 }), kmh: 55, fondKmh: 48 });
+  const rc = R.rafalePi(cellule, SITE.lat, SITE.lon, MAINTENANT_MS, { seuilKmh: 30 });
+  const rr = R.rafalePi(regime, SITE.lat, SITE.lon, MAINTENANT_MS, { seuilKmh: 30 });
+  check('les DEUX franchissent le seuil de 30', rc.hit && rr.hit);
+  check(`la cellule se détache du fond : saut ${rc.sautHitKmh} km/h ⇒ pousse`, rc.cellule === true);
+  check(`le régime venté ne se détache pas : saut ${rr.sautHitKmh} km/h ⇒ NE POUSSE PAS`, rr.cellule === false);
+  check('…et `hit` reste vrai dans les deux cas — l\'information n\'est pas perdue, elle est nommée',
+    rr.hit === true && rr.gustKmh >= 50);
+  check('le saut exigé est publié, pour que le réglage soit lisible',
+    rc.sautMinKmh === R.DEFAUTS.sautMinKmh && rr.sautMinKmh === R.DEFAUTS.sautMinKmh);
+  // SABOTAGE : sans la condition de saut, les deux pousseraient.
+  check('SABOTAGE sans saut (sautMinKmh = 0) : le jour de tramontane pousse AUSSI — c\'est ce que la correction supprime',
+    R.rafalePi(regime, SITE.lat, SITE.lon, MAINTENANT_MS, { seuilKmh: 30, sautMinKmh: 0 }).cellule === true);
+  // SABOTAGE : un saut démesuré ne laisserait plus rien passer.
+  check('SABOTAGE saut = 60 km/h : même la vraie cellule est refusée',
+    R.rafalePi(cellule, SITE.lat, SITE.lon, MAINTENANT_MS, { seuilKmh: 30, sautMinKmh: 60 }).cellule === false);
+  check('un refus porte aussi `cellule: false` et `sautMinKmh`',
+    (() => { const x = R.rafalePi(cellule, 47.26, 11.39, MAINTENANT_MS, { seuilKmh: 30 }); return x.cellule === false && x.sautMinKmh === R.DEFAUTS.sautMinKmh; })());
+}
+
+// ══════════════════════════════════════════════════════════════════════
 section('7. Le coût — ce que ça pèse dans un poll de 200 sites');
 {
   const carte = fabriquer({ centre: trajectoire({ deDeg: 225, vKmh: 30, d0Km: 50 }), kmh: 70, fondKmh: 15 });
@@ -380,8 +434,11 @@ if (process.argv.includes('--production')) {
                    ['Millau — Brunas', 44.09, 3.10], ['Innsbruck', 47.26, 11.39],
                    ['Ouessant', 48.46, -5.09]];
     for (const [nom, lat, lon] of sites) {
-      const r = R.rafalePi(carte, lat, lon, now);
-      console.log(`    ${nom.padEnd(20)} ${(r.refus ?? r.trend).padEnd(12)} pic=${r.picKmh ?? '—'} km/h dans ${r.picDansMin ?? '—'} min · fond=${r.baseKmh ?? '—'} · eta=${r.etaMin ?? '—'} · cpa=${r.cpaKm ?? '—'} · ${r.secteur ?? '—'} · âge=${r.runAgeMin} ${r.fraicheur ?? ''}`);
+      // ⚠️ Seuil 30 km/h : celui que « Surveiller ce site » pose EN DUR
+      // pour chaque balise d'un site. C'est donc la vraie configuration
+      // de la plupart des surveillances, pas un chiffre de banc.
+      const r = R.rafalePi(carte, lat, lon, now, { seuilKmh: 30 });
+      console.log(`    ${nom.padEnd(20)} ${(r.refus ?? r.trend).padEnd(12)} pic=${String(r.picKmh ?? '—').padStart(3)} km/h dans ${String(r.picDansMin ?? '—').padStart(3)} min · ici=${String(r.baseKmh ?? '—').padStart(3)} · régime=${String(r.regimeKmh ?? '—').padStart(3)} · saut=${String(r.sautHitKmh ?? '—').padStart(4)} · ${r.hit ? 'HIT' : '   '} ${r.cellule ? 'CELLULE' : '       '} · eta=${r.etaMin ?? '—'} · ${r.secteur ?? '—'} · âge=${r.runAgeMin} ${r.fraicheur ?? ''}`);
     }
     check('Innsbruck → hors-emprise, nommé', R.rafalePi(carte, 47.26, 11.39, now).refus === 'hors-emprise');
     check(`âge du run ${lecteur.etat().runAgeMin} min ≤ ${R.DEFAUTS.ageRefusMin}`,
