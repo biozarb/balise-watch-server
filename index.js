@@ -194,6 +194,23 @@ const PUSH_LABELS = {
           return `Pluie prévue ${quand}${dou}${loin} — prévision Météo-France, passe de ${r.passeHHMM}${age}.${obs} Source : Météo-France, Licence Ouverte 2.0. Vérifie les balises avant de décoller.`;
         },
       },
+      // Lot 2 « cellule qui approche » (09/09) : la RAFALE prévue par
+      // AROME-PI. ⛔ Le push NOMME le run et son âge — un run frais a
+      // DÉJÀ une heure (latence du producteur), et le taire ferait
+      // croire à une mesure. Il dit aussi le FOND, parce que 55 km/h
+      // sur un fond à 12 et 55 sur un fond à 50 ne se vivent pas
+      // pareil. ⚠️ Rien de commun avec `gust_front`, qui CONSTATE.
+      gust_pi: {
+        eta: r => {
+          const quand = r.etaMin === 0 ? 'en ce moment' : `vers ${new Date(r.etaAtMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })} (~${r.etaMin} min)`;
+          const dou = r.secteur ? ` par le ${r.secteur}` : '';
+          const fond = (r.baseKmh != null && r.sautKmh != null && r.sautKmh >= 15) ? `, contre ${r.baseKmh} km/h en ce moment` : '';
+          const loin = (r.cpaKm != null && r.etaMin > 0 && r.cpaKm >= 2) ? `, front à ~${Math.round(r.cpaKm)} km` : '';
+          // ⛔ L'ÂGE EST TOUJOURS DIT, frais ou pas (arbitrage Yann 09/09). Un run AROME-PI frais a DÉJÀ une heure : le taire ferait passer une prévision d'il y a une heure pour une mesure de maintenant.
+          const age = r.fraicheur === 'ancienne' ? `, run ancien (${r.runAgeMin} min)` : ` (${r.runAgeMin} min)`;
+          return `Rafales jusqu'à ${r.gustKmh} km/h prévues ${quand}${dou}${fond}${loin} — prévision Météo-France AROME-PI, run de ${r.runHHMM}${age}. Source : Météo-France, Licence Ouverte 2.0. Une prévision, pas une mesure : vérifie les balises avant de décoller.`;
+        },
+      },
       // ── Le texte d'une alerte de phénomène, PAR FAMILLE ───────────
       //
       // ⚠️ DÉBOGAGE 08/08/2026 (retour Yann sur une notification reçue
@@ -339,6 +356,16 @@ const PUSH_LABELS = {
           return `Rain expected ${quand}${dou}${loin} — Météo-France nowcast, run of ${r.passeHHMM}${age}.${obs} Source: Météo-France, Licence Ouverte 2.0. Check the beacons before taking off.`;
         },
       },
+      gust_pi: {
+        eta: r => {
+          const quand = r.etaMin === 0 ? 'right now' : `around ${new Date(r.etaAtMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })} (~${r.etaMin} min)`;
+          const dou = r.secteur ? ` from the ${r.secteur}` : '';
+          const fond = (r.baseKmh != null && r.sautKmh != null && r.sautKmh >= 15) ? `, against ${r.baseKmh} km/h right now` : '';
+          const loin = (r.cpaKm != null && r.etaMin > 0 && r.cpaKm >= 2) ? `, front ~${Math.round(r.cpaKm)} km away` : '';
+          const age = r.fraicheur === 'ancienne' ? `, ageing run (${r.runAgeMin} min)` : ` (${r.runAgeMin} min old)`;
+          return `Gusts up to ${r.gustKmh} km/h expected ${quand}${dou}${fond}${loin} — Météo-France AROME-PI forecast, run of ${r.runHHMM}${age}. Source: Météo-France, Licence Ouverte 2.0. A forecast, not a measurement: check the beacons before taking off.`;
+        },
+      },
       // Miroir exact du bloc `fr` — même découpage par famille, mêmes
       // verdicts. Les 6 autres langues n'existent pas dans PUSH_LABELS :
       // `pushLabels()` retombe ici, donc ce bloc est celui que reçoit
@@ -471,6 +498,7 @@ const FW_DEFAULTS = {
   sig_vigilance:         true,
   sig_lightning:         true,
   sig_precip:            true, // Lot C : précipitations à proximité (radar RainViewer)
+  sig_gust_pi:           true, // Lot 2 « cellule qui approche » : rafale PRÉVUE par AROME-PI. ⚠️ Défaut `true`, mais la chaîne entière est gatée par PI_RAFALE_ENABLED (opt-in, OFF) : rien ne part tant que le seuil n'est pas calibré. La colonne `sig_gust_pi` de `user_surveillance` n'existe pas encore — `fwPrefs` retombe donc sur ce défaut, et le SQL attend dans `add_sig_gust_pi.sql`, à exécuter par Yann.
   sig_freezing_level:    false, // info pure, off par défaut (cf. schéma Lot 0)
   lightning_radius_km:   50,
   wind_surge_factor:     1.8,
@@ -2169,6 +2197,64 @@ function piafPasseHHMM(passeIso) {
   const t = Date.parse(passeIso);
   return Number.isFinite(t) ? new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' }) : '?';
 }
+
+// ── Lot « cellule qui approche », lot 2 (09/09/2026) : la RAFALE prévue
+// par AROME-PI, tranche de 15 min, dans l'emprise du modèle. Toute la
+// logique vit dans lib/rafale-pi.js (module PUR, banc
+// tools/banc_rafale_pi_09-09.mjs) ; ici on ne fait que tenir UN run en
+// RAM (16,1 Mo, retéléchargé quand `dernier.run` avance) et le donner à
+// qui le demande : le poll flightwatch (signal `gust_pi`) et
+// /rafale-signal.
+//
+// ⛔⛔ CE N'EST PAS `gust_front`, ET LA CONFUSION COÛTERAIT UNE ALERTE
+// SUR DEUX. `gust_front` CONSTATE un front de rafales sur le réseau
+// RADOME (gust-front.js, scope `gust_front:<event.id>`, table
+// gust_front_events). `gust_pi` PRÉVOIT sur un modèle, scope
+// `<beacon_id>`. La clé de dédup étant `(user_id, scope, signal)`, deux
+// noms distincts = deux lignes distinctes = les deux peuvent parler du
+// même orage sans s'effacer l'un l'autre. Ils ne partagent NI table, NI
+// seuil, NI vocabulaire de push.
+//
+// ⛔ CE QUE ÇA NE REMPLACE PAS : `wind_surge` reste la MESURE (la balise
+// a vu le vent monter) et garde ses champs. `gust_pi` est une PRÉVISION
+// et arrive dans son propre objet, avec son run, son âge et son
+// attribution (Licence Ouverte 2.0). Chaque source parle à son nom.
+//
+// ⛔ OPT-IN, ET OFF PAR DÉFAUT — contrairement à PIAF. Le seuil de
+// 40 km/h n'est PAS calibré : mesuré le 09/09 à 16:08 Z sur le run
+// 15:00 Z, 10,5 % des mailles de la boîte le dépassaient déjà (journée
+// de tramontane). Tant qu'un épisode réel n'a pas été rejoué, la chaîne
+// ÉVALUE et EXPOSE (/rafale-signal, /rafale-pi/health) mais ne pousse
+// rien : PI_RAFALE_ENABLED=1 pour ouvrir les push, PI_RAFALE_READ=0
+// pour tout couper, lecture comprise.
+const PI_RAFALE = require('./lib/rafale-pi');
+//: Lecture du calque : ON par défaut (donnée publique déjà sur R2).
+const PI_RAFALE_READ = process.env.PI_RAFALE_READ !== '0';
+//: ⛔ PUSH : OFF par défaut, tant que le seuil n'est pas calibré.
+const PI_RAFALE_ENABLED = process.env.PI_RAFALE_ENABLED === '1';
+//: Au-delà, une rafale prévue ne déclenche plus de push : à 4 h, le
+//: pilote n'a rien à décider maintenant, et le run aura été remplacé
+//: trois fois d'ici là.
+const FW_GUST_PI_ETA_MAX_MIN = Number(process.env.FW_GUST_PI_ETA_MAX_MIN) || 120;
+//: Seuil de rafale, en km/h — surchargeable SANS réingérer une seule
+//: passe (les octets sont en m/s et ne portent aucun seuil).
+const FW_GUST_PI_SEUIL_KMH = Number(process.env.FW_GUST_PI_SEUIL_KMH) || PI_RAFALE.DEFAUTS.seuilKmh;
+const piRafaleLecteur = new PI_RAFALE.LecteurRafale({ baseUrl: WIND_GRID_BASE_URL, fetch, journal: m => console.log(m) });
+/** La rafale prévue en un point, sur le run en RAM (jamais de réseau
+ *  ici : le rafraîchissement est fait par l'appelant). */
+function rafalePiAt(lat, lon, nowMs = Date.now()) {
+  if (!PI_RAFALE_READ) return null;
+  return PI_RAFALE.rafalePi(piRafaleLecteur.courante(), lat, lon, nowMs, { seuilKmh: FW_GUST_PI_SEUIL_KMH });
+}
+/** « 15:00 » heure de Paris, pour nommer un run dans un push. */
+function piRafaleRunHHMM(runIso) {
+  const t = Date.parse(runIso);
+  return Number.isFinite(t) ? new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' }) : '?';
+}
+/** L'état des signaux `gust_pi` par balise, pour /rafale-signal — écrit
+ *  à CHAQUE poll, y compris quand rien n'est détecté, comme
+ *  precipSignalCache. */
+const gustPiSignalCache = new Map();
 
 let gfModelGrid = null;
 let gfModelEtag = null;
@@ -5913,6 +5999,47 @@ app.get('/precip-piaf/health', (req, res) => {
   res.json({ enabled: PIAF_ETA_ENABLED, seuils: PIAF_ETA.DEFAUTS, etaMaxMin: FW_PRECIP_ETA_MAX_MIN, ...piafLecteur.etat() });
 });
 
+// ── Lot 2 « cellule qui approche » : la rafale prévue ────────────────
+// L'état du signal `gust_pi` par balise, écrit à CHAQUE poll — y compris
+// quand la chaîne ne pousse pas encore (`pousse: false`). C'est ce qui
+// permet d'OBSERVER le seuil sur des jours réels avant de l'ouvrir.
+// Même forme et même contrat que /precip-signal.
+app.get('/rafale-signal', (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  const signals = {};
+  for (const id of ids) signals[id] = gustPiSignalCache.get(id) ?? null;
+  res.json({ signals });
+});
+
+// La rafale prévue EN UN POINT, à la demande (fiche de site, plan de
+// coupe). ⛔ Elle ne remplace AUCUN champ de vent existant : elle arrive
+// dans son propre objet, avec son run, son âge et son attribution. Une
+// prévision glissée dans un champ de mesure serait attribuée à la
+// balise. Rafraîchissement paresseux (index.json au plus toutes les
+// 5 min, carte seulement si le run a avancé).
+app.get('/rafale-pi', async (req, res) => {
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ error: 'lat/lon requis' });
+  if (!PI_RAFALE_READ) return res.json({ rafale: null, enabled: false });
+  try { await piRafaleLecteur.rafraichir(); } catch { /* le lecteur journalise déjà */ }
+  const r = rafalePiAt(lat, lon);
+  res.json({ enabled: true, rafale: r ? { ...r, runHHMM: piRafaleRunHHMM(r.run) } : null });
+});
+
+// Santé du lecteur de rafale (lot 2) : le run en RAM, son âge, le
+// dernier échec, et ce que la chaîne fait vraiment (lit ? pousse ?).
+// Lecture seule, donnée publique — même politique que /precip-piaf/health.
+app.get('/rafale-pi/health', (req, res) => {
+  res.json({
+    lit: PI_RAFALE_READ, pousse: PI_RAFALE_ENABLED,
+    seuils: { ...PI_RAFALE.DEFAUTS, seuilKmh: FW_GUST_PI_SEUIL_KMH },
+    etaMaxMin: FW_GUST_PI_ETA_MAX_MIN,
+    sitesEvalues: gustPiSignalCache.size,
+    sitesActifs: [...gustPiSignalCache.values()].filter(v => v?.detected).length,
+    ...piRafaleLecteur.etat(),
+  });
+});
+
 // ── Étape 11 : stations Météo-France (lecture seule) ─────────────────
 // Sert le cache mfObsCache/mfStationsList (rafraîchi en tâche de fond,
 // cf. refreshMeteoFranceData) — jamais d'appel Météo-France déclenché
@@ -7348,6 +7475,15 @@ async function pollAndNotify() {
     // ~25 Mo seulement quand `dernier.passe` a avancé). Un échec garde la
     // passe précédente — c'est son âge qui décidera (lib/piaf-eta.js).
     if (PIAF_ETA_ENABLED && FW_PRECIP_ENABLED && watchedRows.length > 0) await piafLecteur.rafraichir();
+    // Lot 2 « cellule qui approche » : le run de rafale AROME-PI en RAM,
+    // UNE fois par poll et pour toutes les balises (index.json ~1 ko ;
+    // carte.bin 16,1 Mo seulement quand `dernier.run` a avancé, soit une
+    // fois par heure). Un échec garde le run précédent — c'est son âge
+    // qui décidera (lib/rafale-pi.js).
+    // ⚠️ Le rafraîchissement suit PI_RAFALE_READ, pas PI_RAFALE_ENABLED :
+    // on veut pouvoir OBSERVER le signal (/rafale-signal) avant d'ouvrir
+    // les push, et un cache vide ne s'observe pas.
+    if (PI_RAFALE_READ && watchedRows.length > 0) await piRafaleLecteur.rafraichir();
 
     // Langue par compte (Lot 3) : même lecture batchée par table que
     // surveillanceRows ci-dessus (sbGet sur user_language, jamais
@@ -7699,6 +7835,48 @@ async function pollAndNotify() {
               unit: piafArrive ? 'min' : 'km',
               source: piafArrive ? 'piaf' : 'rainviewer',
               ...(piafArrive ? { passe: piaf.passe, passeAgeMin: piaf.passeAgeMin, etaMin: piaf.etaMin, bearingDeg: piaf.bearingDeg, cpaKm: piaf.cpaKm } : {}),
+            },
+          }),
+        });
+      }
+
+      // ── Lot 2 « cellule qui approche » : RAFALE PRÉVUE (AROME-PI) ──
+      // Une cellule de rafale ≥ FW_GUST_PI_SEUIL_KMH sur au moins 3
+      // mailles 0,02° contiguës dans 3 km du site, dans les
+      // FW_GUST_PI_ETA_MAX_MIN prochaines minutes. Niveau 2 (vigilance) :
+      // push DOUX, pas de voix — c'est une PRÉVISION, et une prévision
+      // qui parle avec la voix d'une mesure serait crue comme une mesure.
+      //
+      // ⛔ ÉVALUÉ TOUJOURS, POUSSÉ SEULEMENT SI `PI_RAFALE_ENABLED`. Le
+      // cache est écrit à chaque poll même quand la chaîne est muette :
+      // c'est ce qui permettra de calibrer le seuil sur des jours réels
+      // (§5, calibration) AVANT d'envoyer le premier push. Un seuil non
+      // calibré qui pousse, c'est un pilote qui apprend à ignorer.
+      //
+      // ⚠️ `gust_pi`, PAS `gust_front` : voir le pavé du module plus haut.
+      if (PI_RAFALE_READ && fwPrefsForUser.sig_gust_pi && rel.lat != null && rel.lon != null) {
+        const gust = rafalePiAt(rel.lat, rel.lon);
+        const gustArrive = !!(gust && !gust.refus && gust.hit && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
+        gustPiSignalCache.set(String(w.beacon_id), {
+          detected: gustArrive, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED,
+          rafale: gust ? { ...gust, runHHMM: piRafaleRunHHMM(gust.run) } : null,
+        });
+        const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.gust_pi;
+        await evaluateFwSignal({
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'gust_pi', level: 2,
+          active: gustArrive, notify: notify && PI_RAFALE_ENABLED,
+          buildPush: () => ({
+            title: `💨 ${rel.nom}`,
+            body: lbl.eta({ ...gust, runHHMM: piRafaleRunHHMM(gust.run) }),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            tag: `fw-gust_pi-${w.beacon_id}`, requireInteraction: false,
+            data: {
+              url: '/', kind: 'flightwatch', signal: 'gust_pi', level: 2,
+              scope: String(w.beacon_id), voice: false,
+              value: gust.gustKmh, unit: 'km/h', source: 'arome-pi',
+              run: gust.run, runAgeMin: gust.runAgeMin, etaMin: gust.etaMin,
+              bearingDeg: gust.bearingDeg, cpaKm: gust.cpaKm,
+              baseKmh: gust.baseKmh, sautKmh: gust.sautKmh, seuilKmh: gust.seuilKmh,
             },
           }),
         });

@@ -299,6 +299,77 @@ def _controle_pluie():
             "de conversion — l'agrégat horaire additionnerait deux "
             "échelles différentes.")
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  LA RAFALE D'AROME-PI, TRANCHE DE 15 MIN — lot « cellule qui approche »,
+#  lot 2 (09/09/2026)
+#
+#  Le champ WCS est `WIND_SPEED_GUST_15MIN__…_ABOVE_GROUND_PT15M`, et
+#  eccodes le nomme `max_i10fg` — LE MÊME `court` que la ligne `rafale`
+#  de `PARAMS_SURFACE`. C'est bien la même grandeur (la rafale maximale à
+#  10 m, en m/s), mais PAS la même fenêtre d'agrégation, et c'est toute
+#  la raison de cette entrée séparée :
+#
+#      rafale (AROME)        `stepType = max`, tranche d'UNE HEURE
+#      rafale_pi_15min       `stepType = max`, tranche de QUINZE MINUTES
+#
+#  ⛔ CE QUE COÛTERAIT DE LES CONFONDRE. Un maximum horaire et un maximum
+#  de quart d'heure ne sont pas comparables : le premier est toujours ≥
+#  le second, et l'écart grandit avec la convection — exactement le cas
+#  où ce lot doit parler. Mélangés dans une même série, ils dessineraient
+#  une rafale qui « retombe » de 20 % à chaque changement de source,
+#  sans qu'une seule valeur soit fausse.
+#
+#  ⛔ LE PLAFOND RESTE 200 m/s, comme `rafale` : ici la tranche est plus
+#  COURTE, donc le maximum est plus petit — il n'y a pas de cumul qui
+#  s'emballe, et le plafond ne sert qu'à attraper une erreur de décodage.
+#  Mesuré le 09/09 à 16:08 Z sur la boîte entière (run 15:00Z, +15 min) :
+#  min 0,04 m/s, max 23,48 m/s.
+#
+#  ⚠️ `decalage = 0` et `facteur = 1` : on garde les **m/s** du GRIB
+#  jusqu'à l'octet publié. La conversion en km/h se fait chez le lecteur,
+#  UNE fois, et le manifeste dit l'unité — convertir ici obligerait le
+#  composite du lot 3 à deviner laquelle des deux unités il lit.
+PARAM_RAFALE_PI_15MIN = dict(
+    nom="rafale_pi_15min", court="max_i10fg", unite="m/s",
+    facteur=1.0, decalage=0.0,
+    pas_de_temps="maximum disjoint de 15 min",
+    source="Météo-France — AROME-PI (Licence Ouverte 2.0)")
+PLAFOND_PHYSIQUE["rafale_pi_15min"] = PLAFOND_PHYSIQUE["rafale"]
+
+
+# ⛔ LE MÊME CONTRÔLE QUE POUR LA PLUIE, ET POUR LA MÊME RAISON. Si un
+# jour `rafale` changeait d'unité (des km/h, par exemple) sans que cette
+# ligne suive, le composite du lot 3 comparerait des m/s à des km/h : un
+# facteur 3,6 entre deux nappes qui se ressemblent, et aucune erreur.
+def _controle_rafale():
+    ref = next((p for p in PARAMS_SURFACE if p["nom"] == "rafale"), None)
+    if ref is None:
+        raise AssertionError(
+            "`rafale` a disparu de PARAMS_SURFACE — `rafale_pi_15min` s'y "
+            "adosse pour que la rafale d'AROME-PI et celle d'AROME "
+            "restent la MÊME grandeur dans la même unité.")
+    for cle in ("unite", "court"):
+        if ref[cle] != PARAM_RAFALE_PI_15MIN[cle]:
+            raise AssertionError(
+                f"`rafale` porte {cle}={ref[cle]!r} et `rafale_pi_15min` "
+                f"{PARAM_RAFALE_PI_15MIN[cle]!r}. ⛔ Les deux décrivent la "
+                f"rafale à 10 m ; les afficher côte à côte suppose la "
+                f"même unité, et elle ne l'est plus.")
+    if ref.get("facteur", 1.0) != PARAM_RAFALE_PI_15MIN["facteur"]:
+        raise AssertionError(
+            "`rafale` et `rafale_pi_15min` n'ont plus le même facteur de "
+            "conversion — deux échelles différentes pour une même "
+            "grandeur.")
+    if ref["pas_de_temps"] == PARAM_RAFALE_PI_15MIN["pas_de_temps"]:
+        raise AssertionError(
+            "`rafale` et `rafale_pi_15min` annoncent la MÊME fenêtre "
+            "d'agrégation. ⛔ C'est justement ce qui les distingue : un "
+            "maximum horaire et un maximum de quart d'heure ne se "
+            "comparent pas, et les confondre ferait « retomber » la "
+            "rafale de 20 % au changement de source, sans une seule "
+            "valeur fausse.")
+
 # Paramètre fictif décrivant l'altitude géopotentielle, pour que
 # `quantifier()` lui applique les mêmes garde-fous qu'aux autres (NaN,
 # sentinelle, plafond physique) sans la faire passer par le float16.
@@ -621,3 +692,4 @@ def erreur_quantification(valeurs, param, dtype=np.float16):
 # les deux existent. Un contrôle qui ne s'exécute qu'au banc laisse
 # passer une divergence en production jusqu'au prochain déploiement.
 _controle_pluie()
+_controle_rafale()

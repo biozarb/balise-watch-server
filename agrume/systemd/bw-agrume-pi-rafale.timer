@@ -1,0 +1,44 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-pi-rafale.timer — toutes les 10 minutes        (09/09/2026)
+#
+#  ⛔ DIX MINUTES POUR UN PRODUCTEUR QUI PUBLIE UNE FOIS PAR HEURE, ET
+#  CE N'EST PAS UNE ERREUR. La latence de publication mesurée le 09/09
+#  va de 47 à 68 min, et le 08/09 la note parlait de H+2 h 40 : elle
+#  n'est pas une constante. Un rendez-vous horaire fixe raterait un run
+#  sur deux d'une demi-heure — et attendrait alors soixante minutes de
+#  plus pour rien. Repasser toutes les 10 min coûte UNE requête
+#  `DescribeCoverage` (~5 ko) par passage à vide, et garantit qu'un run
+#  est pris dans les dix minutes de sa publication, quelle qu'elle soit.
+#
+#  ⚠️ CINQ PASSAGES SUR SIX SORTENT DONC EN CODE 3. C'est le cas
+#  nominal ; `SuccessExitStatus=3` dans le service et le silence du
+#  lanceur (aucun ping sur le 3) en tiennent compte tous les deux.
+#
+#  ⛔ POURQUOI UN TIMER SYSTEMD ET PAS UN CRON GITHUB — mesuré sur ce
+#  dépôt, et recopié de `bw-agrume-piaf.timer` : le cron `*/10`
+#  d'Actions saute 81 % de ses créneaux, médiane 41 min, maximum
+#  6 h 39. Sur un produit dont la première échéance vaut 15 minutes,
+#  ce n'est pas un compromis, c'est un autre produit.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — déclenche l'ingestion de la rafale AROME-PI toutes les 10 min
+
+[Timer]
+OnCalendar=*:0/10
+# ⚠️ `Persistent=false` : au redémarrage du VPS, on NE RATTRAPE PAS les
+# passages manqués. Rattraper ingérerait un run déjà périmé, et
+# `dernier` reculerait — le client verrait la rafale remonter le temps.
+Persistent=false
+# ⚠️ 90 s de dispersion. Le timer tombe sur les minutes rondes et le
+# portail publie AUSSI sur les minutes rondes ; partir pile à l'instant
+# où tout le monde interroge est le meilleur moyen de prendre un 429.
+# ⓘ Plus large que les 30 s de PIAF parce que cette chaîne tire 48 Mo
+# quand elle trouve quelque chose, contre 25 pour PIAF, et qu'elles
+# partagent le même quota sans que leurs compteurs se voient (ils sont
+# PAR PROCESSUS). La dispersion est TIRÉE UNE FOIS par systemd et reste
+# stable — elle ne fait pas dériver la cadence.
+RandomizedDelaySec=90
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

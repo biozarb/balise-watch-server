@@ -1,0 +1,76 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-agrume-pi-rafale.service — l'ingestion de la RAFALE   (09/09/2026)
+#                                AROME-PI 15 min
+#                                Lot « cellule qui approche », lot 2
+#
+#  ⚠️ NE PAS CONFONDRE AVEC `bw-agrume-ingest-pi.service`. Celui-là tire
+#  les colonnes et la grille d'AROME-PI aux balises, sur six niveaux
+#  verticaux. Celui-ci tire UN champ de surface — la rafale à 10 m,
+#  tranche de 15 min — sur la boîte entière, pour en faire un calque.
+#  Deux chaînes, deux unités, deux voyants : elles peuvent tomber
+#  séparément et doivent le dire séparément.
+#
+#  ⚠️ POURQUOI SUR LE VPS. Parce que la clé Météo-France vit ici et n'en
+#  sort pas — c'est écrit dans le message d'erreur de `portail.py`
+#  lui-même. Et parce que le goulot de cette chaîne est le QUOTA du
+#  portail, pas la bande passante (48 Mo par run).
+#
+#  Installation (à faire par Yann — ce fichier ne s'installe pas seul) :
+#    sudo cp agrume/systemd/bw-agrume-pi-rafale.{service,timer} /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-agrume-pi-rafale.timer
+#    journalctl -u bw-agrume-pi-rafale -f
+#
+#  ⚠️ PRÉREQUIS : `~/.balise-watch-agrume-r2.env` doit porter le jeton
+#  AGRUME, seul autorisé à écrire dans `balise-watch-grids`. Le lanceur
+#  refuse de démarrer si le fichier est illisible, mais il ne peut pas
+#  deviner qu'un jeton lisible est trop étroit : ça, seul le premier run
+#  le dira.
+#
+#  ⓘ Voyant healthchecks.io à créer : **période 1 h · grâce 30 min**, et
+#  la variable `BW_AGRUME_PI_RAFALE_PING_URL` à poser dans
+#  `~/.balise-watch-alertes.env`. Sans elle le lanceur crie « PERSONNE
+#  NE SURVEILLE CETTE CHAÎNE » et le dit par le canal d'alerte.
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — ingestion de la rafale AROME-PI 15 min (calque 0,02°)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/agrume/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/agrume
+ExecStart=/home/debian/balise-watch/balise-watch-server/agrume/run-ingest-pi-rafale.sh
+# ⛔⛔ LE CODE 3 EST LE CAS NOMINAL, CINQ PASSAGES SUR SIX. Le producteur
+# ne sort qu'un run par heure et le timer passe toutes les 10 min. Sans
+# cette ligne, systemd compte chaque passage à vide comme un ÉCHEC :
+# `systemctl status` et `journalctl -p err` restent rouges en
+# permanence — et un voyant rouge permanent est un voyant qu'on cesse de
+# lire. C'est la faute que `bw-agrume-ingest-pi.service` a déjà corrigée
+# une fois, le 13/08 ; elle se reproduit à l'identique ici.
+SuccessExitStatus=3
+# ⚠️ Budget MESURÉ le 09/09 : 42 s pour 24 échéances (dont deux 502
+# retentés). 15 min est une ceinture, pas une contrainte — le script
+# crie lui-même dès 5 min.
+TimeoutStartSec=900
+# ⛔ `PrivateTmp=no` EXPRÈS : le verrou `flock` du lanceur vit dans
+# /tmp. Avec un /tmp privé, chaque exécution aurait le sien et le verrou
+# ne verrouillerait plus rien — deux processus écriraient le même index.
+PrivateTmp=no
+# Pas de Restart : un run manqué est repris à l'identique par le passage
+# suivant du timer, dix minutes plus tard (le portail garde ses runs
+# 4,25 jours). Réessayer en boucle sur une erreur de configuration
+# brûlerait du quota pour rien.
+Nice=5
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
