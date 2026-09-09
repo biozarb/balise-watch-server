@@ -148,7 +148,7 @@ def bloc_a_la_main(vals_u, vals_v, m, lat_min, lat_max, lon_min, lon_max, pas=No
     `pas` : ne garder que les nœuds multiples de `pas` (la grille ALT est
     décimée à 0,05° sur du 0,025° — les tuiles ET la pyramide ne voient
     qu'un point sur deux, le recalcul doit faire pareil)."""
-    su = sv = 0.0
+    su = sv = ss = 0.0
     n = 0
     mx = -1.0
     sur_pas = lambda x: pas is None or abs(x / pas - round(x / pas)) < 1e-6   # noqa: E731
@@ -162,13 +162,16 @@ def bloc_a_la_main(vals_u, vals_v, m, lat_min, lat_max, lon_min, lon_max, pas=No
                 continue
             u, v = float(vals_u[j * m["Ni"] + i]), float(vals_v[j * m["Ni"] + i])
             su += u; sv += v; n += 1
-            mx = max(mx, math.hypot(u, v))
+            sp = math.hypot(u, v)
+            ss += sp
+            mx = max(mx, sp)
     if n == 0:
         return None
     um, vm = su / n, sv / n
     return dict(n=n, speed=round(math.hypot(um, vm) * 3.6),
                 dir2=round(((270 - math.degrees(math.atan2(vm, um))) % 360) / 2) % 180,
-                max=round(mx * 3.6))
+                max=round(mx * 3.6),
+                mean=round(ss / n * 3.6))        # moyenne SCALAIRE (plan `mean`, 09/09)
 
 
 def bornes_bloc(h, r, c):
@@ -184,9 +187,9 @@ def controler_niveau(libelle, h, plans, vals_u, vals_v, m, i_t=None, n_blocs=12)
     """12 blocs au hasard : speed / dir2 / max recalculés à la main."""
     R, C = h["rows"], h["cols"]
     pick = lambda nom: (plans[nom][i_t] if i_t is not None else plans[nom])   # noqa: E731
-    S, D, M = pick("speed"), pick("dir2"), pick("max")
+    S, D, M, SM = pick("speed"), pick("dir2"), pick("max"), pick("mean")
     random.seed()
-    ecarts = dict(speed=[], dir2=[], max=[])
+    ecarts = dict(speed=[], dir2=[], max=[], mean=[])
     exemples = []
     for _ in range(n_blocs):
         r, c = random.randrange(R), random.randrange(C)
@@ -199,13 +202,14 @@ def controler_niveau(libelle, h, plans, vals_u, vals_v, m, i_t=None, n_blocs=12)
         ecarts["speed"].append(abs(int(S[r, c]) - att["speed"]))
         ecarts["dir2"].append(min((int(D[r, c]) - att["dir2"]) % 180, (att["dir2"] - int(D[r, c])) % 180))
         ecarts["max"].append(abs(int(M[r, c]) - att["max"]))
+        ecarts["mean"].append(abs(int(SM[r, c]) - att["mean"]))
         if len(exemples) < 2:
             exemples.append(f"({r},{c}) speed {int(S[r,c])}/{att['speed']} dir2 {int(D[r,c])}/{att['dir2']} "
                             f"max {int(M[r,c])}/{att['max']}")
     # « à l'entier près » : 0 attendu ; 1 toléré pour un demi exact (arrondi
     # au pair côté numpy contre round() côté Python sur des flottants qui
     # diffèrent au dernier bit) — et la médiane doit être 0.
-    for nom, tol in (("speed", 1), ("dir2", 1), ("max", 1)):
+    for nom, tol in (("speed", 1), ("dir2", 1), ("max", 1), ("mean", 1)):
         e = ecarts[nom]
         verifier(e and max(e) <= tol and sorted(e)[len(e) // 2] == 0,
                  f"{libelle} : `{nom}` recalculé à la main = valeur écrite ({len(e)} blocs, "
@@ -214,6 +218,11 @@ def controler_niveau(libelle, h, plans, vals_u, vals_v, m, i_t=None, n_blocs=12)
     verifier(bool(np.all((M.astype(int) - S.astype(int)) >= -1)),
              f"{libelle} : max ≥ speed partout (tolérance 1 km/h)",
              f"min(max − speed) = {int((M.astype(int) - S.astype(int)).min())}")
+    # Inégalité triangulaire : ‖vecteur moyen‖ ≤ moyenne des normes ≤ max.
+    verifier(bool(np.all((SM.astype(int) - S.astype(int)) >= -1)) and bool(np.all((M.astype(int) - SM.astype(int)) >= -1)),
+             f"{libelle} : speed ≤ mean ≤ max partout (tolérance 1 km/h)",
+             f"min(mean − speed) = {int((SM.astype(int) - S.astype(int)).min())}, "
+             f"min(max − mean) = {int((M.astype(int) - SM.astype(int)).min())}")
     verifier(bool(np.all(D < 180)), f"{libelle} : dir2 ∈ [0, 179]")
 
 
@@ -333,8 +342,8 @@ def main():
                  f"{n_alt} objets, géométrie 0,05° {e_a05['rows']}×{e_a05['cols']} · "
                  f"0,2° {e_a20['rows']}×{e_a20['cols']} tronqué {e_a20['truncated']}")
         ha, pa = decoder(store.objets[e_a05["paths"][0]]["body"])
-        verifier(bool(np.array_equal(pa["speed"], pa["max"])),
-                 "alt 0,05° (bloc 1) : max = speed partout — rien n'est moyenné au niveau natif")
+        verifier(bool(np.array_equal(pa["speed"], pa["max"])) and bool(np.array_equal(pa["speed"], pa["mean"])),
+                 "alt 0,05° (bloc 1) : max = mean = speed partout — rien n'est moyenné au niveau natif")
         s25 = steps25[-1]
         vu25, m25 = lire_champ_a_la_main(p25, "10u", step=s25)
         vv25, _ = lire_champ_a_la_main(p25, "10v", step=s25)
@@ -388,7 +397,7 @@ def main():
         for lod in ingest.LOD_LEVELS:
             f = round(lod / 0.01)
             geo = ingest.lod_geometrie(meta, fen, f)
-            S, D, M = ingest.lod_bloc(U, V, meta, fen, f)
+            S, D, M, SM = ingest.lod_bloc(U, V, meta, fen, f)
             S, M = S.astype(int), M.astype(int)
             lat = geo["lat0"] + np.arange(geo["rows"]) * geo["dLat"]
             lon = geo["lon0"] + np.arange(geo["cols"]) * geo["dLon"]

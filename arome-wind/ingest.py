@@ -640,9 +640,24 @@ LOD_MAGIC  = b"BWL1"
 LOD_NODATA = 255                      # uint8 : pas de donnée
 LOD_VMAX   = 254                      # km/h, borne haute hors sentinelle
 LOD_ELEV_NODATA = -32768              # int16 : pas d'orographie à ce point
-LOD_PLANES = ["speed", "dir2", "max"]
-LOD_UNITS  = dict(speed="km/h", dir2="degrés/2, convention météo (d'où vient le vent)",
-                  max="km/h, max des points du bloc")
+# ⭐ `mean` (09/09/2026) : MOYENNE SCALAIRE des vitesses du bloc, 4ᵉ plan.
+#    Mesuré le 09/09 à 12 UTC sur la tuile 44_6 (Alpes du Nord) au 0,2° :
+#    la norme du vecteur moyen (`speed`) fait en médiane 31 % du max et
+#    72 % de la moyenne des vitesses ; sur 22 % des blocs moins de la
+#    moitié des points suivent sa direction. Les brises de vallée se
+#    contrarient dans 20 km : le vecteur moyen est VRAI (flux net faible)
+#    mais une flèche de 4 km/h là où chaque point en fait 10 ne dit pas
+#    au pilote ce qu'il ressentira. Arbitrage Yann : convention des roses
+#    des vents — le client prend `mean` pour la LONGUEUR (flèches,
+#    particules, « vent moyen » de la bulle) et `dir2` (vecteur moyen)
+#    pour la DIRECTION. `speed` reste publié (et le client s'en contente
+#    sur un objet d'avant ce plan). Coût : +1 octet/point, ≈ +33 % brut
+#    (à mesurer gzip sur le premier run).
+LOD_PLANES = ["speed", "dir2", "max", "mean"]
+LOD_UNITS  = dict(speed="km/h, norme du vecteur moyen du bloc",
+                  dir2="degrés/2, convention météo (d'où vient le vent), direction du vecteur moyen",
+                  max="km/h, max des points du bloc",
+                  mean="km/h, moyenne scalaire des vitesses des points du bloc")
 
 def fenetre_bbox(meta, step_deg):
     """Fenêtre BBOX dans la grille native, sous forme de tranches numpy
@@ -715,13 +730,18 @@ def lod_bloc(U, V, meta, fen, facteur):
     um = blocs(np.where(valide, u, 0.0)).sum(axis=(1, 3)) / np.maximum(n, 1)
     vm = blocs(np.where(valide, v, 0.0)).sum(axis=(1, 3)) / np.maximum(n, 1)
     mx = blocs(np.where(valide, spd_n, -np.inf)).max(axis=(1, 3))
+    # Moyenne SCALAIRE des vitesses (cf. `LOD_PLANES`, plan `mean`) — sur
+    # les mêmes points valides que `um`/`vm`, donc ≥ ‖(um, vm)‖ toujours
+    # (inégalité triangulaire), ≤ `mx` toujours.
+    sm = blocs(np.where(valide, spd_n, 0.0)).sum(axis=(1, 3)) / np.maximum(n, 1)
     spd = np.hypot(um, vm) * 3.6
     drc = (270 - np.degrees(np.arctan2(vm, um))) % 360
     # np.rint = arrondi au pair le plus proche, comme le round() de `_ms()`.
     b_speed = np.where(ok, np.clip(np.rint(spd), 0, LOD_VMAX), LOD_NODATA).astype(np.uint8)
     b_dir = np.where(ok, np.rint(drc / 2).astype(np.int64) % 180, LOD_NODATA).astype(np.uint8)
     b_max = np.where(ok, np.clip(np.rint(mx), 0, LOD_VMAX), LOD_NODATA).astype(np.uint8)
-    return b_speed, b_dir, b_max
+    b_mean = np.where(ok, np.clip(np.rint(sm), 0, LOD_VMAX), LOD_NODATA).astype(np.uint8)
+    return b_speed, b_dir, b_max, b_mean
 
 def lod_encoder(entete, plans):
     """magic · uint32 LE (longueur en-tête) · en-tête JSON · plans à plat,
@@ -936,8 +956,10 @@ def main():
     # fichiers) plutôt que par échéance, PAS relever le seuil.
     # Stockage : ~55 Mo gzippés (estimation depuis 125 Ko × 395 + 9 × 10 Ko
     # mesurés sur le run 15Z du 08/09), réécrits en place — stationnaire.
+    # 09/09 : 4ᵉ plan `mean` ⇒ +1/3 brut sur la pyramide, ≈ +18 Mo gzip
+    # (ESTIMATION, à lire sur le premier run) — `mo_par_run` 1735 → 1755.
     plafond = verifier_dimensionnement("arome-wind", objets_par_run=1000,
-                                       runs_par_jour=8, mo_par_run=1735)
+                                       runs_par_jour=8, mo_par_run=1755)
     STORE = Storage("arome-wind", "WIND_GRID_BUCKET", "wind-grid", plafond)
 
     # Index de la pyramide : le client y lit niveaux, mailles, grandeurs,
