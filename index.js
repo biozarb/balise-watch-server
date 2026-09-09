@@ -2371,6 +2371,35 @@ const celluleSignalCache = new Map();
  *  répondent à la seule question qui décidera d'ouvrir les push :
  *  combien de fois, et avec quel accord ? */
 const celluleStats = { evaluations: 0, niveau1: 0, niveau2: 0, niveau3: 0, desaccords: 0, sourcesInsuffisantes: 0, depuis: Date.now() };
+/** P1.5 : le composite, SILENCIEUX mais JOURNALISÉ. Une ligne `silent`
+ *  dans `fw_signal_events` à chaque CHANGEMENT d'état d'un scope
+ *  (calme → niveau N, niveau N → désaccord, retour au calme…), jamais à
+ *  chaque poll : 252 scopes × 288 polls/jour feraient 72 000 lignes pour
+ *  rien. C'est ce qui remplace `celluleStats` (RAM, perdu à chaque
+ *  déploiement) et donne enfin, par scope et par jour, combien de fois
+ *  deux sources ont parlé du même moment. */
+const celluleDernierEtat = new Map();
+function fwJournalCellule(userId, scope, cel) {
+  if (!cel) return;
+  const etat = cel.refus ? 'refus' : cel.desaccord ? 'desaccord' : (cel.niveau >= 1 ? `niveau${cel.niveau}` : 'calme');
+  // Clé par (compte, scope) : une balise ou un site peuvent être suivis
+  // par plusieurs comptes, et chacun a sa ligne.
+  const cle = `${userId}|${scope}`;
+  const avant = celluleDernierEtat.get(cle) || 'calme';
+  if (etat === avant) return;
+  celluleDernierEtat.set(cle, etat);
+  // refus ↔ calme : pas une information météo, on ne l'écrit pas.
+  if ((etat === 'calme' || etat === 'refus') && (avant === 'calme' || avant === 'refus')) return;
+  fwJournal({
+    user_id: userId, scope, signal: 'convective_cell', transition: 'silent',
+    level: cel.niveau ?? 0, sent: false, notify: false,
+    meta: {
+      etat, avant, niveau: cel.niveau ?? 0, etaMin: cel.etaMin ?? null,
+      accord: cel.accord ?? null, desaccord: cel.desaccord ?? null, refus: cel.refus ?? null,
+      sources: Array.isArray(cel.sources) ? cel.sources.map(s => ({ nom: s.nom, disponible: s.disponible, parle: s.parle, etaMin: s.etaMin, refus: s.refus })) : null,
+    },
+  });
+}
 
 /** Le composite EN UN POINT. Aucun réseau : les trois sources sont déjà
  *  en RAM (deux calques R2 rafraîchis une fois par poll, un buffer
@@ -5120,6 +5149,47 @@ async function fwPurgeInactiveAlerts() {
     console.log(ok ? `🧹 user_flightwatch_alerts : lignes inactives depuis > ${FW_ALERT_PURGE_DAYS} j purgées` : '⚠️ purge user_flightwatch_alerts refusée');
   } catch (e) { console.warn('⚠️ purge user_flightwatch_alerts :', e.message); }
 }
+// ── P1.5 (09/09) : LE JOURNAL des signaux — `fw_signal_events` ──────────
+// Une ligne par TRANSITION (start / repeat / force / end), plus `silent`
+// pour le composite en observation. Écrit en fire-and-forget : le journal
+// ne doit jamais retarder ni casser un push. Table absente (SQL pas encore
+// lancé par Yann) → l'échec est dit UNE fois, puis avalé. Les 100
+// derniers événements restent en RAM (`/poll/health` → `journal`) pour
+// qu'on voie quelque chose même avant la table.
+const FW_JOURNAL_RETENTION_DAYS = Number(process.env.FW_JOURNAL_RETENTION_DAYS) || 90;
+const FW_JOURNAL_RAM_MAX = 100;
+const fwJournalRecent = [];
+let fwJournalEchecDit = false;
+let fwJournalStats = { ecrits: 0, echecs: 0 };
+function fwJournal(ev) {
+  const row = { t: new Date().toISOString(), ...ev };
+  fwJournalRecent.push(row);
+  if (fwJournalRecent.length > FW_JOURNAL_RAM_MAX) fwJournalRecent.shift();
+  sbInsert('fw_signal_events', [row]).then(ok => {
+    if (ok) { fwJournalStats.ecrits++; return; }
+    fwJournalStats.echecs++;
+    if (!fwJournalEchecDit) { fwJournalEchecDit = true; console.warn('⚠️ fw_signal_events : insertion refusée (table absente ? lancer fw_signal_events.sql) — le journal reste en RAM'); }
+  }).catch(e => { fwJournalStats.echecs++; if (!fwJournalEchecDit) { fwJournalEchecDit = true; console.warn('⚠️ fw_signal_events :', e.message); } });
+}
+/** Ce qu'on garde du `data` d'un push : les nombres et les attributions,
+ *  jamais les tableaux longs (`beacons` est plafonné) ni l'URL. */
+function fwJournalMeta(data) {
+  if (!data || typeof data !== 'object') return null;
+  const m = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (k === 'url' || k === 'kind' || k === 'signal' || k === 'scope' || k === 'level') continue;
+    if (Array.isArray(v)) { m[k] = v.slice(0, 8); continue; }
+    if (v === null || ['number', 'string', 'boolean'].includes(typeof v)) m[k] = v;
+  }
+  return m;
+}
+let fwJournalLastPurgeMs = 0;
+async function fwJournalPurge() {
+  if (Date.now() - fwJournalLastPurgeMs < 24 * 60 * 60 * 1000) return;
+  fwJournalLastPurgeMs = Date.now();
+  const before = new Date(Date.now() - FW_JOURNAL_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  try { await sbDelete('fw_signal_events', `t=lt.${encodeURIComponent(before)}`); } catch { /* table absente : rien à purger */ }
+}
 async function sbUpsert(table, body, onConflict) { const r = await fetch(`${SB_URL}/rest/v1/${table}?on_conflict=${onConflict}`, { method:'POST', headers:{...SB_HEADERS,'Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
 async function sbDelete(table, query) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'DELETE', headers:SB_HEADERS }); return r.ok; }
 async function sbPatch(table, query, body) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
@@ -6364,6 +6434,12 @@ app.get('/poll/health', (req, res) => {
     },
     delais: { indexMs: FETCH_DELAI_INDEX_MS, calqueMs: FETCH_DELAI_CALQUE_MS },
     supabase: { pageRows: SB_PAGE_ROWS, hardMaxRows: SB_HARD_MAX_ROWS, purgeAlertesJours: FW_ALERT_PURGE_DAYS },
+    // P1.5 : le journal — compteurs d'écriture et les derniers événements
+    // en RAM (sans user_id : ce endpoint est public).
+    journal: {
+      table: 'fw_signal_events', retentionJours: FW_JOURNAL_RETENTION_DAYS, ...fwJournalStats,
+      recents: fwJournalRecent.slice(-30).map(({ user_id, ...r }) => ({ ...r, user: String(user_id).slice(0, 8) })),
+    },
   });
 });
 
@@ -7883,6 +7959,7 @@ async function pollAndNotifyInner() {
     // table existera, aucun crash entre-temps).
     const fwAlertRows = await sbGetAll('user_flightwatch_alerts', 'select=*&order=id.asc');
     await fwPurgeInactiveAlerts();
+    await fwJournalPurge(); // P1.5 : rétention du journal, une fois par jour
     const fwAlertMap = new Map(
       (Array.isArray(fwAlertRows) ? fwAlertRows : []).map(r => [`${r.user_id}|${r.scope}|${r.signal}`, r])
     );
@@ -7916,25 +7993,30 @@ async function pollAndNotifyInner() {
             alert_active: false, alert_acked_at: null,
             updated_at: new Date(now).toISOString(),
           }, 'user_id,scope,signal');
+          // P1.5 : la fin d'épisode est une transition — journalisée.
+          fwAlertMap.set(key, { ...row, alert_active: false, alert_acked_at: null });
+          fwJournal({ user_id: userId, scope, signal, transition: 'end', level, sent: false, notify: !!notify, meta: null });
         }
         return;
       }
 
       // Signal DÉTECTÉ. Décision d'envoi de push — uniquement si notify.
       let sent = false;
+      let payload = null; // P1.5 : le push construit, pour en journaliser `data`
+      const justActivated = !row?.alert_active;
       if (notify) {
         const lastSent = row?.alert_last_sent ? new Date(row.alert_last_sent).getTime() : 0;
-        const justActivated = !row?.alert_active;
         const acked = row?.alert_acked_at && new Date(row.alert_acked_at).getTime() >= lastSent;
         const repeatWindow = repeatMs || FW_ALERT_REPEAT_MS; // anti-répétition par défaut 15 min, surchargée par signal (ex. foudre 10 min, Lot 5)
         const dueForSend = force || justActivated || (now - lastSent) >= repeatWindow;
         if (!(acked && !justActivated && !force) && dueForSend) {
+          payload = buildPush();
           const userDevices = devicesByUser[userId] || [];
           for (const dv of userDevices) {
             try {
               await webpush.sendNotification(
                 { endpoint: dv.endpoint, keys: { p256dh: dv.p256dh, auth: dv.auth } },
-                JSON.stringify(buildPush())
+                JSON.stringify(payload)
               );
               console.log(`📲 Push flightwatch → ${signal} (${scope})`);
             } catch (err) {
@@ -7953,6 +8035,20 @@ async function pollAndNotifyInner() {
       const patch = { user_id: userId, scope, signal, level, alert_active: true, updated_at: new Date(now).toISOString() };
       if (sent) patch.alert_last_sent = new Date(now).toISOString();
       await sbUpsert('user_flightwatch_alerts', patch, 'user_id,scope,signal');
+      // P1.5 : la carte en RAM suit l'état écrit — un second appel sur la
+      // même clé dans le MÊME poll ne verrait plus « jamais actif ».
+      fwAlertMap.set(key, { ...(row || { user_id: userId, scope, signal }), ...patch, alert_acked_at: row?.alert_acked_at ?? null });
+
+      // ── P1.5 : la TRANSITION, journalisée ──────────────────────────
+      // `start` = épisode qui commence (push ou pas : `sent` le dit) ;
+      // `force` = information neuve dans un épisode en cours ; `repeat` =
+      // rappel. Un signal actif et stable sans envoi n'écrit RIEN — c'est
+      // un journal d'événements, pas de polls.
+      if (justActivated || sent) {
+        const transition = justActivated ? 'start' : force ? 'force' : 'repeat';
+        const meta = payload?.data ? fwJournalMeta(payload.data) : null;
+        fwJournal({ user_id: userId, scope, signal, transition, level, sent, notify: !!notify, meta });
+      }
     }
 
     console.log(`${new Set(watchedRows.map(w=>w.user_id)).size} compte(s), ${watchedRows.length} surveillance(s), ${activeByUser.size} avec surveillance démarrée`);
@@ -8376,6 +8472,7 @@ async function pollAndNotifyInner() {
           detected: !!cel?.detected, updatedAt: Date.now(), pousse: CELLULE_ENABLED,
           cellule: cel,
         });
+        fwJournalCellule(w.user_id, String(w.beacon_id), cel); // P1.5
       }
 
       // ── Lot 2/2b flightwatch : chute de pression rapide ────────────
@@ -8902,6 +8999,7 @@ async function pollAndNotifyInner() {
           originSite: g.originSite, site, beacons: g.beacons,
           cellule: cel,
         });
+        fwJournalCellule(g.userId, scope, cel); // P1.5
       }
     }
 
