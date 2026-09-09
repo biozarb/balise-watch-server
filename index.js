@@ -768,6 +768,29 @@ const FW_PRECIP_COLOR     = 4;   // schéma couleur (sans effet sur la détectio
 const FW_PRECIP_ALPHA_MIN = 40;  // seuil alpha : un pixel réellement peint = écho radar ; ignore le fuzz d'anti-aliasing
 const FW_PRECIP_BBOX      = FW_LIGHTNING_BBOX; // même emprise France métropolitaine + marge (Alpes/Corse), réutilisée
 
+// ── P0.6 (revue d'intégration 09/09) : un fetch qui LÂCHE. Les
+// téléchargements faits DANS le poll (index + tuiles RainViewer, passes
+// PIAF ~25 Mo, runs AROME-PI 16 Mo) n'avaient aucun délai : node-fetch ne
+// coupe jamais une connexion qui goutte, et un R2 ou un RainViewer lent
+// bloquait les push de seuil derrière lui, jusqu'à faire chevaucher deux
+// polls. Un abandon nommé vaut mieux qu'une attente muette : le calque
+// précédent reste en RAM et c'est son ÂGE qui décidera (lib/piaf-eta,
+// lib/rafale-pi). Les lecteurs reçoivent ce fetch par injection.
+const FETCH_DELAI_INDEX_MS  = Number(process.env.FETCH_DELAI_INDEX_MS)  || 15_000;  // index.json, manifest, weather-maps.json, une tuile
+const FETCH_DELAI_CALQUE_MS = Number(process.env.FETCH_DELAI_CALQUE_MS) || 90_000;  // carte.bin (25 Mo PIAF / 16 Mo AROME-PI) : mesuré 1,9 s en local, on laisse de la marge à Render
+function fetchAvecDelai(url, opts = {}, ms = FETCH_DELAI_INDEX_MS) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  return fetch(url, { ...opts, signal: ctl.signal })
+    .catch(e => { throw (e?.name === 'AbortError' ? new Error(`délai ${ms} ms dépassé : ${String(url).slice(0, 120)}`) : e); })
+    .finally(() => clearTimeout(timer));
+}
+/** Le fetch injecté aux lecteurs R2 : délai long pour les gros objets
+ *  (`carte.bin`, `colonnes-*.bin`), court pour tout le reste. */
+function fetchCalque(url, opts) {
+  return fetchAvecDelai(url, opts, /\.bin(\?|$)/.test(String(url)) ? FETCH_DELAI_CALQUE_MS : FETCH_DELAI_INDEX_MS);
+}
+
 let fwPrecipTiles = new Map();  // "x/y" -> PNG décodé {width, height, data (RGBA)}
 let fwPrecipFrameTime = 0;      // timestamp de la frame radar actuellement en cache
 let fwPrecipRefreshing = false; // garde anti-recouvrement d'appels concurrents
@@ -785,7 +808,7 @@ async function fwPrecipRefresh() {
   if (!FW_PRECIP_ENABLED || fwPrecipRefreshing) return;
   fwPrecipRefreshing = true;
   try {
-    const res = await fetch(FW_PRECIP_INDEX_URL);
+    const res = await fetchAvecDelai(FW_PRECIP_INDEX_URL);
     if (!res.ok) return;
     const idx = await res.json();
     const frames = idx?.radar?.past;
@@ -800,7 +823,7 @@ async function fwPrecipRefresh() {
       for (let y = y0; y <= y1; y++) {
         const url = `${idx.host}${frame.path}/${FW_PRECIP_TILE_SIZE}/${z}/${x}/${y}/${FW_PRECIP_COLOR}/0_1.png`;
         jobs.push(
-          fetch(url)
+          fetchAvecDelai(url)
             .then(r => (r.ok ? r.buffer() : null))
             .then(buf => (buf ? [`${x}/${y}`, PNG.sync.read(buf)] : null))
             .catch(() => null) // tuile en échec ignorée, jamais de crash
@@ -811,7 +834,7 @@ async function fwPrecipRefresh() {
     const next = new Map();
     for (const r of results) if (r) next.set(r[0], r[1]);
     if (next.size) { fwPrecipTiles = next; fwPrecipFrameTime = frame.time; }
-  } catch { /* dégradation silencieuse : cache inchangé, signal non évalué */ }
+  } catch (e) { console.warn('⚠️ radar RainViewer (flightwatch) : cache inchangé —', e.message); }
   finally { fwPrecipRefreshing = false; }
 }
 
@@ -2192,7 +2215,7 @@ const GF_MODEL_CHECK_MS = 30 * 60 * 1000;
 const PIAF_ETA = require('./lib/piaf-eta');
 const PIAF_ETA_ENABLED = process.env.PIAF_ETA_ENABLED !== '0';
 const FW_PRECIP_ETA_MAX_MIN = Number(process.env.FW_PRECIP_ETA_MAX_MIN) || 60; // ETA PIAF ≤ 60 min = « pluie qui arrive » pour le push précip
-const piafLecteur = new PIAF_ETA.LecteurPiaf({ baseUrl: WIND_GRID_BASE_URL, fetch, journal: m => console.log(m) });
+const piafLecteur = new PIAF_ETA.LecteurPiaf({ baseUrl: WIND_GRID_BASE_URL, fetch: fetchCalque, journal: m => console.log(m) }); // P0.6 : fetch avec délai
 /** L'ETA PIAF en un point, sur la passe en RAM (jamais de réseau ici :
  *  le rafraîchissement est fait par l'appelant, cf. piafLecteur). */
 function piafEtaAt(lat, lon, nowMs = Date.now()) {
@@ -2256,7 +2279,7 @@ const FW_GUST_PI_SEUIL_KMH = Number(process.env.FW_GUST_PI_SEUIL_KMH) || PI_RAFA
 //: pilotes ont été réglés pour du vent MESURÉ à un anémomètre, pas pour
 //: un maximum de modèle sur une maille de 2 km réduite par MAXIMUM.
 const FW_GUST_PI_SAUT_MIN_KMH = Number(process.env.FW_GUST_PI_SAUT_MIN_KMH) || PI_RAFALE.DEFAUTS.sautMinKmh;
-const piRafaleLecteur = new PI_RAFALE.LecteurRafale({ baseUrl: WIND_GRID_BASE_URL, fetch, journal: m => console.log(m) });
+const piRafaleLecteur = new PI_RAFALE.LecteurRafale({ baseUrl: WIND_GRID_BASE_URL, fetch: fetchCalque, journal: m => console.log(m) }); // P0.6 : fetch avec délai
 /** La rafale prévue en un point, sur le run en RAM (jamais de réseau
  *  ici : le rafraîchissement est fait par l'appelant).
  *
@@ -3445,10 +3468,11 @@ async function gfLoadAudience() {
     return gfAudience.data;
   }
   const [watchedRows, favRows, survRows, deviceRows] = await Promise.all([
-    sbGet('user_watched', 'select=user_id,beacon_id,nom'),
-    sbGet('user_favorites', 'select=user_id,beacon_id,beacon_nom'),
-    sbGet('user_surveillance', 'select=user_id,sig_gust_front'),
-    sbGet('user_devices', 'select=*'),
+    // P0.5 (09/09) : paginé — même raison que dans pollAndNotify.
+    sbGetAll('user_watched', 'select=user_id,beacon_id,nom&order=id.asc'),
+    sbGetAll('user_favorites', 'select=user_id,beacon_id,beacon_nom&order=user_id.asc,beacon_id.asc'),
+    sbGetAll('user_surveillance', 'select=user_id,sig_gust_front&order=user_id.asc'),
+    sbGetAll('user_devices', 'select=*&order=id.asc'),
   ]);
   const data = { watchedRows, favRows, survRows, deviceRows };
   // ⚠️ ON NE MET PAS EN CACHE UN ÉCHEC. `sbGet` ne jette pas sur une
@@ -5041,6 +5065,61 @@ app.use(limiter);
 
 const SB_HEADERS = { 'apikey': SB_KEY, 'Authorization': `Bearer ${SB_KEY}`, 'Content-Type': 'application/json' };
 async function sbGet(table, query='') { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { headers: SB_HEADERS }); return r.json(); }
+// ── Revue d'intégration 09/09 (P0.5) : les tables de COMPTE lues à chaque
+// poll (`user_watched`, `user_flightwatch_alerts`, `user_devices`,
+// `user_surveillance`, `user_foehn_watch`, `user_language`) l'étaient en
+// `select=*` sans borne. PostgREST tronque à « Max rows » (1 000 par
+// défaut) SANS le dire : au-delà, une surveillance disparaît ou une alerte
+// « jamais envoyée » repousse à chaque poll. Deux outils :
+//  • `sbGetAll` pagine par en-tête `Range` (PostgREST le sert même quand
+//    `limit=` est plafonné par max-rows) — ⚠️ exige un `order=` stable
+//    dans `query`, sinon les pages se recouvrent.
+//  • `sbWarnIfCapped` crie si un résultat touche une borne connue.
+const SB_PAGE_ROWS = 1000;
+const SB_HARD_MAX_ROWS = Number(process.env.SB_HARD_MAX_ROWS) || 20000;
+const SB_LIMIT_ROWS = `&limit=${SB_PAGE_ROWS}`;
+function sbWarnIfCapped(table, rows) {
+  if (!Array.isArray(rows)) return;
+  if (rows.length === SB_PAGE_ROWS || rows.length >= SB_HARD_MAX_ROWS) {
+    console.error(`⛔ ${table} : ${rows.length} lignes = une borne (max-rows PostgREST ou SB_HARD_MAX_ROWS) — résultat probablement TRONQUÉ, alertes incomplètes ce poll-ci`);
+  }
+}
+async function sbGetAll(table, query='') {
+  const out = [];
+  for (let from = 0; from < SB_HARD_MAX_ROWS; from += SB_PAGE_ROWS) {
+    const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, {
+      headers: { ...SB_HEADERS, 'Range-Unit': 'items', 'Range': `${from}-${from + SB_PAGE_ROWS - 1}` },
+    });
+    const j = await r.json();
+    // Erreur PostgREST : rendue telle quelle si rien n'a encore été lu
+    // (les appelants gardent leur `Array.isArray`), sinon on s'arrête
+    // sur ce qu'on a, en le disant.
+    if (!Array.isArray(j)) { if (out.length) console.error(`⚠️ ${table} : page ${from} illisible, ${out.length} lignes gardées`); return out.length ? out : j; }
+    out.push(...j);
+    if (j.length < SB_PAGE_ROWS) return out;
+  }
+  console.error(`⛔ ${table} : SB_HARD_MAX_ROWS (${SB_HARD_MAX_ROWS}) atteint — résultat tronqué`);
+  return out;
+}
+// ── P0.5 (09/09) : purge des lignes INACTIVES de `user_flightwatch_alerts`.
+// La table n'était jamais purgée : une ligne par (compte, scope, signal)
+// reste après réarmement, et le lot 5 en fabrique une par site. Comme
+// c'est une table d'ÉTAT (pas un journal — le journal viendra en P1), une
+// ligne inactive depuis plus de FW_ALERT_PURGE_DAYS n'a aucune valeur :
+// `evaluateFwSignal` la recrée à l'identique au prochain épisode
+// (« jamais encore alerté » = envoi immédiat, ce qui est le comportement
+// voulu pour un premier franchissement). Une fois par jour, jamais plus.
+const FW_ALERT_PURGE_DAYS = Number(process.env.FW_ALERT_PURGE_DAYS) || 7;
+let fwAlertLastPurgeMs = 0;
+async function fwPurgeInactiveAlerts() {
+  if (Date.now() - fwAlertLastPurgeMs < 24 * 60 * 60 * 1000) return;
+  fwAlertLastPurgeMs = Date.now();
+  const before = new Date(Date.now() - FW_ALERT_PURGE_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const ok = await sbDelete('user_flightwatch_alerts', `alert_active=eq.false&updated_at=lt.${encodeURIComponent(before)}`);
+    console.log(ok ? `🧹 user_flightwatch_alerts : lignes inactives depuis > ${FW_ALERT_PURGE_DAYS} j purgées` : '⚠️ purge user_flightwatch_alerts refusée');
+  } catch (e) { console.warn('⚠️ purge user_flightwatch_alerts :', e.message); }
+}
 async function sbUpsert(table, body, onConflict) { const r = await fetch(`${SB_URL}/rest/v1/${table}?on_conflict=${onConflict}`, { method:'POST', headers:{...SB_HEADERS,'Prefer':'resolution=merge-duplicates,return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
 async function sbDelete(table, query) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'DELETE', headers:SB_HEADERS }); return r.ok; }
 async function sbPatch(table, query, body) { const r = await fetch(`${SB_URL}/rest/v1/${table}?${query}`, { method:'PATCH', headers:{...SB_HEADERS,'Prefer':'return=minimal'}, body:JSON.stringify(body) }); return r.ok; }
@@ -6155,8 +6234,16 @@ app.get('/rafale-pi', async (req, res) => {
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ error: 'lat/lon requis' });
   if (!PI_RAFALE_READ) return res.json({ rafale: null, enabled: false });
   try { await piRafaleLecteur.rafraichir(); } catch { /* le lecteur journalise déjà */ }
-  const r = rafalePiAt(lat, lon);
-  res.json({ enabled: true, rafale: r ? { ...r, runHHMM: piRafaleRunHHMM(r.run) } : null });
+  // P0.3 (revue d'intégration 09/09) : la fiche lisait TOUJOURS avec le
+  // repli (40 km/h) pendant que le push lisait avec le seuil du pilote —
+  // deux réponses pour la même question, au même endroit, au même
+  // instant. Même paramètre que /cellule-convective : le client passe le
+  // seuil de la surveillance quand le site est surveillé. La réponse
+  // NOMME le seuil utilisé, pour que l'écran ne le confonde jamais.
+  const seuilRafaleKmh = Number(req.query.seuilRafaleKmh) > 0 ? Number(req.query.seuilRafaleKmh) : FW_GUST_PI_SEUIL_KMH;
+  const r = rafalePiAt(lat, lon, seuilRafaleKmh);
+  res.json({ enabled: true, pousse: PI_RAFALE_ENABLED, seuilRafaleKmh, seuilSource: Number(req.query.seuilRafaleKmh) > 0 ? 'surveillance' : 'defaut',
+    rafale: r ? { ...r, runHHMM: piRafaleRunHHMM(r.run) } : null });
 });
 
 // ── Lot 3 « cellule qui approche » : le composite ────────────────────
@@ -6240,6 +6327,43 @@ app.get('/rafale-pi/health', (req, res) => {
     parBalise: [...gustPiSignalCache.keys()].filter(k => !k.startsWith('site:')).length,
     actifs: vals.filter(v => v?.detected).length,
     ...piRafaleLecteur.etat(),
+  });
+});
+
+// ── P0.6 / P1.7 (revue d'intégration 09/09) : la santé du POLL et la
+// CONFIGURATION EFFECTIVE de la chaîne d'alerte. Avant, personne ne
+// pouvait dire ce que la prod faisait vraiment : sept kill switches
+// dans sept pavés, et un composite qui comptait « sources
+// insuffisantes » sans qu'on sache si c'était le ciel ou une variable
+// d'environnement. Lecture seule, aucune donnée de compte.
+app.get('/poll/health', (req, res) => {
+  const now = Date.now();
+  res.json({
+    poll: {
+      cadenceMs: POLL_MS, enCours: pollEnCours,
+      depuisMs: pollEnCours ? now - pollStats.debutMs : null,
+      ...pollStats,
+      // Le poll met plus de 5 min : le prochain tour sera sauté. C'est
+      // le signal qu'il faut sortir les téléchargements du poll (P1.3).
+      tropLong: pollStats.dureeMaxMs > POLL_MS,
+    },
+    interrupteurs: {
+      FW_PRECIP_ENABLED, PIAF_ETA_ENABLED,
+      piafLuParLePoll: PIAF_ETA_ENABLED && FW_PRECIP_ENABLED, // ⚠️ PIAF n'est rafraîchi par le poll que si les DEUX sont vrais
+      PI_RAFALE_READ, PI_RAFALE_ENABLED,
+      CELLULE_READ, CELLULE_ENABLED,
+      FW_LIGHTNING_ENABLED, FW_VIGILANCE_ENABLED,
+      FOEHN_REQUIRE_ARMED,
+      GUST_FRONT_SHADOW: typeof GUST_FRONT_SHADOW !== 'undefined' ? GUST_FRONT_SHADOW : null,
+    },
+    calques: {
+      piaf: piafLecteur.etat ? piafLecteur.etat(now) : null,
+      rafalePi: piRafaleLecteur.etat ? piRafaleLecteur.etat(now) : null,
+      radar: { enCache: fwPrecipTiles.size, frameAgeMin: fwPrecipFrameTime ? Math.round((now / 1000 - fwPrecipFrameTime) / 60) : null },
+      foudre: { impactsEnBuffer: lightningStrikes.length },
+    },
+    delais: { indexMs: FETCH_DELAI_INDEX_MS, calqueMs: FETCH_DELAI_CALQUE_MS },
+    supabase: { pageRows: SB_PAGE_ROWS, hardMaxRows: SB_HARD_MAX_ROWS, purgeAlertesJours: FW_ALERT_PURGE_DAYS },
   });
 });
 
@@ -7104,7 +7228,7 @@ app.post('/test-push', async (req, res) => {
   if (!admins?.length) return res.status(403).json({ error:'Réservé admin' });
 
   try {
-    const devices = await sbGet('user_devices', 'select=*');
+    const devices = await sbGetAll('user_devices', 'select=*&order=id.asc'); // P0.5
     if (!devices?.length) return res.json({ success:true, sent:0, message:'Aucun appareil enregistré' });
     let sent = 0, errors = 0;
     for (const dv of devices) {
@@ -7321,7 +7445,35 @@ function foehnServerPeak(d, ph, wantDir = 'both', userOverride = null) {
   return best;
 }
 
+// ── P0.6 (revue d'intégration 09/09) : verrou de réentrance + durée ──
+// `pollAndNotify` est lancé par `setInterval` toutes les 5 min, sans
+// verrou. Depuis les lots 1-2 il télécharge en séquence radar, PIAF
+// (~25 Mo) et AROME-PI (16 Mo) AVANT d'évaluer le moindre seuil : un R2
+// lent ferait chevaucher deux polls, qui verraient tous deux
+// `justActivated` avant que l'upsert ne retombe — DOUBLE push. On saute
+// le tour (en le disant) plutôt que de le doubler, et on journalise la
+// durée : c'est le premier chiffre qu'il faudra pour découper le poll
+// en étapes (P1). `pollStats` est exposé par `GET /poll/health`.
+let pollEnCours = false;
+const pollStats = { debutMs: 0, derniereDureeMs: null, dureeMaxMs: 0, sautes: 0, echecs: 0, dernierEchec: null, dernierEchecA: null, tours: 0 };
 async function pollAndNotify() {
+  if (pollEnCours) {
+    pollStats.sautes++;
+    console.warn(`⚠️ Poll précédent encore en cours (${Math.round((Date.now() - pollStats.debutMs) / 1000)} s) — tour sauté (${pollStats.sautes} au total)`);
+    return;
+  }
+  pollEnCours = true;
+  pollStats.debutMs = Date.now();
+  try { await pollAndNotifyInner(); }
+  finally {
+    pollEnCours = false;
+    pollStats.tours++;
+    pollStats.derniereDureeMs = Date.now() - pollStats.debutMs;
+    pollStats.dureeMaxMs = Math.max(pollStats.dureeMaxMs, pollStats.derniereDureeMs);
+    console.log(`   poll terminé en ${(pollStats.derniereDureeMs / 1000).toFixed(1)} s`);
+  }
+}
+async function pollAndNotifyInner() {
   console.log(`[${new Date().toLocaleTimeString('fr-FR')}] Polling...`);
   try {
     const r = await fetch(API_ALL);
@@ -7594,7 +7746,10 @@ async function pollAndNotify() {
     const test = testData?.[0];
     if (test?.enabled) releves['__test__'] = { moy:test.wind_avg, raf:test.wind_max, nom:'🧪 '+(test.label||'Balise de test') };
 
-    let watchedRows = await sbGet('user_watched', 'select=*');
+    // P0.5 (09/09) : paginé + ordonné — cf. sbGetAll. Le lot 5 crée
+    // jusqu'à 5 lignes par site et par compte : la borne de 1 000 n'est
+    // plus loin.
+    let watchedRows = await sbGetAll('user_watched', 'select=*&order=id.asc');
     if (!Array.isArray(watchedRows)) watchedRows = [];
     // Lot foehn : la veille foehn est par AXE (user_foehn_watch), indépendante
     // des balises surveillées — on ne coupe court que si NI balise NI axe
@@ -7610,11 +7765,11 @@ async function pollAndNotify() {
     // alors que l'état a toujours été écrit indépendamment du push
     // (cf. `notify` dans evaluateFwSignal). Ce que la bascule coupe,
     // c'est le réveil — pas l'observation.
-    const foehnWatchRows = await sbGet('user_foehn_watch', 'select=*');
+    const foehnWatchRows = await sbGetAll('user_foehn_watch', 'select=*&order=user_id.asc,axis_id.asc');
     const anyFoehnWatch = Array.isArray(foehnWatchRows) && foehnWatchRows.some(w => w.active);
     if (!watchedRows.length && !anyFoehnWatch) { console.log('Aucune balise ni axe foehn surveillé'); return; }
 
-    const devices = await sbGet('user_devices', 'select=*');
+    const devices = await sbGetAll('user_devices', 'select=*&order=id.asc');
     const devicesByUser = {};
     (devices||[]).forEach(dv => { (devicesByUser[dv.user_id] ??= []).push(dv); });
 
@@ -7632,10 +7787,20 @@ async function pollAndNotify() {
     // si sbGet échoue (table/colonnes pas prêtes), on retombe sur une
     // liste vide -> personne actif -> aucun push (météo ou seuil), jamais
     // de crash.
-    const surveillanceRows = await sbGet('user_surveillance',
+    const surveillanceRows = await sbGetAll('user_surveillance',
       // beta_lightning : accès bêta foudre Blitzortung, activé par l'admin par compte
       // (colonne ajoutée par beta_lightning.sql — défaut FALSE, invisible pour les non-bêta)
-      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_precip,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning');
+      // ⚠️ Revue d'intégration 09/09 (P0.1) : `sig_gust_pi` et
+      // `sig_convective_cell` MANQUAIENT ici. `fwPrefs()` retombait donc
+      // sur le défaut `true` même après exécution des deux `.sql` — la
+      // préférence du pilote n'était jamais lue. Une colonne absente en
+      // base fait échouer TOUT le select (PostgREST 400) : d'où le repli
+      // ci-dessous sur l'ancienne liste si le select élargi échoue, pour
+      // ne pas couper toutes les alertes tant que les SQL ne sont pas
+      // passés. Le jour où ils le sont, la première branche suffit.
+      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_precip,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning,sig_gust_pi,sig_convective_cell&order=user_id.asc')
+      .then(rows => Array.isArray(rows) ? rows : (console.warn('⚠️ user_surveillance : select élargi refusé (colonnes sig_gust_pi/sig_convective_cell absentes ? lancer add_sig_gust_pi.sql + add_sig_convective_cell.sql) — repli sur l\'ancienne liste'),
+        sbGetAll('user_surveillance', 'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_precip,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning&order=user_id.asc')));
     const activeByUser = new Set(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).filter(s => s.active).map(s => s.user_id)
     );
@@ -7706,7 +7871,7 @@ async function pollAndNotify() {
     // Supabase ou toute erreur de fetch, sbGet renvoie un objet
     // d'erreur (pas un tableau) — Map vide -> pushLabels() retombe sur
     // 'en' pour tout le monde, aucun crash de pollAndNotify.
-    const languageRows = await sbGet('user_language', 'select=user_id,lang');
+    const languageRows = await sbGetAll('user_language', 'select=user_id,lang&order=user_id.asc');
     const langByUser = new Map(
       (Array.isArray(languageRows) ? languageRows : []).map(l => [l.user_id, l.lang])
     );
@@ -7716,7 +7881,8 @@ async function pollAndNotify() {
     // erreur, pas un tableau → Map vide → tout signal se comporte comme
     // "jamais encore alerté" (envoi immédiat au 1er dépassement dès que la
     // table existera, aucun crash entre-temps).
-    const fwAlertRows = await sbGet('user_flightwatch_alerts', 'select=*');
+    const fwAlertRows = await sbGetAll('user_flightwatch_alerts', 'select=*&order=id.asc');
+    await fwPurgeInactiveAlerts();
     const fwAlertMap = new Map(
       (Array.isArray(fwAlertRows) ? fwAlertRows : []).map(r => [`${r.user_id}|${r.scope}|${r.signal}`, r])
     );
@@ -7899,6 +8065,38 @@ async function pollAndNotify() {
 
     for (const w of watchedRows) {
       const rel = releves[String(w.beacon_id)];
+
+      // ── Le décollage d'origine, enregistré UNE fois pour tous les
+      //    signaux prévisionnels de ce site ─────────────────────────────
+      // ⛔ P0.2 (revue d'intégration 09/09) : ce bloc vivait APRÈS le
+      // `if (!rel) continue` ci-dessous. Une ligne de site dont la balise
+      // était hors ligne, périmée (garde-fraîcheur) ou absente du poll ne
+      // remplissait donc pas le groupe — et la prévision AU DÉCOLLAGE
+      // (PIAF, AROME-PI, foudre) n'était pas lue, alors qu'elle n'a
+      // aucun besoin de la balise. Si les trois balises d'un déco
+      // tombaient (Pioupiou en panne), la voie qui prévient se taisait
+      // exactement quand la voie qui constate devenait aveugle : un
+      // silence qui ressemble à un calme. Le groupe ne dépend que de la
+      // ligne (seuil, prefs), il se remplit donc AVANT tout test sur la
+      // mesure.
+      if (w.origin_site) {
+        const prefsSite = prefsByUser.get(w.user_id) || fwPrefs(null);
+        const gkey = `${w.user_id}|${w.origin_site}`;
+        const g = sitesSurveilles.get(gkey) || {
+          userId: w.user_id, originSite: w.origin_site,
+          beacons: [], seuilRafaleKmh: null,
+          foudreRayonKm: prefsSite.lightning_radius_km,
+          prefs: prefsSite,
+        };
+        g.beacons.push(String(w.beacon_id));
+        // ⚠️ Le PLUS BAS des seuils du groupe — même règle que
+        // `repeat_interval_min` au lot 5 : sur un groupe, le doute se
+        // tranche du côté qui pousse.
+        const sr = seuilRafaleDe(w);
+        g.seuilRafaleKmh = g.seuilRafaleKmh === null ? sr : Math.min(g.seuilRafaleKmh, sr);
+        sitesSurveilles.set(gkey, g);
+      }
+
       if (!rel) continue;
 
       // ── Débogage 12/07/2026 — source/valeur de pression affichée ────
@@ -8114,24 +8312,8 @@ async function pollAndNotify() {
       // calibré qui pousse, c'est un pilote qui apprend à ignorer.
       //
       // ⚠️ `gust_pi`, PAS `gust_front` : voir le pavé du module plus haut.
-      // ── Le décollage d'origine, enregistré UNE fois pour tous les
-      //    signaux prévisionnels de ce site ─────────────────────────────
-      if (w.origin_site) {
-        const gkey = `${w.user_id}|${w.origin_site}`;
-        const g = sitesSurveilles.get(gkey) || {
-          userId: w.user_id, originSite: w.origin_site,
-          beacons: [], seuilRafaleKmh: null,
-          foudreRayonKm: fwPrefsForUser.lightning_radius_km,
-          prefs: fwPrefsForUser,
-        };
-        g.beacons.push(String(w.beacon_id));
-        // ⚠️ Le PLUS BAS des seuils du groupe — même règle que
-        // `repeat_interval_min` au lot 5 : sur un groupe, le doute se
-        // tranche du côté qui pousse.
-        const sr = seuilRafaleDe(w);
-        g.seuilRafaleKmh = g.seuilRafaleKmh === null ? sr : Math.min(g.seuilRafaleKmh, sr);
-        sitesSurveilles.set(gkey, g);
-      }
+      // (Le groupe de site est enregistré en TÊTE de boucle depuis P0.2,
+      // avant le test sur la mesure.)
 
       if (PI_RAFALE_READ && fwPrefsForUser.sig_gust_pi) {
         // ⛔⛔ LE SEUIL VIENT DE LA SURVEILLANCE, PAS D'UNE CONSTANTE
@@ -8867,7 +9049,13 @@ async function pollAndNotify() {
         });
       }
     }
-  } catch(e) { console.error('pollAndNotify error:', e.message); }
+  } catch(e) {
+    pollStats.echecs++; pollStats.dernierEchec = e.message; pollStats.dernierEchecA = new Date().toISOString();
+    // ⚠️ Une exception ICI veut dire : plus aucun push pour PERSONNE ce
+    // tour-ci, seuils vent compris. La pile est journalisée pour qu'on
+    // sache quelle étape a cassé (le découpage par étape est en P1).
+    console.error('pollAndNotify error:', e.message, e.stack);
+  }
 }
 
 app.listen(PORT, async () => {
