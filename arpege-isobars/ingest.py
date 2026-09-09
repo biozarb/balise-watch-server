@@ -59,6 +59,14 @@ coïncident à la frontière Europe/Monde. Conséquences dans ce fichier :
     pas encore lue par le web, mais le lot fronts en aura besoin et un
     changement de version coûte un recalcul complet du passé.
 
+⚠️ 09/09/2026 — NAPPE DE PRESSION COLORÉE (demande Yann, capture Windy à
+l'appui). Chaque fichier porte désormais une clé `field` : le champ de
+pression lui-même, sous-échantillonné (1° sur le monde, 0,5° sur
+l'Europe) et encodé en PNG base64. Le manifest porte `fieldVersion`. Le
+web le colorie sous les traits, avec un interrupteur et une opacité dans
+la roue ⚙️ ; un fichier sans `field` s'affiche comme avant. Détail du
+raisonnement et de l'encodage : § NAPPE DE PRESSION COLORÉE plus bas.
+
 ⚠️ 08/09/2026 (soir) — FRONTS sur le synoptique Monde (demande Yann : « un
 rendu comme le Met Office », fronts compris). Détection OBJECTIVE (Hewson
 1998) sur θe à 850 hPa lue dans le MÊME `.om` que la pression ; froid /
@@ -125,6 +133,7 @@ signature. La destination se choisit par variable d'environnement :
   DRY_RUN=1 pour tester le calcul/tuilage sans rien téléverser.
 """
 import os, sys, json, time, re, urllib.parse, urllib.request
+import base64, struct, zlib
 from datetime import datetime, timezone, timedelta
 
 import numpy as np
@@ -163,6 +172,11 @@ GRIDS = {
         synop_tol_deg=0.02,
         max_centers_per_kind=6,
         lat_clip_deg=None,          # BBOX 20→72 N : rien à couper
+        # 09/09/2026 — nappe colorée : 0,5° sur l'Europe (5 cellules de
+        # 0,1°), soit ~149 × 105 nœuds. Le détaillé se regarde au zoom 7+,
+        # où 0,5° fait encore ~200 px : largement au-dessus de ce que la
+        # couleur donne à lire (un dégradé, pas une isoligne).
+        field_step_deg=0.5,
     ),
     "arpege_world": dict(
         model="meteofrance_arpege_world025",
@@ -202,6 +216,10 @@ GRIDS = {
         # `.synop.json` — même run, même échéance, jamais un second
         # fichier ni un second manifest (piège des deux runs du 24/07).
         fronts=True,
+        # 09/09/2026 — nappe colorée : 1° sur le globe (4 cellules de
+        # 0,25°), soit 360 × 161 nœuds une fois les pôles coupés. La vue
+        # synoptique se lit aux zooms 1-4, où 1° fait 2 à 20 px.
+        field_step_deg=1.0,
     ),
 }
 # Grilles qui ont existé et dont le bucket doit être vidé (manifest +
@@ -232,6 +250,37 @@ RETIRED_GRIDS = ()
 # dessine.
 LEVEL_STEP_HPA = 1        # version DÉTAILLÉE (`<iso>.json`)
 SYNOP_STEP_HPA = 4        # version SIMPLIFIÉE (`<iso>.synop.json`), Met Office
+
+# ── NAPPE DE PRESSION COLORÉE (09/09/2026, demande Yann) ──────────────
+# « Est-ce qu'il est possible de rajouter de la coloration en fonction de
+# la pression comme sur la capture d'écran ? » (capture : Windy, calque
+# Pression). Les traits seuls disent OÙ sont les systèmes ; la couleur
+# dit d'un coup d'œil LEQUEL est creux et lequel est gonflé.
+#
+# ⚠️ La couleur vient du CHAMP RÉEL, pas d'une interpolation entre les
+# lignes déjà tracées : le web ne dispose que de contours (des lignes de
+# niveau), et « remplir entre les lignes » aurait été une reconstruction
+# inventée — exactement ce que le projet s'interdit. On expédie donc le
+# champ lui-même, sous-échantillonné, dans le MÊME fichier que les
+# contours (même run, même échéance : la couleur ne peut pas dater d'un
+# autre run que les traits qu'elle habille).
+#
+# Encodage : PNG 8 bits en niveaux de gris, base64, dans la clé `field`.
+#   valeur 0    = pas de donnée (le web laisse transparent, jamais deviné)
+#   valeur v>0  = pression = FIELD_BASE_HPA + v  (soit 871 → 1125 hPa)
+# Le pas de 1 hPa est invisible à l'écran : la rampe de couleur s'étale
+# sur ~90 hPa, un cran vaut donc ~1 % de la rampe, et le web interpole
+# bilinéairement entre les nœuds. Le PNG (et pas un tableau JSON de
+# nombres, ni du base64 brut) parce qu'un champ de pression est LISSE :
+# le filtre par lignes + zlib le compriment d'un facteur ~4, et tout
+# navigateur sait décoder un PNG sans dépendance ni polyfill.
+# Coût mesuré (`banc_field_09-09.py`, champ synthétique RÉALISTE — 30
+# systèmes de ±8 à 35 hPa sur le globe, le lisse se comprimant trop bien
+# pour dire quoi que ce soit) : 10,5 Ko de base64 pour la grille Monde
+# 360 × 161, soit ~4 % d'un `.synop.json` de 273 Ko. À comparer au
+# dépassement de quota du 30/07, qui venait de fichiers 5× trop gros.
+FIELD_VERSION = 1
+FIELD_BASE_HPA = 870      # 0 réservé au « trou de donnée », d'où le +1
 # ⚠️ 08/09/2026 — le lissage (σ), la longueur minimale d'un tracé, la
 # tolérance RDP du synoptique et le nombre de centres sont désormais
 # PAR GRILLE (cf. `GRIDS` plus haut) : les mêmes 2,5 cellules ne font pas
@@ -521,6 +570,86 @@ def smooth_pressure(pressure, sigma_cells):
     au bord de la grille, qui creuserait une fausse dépression sur tout le
     pourtour."""
     return gaussian_filter(pressure, sigma=sigma_cells, mode="nearest")
+
+# ── Nappe de pression colorée (09/09/2026) ─────────────────────────────
+def _png_gray(a):
+    """PNG 8 bits en niveaux de gris, écrit à la main (`zlib` + `struct`
+    de la bibliothèque standard). Pas de Pillow : l'image du workflow ne
+    l'a pas, et l'ajouter pour écrire UN PNG trivial serait une
+    dépendance de plus à maintenir dans la chaîne d'ingestion.
+
+    Filtre choisi ligne par ligne parmi None/Sub/Up (heuristique
+    classique de la somme des écarts absolus signés) — sur un champ de
+    pression, `Sub` ramène presque tout à 0/±1 et zlib finit le travail."""
+    h, w = a.shape
+    a = np.ascontiguousarray(a, dtype=np.uint8)
+    lignes = bytearray()
+    prev = np.zeros(w, dtype=np.uint8)
+    for y in range(h):
+        cur = a[y]
+        gauche = np.concatenate((np.zeros(1, dtype=np.int16), cur[:-1].astype(np.int16)))
+        cands = (
+            (0, cur),
+            (1, ((cur.astype(np.int16) - gauche) & 0xFF).astype(np.uint8)),
+            (2, ((cur.astype(np.int16) - prev.astype(np.int16)) & 0xFF).astype(np.uint8)),
+        )
+        ft, data = min(cands, key=lambda c: int(
+            np.minimum(c[1].astype(np.int16), 256 - c[1].astype(np.int16)).sum()))
+        lignes.append(ft)
+        lignes += data.tobytes()
+        prev = cur
+
+    def bloc(tag, payload):
+        return (struct.pack(">I", len(payload)) + tag + payload
+                + struct.pack(">I", zlib.crc32(tag + payload) & 0xFFFFFFFF))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + bloc(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
+            + bloc(b"IDAT", zlib.compress(bytes(lignes), 9))
+            + bloc(b"IEND", b""))
+
+def pressure_field(lon2d, lat2d, pressure, step_deg):
+    """Le champ de pression lui-même, sous-échantillonné à ~`step_deg`,
+    prêt à être colorié par le web (cf. § NAPPE DE PRESSION COLORÉE).
+
+    ⚠️ C'est le champ QUI A SERVI AU CONTOURAGE qu'on passe ici (lissé
+    pour le synoptique, brut pour le détaillé) : la couleur et les traits
+    doivent raconter la même chose, sinon un pilote verrait une ligne
+    « 1000 » au milieu d'une zone peinte comme 1004.
+
+    Convention de l'image (documentée côté web) : la ligne 0 du PNG est
+    la plus au NORD (sens naturel d'une image), alors que les tableaux du
+    modèle sont sud → nord — d'où le retournement ci-dessous. Se tromper
+    ici referait le bug du calque retourné (08/09), qui est resté six
+    semaines invisible parce qu'une carte à l'envers reste plausible."""
+    lats = lat2d[:, 0]
+    lons = lon2d[0, :]
+    dlat = float(abs(lats[1] - lats[0]))
+    dlon = float(abs(lons[1] - lons[0]))
+    sj = max(1, int(round(step_deg / dlat)))
+    si = max(1, int(round(step_deg / dlon)))
+    sub = np.asarray(pressure, dtype=float)[::sj, ::si]
+    la, lo = lats[::sj], lons[::si]
+    if len(la) < 2 or len(lo) < 2:
+        return None
+    # 0 = trou de donnée (jamais deviné) ; sinon hPa = FIELD_BASE_HPA + v.
+    q = np.where(np.isfinite(sub),
+                 np.clip(np.rint(sub) - FIELD_BASE_HPA, 1, 255), 0).astype(np.uint8)
+    q = q[::-1, :]                       # ligne 0 = la plus au nord
+    dLon = float(lo[1] - lo[0])
+    dLat = float(la[1] - la[0])
+    return {
+        "v": FIELD_VERSION,
+        "lonMin": round(float(lo[0]), 4), "latMin": round(float(la[0]), 4),
+        "dLon": round(dLon, 6), "dLat": round(dLat, 6),
+        "nx": int(q.shape[1]), "ny": int(q.shape[0]),
+        "baseHpa": FIELD_BASE_HPA,
+        # Grille faisant tout le tour : le web interpole entre la dernière
+        # et la première colonne au lieu de laisser une couture blanche
+        # sur l'antiméridien.
+        "wrap": bool(abs(float(lo[-1] - lo[0]) + dLon) >= 359.0),
+        "png": base64.b64encode(_png_gray(q)).decode("ascii"),
+    }
 
 def synop_geojson(lon2d, lat2d, pressure_smooth, tol_deg, min_length_deg):
     """Version SIMPLIFIÉE (07/09/2026, modèle : cartes de pression de
@@ -1029,9 +1158,16 @@ def manifest_profil(cfg):
     # recalculé une fois (79 échéances, cf. `reprocess_past`).
     if cfg.get("fronts"):
         p["frontsVersion"] = FRONTS_VERSION
+    # 09/09/2026 : idem pour la nappe colorée — absente du manifest
+    # précédent → le passé est recalculé une fois, et le web sait alors
+    # que la couleur est disponible sur TOUTES les échéances listées
+    # (pas seulement sur celles produites depuis le déploiement).
+    if cfg.get("field_step_deg"):
+        p["fieldVersion"] = FIELD_VERSION
     return p
 
-PROFIL_KEYS = ("levelStepHpa", "synopStepHpa", "centersVersion", "frontsVersion")
+PROFIL_KEYS = ("levelStepHpa", "synopStepHpa", "centersVersion", "frontsVersion",
+               "fieldVersion")
 
 def echeances_publiees(key, attendu):
     """Les échéances DÉJÀ dans le bucket, lues dans le manifest du run
@@ -1282,6 +1418,8 @@ def process_grid(key, cfg):
         quoi.append(f"synoptique {SYNOP_STEP_HPA} hPa")
     if cfg.get("fronts"):
         quoi.append(f"fronts (Hewson, θe 850 hPa, v{FRONTS_VERSION})")
+    if cfg.get("field_step_deg"):
+        quoi.append(f"nappe colorée {cfg['field_step_deg']:g}° (v{FIELD_VERSION})")
     print(f"  contourage : {' + '.join(quoi)} (lissage σ = "
           f"{cfg['smooth_sigma_cells']} cellules"
           + (f", latitudes bornées à ±{cfg['lat_clip_deg']:g}°" if cfg["lat_clip_deg"] else "")
@@ -1340,11 +1478,23 @@ def process_grid(key, cfg):
         if "detail" in variants:
             geo = isobars_geojson(lon2d, lat2d, pressure, step_hpa=LEVEL_STEP_HPA)
             geo["centers"] = centers
+            # 09/09/2026 — la nappe colorée, depuis le champ BRUT : c'est
+            # celui que le détaillé contoure.
+            if cfg.get("field_step_deg"):
+                champ = pressure_field(lon2d, lat2d, pressure, cfg["field_step_deg"])
+                if champ:
+                    geo["field"] = champ
             sb_upload(obj_path, json.dumps(geo, separators=(",", ":")).encode())
         if "synop" in variants:
             synop = synop_geojson(lon2d, lat2d, smooth, cfg["synop_tol_deg"],
                                   cfg["synop_min_length_deg"])
             synop["centers"] = centers
+            # … et depuis le champ LISSÉ ici, celui que le synoptique
+            # contoure. Deux versions, deux champs, jamais l'inverse.
+            if cfg.get("field_step_deg"):
+                champ = pressure_field(lon2d, lat2d, smooth, cfg["field_step_deg"])
+                if champ:
+                    synop["field"] = champ
             if cfg.get("fronts"):
                 # Même run, même échéance, même fichier : un pilote ne
                 # verra jamais des fronts d'un run et des isobares d'un
