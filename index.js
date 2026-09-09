@@ -506,6 +506,7 @@ const FW_DEFAULTS = {
   sig_precip:            true, // Lot C : précipitations à proximité (radar RainViewer)
   sig_convective_cell:   true, // Lot 3 « cellule qui approche » : le composite des trois sources. ⚠️ Défaut `true`, mais le lot est SILENCIEUX (aucun push, aucune ligne en base) tant que CELLULE_ENABLED n'est pas posé : ce drapeau ne gouverne que l'évaluation et le cache. Colonne absente de `user_surveillance` → `fwPrefs` retombe sur ce défaut ; le SQL attend dans `add_sig_convective_cell.sql`.
   sig_gust_pi:           true, // Lot 2 « cellule qui approche » : rafale PRÉVUE par AROME-PI. ⚠️ Défaut `true`, mais la chaîne entière est gatée par PI_RAFALE_ENABLED (opt-in, OFF) : rien ne part tant que le seuil n'est pas calibré. La colonne `sig_gust_pi` de `user_surveillance` n'existe pas encore — `fwPrefs` retombe donc sur ce défaut, et le SQL attend dans `add_sig_gust_pi.sql`, à exécuter par Yann.
+  sig_gust_front:        true, // Étape 28 : front de rafales OBSERVÉ (RADOME). Lu par gfLoadAudience ; ici pour que fwPrefs porte TOUTES les préférences (banc_signaux, P1.1).
   sig_freezing_level:    false, // info pure, off par défaut (cf. schéma Lot 0)
   lightning_radius_km:   50,
   wind_surge_factor:     1.8,
@@ -2220,7 +2221,8 @@ const piafLecteur = new PIAF_ETA.LecteurPiaf({ baseUrl: WIND_GRID_BASE_URL, fetc
  *  le rafraîchissement est fait par l'appelant, cf. piafLecteur). */
 function piafEtaAt(lat, lon, nowMs = Date.now()) {
   if (!PIAF_ETA_ENABLED) return null;
-  return PIAF_ETA.etaPiaf(piafLecteur.courante(), lat, lon, nowMs);
+  // P1.2 : sous garde — une passe inattendue ne coupe plus le poll.
+  return garde('piaf', () => PIAF_ETA.etaPiaf(piafLecteur.courante(), lat, lon, nowMs));
 }
 /** « 11:40 » heure de Paris, pour nommer une passe dans un push. */
 function piafPasseHHMM(passeIso) {
@@ -2303,8 +2305,9 @@ const piRafaleLecteur = new PI_RAFALE.LecteurRafale({ baseUrl: WIND_GRID_BASE_UR
  *  je ne veux plus être là », et l'inventer ailleurs serait pire. */
 function rafalePiAt(lat, lon, seuilKmh = FW_GUST_PI_SEUIL_KMH, nowMs = Date.now()) {
   if (!PI_RAFALE_READ) return null;
-  return PI_RAFALE.rafalePi(piRafaleLecteur.courante(), lat, lon, nowMs,
-    { seuilKmh, sautMinKmh: FW_GUST_PI_SAUT_MIN_KMH });
+  // P1.2 : sous garde — un run inattendu ne coupe plus le poll.
+  return garde('rafale-pi', () => PI_RAFALE.rafalePi(piRafaleLecteur.courante(), lat, lon, nowMs,
+    { seuilKmh, sautMinKmh: FW_GUST_PI_SAUT_MIN_KMH }));
 }
 /** Le seuil de rafale de CETTE ligne surveillée, ou le repli. */
 function seuilRafaleDe(w) {
@@ -2356,6 +2359,9 @@ const gustPiSignalCache = new Map();
 // CELLULE_ENABLED=1 ouvrira la ligne ET le push, ensemble, une fois les
 // fenêtres calibrées. CELLULE_READ=0 coupe tout, évaluation comprise.
 const CELLULE = require('./lib/cellule-convective');
+// P1.1 (09/09) : LE REGISTRE des signaux — cf. lib/signaux.js. Le select
+// des préférences et /signals/catalog en dérivent.
+const SIGNAUX = require('./lib/signaux');
 const CELLULE_READ = process.env.CELLULE_READ !== '0';
 //: ⛔ OPT-IN, et il n'est branché nulle part pour l'instant : le poser à
 //: 1 ne suffira pas, il faudra AUSSI écrire le câblage d'alerte que ce
@@ -2418,6 +2424,10 @@ function fwJournalCellule(userId, scope, cel) {
 function celluleAt(lat, lon, reglages, nowMs = Date.now()) {
   if (!CELLULE_READ) return null;
   if (!(Number.isFinite(lat) && Number.isFinite(lon))) return null;
+  // P1.2 : sous garde — le composite qui plante ne coupe plus le poll.
+  return garde('cellule', () => celluleAtInner(lat, lon, reglages, nowMs));
+}
+function celluleAtInner(lat, lon, reglages, nowMs) {
   const piaf = PIAF_ETA_ENABLED ? piafEtaAt(lat, lon, nowMs) : null;
   const rafale = rafalePiAt(lat, lon, reglages.seuilRafaleKmh, nowMs);
   const foudre = FW_LIGHTNING_ENABLED
@@ -6406,6 +6416,21 @@ app.get('/rafale-pi/health', (req, res) => {
 // dans sept pavés, et un composite qui comptait « sources
 // insuffisantes » sans qu'on sache si c'était le ciel ou une variable
 // d'environnement. Lecture seule, aucune donnée de compte.
+// P1.1 : le registre des signaux, servi au client (sans les fonctions).
+// Avec, pour chaque interrupteur nommé, sa valeur EFFECTIVE en prod —
+// c'est ce qui permet à l'Admin de voir un signal proposé aux pilotes
+// pendant que sa chaîne est coupée.
+app.get('/signals/catalog', (req, res) => {
+  const interrupteurs = {
+    FW_VIGILANCE_ENABLED, FW_LIGHTNING_ENABLED, FW_PRECIP_ENABLED,
+    PI_RAFALE_ENABLED, CELLULE_ENABLED, FOEHN_REQUIRE_ARMED, GUST_FRONT_SHADOW,
+  };
+  const cat = SIGNAUX.catalogue();
+  for (const d of Object.values(cat)) d.interrupteurEffectif = d.interrupteur ? (interrupteurs[d.interrupteur] ?? null) : null;
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ signaux: cat, colonnesPrefs: SIGNAUX.COLONNES_PREFS });
+});
+
 app.get('/poll/health', (req, res) => {
   const now = Date.now();
   res.json({
@@ -6416,6 +6441,10 @@ app.get('/poll/health', (req, res) => {
       // Le poll met plus de 5 min : le prochain tour sera sauté. C'est
       // le signal qu'il faut sortir les téléchargements du poll (P1.3).
       tropLong: pollStats.dureeMaxMs > POLL_MS,
+      // P1.2 : durée par étape du DERNIER tour (ms), et exceptions avalées
+      // par les gardes des lots 1-3 depuis le démarrage.
+      etapes: { ...pollEtapes },
+      gardes: { ...pollGardes },
     },
     interrupteurs: {
       FW_PRECIP_ENABLED, PIAF_ETA_ENABLED,
@@ -7532,6 +7561,31 @@ function foehnServerPeak(d, ph, wantDir = 'both', userOverride = null) {
 // en étapes (P1). `pollStats` est exposé par `GET /poll/health`.
 let pollEnCours = false;
 const pollStats = { debutMs: 0, derniereDureeMs: null, dureeMaxMs: 0, sautes: 0, echecs: 0, dernierEchec: null, dernierEchecA: null, tours: 0 };
+// ── P1.2 (09/09) : les ÉTAPES du poll, chronométrées ──────────────────
+// Le poll reste une seule fonction (la découpe en fonctions séparées est
+// l'étape suivante, une par commit) mais chaque segment est nommé et
+// mesuré : `marque('nom')` note la durée écoulée depuis la marque
+// précédente. `/poll/health` → `etapes` dit où passent les 139 s mesurées
+// en prod le 09/09. `pollGardes` compte les exceptions AVALÉES par les
+// gardes des lots 1-3 (piafEtaAt / rafalePiAt / celluleAt) : une
+// prévision qui plante ne coupe plus les seuils vent, mais elle est
+// comptée — un silence qui ne se compte pas est un silence qu'on croit.
+const pollEtapes = {};
+const pollGardes = {};
+let pollEtapeT0 = 0;
+function marque(nom) {
+  const t = Date.now();
+  pollEtapes[nom] = t - pollEtapeT0;
+  pollEtapeT0 = t;
+}
+function garde(nom, fn, repli = null) {
+  try { return fn(); }
+  catch (e) {
+    pollGardes[nom] = (pollGardes[nom] || 0) + 1;
+    if (pollGardes[nom] === 1 || pollGardes[nom] % 100 === 0) console.error(`⛔ garde ${nom} (${pollGardes[nom]}) :`, e.message, e.stack);
+    return repli;
+  }
+}
 async function pollAndNotify() {
   if (pollEnCours) {
     pollStats.sautes++;
@@ -7551,6 +7605,8 @@ async function pollAndNotify() {
 }
 async function pollAndNotifyInner() {
   console.log(`[${new Date().toLocaleTimeString('fr-FR')}] Polling...`);
+  for (const k of Object.keys(pollEtapes)) delete pollEtapes[k];
+  pollEtapeT0 = Date.now();
   try {
     const r = await fetch(API_ALL);
     const d = await r.json();
@@ -7818,6 +7874,7 @@ async function pollAndNotifyInner() {
       // ne les sert jamais, cf. fetchHistory côté client).
       fwRecordHistory(id, { t: fwPollT, moy: rel.moy, raf: rel.raf ?? null, min: fwWindowMinFf(id, rel.moy), dir: rel.dir, pressure: rel.pressure });
     });
+    marque('releves'); // P1.2 : Pioupiou + fusion des six caches réseau + historique RAM
     const testData = await sbGet('test_beacon', 'id=eq.singleton&select=*');
     const test = testData?.[0];
     if (test?.enabled) releves['__test__'] = { moy:test.wind_avg, raf:test.wind_max, nom:'🧪 '+(test.label||'Balise de test') };
@@ -7874,7 +7931,8 @@ async function pollAndNotifyInner() {
       // ci-dessous sur l'ancienne liste si le select élargi échoue, pour
       // ne pas couper toutes les alertes tant que les SQL ne sont pas
       // passés. Le jour où ils le sont, la première branche suffit.
-      'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_precip,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning,sig_gust_pi,sig_convective_cell&order=user_id.asc')
+      // P1.1 : la liste des `sig_*` est DÉRIVÉE du registre (lib/signaux.js).
+      `select=user_id,active,${SIGNAUX.COLONNES_PREFS.join(',')},sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning&order=user_id.asc`)
       .then(rows => Array.isArray(rows) ? rows : (console.warn('⚠️ user_surveillance : select élargi refusé (colonnes sig_gust_pi/sig_convective_cell absentes ? lancer add_sig_gust_pi.sql + add_sig_convective_cell.sql) — repli sur l\'ancienne liste'),
         sbGetAll('user_surveillance', 'select=user_id,active,sig_wind_surge,sig_breeze_reversal,sig_pressure_drop,sig_convection,sig_vigilance,sig_lightning,sig_precip,sig_freezing_level,lightning_radius_km,wind_surge_factor,wind_surge_window_min,pressure_drop_hpa_h,voice_enabled,beta_lightning&order=user_id.asc')));
     const activeByUser = new Set(
@@ -7913,6 +7971,7 @@ async function pollAndNotifyInner() {
       .some(s => s.active && fwPrefs(s).sig_lightning);
     fwLightningSetNeeded(anyLightningWanted);
     fwLightningPrune();
+    marque('comptes'); // P1.2 : user_watched, user_foehn_watch, user_devices, user_surveillance
 
     // ── Lot C flightwatch : précipitations observées (radar RainViewer) ──
     // Rafraîchit le cache des tuiles radar France si au moins un compte a
@@ -7939,6 +7998,7 @@ async function pollAndNotifyInner() {
     // on veut pouvoir OBSERVER le signal (/rafale-signal) avant d'ouvrir
     // les push, et un cache vide ne s'observe pas.
     if (PI_RAFALE_READ && watchedRows.length > 0) await piRafaleLecteur.rafraichir();
+    marque('calques'); // P1.2 : radar RainViewer, passe PIAF, run AROME-PI
 
     // Langue par compte (Lot 3) : même lecture batchée par table que
     // surveillanceRows ci-dessus (sbGet sur user_language, jamais
@@ -7963,6 +8023,7 @@ async function pollAndNotifyInner() {
     const fwAlertMap = new Map(
       (Array.isArray(fwAlertRows) ? fwAlertRows : []).map(r => [`${r.user_id}|${r.scope}|${r.signal}`, r])
     );
+    marque('etat'); // P1.2 : user_language, user_flightwatch_alerts, purges
 
     // Cycle d'alerte par signal (mirroir du cycle user_watched étape 5,
     // mais par (user, scope, signal) — cf. §2 FLIGHTWATCH_LOT0.md).
@@ -7982,6 +8043,15 @@ async function pollAndNotifyInner() {
     // s'ajouter. Absent chez tous les autres appelants → undefined →
     // comportement d'avant, à l'identique.
     async function evaluateFwSignal({ userId, scope, signal, level, active, buildPush, repeatMs, notify, force }) {
+      // P1.1 : le registre fournit les défauts (niveau, rappel) et vérifie
+      // que le scope écrit appartient bien à ce signal — un scope inconnu
+      // est journalisé, jamais bloqué (on préfère une ligne de trop à un
+      // push de moins).
+      const def = SIGNAUX.SIGNAUX[signal];
+      if (!def) console.warn(`⚠️ signal « ${signal} » absent du registre lib/signaux.js`);
+      else if (!SIGNAUX.scopeValide(signal, scope)) console.warn(`⚠️ signal ${signal} : scope « ${scope} » hors registre (${def.scopes.join('|')})`);
+      level = level ?? def?.niveau ?? 2;
+      repeatMs = repeatMs ?? def?.rappelMs ?? null;
       const key = `${userId}|${scope}|${signal}`;
       const row = fwAlertMap.get(key);
       const now = Date.now();
@@ -8092,6 +8162,7 @@ async function pollAndNotifyInner() {
       const signals = await fetchOpenMeteoSignals(rel.lat, rel.lon);
       if (signals) weatherByBeacon.set(id, signals);
     }
+    marque('open-meteo'); // P1.2 : une requête par balise distincte (cache serveur en amont)
 
     // ── Lot 4 flightwatch : vigilance Météo-France (mutualisée) ────────
     // Mapping balise -> département résolu une fois par balise (cache
@@ -8712,6 +8783,8 @@ async function pollAndNotifyInner() {
       void anySent;
     }
 
+    marque('balises'); // P1.2 : la boucle principale — signaux par balise + seuils vent + upserts
+
     // ── Lot 1 flightwatch : bascule de brise (cohérence multi-balises) ──
     // Piège classique de rentrée maritime/thermique qui bascule : un
     // retournement de direction isolé sur une seule balise est du bruit
@@ -9003,6 +9076,8 @@ async function pollAndNotifyInner() {
       }
     }
 
+    marque('groupes'); // P1.2 : brise, vigilance, seuil groupé par site, prévisions au décollage
+
     // ── Lot foehn : alarme différentiel de pression par AXE ───────────
     // Veille par axe (user_foehn_watch, déjà lu en tête pour le garde-fou
     // d'arrêt), mutualisée : un seul fetch OM par axe distinct surveillé.
@@ -9147,8 +9222,10 @@ async function pollAndNotifyInner() {
         });
       }
     }
+    marque('foehn'); // P1.2
   } catch(e) {
     pollStats.echecs++; pollStats.dernierEchec = e.message; pollStats.dernierEchecA = new Date().toISOString();
+    pollEtapes.echecApres = Object.keys(pollEtapes).at(-1) ?? 'debut'; // la dernière étape TERMINÉE avant l'exception
     // ⚠️ Une exception ICI veut dire : plus aucun push pour PERSONNE ce
     // tour-ci, seuils vent compris. La pile est journalisée pour qu'on
     // sache quelle étape a cassé (le découpage par étape est en P1).
