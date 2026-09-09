@@ -6456,6 +6456,7 @@ app.get('/poll/health', (req, res) => {
       GUST_FRONT_SHADOW: typeof GUST_FRONT_SHADOW !== 'undefined' ? GUST_FRONT_SHADOW : null,
     },
     calques: {
+      minuterie: { cadenceMs: CALQUES_REFRESH_MS, voulus: calquesVoulus, enCours: calquesEnCours, ...calquesStats }, // P1.3
       piaf: piafLecteur.etat ? piafLecteur.etat(now) : null,
       rafalePi: piRafaleLecteur.etat ? piRafaleLecteur.etat(now) : null,
       radar: { enCache: fwPrecipTiles.size, frameAgeMin: fwPrecipFrameTime ? Math.round((now / 1000 - fwPrecipFrameTime) / 60) : null },
@@ -7559,6 +7560,32 @@ function foehnServerPeak(d, ph, wantDir = 'both', userOverride = null) {
 // le tour (en le disant) plutôt que de le doubler, et on journalise la
 // durée : c'est le premier chiffre qu'il faudra pour découper le poll
 // en étapes (P1). `pollStats` est exposé par `GET /poll/health`.
+// ── P1.3 (09/09) : les calques (radar, PIAF, AROME-PI) se rafraîchissent
+// HORS du poll, sur leur propre minuterie. `calquesVoulus` est posé par le
+// poll (au moins une balise surveillée) ; les lecteurs se throttlent
+// eux-mêmes sur leur index (5 min), la minuterie peut donc être courte.
+// Séquentiel et sous garde : un R2 lent ne bloque que cette minuterie.
+const CALQUES_REFRESH_MS = Number(process.env.CALQUES_REFRESH_MS) || 60_000;
+let calquesVoulus = false;
+let calquesEnCours = false;
+const calquesStats = { tours: 0, derniereDureeMs: null, dernierEchec: null, dernierEchecA: null };
+async function rafraichirCalques() {
+  if (calquesEnCours || !calquesVoulus) return;
+  calquesEnCours = true;
+  const t0 = Date.now();
+  try {
+    if (FW_PRECIP_ENABLED) await fwPrecipRefresh();
+    if (PIAF_ETA_ENABLED && FW_PRECIP_ENABLED) await piafLecteur.rafraichir();
+    if (PI_RAFALE_READ) await piRafaleLecteur.rafraichir();
+  } catch (e) {
+    calquesStats.dernierEchec = e.message; calquesStats.dernierEchecA = new Date().toISOString();
+    console.warn('⚠️ rafraichirCalques :', e.message);
+  } finally {
+    calquesEnCours = false;
+    calquesStats.tours++;
+    calquesStats.derniereDureeMs = Date.now() - t0;
+  }
+}
 let pollEnCours = false;
 const pollStats = { debutMs: 0, derniereDureeMs: null, dureeMaxMs: 0, sautes: 0, echecs: 0, dernierEchec: null, dernierEchecA: null, tours: 0 };
 // ── P1.2 (09/09) : les ÉTAPES du poll, chronométrées ──────────────────
@@ -7982,23 +8009,18 @@ async function pollAndNotifyInner() {
     // si un compte a démarré) : l'état précip doit être RÉEL sur toute
     // balise surveillée/favorite, même veille non démarrée (règle 13/07,
     // cf. VEILLE_METEO_EXPLICATION §« affichage vs notifications »).
-    if (FW_PRECIP_ENABLED && watchedRows.length > 0) await fwPrecipRefresh();
-    else fwPrecipClear();
-    // Lot 1 « cellule qui approche » : la passe PIAF en RAM, UNE fois par
-    // poll et pour toutes les balises (index.json ~1 ko ; carte.bin
-    // ~25 Mo seulement quand `dernier.passe` a avancé). Un échec garde la
-    // passe précédente — c'est son âge qui décidera (lib/piaf-eta.js).
-    if (PIAF_ETA_ENABLED && FW_PRECIP_ENABLED && watchedRows.length > 0) await piafLecteur.rafraichir();
-    // Lot 2 « cellule qui approche » : le run de rafale AROME-PI en RAM,
-    // UNE fois par poll et pour toutes les balises (index.json ~1 ko ;
-    // carte.bin 16,1 Mo seulement quand `dernier.run` a avancé, soit une
-    // fois par heure). Un échec garde le run précédent — c'est son âge
-    // qui décidera (lib/rafale-pi.js).
-    // ⚠️ Le rafraîchissement suit PI_RAFALE_READ, pas PI_RAFALE_ENABLED :
-    // on veut pouvoir OBSERVER le signal (/rafale-signal) avant d'ouvrir
-    // les push, et un cache vide ne s'observe pas.
-    if (PI_RAFALE_READ && watchedRows.length > 0) await piRafaleLecteur.rafraichir();
-    marque('calques'); // P1.2 : radar RainViewer, passe PIAF, run AROME-PI
+    // ⛔ P1.3 (revue d'intégration 09/09) : LE POLL NE TÉLÉCHARGE PLUS.
+    // Radar, passe PIAF et run AROME-PI sont rafraîchis par leur propre
+    // minuterie (`rafraichirCalques`, toutes les CALQUES_REFRESH_MS), sur
+    // le patron de MF/AEMET/METAR/SMN : ici on ne fait que dire si des
+    // calques sont VOULUS (au moins une balise surveillée) et on lit la
+    // RAM. Mesuré en prod le 09/09 avant ce changement : 139 s de poll,
+    // dont les téléchargements en séquence AVANT le premier seuil vent.
+    // Conséquence assumée : le premier poll après un redémarrage lit un
+    // calque vide → refus NOMMÉ (`aucune-passe`), jamais un calme.
+    calquesVoulus = watchedRows.length > 0;
+    if (!calquesVoulus) fwPrecipClear();
+    marque('calques'); // P1.2 : ne mesure plus qu'un drapeau — les téléchargements sont hors du poll (P1.3)
 
     // Langue par compte (Lot 3) : même lecture batchée par table que
     // surveillanceRows ci-dessus (sbGet sur user_language, jamais
@@ -9249,6 +9271,10 @@ app.listen(PORT, async () => {
   await hydrateAemetHistoryFromSupabase(); // AEMET, 22/07/2026 — même raison, cf. définition
   pollAndNotify();
   setInterval(pollAndNotify, POLL_MS);
+  // P1.3 : les calques, hors du poll. Lancés une fois tout de suite après
+  // le premier poll (qui pose `calquesVoulus`), puis à la minuterie.
+  setTimeout(() => void rafraichirCalques(), 5_000);
+  setInterval(() => void rafraichirCalques(), CALQUES_REFRESH_MS);
   refreshMeteoFranceData(); // no-op silencieux si METEOFRANCE_API_KEY absente
   setInterval(refreshMeteoFranceData, MF_OBS_POLL_MS);
   // Infoclimat — LECTURE d'objets R2 écrits par le VPS, jamais un appel
