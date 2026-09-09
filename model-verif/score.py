@@ -325,6 +325,47 @@ ROLLING_DAYS = 15
 #: index-là, pas un tri qui lui ressemble.
 CLE_DAILY = "day,source,station_id,model,lead_h,fcst_src"
 
+#: ⛔ LES COLONNES QUE LA FENÊTRE GLISSANTE LIT — ET SEULEMENT ELLES
+#: (09/09/2026, contrôle du matin : ⛔ 2 du rapport-controle-scoring-09-09).
+#:
+#: La lecture de `model_verif_daily` ramenait `select=*` : 31 colonnes
+#: pour 784 372 lignes le 07/09 = 1 266 Mo, remesurés. `_case_rows` en
+#: lit DIX-HUIT (la clé, l'erreur médiane brute et corrigée, les six
+#: MSE des références, les trois du biais S2, `n_hours`). Les treize
+#: autres — `err_vec_rms`, `err_vec_p90`, `vector_ratio`, `regime`,
+#: `lead_exact_h`, `bias_slope`, `fcst_src`, les quatre colonnes du L19
+#: (`*_fin`, `spread_kmh`, `mix_n_models`) — voyageaient pour rien, et
+#: c'était la moitié de la mémoire du bloc.
+#:
+#: ⛔ POURQUOI C'EST DEVENU URGENT. Le 09/09 le jalon « mémoire après
+#: l'oubli de la fenêtre rejouée » a lu 2 900 Mo, AU-DESSUS du seuil
+#: de 2 800 (`MAX_RSS_MO`), `Mem peak: 3.4G (swap: 269M)` — le run a
+#: mordu dans le swap, et la nuit a fini en 3 671 s sur un chien de
+#: garde à 3 900. L'incident du 07/09 (§8.3) nommait ce remède et le
+#: laissait pour plus tard ; plus tard, c'est maintenant.
+#:
+#: ⚠️ LE PIÈGE, écrit là où il se tend : une colonne lue par
+#: `_case_rows` et ABSENTE de cette liste n'échoue pas — `d.get(...)`
+#: rend `None`, la métrique s'éteint et rien ne rougit. C'est pour ça
+#: que `test_score.py` ne se contente pas de comparer deux chaînes : il
+#: EXTRAIT du source de `_case_rows` chaque clé lue sur une ligne et
+#: vérifie qu'elle est ici. Ajouter une lecture sans l'ajouter ici
+#: rougit le banc ; c'est le seul garde-fou qui tienne, parce que la
+#: base, elle, ne dira jamais rien.
+#:
+#: ⚠️ `day` DOIT y être (c'est la clé sur laquelle `select_par_cle`
+#: avance), `source` et `station_id` aussi (ils fabriquent `unit`).
+#: L'ordre de lecture reste `CLE_DAILY` entière : PostgREST ordonne
+#: sur `fcst_src` sans avoir à le rendre (vérifié le 09/09, HTTP 200).
+COLONNES_FENETRE = ",".join((
+    "day", "source", "station_id", "model", "lead_h",
+    "err_vec_med", "err_vec_med_corr",
+    "mse_model", "mse_persist", "mse_clim",
+    "mse_model_comb", "mse_comb", "mse_comb_vec", "mse_model_corr",
+    "bias_n_days", "bias_ratio", "bias_dir_deg",
+    "n_hours",
+))
+
 RETENTION_DAILY_D = 30
 RETENTION_EVENT_D = 90
 RETENTION_SCORE_D = 7
@@ -7290,10 +7331,15 @@ def main() -> int:
         # son témoin (L19), la classe courte et la classe au quart
         # (L10/L11), les lignes sœurs (L20), et la classe +48 h qui
         # arrive (L22a). Chaque série nouvelle multiplie cette table.
+        #
+        # ⛔ ET SEULEMENT LES COLONNES LUES (09/09/2026) : `select=*`
+        # ramenait 31 colonnes dont 13 que personne ne lit ici. Voir le
+        # pavé de `COLONNES_FENETRE` — et le banc qui garantit que la
+        # liste couvre chaque clé lue par `_case_rows`.
         daily = sb.select_par_cle(
             "model_verif_daily", "day",
             order=CLE_DAILY,
-            query=f"?day=gte.{since}")
+            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")
 
         t_roll = time.monotonic()
         # ⛔ `sur_place=True` : 687 Mo évités, mesurés le 07/09 (+47 Mo

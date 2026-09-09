@@ -37,6 +37,9 @@ import harnais as HARNAIS  # noqa: E402
 SCORE = ICI / "score.py"
 B_SCORE = ICI / "test_score.py"
 
+# ⓘ 09/09/2026 : la requête de la fenêtre porte désormais
+#   `&select={COLONNES_FENETRE}` (restriction des colonnes lues) ; les
+#   quatre motifs qui la citent ont suivi. Voir mutations_colonnes_0909.py.
 MUTATIONS = [
     # ══════════════════════════════════════════════════════════════
     #  LA PAGINATION — la faute exacte des nuits des 05 et 06/09
@@ -50,11 +53,11 @@ MUTATIONS = [
      '        daily = sb.select_par_cle(\n'
      '            "model_verif_daily", "day",\n'
      '            order=CLE_DAILY,\n'
-     '            query=f"?day=gte.{since}")',
+     '            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")',
      '        daily = sb.select(\n'
      '            "model_verif_daily",\n'
      '            order=CLE_DAILY,\n'
-     '            query=f"?day=gte.{since}")'),
+     '            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")'),
 
     ("la lecture reste par clé mais borne sur `station_id` au lieu de "
      "`day` : la clé n'est plus la PREMIÈRE colonne de l'ordre, donc "
@@ -79,9 +82,9 @@ MUTATIONS = [
      "quatre copies d'avant le 07/09, remises une par une",
      SCORE, B_SCORE,
      '            order=CLE_DAILY,\n'
-     '            query=f"?day=gte.{since}")',
+     '            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")',
      '            order="day,source,station_id,model,lead_h,fcst_src",\n'
-     '            query=f"?day=gte.{since}")'),
+     '            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")'),
 
     ("`day` n'est plus la tête de l'ordre : `select_par_cle` borne "
      "toujours sur `day`, mais l'index attaqué n'est plus le sien — la "

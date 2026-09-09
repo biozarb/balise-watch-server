@@ -22,6 +22,7 @@ import json
 import math
 import os
 import pathlib
+import re
 import sys
 import tempfile
 import tokenize
@@ -1239,6 +1240,96 @@ def test_memoire_rolling_scores_sur_place_incident_07_09():
     # compter le mot ferait rougir le banc pour un commentaire.
     check("aucun autre appel de `rolling_scores` ne mute en production",
           src.count("rolling_scores(daily, zone_of, as_of, sur_place=True)"), 1)
+
+
+def test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09():
+    """La lecture de la fenêtre glissante ne ramène que ce que
+    `_case_rows` lit — et la liste ne peut pas prendre de retard.
+
+    ⛔ CE QUI EST EN JEU (09/09/2026). `select=*` ramenait 31 colonnes
+    pour 784 372 lignes (1 266 Mo mesurés le 07/09) ; `_case_rows` en lit
+    18. Le 09/09 le run a franchi son seuil mémoire (2 900 Mo au jalon
+    de la fenêtre rejouée, seuil 2 800, `Mem peak 3.4G` avec 269 Mo de
+    swap) et fini à 229 s du chien de garde. La moitié de ce bloc était
+    des colonnes que personne ne lisait.
+
+    ⛔ ET LE PIÈGE QUE CE BANC TIENT. Une colonne lue par `_case_rows`
+    et absente de `COLONNES_FENETRE` n'échoue pas : `d.get()` rend
+    `None`, la métrique s'éteint, rien ne rougit — c'est exactement la
+    raison pour laquelle l'incident du 07/09 avait REMIS ce correctif.
+    Donc le banc ne compare pas deux chaînes : il EXTRAIT du source de
+    `_case_rows` chaque clé lue sur une ligne, et exige qu'elle soit
+    dans la liste. Ajouter une lecture sans l'ajouter à la liste rougit.
+    """
+    print("── mémoire : la fenêtre ne lit que ses colonnes (09/09) ──")
+    cols = J.COLONNES_FENETRE.split(",")
+    jeu = set(cols)
+    check("la liste est sans doublon ni espace (c'est une valeur de "
+          "`select=` PostgREST, telle quelle)",
+          len(jeu) == len(cols) and all(c == c.strip() and c for c in cols),
+          True)
+    check("⭐ `day` y est — c'est la clé sur laquelle `select_par_cle` "
+          "avance ; sans elle la pagination n'a plus de borne",
+          J.CLE_DAILY.split(",")[0] in jeu, True)
+    check("`source` et `station_id` y sont — ils fabriquent `unit`",
+          {"source", "station_id"} <= jeu, True)
+
+    # ⭐⭐ LES CLÉS LUES PAR `_case_rows`, EXTRAITES DU SOURCE. Le motif
+    # est celui du code : `d["x"]` et `d.get("x")` sur la ligne `d`.
+    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+    debut = src.index("def _case_rows(")
+    fin = src.index("\ndef ", debut + 1)
+    corps = sans_commentaires(src[debut:fin])
+    lues = set(re.findall(r'\bd\[\"(\w+)\"\]', corps))
+    lues |= set(re.findall(r'\bd\.get\(\"(\w+)\"', corps))
+    lues.discard("unit")                     # dérivée, pas lue en base
+    check("le banc a bien trouvé des lectures dans `_case_rows` (sinon "
+          "il ne garde rien)", len(lues) >= 12, True)
+    # ⚠️ Et les DEUX formes : `n_hours` et `mse_comb_vec` ne sont lues
+    # que par `d.get(...)` — un extracteur qui ne verrait que `d[...]`
+    # laisserait passer une colonne oubliée sur cette voie-là.
+    check("… y compris les lectures par `.get()` (`n_hours`, "
+          "`mse_comb_vec` ne sont lues que par là)",
+          {"n_hours", "mse_comb_vec"} <= lues, True)
+    manquantes = sorted(lues - jeu)
+    check("⭐⭐ CHAQUE clé lue par `_case_rows` est dans "
+          f"`COLONNES_FENETRE` (manquantes : {manquantes})",
+          manquantes, [])
+    # Et les clés que l'inférence lit sur ces mêmes lignes (test apparié
+    # par balise-jour) : le jour, et les deux valeurs classées.
+    check("les clés du test apparié (`day`, `err_vec_med`, "
+          "`err_vec_med_corr`) y sont",
+          {"day", "err_vec_med", "err_vec_med_corr"} <= jeu, True)
+
+    # ⭐ LE MÊME SCORE, AVEC OU SANS LES COLONNES SUPERFLUES. Sinon la
+    # mémoire serait payée par un score différent.
+    daily = _daily_agrume(ZONE_L18, (("icon_d2", 5.0),
+                                     (J.AGRUME_MODEL, 3.0),
+                                     (J.AGRUME_PI_MODEL, 4.0)))
+    for d in daily:
+        d.update({"fcst_src": "fcst", "err_vec_rms": 9.9, "err_vec_p90": 9.9,
+                  "vector_ratio": 1.1, "lead_exact_h": 24.0,
+                  "bias_slope": 1.0, "spread_kmh": 2.0, "mix_n_models": 3})
+    large = [dict(d) for d in daily]
+    etroit = [{k: v for k, v in d.items() if k in jeu} for d in daily]
+    cle = lambda r: (r.get("zone_id"), r.get("model"), r.get("lead_h"),
+                     r.get("metric"), r.get("window_kind"), r.get("regime"))
+    check("⭐ `rolling_scores` rend EXACTEMENT les mêmes lignes sur les "
+          "18 colonnes que sur les 31",
+          sorted(J.rolling_scores(etroit, ZONE_L18, DAY), key=cle),
+          sorted(J.rolling_scores(large, ZONE_L18, DAY), key=cle))
+
+    # ⛔ ET `main` S'EN SERT — sur CETTE lecture, pas une autre.
+    m = src[src.index("def main() -> int:"):]
+    check("⭐⭐ la lecture de la fenêtre passe `select={COLONNES_FENETRE}` "
+          "dans sa requête",
+          'sb.select_par_cle(\n            "model_verif_daily", "day",\n'
+          '            order=CLE_DAILY,\n'
+          '            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")'
+          in m, True)
+    check("… et aucune lecture de `model_verif_daily` par clé ne "
+          "ramène plus `select=*` (une seule lecture par clé, restreinte)",
+          m.count('"model_verif_daily", "day",'), 1)
 
 
 
@@ -6080,6 +6171,8 @@ def main() -> int:
                test_memoire_les_blocs_morts_sont_relaches_avant_le_chemin_regime,
                # ── 07/09 : la copie par ligne de la fenêtre (687 Mo) ──
                test_memoire_rolling_scores_sur_place_incident_07_09,
+               # ── 09/09 : la fenêtre ne lit que ses colonnes ──
+               test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09,
                # ── lot LR (01/09) : le rejeu qui republiait le jour ──
                test_lr_le_rejeu_ancien_ne_republie_pas_le_classement,
                # ── lot L13 (01/09) : les deux dettes ops de l'audit ──

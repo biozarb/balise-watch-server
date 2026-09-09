@@ -80,6 +80,13 @@ def main() -> int:
     ap.add_argument("--sur-place", action="store_true", dest="sur_place",
                     help="mesurer l'écriture SUR PLACE (le correctif) "
                          "au lieu de la copie")
+    # ⓘ 09/09/2026 — la lecture de `main` ne ramène plus que
+    # `COLONNES_FENETRE` (18 colonnes sur 31). Par défaut la sonde lit
+    # comme `main` ; `--toutes-colonnes` refait l'ancienne lecture
+    # (`select=*`) pour mesurer l'écart, pas le supposer.
+    ap.add_argument("--toutes-colonnes", action="store_true",
+                    dest="toutes", help="lire select=* (l'ancienne "
+                    "lecture) au lieu de COLONNES_FENETRE")
     a = ap.parse_args()
 
     jours = a.jours if a.jours is not None else SC.ROLLING_DAYS
@@ -92,10 +99,15 @@ def main() -> int:
           f"(disponible {dispo_mo():.0f} Mo)")
 
     t0 = time.monotonic()
+    # ⚠️ Même ordre que `main` (`CLE_DAILY`, écrite une fois) et même
+    # `select` : une sonde qui lit autrement que le run mesure autre
+    # chose que le run.
+    colonnes = "" if a.toutes else f"&select={SC.COLONNES_FENETRE}"
+    print(f"colonnes : {'toutes (select=*)' if a.toutes else 'COLONNES_FENETRE'}")
     daily = sb.select_par_cle(
         "model_verif_daily", "day",
-        order="day,source,station_id,model,lead_h,fcst_src",
-        query=f"?day=gte.{since}")
+        order=SC.CLE_DAILY,
+        query=f"?day=gte.{since}{colonnes}")
     dt = time.monotonic() - t0
     apres_lecture = rss_mo()
     print(f"lecture par clé  : {len(daily):>8,} lignes en {dt:6.1f} s"
