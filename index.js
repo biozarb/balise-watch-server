@@ -504,6 +504,7 @@ const FW_DEFAULTS = {
   sig_vigilance:         true,
   sig_lightning:         true,
   sig_precip:            true, // Lot C : précipitations à proximité (radar RainViewer)
+  sig_convective_cell:   true, // Lot 3 « cellule qui approche » : le composite des trois sources. ⚠️ Défaut `true`, mais le lot est SILENCIEUX (aucun push, aucune ligne en base) tant que CELLULE_ENABLED n'est pas posé : ce drapeau ne gouverne que l'évaluation et le cache. Colonne absente de `user_surveillance` → `fwPrefs` retombe sur ce défaut ; le SQL attend dans `add_sig_convective_cell.sql`.
   sig_gust_pi:           true, // Lot 2 « cellule qui approche » : rafale PRÉVUE par AROME-PI. ⚠️ Défaut `true`, mais la chaîne entière est gatée par PI_RAFALE_ENABLED (opt-in, OFF) : rien ne part tant que le seuil n'est pas calibré. La colonne `sig_gust_pi` de `user_surveillance` n'existe pas encore — `fwPrefs` retombe donc sur ce défaut, et le SQL attend dans `add_sig_gust_pi.sql`, à exécuter par Yann.
   sig_freezing_level:    false, // info pure, off par défaut (cf. schéma Lot 0)
   lightning_radius_km:   50,
@@ -2305,6 +2306,84 @@ function piRafaleRunHHMM(runIso) {
  *  à CHAQUE poll, y compris quand rien n'est détecté, comme
  *  precipSignalCache. */
 const gustPiSignalCache = new Map();
+
+// ── Lot « cellule qui approche », lot 3 (09/09/2026) : LE COMPOSITE ───
+// Trois sources — la pluie prévue (PIAF, lot 1), la rafale prévue
+// (AROME-PI, lot 2) et la foudre observée (Blitzortung) — et une seule
+// question : disent-elles la même chose AU MÊME MOMENT ? Toute la
+// logique vit dans lib/cellule-convective.js (module PUR, banc
+// tools/banc_cellule_09-09.mjs) ; ici on ne fait que lui passer ce que
+// les autres ont déjà calculé.
+//
+// ⛔⛔ IL EST SILENCIEUX, ET C'EST LE CŒUR DU LOT 3. Aucun push, aucune
+// ligne dans `user_flightwatch_alerts`, aucune voix : rien qu'un cache
+// et deux endpoints. Deux raisons, et la seconde est la vraie :
+//
+//  1. Les fenêtres de concordance (± 8 / ± 20 / ± 15 min) sont des
+//     granularités posées à la main. Aucun orage réel ne les a encore
+//     jugées.
+//  2. ⚠️ ÉCRIRE UNE LIGNE EN BASE N'EST PAS NEUTRE. Le client affiche
+//     une pastille par alerte active (« Mode vol », `SignalsDashboard`)
+//     et énonce à la VOIX toute alerte `level >= 3` NOUVELLEMENT active
+//     — et il le fait en lisant la LIGNE, pas le push. Un composite
+//     « silencieux » qui écrirait quand même sa ligne ferait donc
+//     apparaître une pastille inconnue, et parlerait. Le silence de ce
+//     lot est un vrai silence : `evaluateFwSignal` n'est pas appelé.
+//
+// CELLULE_ENABLED=1 ouvrira la ligne ET le push, ensemble, une fois les
+// fenêtres calibrées. CELLULE_READ=0 coupe tout, évaluation comprise.
+const CELLULE = require('./lib/cellule-convective');
+const CELLULE_READ = process.env.CELLULE_READ !== '0';
+//: ⛔ OPT-IN, et il n'est branché nulle part pour l'instant : le poser à
+//: 1 ne suffira pas, il faudra AUSSI écrire le câblage d'alerte que ce
+//: lot n'a délibérément pas écrit. C'est un interrupteur qui attend son
+//: fil, pas une porte fermée à clé.
+const CELLULE_ENABLED = process.env.CELLULE_ENABLED === '1';
+/** L'état du composite par scope (`<beacon_id>` ou `site:<lat|lon>`),
+ *  écrit à CHAQUE poll — y compris quand rien n'est détecté. C'est la
+ *  seule trace de la phase d'observation : sans écriture systématique,
+ *  on ne saurait jamais combien de fois le composite s'est TU. */
+const celluleSignalCache = new Map();
+/** Compteurs d'observation, cumulés depuis le démarrage du process. Ils
+ *  répondent à la seule question qui décidera d'ouvrir les push :
+ *  combien de fois, et avec quel accord ? */
+const celluleStats = { evaluations: 0, niveau1: 0, niveau2: 0, niveau3: 0, desaccords: 0, sourcesInsuffisantes: 0, depuis: Date.now() };
+
+/** Le composite EN UN POINT. Aucun réseau : les trois sources sont déjà
+ *  en RAM (deux calques R2 rafraîchis une fois par poll, un buffer
+ *  d'impacts alimenté par le WebSocket).
+ *
+ *  ⛔ CHAQUE SOURCE PORTE SON PROPRE INTERRUPTEUR, et une source coupée
+ *  arrive au composite comme INDISPONIBLE — jamais comme un calme. C'est
+ *  la distinction que `lib/cellule-convective.js` fait entre
+ *  `disponible` et `parle`, et elle ne vaut que si on la renseigne
+ *  honnêtement ici.
+ *
+ *  @param {{seuilRafaleKmh: number, foudreRayonKm: number}} reglages
+ *         ⛔ Les DEUX viennent de la surveillance, jamais d'une
+ *         constante : `user_watched.seuil_rafale` pour la rafale (lot 2)
+ *         et `user_surveillance.lightning_radius_km` pour la foudre. */
+function celluleAt(lat, lon, reglages, nowMs = Date.now()) {
+  if (!CELLULE_READ) return null;
+  if (!(Number.isFinite(lat) && Number.isFinite(lon))) return null;
+  const piaf = PIAF_ETA_ENABLED ? piafEtaAt(lat, lon, nowMs) : null;
+  const rafale = rafalePiAt(lat, lon, reglages.seuilRafaleKmh, nowMs);
+  const foudre = FW_LIGHTNING_ENABLED
+    ? CELLULE.foudreAutour(lightningStrikes, lat, lon, nowMs,
+        { foudreRayonKm: reglages.foudreRayonKm })
+    // ⚠️ Le kill switch foudre est une INDISPONIBILITÉ nommée, pas un
+    // buffer vide : « aucun impact » et « on n'écoute pas » ne disent
+    // pas la même chose, et le composite doit pouvoir les distinguer.
+    : Object.assign(CELLULE.foudreAutour(null, lat, lon, nowMs), { refus: 'flux-desactive' });
+  const r = CELLULE.celluleConvective({ piaf, rafale, foudre }, nowMs);
+  celluleStats.evaluations++;
+  if (r.refus === 'sources-insuffisantes') celluleStats.sourcesInsuffisantes++;
+  else if (r.niveau === 1) celluleStats.niveau1++;
+  else if (r.niveau === 2) celluleStats.niveau2++;
+  else if (r.niveau === 3) celluleStats.niveau3++;
+  if (r.desaccord) celluleStats.desaccords++;
+  return r;
+}
 
 let gfModelGrid = null;
 let gfModelEtag = null;
@@ -6080,6 +6159,65 @@ app.get('/rafale-pi', async (req, res) => {
   res.json({ enabled: true, rafale: r ? { ...r, runHHMM: piRafaleRunHHMM(r.run) } : null });
 });
 
+// ── Lot 3 « cellule qui approche » : le composite ────────────────────
+// ⚠️ Les clés sont soit un `beacon_id`, soit `site:<lat|lon>` — les
+// mêmes que /rafale-signal. Chaque entrée porte le composite ENTIER,
+// sources comprises, avec le refus nommé de chacune : c'est ce qui
+// permet de comprendre POURQUOI il s'est tu, et pas seulement qu'il
+// s'est tu.
+app.get('/cellule-signal', (req, res) => {
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean);
+  const signals = {};
+  for (const id of ids) signals[id] = celluleSignalCache.get(id) ?? null;
+  res.json({ signals });
+});
+
+// Le composite EN UN POINT, à la demande (fiche de site, plan de coupe).
+// ⛔ Il ne remplace aucun champ existant et n'en remplit aucun : il
+// arrive dans un objet à lui, avec ses trois sources nommées et leurs
+// attributions. Réglages par défaut si non fournis — cet endpoint sert
+// l'exploration, pas la surveillance, qui a les seuils du pilote.
+app.get('/cellule-convective', async (req, res) => {
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return res.status(400).json({ error: 'lat/lon requis' });
+  if (!CELLULE_READ) return res.json({ enabled: false, cellule: null });
+  try {
+    if (PIAF_ETA_ENABLED) await piafLecteur.rafraichir();
+    if (PI_RAFALE_READ) await piRafaleLecteur.rafraichir();
+  } catch { /* les lecteurs journalisent déjà */ }
+  const seuilRafaleKmh = Number(req.query.seuilRafaleKmh) > 0 ? Number(req.query.seuilRafaleKmh) : FW_GUST_PI_SEUIL_KMH;
+  const foudreRayonKm = Number(req.query.foudreRayonKm) > 0 ? Number(req.query.foudreRayonKm) : FW_DEFAULTS.lightning_radius_km;
+  res.json({ enabled: true, pousse: CELLULE_ENABLED, seuilRafaleKmh, foudreRayonKm,
+    cellule: celluleAt(lat, lon, { seuilRafaleKmh, foudreRayonKm }) });
+});
+
+// Santé du composite (lot 3) — et surtout ses COMPTEURS D'OBSERVATION.
+// ⛔ C'est le seul livrable réel de la phase silencieuse : combien de
+// fois le composite a vu deux sources d'accord, combien de fois elles se
+// sont contredites, et combien de fois il n'avait pas assez de sources
+// pour se prononcer. Sans ces trois nombres, « ouvrir les push » serait
+// une décision prise sur une impression.
+app.get('/cellule-convective/health', (req, res) => {
+  const vals = [...celluleSignalCache.values()];
+  const h = (Date.now() - celluleStats.depuis) / 3_600_000;
+  res.json({
+    lit: CELLULE_READ, pousse: CELLULE_ENABLED,
+    silencieux: !CELLULE_ENABLED,
+    note: CELLULE_ENABLED ? null
+      : "Phase d'observation : aucun push, aucune ligne dans user_flightwatch_alerts, aucune voix. Le cache et ces compteurs sont la seule trace.",
+    fenetres: CELLULE.DEFAUTS,
+    sources: {
+      piaf: PIAF_ETA_ENABLED, rafale: PI_RAFALE_READ, foudre: FW_LIGHTNING_ENABLED,
+      // ⚠️ Le composite exige DEUX sources disponibles. Avec une seule,
+      // il refuse en le nommant — il ne rend pas « rien détecté ».
+      disponibles: [PIAF_ETA_ENABLED, PI_RAFALE_READ, FW_LIGHTNING_ENABLED].filter(Boolean).length,
+    },
+    evalues: celluleSignalCache.size,
+    actifs: vals.filter(v => v?.detected).length,
+    compteurs: { ...celluleStats, heures: Math.round(h * 10) / 10 },
+  });
+});
+
 // Santé du lecteur de rafale (lot 2) : le run en RAM, son âge, le
 // dernier échec, et ce que la chaîne fait vraiment (lit ? pousse ?).
 // Lecture seule, donnée publique — même politique que /precip-piaf/health.
@@ -7506,6 +7644,12 @@ async function pollAndNotify() {
     const prefsByUser = new Map(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).map(s => [s.user_id, fwPrefs(s)])
     );
+    // ⓘ `betaByUser` n'est PLUS LU nulle part depuis la sortie de bêta de
+    // la foudre (09/09). On garde la lecture — la colonne
+    // `beta_lightning` existe, l'admin la coche encore
+    // (`AdminLightningBeta.tsx`), et elle resservira au prochain signal
+    // qu'il faudra ouvrir progressivement. La supprimer maintenant, c'est
+    // la réécrire dans trois semaines.
     const betaByUser = new Map(
       (Array.isArray(surveillanceRows) ? surveillanceRows : []).map(s => [s.user_id, !!s.beta_lightning])
     );
@@ -7519,8 +7663,13 @@ async function pollAndNotify() {
     // beta_lightning : seuls les comptes explicitement activés par l'admin
     // reçoivent le signal foudre. Double garde : FW_LIGHTNING_ENABLED (env var
     // Render, doit être posé à '1' manuellement) ET beta_lightning par compte.
+    // ⚠️ `beta_lightning` retiré ici AUSSI (09/09). Sans ça, le
+    // WebSocket ne s'ouvrirait que si un compte BÊTA veille : les
+    // comptes fraîchement sortis de bêta auraient un signal branché sur
+    // un buffer toujours vide — c'est-à-dire un silence qui ressemble à
+    // un ciel calme, et personne pour s'en apercevoir.
     const anyLightningWanted = (Array.isArray(surveillanceRows) ? surveillanceRows : [])
-      .some(s => s.active && s.beta_lightning && fwPrefs(s).sig_lightning);
+      .some(s => s.active && fwPrefs(s).sig_lightning);
     fwLightningSetNeeded(anyLightningWanted);
     fwLightningPrune();
 
@@ -7731,13 +7880,19 @@ async function pollAndNotify() {
     // (`origin_site` non nul). Une balise posée à la main garde son push
     // individuel : c'est la règle d'appartenance du lot 4.
     const windByUserSite = new Map();
-    // Lot 2 « cellule qui approche » : le même groupement, pour la
-    // rafale PRÉVUE. ⛔ Il ne se contente pas de grouper le réveil : il
-    // change le POINT DE LECTURE. `origin_site` EST la coordonnée du
-    // décollage, donc on lit la prévision AU DÉCOLLAGE — là où le pilote
-    // sera — au lieu de la lire aux trois balises qui l'entourent et de
-    // pousser trois fois pour la même cellule.
-    const gustPiByUserSite = new Map();
+    // Lots 2 et 3 « cellule qui approche » : le même groupement, pour
+    // tout ce qui est PRÉVU. ⛔ Il ne se contente pas de grouper le
+    // réveil : il change le POINT DE LECTURE. `origin_site` EST la
+    // coordonnée du décollage, donc on lit les prévisions AU DÉCOLLAGE —
+    // là où le pilote sera — au lieu de les lire aux trois balises qui
+    // l'entourent et de pousser trois fois pour la même cellule.
+    //
+    // ⚠️ Cette carte se remplit pour TOUTE ligne portant `origin_site`,
+    // indépendamment des préférences de signal : c'est le lieu qui est
+    // groupé, pas le signal. Les gardes `sig_*` sont appliquées à la
+    // sortie, une par signal — sinon couper `gust_pi` couperait aussi le
+    // composite, qui n'a rien demandé.
+    const sitesSurveilles = new Map();
     // decos.json (nom des sites) : chargé une fois par poll, hors de la
     // boucle. Échec = pas de nom, jamais d'erreur — cf. loadDecoNames.
     await loadDecoNames();
@@ -7839,7 +7994,35 @@ async function pollAndNotify() {
       // = un push par épisode puis rappel tant que des impacts tombent dans la
       // zone, jamais un push par impact. Buffer vide (WS coupé, démarrage,
       // kill switch) -> count 0 -> active=false -> pas d'alerte, jamais de crash.
-      if (FW_LIGHTNING_ENABLED && betaByUser.get(w.user_id) && fwPrefsForUser.sig_lightning && rel.lat != null && rel.lon != null) {
+      // ⛔ SORTIE DE BÊTA, 09/09/2026 (décision Yann). `betaByUser` est
+      // retiré de cette garde : la foudre est désormais offerte à tout
+      // compte qui l'a activée, comme les autres signaux.
+      //
+      // ⚠️ CE N'EST PAS UNE DÉCOUVERTE, C'EST LA SECONDE MOITIÉ D'UNE
+      // DÉCISION DÉJÀ PRISE. Le gate côté CLIENT avait été retiré le
+      // 14/07 (`SignalsDashboard.tsx`, `FlightwatchSettingsModal.tsx`) :
+      // le réglage était visible et activable par tous depuis deux mois,
+      // pendant que le serveur, lui, continuait de ne rien envoyer aux
+      // comptes non cochés. Les deux moitiés sont maintenant d'accord.
+      //
+      // ⛔ CE QUI EST LEVÉ, ET CE QUI NE L'EST PAS :
+      //   LEVÉ  — « le décodage n'a jamais été vérifié contre un vrai
+      //           flux » (ROADMAP, point 1). Le 09/09 : 4 105 impacts
+      //           lus sur `/lightning-strikes`, orage en Ligurie,
+      //           2 542 impacts sur 15 min contre 1 563 les 15
+      //           précédentes. Le décodage tient sur un vrai orage.
+      //   PAS LEVÉ — les ToU Blitzortung (point 2). Le mail du 11/07
+      //           (`MAIL_BLITZORTUNG.md`) est SANS RÉPONSE à ce jour, et
+      //           les conditions disent « private/entertainment use,
+      //           among participants or those we explicitly allow ».
+      //           Le risque est assumé par Yann, explicitement, comme il
+      //           l'avait été le 14/07 — et il reste à assumer.
+      //
+      // Ce qui protège encore : `FW_LIGHTNING_ENABLED` (env, opt-in), la
+      // préférence `sig_lightning` du pilote, `notify` (surveillance
+      // démarrée), et le corps du push qui DIT que la donnée est
+      // indicative, non officielle, et vient d'un réseau bénévole.
+      if (FW_LIGHTNING_ENABLED && fwPrefsForUser.sig_lightning && rel.lat != null && rel.lon != null) {
         const radiusKm = fwPrefsForUser.lightning_radius_km;
         const strikeCount = fwLightningCountNear(rel.lat, rel.lon, radiusKm, FW_LIGHTNING_WINDOW_MIN);
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.lightning;
@@ -7926,6 +8109,25 @@ async function pollAndNotify() {
       // calibré qui pousse, c'est un pilote qui apprend à ignorer.
       //
       // ⚠️ `gust_pi`, PAS `gust_front` : voir le pavé du module plus haut.
+      // ── Le décollage d'origine, enregistré UNE fois pour tous les
+      //    signaux prévisionnels de ce site ─────────────────────────────
+      if (w.origin_site) {
+        const gkey = `${w.user_id}|${w.origin_site}`;
+        const g = sitesSurveilles.get(gkey) || {
+          userId: w.user_id, originSite: w.origin_site,
+          beacons: [], seuilRafaleKmh: null,
+          foudreRayonKm: fwPrefsForUser.lightning_radius_km,
+          prefs: fwPrefsForUser,
+        };
+        g.beacons.push(String(w.beacon_id));
+        // ⚠️ Le PLUS BAS des seuils du groupe — même règle que
+        // `repeat_interval_min` au lot 5 : sur un groupe, le doute se
+        // tranche du côté qui pousse.
+        const sr = seuilRafaleDe(w);
+        g.seuilRafaleKmh = g.seuilRafaleKmh === null ? sr : Math.min(g.seuilRafaleKmh, sr);
+        sitesSurveilles.set(gkey, g);
+      }
+
       if (PI_RAFALE_READ && fwPrefsForUser.sig_gust_pi) {
         // ⛔⛔ LE SEUIL VIENT DE LA SURVEILLANCE, PAS D'UNE CONSTANTE
         // (retour Yann, 09/09). `user_watched.seuil_rafale` est le
@@ -7934,24 +8136,10 @@ async function pollAndNotify() {
         // sur 2 066 en alerte un jour de tramontane ordinaire — juste,
         // et inutile.
         const seuilKmh = seuilRafaleDe(w);
-        if (w.origin_site) {
-          // ── Ligne née d'un geste « Surveiller ce site » ─────────────
-          // On n'évalue rien ici : on accumule, et le site est lu UNE
-          // fois après la boucle, à sa propre coordonnée. Trois balises
-          // autour d'un même déco voient la même cellule à 2 km près ;
-          // pousser trois fois, c'est apprendre au pilote à ignorer.
-          const gkey = `${w.user_id}|${w.origin_site}`;
-          const g = gustPiByUserSite.get(gkey) || {
-            userId: w.user_id, originSite: w.origin_site,
-            beacons: [], seuilKmh: null,
-          };
-          g.beacons.push(String(w.beacon_id));
-          // ⚠️ Le PLUS BAS des seuils du groupe — même règle que
-          // `repeat_interval_min` au lot 5 : sur un groupe, le doute se
-          // tranche du côté qui pousse.
-          g.seuilKmh = g.seuilKmh === null ? seuilKmh : Math.min(g.seuilKmh, seuilKmh);
-          gustPiByUserSite.set(gkey, g);
-        } else if (rel.lat != null && rel.lon != null) {
+        // ⛔ Une ligne née d'un geste « Surveiller ce site » n'est PAS
+        // évaluée ici : elle a été enregistrée au-dessus, et le site est
+        // lu UNE fois après la boucle, à sa propre coordonnée.
+        if (!w.origin_site && rel.lat != null && rel.lon != null) {
           // ── Balise posée à la main : on lit à la balise ─────────────
           const gust = rafalePiAt(rel.lat, rel.lon, seuilKmh);
           const gustArrive = !!(gust && !gust.refus && gust.cellule && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
@@ -7980,6 +8168,27 @@ async function pollAndNotify() {
             }),
           });
         }
+      }
+
+      // ── Lot 3 « cellule qui approche » : LE COMPOSITE, SILENCIEUX ──
+      // Trois sources, une seule question : disent-elles la même chose
+      // AU MÊME MOMENT ? ⛔ Aucun push, aucune ligne en base, aucune
+      // voix — juste le cache, pour qu'on puisse REGARDER avant
+      // d'ouvrir. `evaluateFwSignal` n'est volontairement pas appelé :
+      // l'appeler écrirait une pastille inconnue dans « Mode vol ».
+      //
+      // ⚠️ Seules les balises posées à la main sont évaluées ici ; les
+      // lignes de site le sont après la boucle, au décollage.
+      if (CELLULE_READ && fwPrefsForUser.sig_convective_cell
+          && !w.origin_site && rel.lat != null && rel.lon != null) {
+        const cel = celluleAt(rel.lat, rel.lon, {
+          seuilRafaleKmh: seuilRafaleDe(w),
+          foudreRayonKm: fwPrefsForUser.lightning_radius_km,
+        });
+        celluleSignalCache.set(String(w.beacon_id), {
+          detected: !!cel?.detected, updatedAt: Date.now(), pousse: CELLULE_ENABLED,
+          cellule: cel,
+        });
       }
 
       // ── Lot 2/2b flightwatch : chute de pression rapide ────────────
@@ -8446,45 +8655,67 @@ async function pollAndNotify() {
     // ⚠️ Le seuil du groupe est le PLUS BAS de ses balises (posé dans la
     // boucle) — même règle que `repeat_interval_min` au lot 5 : sur un
     // groupe, le doute se tranche du côté qui pousse.
-    for (const g of gustPiByUserSite.values()) {
+    for (const g of sitesSurveilles.values()) {
       const c = coordsDuSite(g.originSite);
       const scope = `site:${g.originSite}`;
+      const site = siteLabelFromKey(g.originSite);
       if (!c) {
         // Une clé de site illisible n'est pas un site sans rafale : on le
         // DIT plutôt que de laisser un cache vide passer pour un calme.
-        gustPiSignalCache.set(scope, { detected: false, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED, rafale: null, refusLocal: 'cle-de-site-illisible' });
+        const muet = { detected: false, updatedAt: Date.now(), refusLocal: 'cle-de-site-illisible' };
+        gustPiSignalCache.set(scope, { ...muet, pousse: PI_RAFALE_ENABLED, rafale: null });
+        celluleSignalCache.set(scope, { ...muet, pousse: CELLULE_ENABLED, cellule: null });
         continue;
       }
-      const gust = rafalePiAt(c.lat, c.lon, g.seuilKmh);
-      const gustArrive = !!(gust && !gust.refus && gust.cellule && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
-      const site = siteLabelFromKey(g.originSite);
-      gustPiSignalCache.set(scope, {
-        detected: gustArrive, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED,
-        seuilKmh: g.seuilKmh, originSite: g.originSite, site,
-        beacons: g.beacons,
-        rafale: gust ? { ...gust, runHHMM: piRafaleRunHHMM(gust.run) } : null,
-      });
-      const lbl = pushLabels(langByUser.get(g.userId)).flightwatch.gust_pi;
-      await evaluateFwSignal({
-        userId: g.userId, scope, signal: 'gust_pi', level: 2,
-        active: gustArrive, notify: activeByUser.has(g.userId) && PI_RAFALE_ENABLED,
-        buildPush: () => ({
-          title: `💨 ${site}`,
-          body: lbl.eta({ ...gust, runHHMM: piRafaleRunHHMM(gust.run) }),
-          icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
-          // Un tag PAR SITE : les push d'un même décollage se remplacent
-          // dans le tiroir au lieu de s'y empiler.
-          tag: `fw-gust_pi-site-${g.originSite}`, requireInteraction: false,
-          data: {
-            url: '/', kind: 'siteWatch', signal: 'gust_pi', level: 2,
-            scope, originSite: g.originSite, beacons: g.beacons, voice: false,
-            value: gust.gustKmh, unit: 'km/h', source: 'arome-pi',
-            run: gust.run, runAgeMin: gust.runAgeMin, etaMin: gust.etaMin,
-            bearingDeg: gust.bearingDeg, cpaKm: gust.cpaKm,
-            baseKmh: gust.baseKmh, sautKmh: gust.sautHitKmh, seuilKmh: gust.seuilKmh, sautMinKmh: gust.sautMinKmh,
-          },
-        }),
-      });
+
+      // ── Lot 2 : la rafale prévue, au décollage ────────────────────
+      if (PI_RAFALE_READ && g.prefs.sig_gust_pi) {
+        const gust = rafalePiAt(c.lat, c.lon, g.seuilRafaleKmh);
+        const gustArrive = !!(gust && !gust.refus && gust.cellule && gust.etaMin <= FW_GUST_PI_ETA_MAX_MIN);
+        gustPiSignalCache.set(scope, {
+          detected: gustArrive, updatedAt: Date.now(), pousse: PI_RAFALE_ENABLED,
+          seuilKmh: g.seuilRafaleKmh, originSite: g.originSite, site,
+          beacons: g.beacons,
+          rafale: gust ? { ...gust, runHHMM: piRafaleRunHHMM(gust.run) } : null,
+        });
+        const lbl = pushLabels(langByUser.get(g.userId)).flightwatch.gust_pi;
+        await evaluateFwSignal({
+          userId: g.userId, scope, signal: 'gust_pi', level: 2,
+          active: gustArrive, notify: activeByUser.has(g.userId) && PI_RAFALE_ENABLED,
+          buildPush: () => ({
+            title: `💨 ${site}`,
+            body: lbl.eta({ ...gust, runHHMM: piRafaleRunHHMM(gust.run) }),
+            icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
+            // Un tag PAR SITE : les push d'un même décollage se remplacent
+            // dans le tiroir au lieu de s'y empiler.
+            tag: `fw-gust_pi-site-${g.originSite}`, requireInteraction: false,
+            data: {
+              url: '/', kind: 'siteWatch', signal: 'gust_pi', level: 2,
+              scope, originSite: g.originSite, beacons: g.beacons, voice: false,
+              value: gust.gustKmh, unit: 'km/h', source: 'arome-pi',
+              run: gust.run, runAgeMin: gust.runAgeMin, etaMin: gust.etaMin,
+              bearingDeg: gust.bearingDeg, cpaKm: gust.cpaKm,
+              baseKmh: gust.baseKmh, sautKmh: gust.sautHitKmh, seuilKmh: gust.seuilKmh,
+              sautMinKmh: gust.sautMinKmh,
+            },
+          }),
+        });
+      }
+
+      // ── Lot 3 : le composite, SILENCIEUX ──────────────────────────
+      // ⛔ Pas d'`evaluateFwSignal` ici, et c'est délibéré : ce lot
+      // observe, il ne parle pas. Voir le pavé du module plus haut.
+      if (CELLULE_READ && g.prefs.sig_convective_cell) {
+        const cel = celluleAt(c.lat, c.lon, {
+          seuilRafaleKmh: g.seuilRafaleKmh,
+          foudreRayonKm: g.foudreRayonKm,
+        });
+        celluleSignalCache.set(scope, {
+          detected: !!cel?.detected, updatedAt: Date.now(), pousse: CELLULE_ENABLED,
+          originSite: g.originSite, site, beacons: g.beacons,
+          cellule: cel,
+        });
+      }
     }
 
     // ── Lot foehn : alarme différentiel de pression par AXE ───────────
