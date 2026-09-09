@@ -7279,9 +7279,31 @@ app.delete('/unsubscribe-device', async (req, res) => {
 // L'utilisateur ne peut acquitter que ses propres lignes — filtre user_id
 // en plus de l'id, même si verifyUser garantit déjà l'identité.
 app.post('/ack', async (req, res) => {
-  const { access_token, beacon_id, origin_site } = req.body;
+  const { access_token, beacon_id, origin_site, scope, signal } = req.body;
   const user = await verifyUser(access_token);
   if (!user) return res.status(401).json({ error:'Session invalide ou expirée' });
+
+  // ── P1.4 (revue d'intégration 09/09) : l'acquittement GÉNÉRIQUE ──
+  // `{ scope, signal }` acquitte n'importe quelle ligne de
+  // `user_flightwatch_alerts` (foudre, précip, rafale prévue, foehn…).
+  // Avant, seul `wind_threshold` sur un site l'était : un `gust_pi`
+  // actif deux heures, c'était huit push que rien ne pouvait arrêter.
+  // `evaluateFwSignal` lit déjà `alert_acked_at` — ZÉRO changement dans
+  // le cycle : « acquitté » = plus de rappel jusqu'à la fin de l'épisode,
+  // sauf information neuve (`force`). Le registre dit ce qui est
+  // acquittable ; un scope hors registre est refusé.
+  if (scope && signal) {
+    const def = SIGNAUX.SIGNAUX[signal];
+    if (!def || !def.ackable) return res.status(400).json({ error:`signal ${signal} non acquittable` });
+    if (!SIGNAUX.scopeValide(signal, String(scope))) return res.status(400).json({ error:`scope hors registre pour ${signal}` });
+    const at = new Date().toISOString();
+    const ok = await sbUpsert('user_flightwatch_alerts', {
+      user_id: user.id, scope: String(scope), signal, level: def.niveau, alert_acked_at: at, updated_at: at,
+    }, 'user_id,scope,signal');
+    if (!ok) return res.status(500).json({ error:'Échec acquittement' });
+    console.log(`🔕 Ack ${user.email||user.id.slice(0,8)} — ${signal} @ ${scope}`);
+    return res.json({ success:true, ackedAt: at });
+  }
 
   // ── Lot 5 : acquitter un push GROUPÉ ─────────────────────────────
   // Décision Yann (08/08) : « le groupe, rappel maintenu si ça monte, et
