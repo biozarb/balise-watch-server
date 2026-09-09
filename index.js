@@ -180,6 +180,19 @@ const PUSH_LABELS = {
       precip: {
         body: radiusKm =>
           `Précipitations détectées à moins de ${radiusKm} km de ta balise — donnée radar indicative (RainViewer), non officielle`,
+        // Lot 1 « cellule qui approche » (09/09) : l'ETA vient de la
+        // prévision Météo-France dans son emprise. Le push NOMME la
+        // passe et son âge, et porte l'attribution exigée par la Licence
+        // Ouverte 2.0. `radar` = ce que RainViewer voit en même temps
+        // (null si rien à moins de radiusKm) — deux sources, deux phrases.
+        eta: (r, radar, radiusKm) => {
+          const quand = r.etaMin === 0 ? 'maintenant' : `vers ${new Date(r.etaAtMs).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })} (~${r.etaMin} min)`;
+          const dou = r.secteur ? ` par le ${r.secteur}` : '';
+          const loin = r.cpaKm != null && r.etaMin > 0 ? `, écho à ~${Math.round(r.cpaKm)} km` : '';
+          const age = r.fraicheur === 'ancienne' ? `, passe ancienne (${r.passeAgeMin} min)` : '';
+          const obs = radar?.near ? ` · Radar RainViewer : écho à ${radar.distanceKm != null ? `~${Math.round(radar.distanceKm)} km` : `moins de ${radiusKm} km`} (indicatif).` : '';
+          return `Pluie prévue ${quand}${dou}${loin} — prévision Météo-France, passe de ${r.passeHHMM}${age}.${obs} Source : Météo-France, Licence Ouverte 2.0. Vérifie les balises avant de décoller.`;
+        },
       },
       // ── Le texte d'une alerte de phénomène, PAR FAMILLE ───────────
       //
@@ -317,6 +330,14 @@ const PUSH_LABELS = {
       precip: {
         body: radiusKm =>
           `Precipitation detected within ${radiusKm} km of your beacon — indicative radar data (RainViewer), unofficial`,
+        eta: (r, radar, radiusKm) => {
+          const quand = r.etaMin === 0 ? 'now' : `around ${new Date(r.etaAtMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' })} (~${r.etaMin} min)`;
+          const dou = r.secteur ? ` from the ${r.secteur}` : '';
+          const loin = r.cpaKm != null && r.etaMin > 0 ? `, echo ~${Math.round(r.cpaKm)} km away` : '';
+          const age = r.fraicheur === 'ancienne' ? `, ageing run (${r.passeAgeMin} min)` : '';
+          const obs = radar?.near ? ` · RainViewer radar: echo ${radar.distanceKm != null ? `~${Math.round(radar.distanceKm)} km away` : `within ${radiusKm} km`} (indicative).` : '';
+          return `Rain expected ${quand}${dou}${loin} — Météo-France nowcast, run of ${r.passeHHMM}${age}.${obs} Source: Météo-France, Licence Ouverte 2.0. Check the beacons before taking off.`;
+        },
       },
       // Miroir exact du bloc `fr` — même découpage par famille, mêmes
       // verdicts. Les 6 autres langues n'existent pas dans PUSH_LABELS :
@@ -2111,6 +2132,43 @@ const WIND_GRID_BASE_URL = process.env.WIND_GRID_BASE_URL
   || 'https://pub-7a401bae4fe54a6c8dbdd6b5a33a7bec.r2.dev';
 const GF_MODEL_URL = `${WIND_GRID_BASE_URL}/arome/gustfront/grid.json`;
 const GF_MODEL_CHECK_MS = 30 * 60 * 1000;
+
+// ── Lot « cellule qui approche », lot 1 (09/09/2026) : l'ETA de la pluie
+// LU dans la prévision immédiate Météo-France (PIAF), dans son emprise.
+// Toute la logique vit dans lib/piaf-eta.js (module PUR, banc
+// tools/banc_eta_piaf_09-09.mjs) ; ici on ne fait que tenir UNE passe en
+// RAM (~25 Mo, retéléchargée quand `dernier.passe` avance) et la donner
+// à qui la demande : le poll flightwatch (push précip + /precip-signal)
+// et /precip-distance (fiche de site, plan de coupe).
+//
+// ⛔ CE QUE ÇA NE REMPLACE PAS : la corrélation RainViewer
+// (precipTrackInTiles) reste TELLE QUELLE et continue de remplir les
+// champs `trend/etaMin/cpaKm` de /precip-distance — le client les
+// affiche avec la mention « radar il y a N min », et une prévision
+// Météo-France mise dans ces champs-là serait attribuée au radar. PIAF
+// arrive dans un objet `piaf` À CÔTÉ, avec sa passe, son âge et son
+// attribution (Licence Ouverte 2.0). Chaque source parle à son nom.
+//
+// Kill switch : PIAF_ETA_ENABLED=0 (défaut : actif — la donnée est déjà
+// publique sur R2 et servie au calque carte, il n'y a pas de nouveau
+// tiers). Le lecteur sait vieillir à découvert : R2 en panne → la passe
+// en RAM reste, et c'est etaPiaf() qui la refuse passé 35 min
+// (« passe-trop-vieille »), jamais un ETA sur une passe d'une heure.
+const PIAF_ETA = require('./lib/piaf-eta');
+const PIAF_ETA_ENABLED = process.env.PIAF_ETA_ENABLED !== '0';
+const FW_PRECIP_ETA_MAX_MIN = Number(process.env.FW_PRECIP_ETA_MAX_MIN) || 60; // ETA PIAF ≤ 60 min = « pluie qui arrive » pour le push précip
+const piafLecteur = new PIAF_ETA.LecteurPiaf({ baseUrl: WIND_GRID_BASE_URL, fetch, journal: m => console.log(m) });
+/** L'ETA PIAF en un point, sur la passe en RAM (jamais de réseau ici :
+ *  le rafraîchissement est fait par l'appelant, cf. piafLecteur). */
+function piafEtaAt(lat, lon, nowMs = Date.now()) {
+  if (!PIAF_ETA_ENABLED) return null;
+  return PIAF_ETA.etaPiaf(piafLecteur.courante(), lat, lon, nowMs);
+}
+/** « 11:40 » heure de Paris, pour nommer une passe dans un push. */
+function piafPasseHHMM(passeIso) {
+  const t = Date.parse(passeIso);
+  return Number.isFinite(t) ? new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Paris' }) : '?';
+}
 
 let gfModelGrid = null;
 let gfModelEtag = null;
@@ -5820,6 +5878,18 @@ app.get('/precip-distance', async (req, res) => {
       cutPrecipTrackMemo.set(memoKey, track); // `null` mémoïsé aussi : un refus est aussi cher à recalculer
     }
   }
+  // Lot 1 « cellule qui approche » (09/09/2026) : la PRÉVISION Météo-France
+  // à côté du constat radar, dans un objet à elle. ⛔ Elle ne remplace
+  // AUCUN des champs ci-dessus : le client les affiche avec « radar il y
+  // a N min », et une prévision glissée dedans serait attribuée au radar.
+  // Rafraîchissement paresseux (index.json au plus toutes les 60 s, carte
+  // seulement si la passe a avancé) — `null` si le kill switch est OFF.
+  let piaf = null;
+  if (PIAF_ETA_ENABLED) {
+    try { await piafLecteur.rafraichir(); } catch { /* le lecteur journalise déjà */ }
+    const r = piafEtaAt(lat, lon);
+    piaf = r ? { ...r, passeHHMM: piafPasseHHMM(r.passe) } : null;
+  }
   res.json({
     near, distanceKm, radiusKm, bearingDeg,
     trend: track?.trend ?? null,
@@ -5831,7 +5901,16 @@ app.get('/precip-distance', async (req, res) => {
     // ses frames en secondes (epoch), d'où le *1000. null si aucune frame
     // n'a jamais pu être chargée.
     frameAgeMin: cutPrecipFrameTime ? Math.round((Date.now() - cutPrecipFrameTime * 1000) / 60000) : null,
+    source: 'rainviewer',
+    piaf,
   });
+});
+
+// Santé du lecteur PIAF (lot 1) : la passe en RAM, son âge, le dernier
+// échec. Lecture seule, donnée publique — même politique que
+// /gust-front/health.
+app.get('/precip-piaf/health', (req, res) => {
+  res.json({ enabled: PIAF_ETA_ENABLED, seuils: PIAF_ETA.DEFAUTS, etaMaxMin: FW_PRECIP_ETA_MAX_MIN, ...piafLecteur.etat() });
 });
 
 // ── Étape 11 : stations Météo-France (lecture seule) ─────────────────
@@ -7264,6 +7343,11 @@ async function pollAndNotify() {
     // cf. VEILLE_METEO_EXPLICATION §« affichage vs notifications »).
     if (FW_PRECIP_ENABLED && watchedRows.length > 0) await fwPrecipRefresh();
     else fwPrecipClear();
+    // Lot 1 « cellule qui approche » : la passe PIAF en RAM, UNE fois par
+    // poll et pour toutes les balises (index.json ~1 ko ; carte.bin
+    // ~25 Mo seulement quand `dernier.passe` a avancé). Un échec garde la
+    // passe précédente — c'est son âge qui décidera (lib/piaf-eta.js).
+    if (PIAF_ETA_ENABLED && FW_PRECIP_ENABLED && watchedRows.length > 0) await piafLecteur.rafraichir();
 
     // Langue par compte (Lot 3) : même lecture batchée par table que
     // surveillanceRows ci-dessus (sbGet sur user_language, jamais
@@ -7583,19 +7667,38 @@ async function pollAndNotify() {
         // y compris quand rien n'est détecté (distanceKm repasse à null),
         // pour que WatchCard affiche la vraie distance à l'écho le plus
         // proche plutôt que le seul rayon configuré (qui ne bougeait jamais).
-        precipSignalCache.set(String(w.beacon_id), { detected: precipNear, distanceKm: precipDistanceKm, updatedAt: Date.now() });
+        // Lot 1 « cellule qui approche » (09/09/2026) : dans l'emprise
+        // PIAF, la PRÉVISION parle AVANT que le radar constate. Le
+        // signal devient actif aussi quand PIAF voit une averse (≥ 0,5
+        // mm/5 min sur 3 mailles contiguës dans 3 km) arriver sous
+        // FW_PRECIP_ETA_MAX_MIN. Hors emprise / passe trop vieille / R2
+        // muet : `piaf.refus` est nommé, le radar garde seul la parole,
+        // le push est celui d'avant, à l'identique. Les deux ne se
+        // mélangent jamais dans une phrase : chaque source est nommée.
+        const piaf = piafEtaAt(rel.lat, rel.lon);
+        const piafArrive = !!(piaf && !piaf.refus && piaf.hit && piaf.etaMin <= FW_PRECIP_ETA_MAX_MIN);
+        precipSignalCache.set(String(w.beacon_id), {
+          detected: precipNear || piafArrive, distanceKm: precipDistanceKm, updatedAt: Date.now(),
+          radar: { near: precipNear, distanceKm: precipDistanceKm, source: 'rainviewer' },
+          piaf: piaf ? { ...piaf, passeHHMM: piafPasseHHMM(piaf.passe) } : null,
+        });
         const lbl = pushLabels(langByUser.get(w.user_id)).flightwatch.precip;
         await evaluateFwSignal({
-          userId: w.user_id, scope: String(w.beacon_id), signal: 'precip', level: 2, active: precipNear, notify,
+          userId: w.user_id, scope: String(w.beacon_id), signal: 'precip', level: 2, active: precipNear || piafArrive, notify,
           buildPush: () => ({
             title: `🌧️ ${rel.nom}`,
-            body: lbl.body(FW_PRECIP_RADIUS_KM),
+            body: piafArrive
+              ? lbl.eta({ ...piaf, passeHHMM: piafPasseHHMM(piaf.passe) }, { near: precipNear, distanceKm: precipDistanceKm }, FW_PRECIP_RADIUS_KM)
+              : lbl.body(FW_PRECIP_RADIUS_KM),
             icon: '/apple-touch-icon.png', badge: '/apple-touch-icon.png',
             tag: `fw-precip-${w.beacon_id}`, requireInteraction: false,
             data: {
               url: '/', kind: 'flightwatch', signal: 'precip', level: 2,
               scope: String(w.beacon_id), voice: false,
-              value: precipDistanceKm ?? FW_PRECIP_RADIUS_KM, unit: 'km',
+              value: piafArrive ? piaf.etaMin : (precipDistanceKm ?? FW_PRECIP_RADIUS_KM),
+              unit: piafArrive ? 'min' : 'km',
+              source: piafArrive ? 'piaf' : 'rainviewer',
+              ...(piafArrive ? { passe: piaf.passe, passeAgeMin: piaf.passeAgeMin, etaMin: piaf.etaMin, bearingDeg: piaf.bearingDeg, cpaKm: piaf.cpaKm } : {}),
             },
           }),
         });
