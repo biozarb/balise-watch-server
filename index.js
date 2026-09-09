@@ -601,7 +601,7 @@ const FW_CONVECTION_CAPE_RISE_MIN_JKG = 150; // hausse minimale sur la fenêtre 
 // défensif : WS coupé / kill switch / ws absent → buffer vide → signal
 // simplement non évalué, jamais de crash (même politique que
 // METEOFRANCE_APP_ID absent au Lot 4).
-const FW_LIGHTNING_ENABLED = process.env.FW_LIGHTNING_ENABLED === '1'; // OPT-IN : OFF par défaut. La chaîne foudre reste DORMANTE en prod (aucune connexion WS, aucun push) tant que FW_LIGHTNING_ENABLED=1 n'est pas mis sur Render — à n'activer qu'une fois le décodage validé sur le vrai flux ET l'accès Blitzortung régularisé (ToU, cf. ROADMAP Lot 5). En local : `export FW_LIGHTNING_ENABLED=1` pour tester.
+const FW_LIGHTNING_ENABLED = process.env.FW_LIGHTNING_ENABLED === '1'; // OPT-IN : OFF par défaut. La chaîne foudre reste DORMANTE en prod (aucune connexion WS, aucun push) tant que FW_LIGHTNING_ENABLED=1 n'est pas mis sur Render — les deux conditions posées à l'époque sont levées le 09/09 : décodage validé sur un vrai orage (4 105 impacts, Ligurie) et accord OFFICIEUX de Blitzortung pour un projet comme celui-ci (pas de réponse formelle à attendre, ils sont débordés — cf. le pavé « SORTIE DE BÊTA » du signal lightning). En local : `export FW_LIGHTNING_ENABLED=1` pour tester.
 const FW_LIGHTNING_WS_SERVERS = ['wss://ws1.blitzortung.org', 'wss://ws7.blitzortung.org', 'wss://ws8.blitzortung.org']; // rotation en cas d'échec/silence
 const FW_LIGHTNING_BBOX = { latMin: 41.0, latMax: 51.6, lonMin: -5.5, lonMax: 10.0 }; // France métropolitaine + marge (Alpes/Corse) — filtre à la réception
 const FW_LIGHTNING_BUFFER_MAX_AGE_MS = 60 * 60 * 1000; // fenêtre glissante du buffer (60 min), large marge sur la fenêtre de comptage
@@ -8011,12 +8011,17 @@ async function pollAndNotify() {
       //           lus sur `/lightning-strikes`, orage en Ligurie,
       //           2 542 impacts sur 15 min contre 1 563 les 15
       //           précédentes. Le décodage tient sur un vrai orage.
-      //   PAS LEVÉ — les ToU Blitzortung (point 2). Le mail du 11/07
-      //           (`MAIL_BLITZORTUNG.md`) est SANS RÉPONSE à ce jour, et
-      //           les conditions disent « private/entertainment use,
-      //           among participants or those we explicitly allow ».
-      //           Le risque est assumé par Yann, explicitement, comme il
-      //           l'avait été le 14/07 — et il reste à assumer.
+      //   LEVÉ, À MOITIÉ — les ToU Blitzortung (point 2). Le mail du
+      //           11/07 (`MAIL_BLITZORTUNG.md`) n'a pas eu de réponse
+      //           écrite, mais Yann a obtenu le 09/09 une réponse
+      //           OFFICIEUSE : l'équipe est débordée, il n'y aura jamais
+      //           de réponse formelle, et les projets comme celui-ci —
+      //           gratuits, non commerciaux, donnée servie par notre
+      //           propre serveur, jamais le flux brut — leur conviennent.
+      //           ⚠️ OFFICIEUSE : ça n'est pas une licence, et le corps
+      //           du push continue de dire « réseau bénévole, donnée
+      //           indicative, non officielle ». Mais ce n'est plus un
+      //           silence sur lequel on parie.
       //
       // Ce qui protège encore : `FW_LIGHTNING_ENABLED` (env, opt-in), la
       // préférence `sig_lightning` du pilote, `notify` (surveillance
