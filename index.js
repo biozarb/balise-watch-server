@@ -1643,7 +1643,7 @@ async function getBeaconDepartment(beaconId, lat, lon) {
 // (même dégradation silencieuse que le reste du module Météo-France).
 let mfStationsList = []; // [{id, nom, lat, lon, alt}]
 let mfStationsListFetchedAt = 0;
-let mfObsCache = new Map(); // id_station -> {dd, ff, ddraf10, raf10, pres, pmer, validityTime}
+let mfObsCache = new Map(); // id_station -> {dd, ff, ddraf10, raf10, pres, pmer, temp, validityTime}
 let mfObsCacheFetchedAt = 0;
 
 // Débogage 11/08/2026 — combien de temps on garde une station MF qui ne
@@ -3976,7 +3976,7 @@ const SMN_OBS_MAX_AGE_MS = 40 * 60 * 1000;
 // même source, c'est exactement le genre de divergence silencieuse que
 // la révision du lot 7 a supprimée côté seuils foehn.)
 
-let aemetObsCache = new Map(); // idema -> {t, moy, raf, dir, dirRaf, pressure, lat, lon, alt, nom}
+let aemetObsCache = new Map(); // idema -> {t, moy, raf, dir, dirRaf, pressure, temp, lat, lon, alt, nom}
 let aemetObsCacheFetchedAt = 0;
 let aemetLastError = null; // même principe diagnostic que infoclimatLastError
 
@@ -4034,6 +4034,11 @@ async function refreshAemetObs() {
         dir: row.dv ?? null,
         dirRaf: row.dmax ?? null,
         pressure: row.pres_nmar ?? null,
+        // 10/09/2026 — `ta` est la température instantanée de l'air (°C),
+        // déjà en °C côté AEMET : pas de conversion, contrairement au `t`
+        // en kelvin de Météo-France. `ts` (température du SOL) est le
+        // champ voisin à ne pas confondre.
+        temp: row.ta ?? null,
         lat: row.lat ?? null, lon: row.lon ?? null, alt: row.alt ?? null,
         nom: row.ubi || id,
       });
@@ -4181,7 +4186,7 @@ const WINDSMOBI_DEDUP_M = 180;
 // et AEMET dont l'API ne rend que l'instant présent.
 const WINDSMOBI_HISTORY_MAX_H = 168;
 
-let windsmobiObsCache = new Map(); // id -> {t, moy, raf, dir, lat, lon, alt, nom, reseau, reseauNom, url}
+let windsmobiObsCache = new Map(); // id -> {t, moy, raf, dir, temp, lat, lon, alt, nom, reseau, reseauNom, url}
 let windsmobiFetchedAt = 0;
 let windsmobiLastError = null;
 let windsmobiDedupCount = 0; // diagnostic : combien de balises écartées comme doublons
@@ -4390,6 +4395,15 @@ async function refreshWindsmobiProviders(providers) {
         windsmobiObsCache.set(s._id, {
           t: last._id * 1000, // winds.mobi horodate en SECONDES
           moy: last['w-avg'], raf: last['w-max'] ?? null, dir: last['w-dir'] ?? null,
+          // ⚠️ Contrairement à `pres` (jamais repris, cf. le pavé
+          // ci-dessus), la température n'a PAS de convention cachée : un
+          // °C est un °C quel que soit le réseau source. Elle est donc
+          // reprise telle quelle. Couverture MESURÉE le 10/09/2026 sur
+          // les 16 réseaux dans la boîte : 864/1212 (71 %) — Holfuy et
+          // SLF 100 %, MeteoSuisse 96 %, mais FFVL 31 % seulement. C'est
+          // pourquoi la bulle est masquée quand elle manque plutôt que
+          // d'afficher un « – » permanent (cf. buildWindsmobiPopupEl).
+          temp: last.temp ?? null,
           lat, lon, alt: s.alt ?? null,
           nom: (s.name || s.short || s._id).trim(),
           reseau: provider,
@@ -6508,7 +6522,13 @@ function mfStationsPayload() {
     out.push({
       id, nom: meta.nom, lat: meta.lat, lon: meta.lon, alt: meta.alt,
       dd: obs.dd, ff: obs.ff, raf10: obs.raf10, ddraf10: obs.ddraf10,
-      pres: obs.pres, pmer: obs.pmer, validityTime: obs.validityTime,
+      pres: obs.pres, pmer: obs.pmer,
+      // 10/09/2026 — `temp` était ingérée depuis l'étape 28 (signal bonus
+      // du front de rafales) et convertie K→°C au seul endroit prévu pour
+      // ça, mais n'était jamais publiée. Aucun appel réseau ajouté : c'est
+      // le MÊME paquet d'observations, une clé de plus dans la réponse.
+      temp: obs.temp,
+      validityTime: obs.validityTime,
     });
   }
   return out;
@@ -6671,7 +6691,7 @@ function aemetStationsPayload() {
     out.push({
       id, nom: obs.nom, lat: obs.lat, lon: obs.lon, alt: obs.alt,
       dd: obs.dir, ff: obs.moy, raf10: obs.raf, ddraf10: obs.dirRaf,
-      pres: null, pmer: obs.pressure,
+      pres: null, pmer: obs.pressure, temp: obs.temp ?? null,
       validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
     });
   }
@@ -6732,7 +6752,7 @@ function windsmobiStationsPayload() {
     out.push({
       id, nom: obs.nom, lat: obs.lat, lon: obs.lon, alt: obs.alt,
       dd: obs.dir, ff: obs.moy, raf10: obs.raf, ddraf10: null,
-      pres: null, pmer: null,
+      pres: null, pmer: null, temp: obs.temp ?? null,
       reseau: obs.reseau, reseauNom: obs.reseauNom, url: obs.url,
       validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
     });
