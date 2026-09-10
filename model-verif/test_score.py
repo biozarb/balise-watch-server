@@ -5732,85 +5732,111 @@ def test_10_09_la_purge_de_model_score_zone_va_par_tranches():
 
     UNE requête `DELETE … as_of < J−7` a expiré avec 94 436 lignes — la
     charge d'une nuit ordinaire. Et une purge ratée DOUBLE la suivante.
-    Le remède : des tranches bornées (`limit` + `order` sur la clé
-    primaire, « Limited Update/Delete » de PostgREST), comptées entre
-    chaque passe, qui s'arrêtent d'elles-mêmes quand rien ne bouge.
+    Le remède : des tranches par CLÉ (une journée × un régime), comptées
+    avant/après, qui s'arrêtent d'elles-mêmes sur trois échecs.
+
+    ⛔ PAS `limit` : mesuré le 10/09 sur cette base, PostgREST l'IGNORE
+    (un `PATCH …&limit=2` a touché 21 lignes). Le banc tient donc que les
+    tranches sont des FILTRES sur la clé, jamais un `limit`.
     """
     print("── 10/09 : la purge de model_score_zone va par tranches ──")
     import io
+    import email.message as _M
+    import urllib.error as E
+    import urllib.parse as P
     import urllib.request as U
 
     class _Fausse:
-        """Une table de `n` lignes ; chaque DELETE limité en efface `limit`."""
-        def __init__(self, n, panne_a=None):
-            self.n, self.appels, self.panne_a = n, [], panne_a
+        """Une table {(as_of, regime): n} ; DELETE par filtre, HEAD count."""
+        def __init__(self, table, panne_apres=None):
+            self.t, self.appels, self.panne_apres = dict(table), [], panne_apres
+        def _filtre(self, url):
+            q = P.parse_qs(P.urlsplit(url).query)
+            j = q.get("as_of", [""])[0]; r = q.get("regime", [None])[0]
+            op, _, val = j.partition(".")
+            return op, val, (r.partition(".")[2] if r else None)
+        def _lignes(self, op, val, reg):
+            return [k for k in self.t if (k[0] < val if op == "lt" else k[0] == val)
+                    and (reg is None or k[1] == reg)]
         def urlopen(self, req, timeout=None):
-            self.appels.append(req.full_url)
+            self.appels.append((req.get_method(), req.full_url))
+            op, val, reg = self._filtre(req.full_url)
+            r = io.BytesIO(b""); r.__enter__ = lambda *a: r; r.__exit__ = lambda *a: None
+            r.headers = _M.Message(); r.status = 204
             if req.get_method() == "HEAD":
-                import email.message as _M
-                r = io.BytesIO(b"")
-                r.headers = _M.Message()           # insensible à la casse, comme urllib
-                r.headers["Content-Range"] = f"*/{self.n}"
-                r.__enter__ = lambda *a: r; r.__exit__ = lambda *a: None
+                r.headers["Content-Range"] = f"*/{sum(self.t[k] for k in self._lignes(op, val, reg))}"
                 return r
-            import urllib.parse as P
-            q = P.parse_qs(P.urlsplit(req.full_url).query)
-            if self.panne_a is not None and len([a for a in self.appels if "limit=" in a]) >= self.panne_a:
-                import urllib.error as E
+            if req.get_method() == "GET":
+                ks = sorted(self._lignes(op, val, reg))
+                return io.BytesIO(json.dumps([{"as_of": ks[0][0]}] if ks else []).encode())
+            n_del = len([a for a in self.appels if a[0] == "DELETE"])
+            if self.panne_apres is not None and n_del > self.panne_apres:
                 raise E.HTTPError(req.full_url, 500, "x", {},
                                   io.BytesIO(b'{"code":"57014","message":"timeout"}'))
-            self.n = max(0, self.n - int(q["limit"][0]))
-            r = io.BytesIO(b""); r.__enter__ = lambda *a: r; r.__exit__ = lambda *a: None
+            for k in self._lignes(op, val, reg):
+                self.t[k] = 0
             return r
 
+    regimes = list(J.S.REGIMES) + ["unknown", "all"]
+    table = {}
+    for jour, n in (("2026-09-02", 94436), ("2026-09-03", 95373)):
+        for k, reg in enumerate(regimes):
+            table[(jour, reg)] = n // len(regimes) + (1 if k == 0 else 0)
+    for reg in regimes:
+        table[("2026-09-09", reg)] = 1000        # à GARDER
+    seuil = datetime(2026, 9, 4, tzinfo=timezone.utc)
     sb = _sb_de_banc()
-    f = _Fausse(189_809)
+    f = _Fausse(table)
     vrai, U.urlopen = U.urlopen, f.urlopen
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            n = sb.delete_par_tranches("model_score_zone", "?as_of=lt.2026-09-04",
-                                       order=J.CLE_SCORE_ZONE, limit=20000)
+            n = sb.delete_par_tranches("model_score_zone", "as_of", seuil,
+                                       tranches=J.TRANCHES_SCORE_ZONE)
     finally:
         U.urlopen = vrai
-    deletes = [a for a in f.appels if "limit=20000" in a]
-    check("10/09 ⭐ 189 809 lignes (deux journées) partent en 10 tranches de 20 000",
-          len(deletes), 10)
-    check("10/09 ⭐ … et le total effacé est rendu", n, 189_809)
-    check("10/09 ⛔ chaque tranche est ORDONNÉE sur la clé primaire complète "
-          "(PostgREST l'exige, et un ordre partiel sauterait des lignes)",
-          all(f"order={J.CLE_SCORE_ZONE}" in a for a in deletes), True)
-    check("10/09 le filtre de rétention est conservé sur chaque tranche",
-          all("as_of=lt.2026-09-04" in a for a in deletes), True)
+    deletes = [u for m, u in f.appels if m == "DELETE"]
+    check("10/09 ⭐ deux journées (189 809 lignes) partent en 2 × 9 tranches "
+          "(8 régimes + le reste de la journée)", len(deletes), 18)
+    attendu = sum(v for k, v in table.items() if k[0] < "2026-09-04")
+    check("10/09 ⭐ … et le total effacé est rendu", n, attendu)
+    check("10/09 ⛔ AUCUNE tranche n'est un `limit` (ignoré par cette base)",
+          any("limit=" in u for u in deletes), False)
+    check("10/09 ⛔ chaque tranche est un FILTRE SUR LA CLÉ : as_of=eq.<jour>",
+          all("as_of=eq.2026-09-0" in u for u in deletes), True)
+    check("10/09 … huit tranches par jour portent un régime (dont `all` = la "
+          "fenêtre glissante)",
+          sum("regime=eq." in u for u in deletes), 16)
+    check("10/09 ⭐⭐ ce qui est APRÈS le seuil n'est pas touché",
+          sum(v for k, v in f.t.items() if k[0] == "2026-09-09"), 8000)
     check("10/09 rien à effacer ⇒ aucun DELETE", (lambda: (
-        setattr(U, "urlopen", _Fausse(0).urlopen),
-        sb.delete_par_tranches("model_score_zone", "?as_of=lt.2026-09-04",
-                               order=J.CLE_SCORE_ZONE)))()[1], 0)
+        setattr(U, "urlopen", _Fausse({("2026-09-09", "all"): 5}).urlopen),
+        sb.delete_par_tranches("model_score_zone", "as_of", seuil,
+                               tranches=J.TRANCHES_SCORE_ZONE)))()[1], 0)
     U.urlopen = vrai
 
-    # ⛔ Une tranche qui expire ne perd pas les précédentes, et on ne
-    # boucle pas cent fois sur le même 57014.
-    f = _Fausse(100_000, panne_a=3)
+    # ⛔ Trois tranches en 57014 arrêtent la boucle ; les précédentes restent.
+    f = _Fausse(table, panne_apres=3)
     U.urlopen = f.urlopen
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            n = sb.delete_par_tranches("model_score_zone", "?as_of=lt.2026-09-04",
-                                       order=J.CLE_SCORE_ZONE, limit=20000)
+            n = sb.delete_par_tranches("model_score_zone", "as_of", seuil,
+                                       tranches=J.TRANCHES_SCORE_ZONE)
     finally:
         U.urlopen = vrai
-    check("10/09 ⛔ une tranche en 57014 arrête la boucle, les précédentes restent acquises",
-          n, 40_000)
+    check("10/09 ⛔ trois tranches en 57014 arrêtent la boucle, l'acquis reste",
+          0 < n < 94436 and len([u for m, u in f.appels if m == "DELETE"]) == 6, True)
 
-    # ⛔ ET `_purges` S'EN SERT — sur model_score_zone, avec l'ordre.
+    # ⛔ ET `_purges` S'EN SERT — sur model_score_zone, avec les tranches.
     src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
     corps = sans_commentaires(src[src.index("def _purges("):src.index("\ndef main(")])
-    check("10/09 ⭐⭐ `_purges` efface model_score_zone PAR TRANCHES, ordonnées "
-          "sur CLE_SCORE_ZONE",
-          'sb.delete_par_tranches(\n        "model_score_zone",' in corps
-          and "order=CLE_SCORE_ZONE" in corps, True)
+    check("10/09 ⭐⭐ `_purges` efface model_score_zone PAR TRANCHES (as_of, régimes)",
+          'sb.delete_par_tranches(\n        "model_score_zone", "as_of",' in corps
+          and "tranches=TRANCHES_SCORE_ZONE" in corps, True)
     check("10/09 … et plus jamais en une seule requête",
           'sb.delete("model_score_zone"' in corps, False)
-    check("10/09 CLE_SCORE_ZONE est la clé primaire de step35",
-          J.CLE_SCORE_ZONE, "as_of,zone_id,model,lead_h,window_kind,regime")
+    check("10/09 les tranches couvrent TOUS les régimes du CHECK de step35 + `all`",
+          set(t.split("eq.")[1] for t in J.TRANCHES_SCORE_ZONE),
+          {"fluxN", "fluxE", "fluxS", "fluxW", "thermal", "calm", "unknown", "all"})
     check("10/09 `--purge-seule` existe (le rattrapage, sans notation)",
           'ap.add_argument("--purge-seule"' in src
           and "if args.purge_seule:" in src, True)

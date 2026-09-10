@@ -330,6 +330,15 @@ CLE_DAILY = "day,source,station_id,model,lead_h,fcst_src"
 #: PostgREST refuserait, ou effacerait de travers.
 CLE_SCORE_ZONE = "as_of,zone_id,model,lead_h,window_kind,regime"
 
+#: ⛔ LES TRANCHES DE LA PURGE DE `model_score_zone` (10/09/2026) : une
+#: journée d'`as_of` se découpe par régime — `all` = la fenêtre glissante
+#: (≈ 11 000 lignes le 10/09), chacun des six régimes ≈ 15 000 à 20 000
+#: (107 404 lignes de régime le 09/09), `unknown` presque rien. Chaque
+#: tranche est un DELETE sur l'index de la clé primaire (`as_of` en
+#: tête), très sous les 8 s. ⚠️ `regime` fait partie du CHECK de step35 :
+#: la liste vient de `scoring.REGIMES`, pas d'une copie.
+TRANCHES_SCORE_ZONE = tuple(f"regime=eq.{r}" for r in (*S.REGIMES, "unknown", "all"))
+
 #: ⛔ LES COLONNES QUE LA FENÊTRE GLISSANTE LIT — ET SEULEMENT ELLES
 #: (09/09/2026, contrôle du matin : ⛔ 2 du rapport-controle-scoring-09-09).
 #:
@@ -1274,10 +1283,12 @@ class Supabase:
             print(f"  ⚠️ purge {table} : HTTP {e.code} — "
                   f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
 
-    def delete_par_tranches(self, table: str, query: str, order: str,
-                            limit: int = 20000, max_passes: int = 100) -> int | None:
-        """Supprime PAR TRANCHES, et rend le nombre de lignes effacées
-        (ou `None` si le compte n'a pas pu être lu).
+    def delete_par_tranches(self, table: str, colonne_jour: str, seuil,
+                            tranches, max_jours: int = 60) -> int | None:
+        """Supprime `colonne_jour < seuil` PAR TRANCHES — une journée à la
+        fois, et chaque journée découpée par `tranches` (une liste de
+        sous-filtres PostgREST, ex. `regime=eq.fluxN`). Rend le nombre
+        de lignes effacées, ou `None` si le compte n'a pas pu être lu.
 
         ⛔ POURQUOI (10/09/2026, enquete-pente-10-09.md §1). La purge de
         `model_score_zone` (`as_of < J−7`, UNE requête) a expiré en 57014
@@ -1285,20 +1296,24 @@ class Supabase:
         sur la veille — 70 s après l'upsert de 122 691 lignes sur la même
         table. Et une purge ratée DOUBLE la suivante : deux journées le
         lendemain, trois le surlendemain, jusqu'à ce que la rétention ne
-        soit plus qu'une ligne de journal. Le coût d'UNE requête dépendait
-        de la taille du retard ; ici chaque passe efface au plus `limit`
-        lignes, très sous les 8 s, et une passe qui expire ne perd pas
-        les précédentes.
+        soit plus qu'une ligne de journal. Ici le coût d'une requête ne
+        dépend plus de la taille du retard : une journée × un régime, soit
+        ≈ 11 000 à 20 000 lignes, très sous les 8 s ; et une tranche qui
+        expire ne perd pas les précédentes.
 
-        ⚠️ `order` DOIT être la clé primaire complète : PostgREST refuse
-        un DELETE limité sans ordre sur des colonnes uniques (« Limited
-        Update/Delete »), et un ordre partiel ferait sauter des lignes.
-        ⚠️ On COMPTE avant et entre les passes (HEAD, sur l'index de la
-        clé — pas le seq scan de `model_character`) : c'est ce qui dit
-        quand s'arrêter ET si une passe n'a rien effacé (base en panne,
-        on ne boucle pas cent fois sur le même 57014).
+        ⛔ PAS `limit` : MESURÉ LE 10/09 SUR CETTE BASE, il est IGNORÉ.
+        PostgREST documente « Limited Update/Delete » (`limit` + `order`),
+        et le premier jet l'utilisait ; le rattrapage a effacé 94 488
+        lignes en UNE requête `limit=20000`. Contre-épreuve sur
+        `model_character` : un `PATCH …&limit=2` a rendu
+        `Content-Range: 0-20/21` — 21 lignes touchées. PostgREST 14.5,
+        derrière la passerelle Supabase. On découpe donc par CLÉ, ce que
+        le serveur ne peut pas ignorer.
+
+        ⚠️ On COMPTE avant et après (HEAD, sur l'index de la clé — pas le
+        seq scan de `model_character`) : c'est ce qui dit ce qui reste.
         """
-        sep = "&" if "?" in query else "?"
+        query = f"?{colonne_jour}=lt.{seuil:%Y-%m-%d}"
         avant = self.compte(table, query)
         if avant == 0:
             print(f"  ⓘ purge {table} : rien à effacer ({query})")
@@ -1306,36 +1321,48 @@ class Supabase:
         if self.dry_run:
             print(f"  (dry-run) delete par tranches {table}{query} ({avant} lignes)")
             return 0
-        restant = avant
-        for passe in range(1, max_passes + 1):
-            req = self._req(f"{table}{query}{sep}order={order}&limit={limit}",
-                            "DELETE", None, {"Prefer": "return=minimal"})
-            try:
-                with urllib.request.urlopen(req, timeout=120) as r:
-                    r.read()
-            except urllib.error.HTTPError as e:
-                print(f"  ⚠️ purge {table} (tranche {passe}) : HTTP {e.code} — "
-                      f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
+        # La plus vieille journée présente : une lecture d'une ligne.
+        premier = None
+        try:
+            req = self._req(f"{table}{query}&select={colonne_jour}"
+                            f"&order={colonne_jour}&limit=1", "GET", None, {})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                lignes = json.loads(r.read().decode("utf-8"))
+            if lignes:
+                premier = datetime.strptime(lignes[0][colonne_jour], "%Y-%m-%d")
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError,
+                KeyError, TypeError) as e:
+            print(f"  ⚠️ purge {table} : plus vieille journée illisible ({e})",
+                  file=sys.stderr)
+        if premier is None:
+            premier = seuil - timedelta(days=max_jours)
+        jour = premier.replace(tzinfo=None)
+        fin = seuil.replace(tzinfo=None)
+        passes, echecs = 0, 0
+        while jour < fin and passes < max_jours * (len(tranches) + 1):
+            for sous in list(tranches) + [""]:      # "" = le reste de la journée
+                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}" + (f"&{sous}" if sous else "")
+                req = self._req(f"{table}{q}", "DELETE", None,
+                                {"Prefer": "return=minimal"})
+                passes += 1
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as r:
+                        r.read()
+                except urllib.error.HTTPError as e:
+                    echecs += 1
+                    print(f"  ⚠️ purge {table} ({q}) : HTTP {e.code} — "
+                          f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
+                    if echecs >= 3:
+                        break
+            if echecs >= 3:
+                print(f"  ⚠️ purge {table} : trois tranches en échec — on "
+                      f"s'arrête, le reste attendra demain", file=sys.stderr)
                 break
-            apres = self.compte(table, query)
-            if apres is None:
-                # Compte illisible : on continue sur la foi de `limit`,
-                # borné par `max_passes` — jamais en boucle aveugle.
-                restant = None if restant is None else max(0, restant - limit)
-                if restant == 0:
-                    break
-                continue
-            if apres >= (restant if restant is not None else apres + 1):
-                print(f"  ⚠️ purge {table} (tranche {passe}) : aucune ligne "
-                      f"effacée ({apres} restantes) — on s'arrête", file=sys.stderr)
-                restant = apres
-                break
-            restant = apres
-            if apres == 0:
-                break
+            jour += timedelta(days=1)
+        restant = self.compte(table, query)
         effacees = None if (avant is None or restant is None) else avant - restant
         print(f"  → purge {table} : {effacees if effacees is not None else '?'} "
-              f"ligne(s) effacée(s) en {passe} tranche(s)"
+              f"ligne(s) effacée(s) en {passes} tranche(s)"
               + (f", {restant} RESTANTE(S)" if restant else ""))
         return effacees
 
@@ -6789,9 +6816,8 @@ def _purges(sb, today) -> None:
     # ⛔ PAR TRANCHES depuis le 10/09 — voir `delete_par_tranches`.
     # L'ordre est la clé primaire (step35), et pas un raccourci.
     sb.delete_par_tranches(
-        "model_score_zone",
-        f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}",
-        order=CLE_SCORE_ZONE)
+        "model_score_zone", "as_of", today - timedelta(days=RETENTION_SCORE_D),
+        tranches=TRANCHES_SCORE_ZONE)
     # ⛔ CETTE LIGNE A DIT LE CONTRAIRE DU 08/08 AU 25/08 : «
     # `model_character` ne se purge JAMAIS : c'est son intérêt ».
     # Elle était fausse, et pas seulement en principe — la table A

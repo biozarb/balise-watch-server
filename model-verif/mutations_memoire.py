@@ -130,17 +130,23 @@ MUTATIONS = [
     ("⭐ la purge de model_score_zone redevient UNE requête : le 57014 du "
      "10/09, et sa boucle (une purge ratée double la suivante)",
      SCORE, B_SCORE,
-     '    sb.delete_par_tranches(\n        "model_score_zone",\n'
-     '        f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}",\n'
-     '        order=CLE_SCORE_ZONE)',
+     '    sb.delete_par_tranches(\n        "model_score_zone", "as_of", '
+     'today - timedelta(days=RETENTION_SCORE_D),\n        tranches=TRANCHES_SCORE_ZONE)',
      '    sb.delete("model_score_zone",\n'
      '              f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}")'),
 
-    ("l'ordre des tranches perd `regime` : PostgREST refuserait, ou "
-     "effacerait de travers — la clé n'est plus la clé primaire",
+    ("les tranches perdent un régime (`calm`) : ses lignes ne sont "
+     "effacées que par « le reste de la journée », une requête aussi "
+     "grosse que ce qu'on voulait éviter — et le banc doit le voir",
      SCORE, B_SCORE,
-     'CLE_SCORE_ZONE = "as_of,zone_id,model,lead_h,window_kind,regime"',
-     'CLE_SCORE_ZONE = "as_of,zone_id,model,lead_h,window_kind"'),
+     'TRANCHES_SCORE_ZONE = tuple(f"regime=eq.{r}" for r in (*S.REGIMES, "unknown", "all"))',
+     'TRANCHES_SCORE_ZONE = tuple(f"regime=eq.{r}" for r in (*S.REGIMES[:-1], "unknown", "all"))'),
+
+    ("les tranches redeviennent un `limit` — que cette base IGNORE "
+     "(mesuré le 10/09 : `limit=2` → 21 lignes touchées)",
+     SCORE, B_SCORE,
+     '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}" + (f"&{sous}" if sous else "")',
+     '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}&limit=20000"'),
 
     ("⭐ le garde-fou calendaire de model_character disparaît : deux seq "
      "scans de 1,2 M lignes par nuit, pour zéro ligne, et les 57014 avec",

@@ -24,15 +24,20 @@ coup sûr, puis trois, et la table croît de ~100 000 lignes par jour sans
 qu'aucune requête ne rougisse plus fort que la première. La rétention
 n'est plus une rétention ; c'est une ligne de journal qu'on ne lit pas.
 
-Ce qui protège (à faire — enquete-pente-10-09.md §1.6) :
+Ce qui protège (fait le 10/09 — enquete-pente-10-09.md §1.6) :
 
-1. **rattraper à la main, une fois** (SQL Editor, rôle `postgres` : 2 min
-   de délai au lieu des 8 s de `service_role`), journée par journée ;
-2. **purger par tranches** : PostgREST accepte `limit` + `order` sur un
-   `DELETE` (« Limited Update/Delete », ordre sur la clé primaire) —
-   une boucle de 20 000 lignes jusqu'à ce qu'une passe n'efface plus rien.
-   Une passe qui expire ne perd pas les précédentes, et le coût par
-   passe ne dépend plus de la taille du retard ;
+1. **rattraper, une fois** — `score.py --purge-seule` (l'étape 6 seule,
+   idempotente) ; joué le 10/09 : 09-02 puis 09-03, 189 861 lignes ;
+2. **purger par tranches — par CLÉ, pas par `limit`.** PostgREST
+   documente `limit` + `order` sur un `DELETE` (« Limited Update/Delete »)
+   et le premier jet s'en servait : **cette base l'ignore** (PostgREST
+   14.5 derrière la passerelle Supabase ; mesuré : `PATCH …&limit=2` →
+   `Content-Range: 0-20/21`, et le rattrapage a effacé 94 488 lignes en
+   UNE requête `limit=20000`). Un serveur peut ignorer un `limit` ; il ne
+   peut pas ignorer un filtre. D'où `TRANCHES_SCORE_ZONE` : une journée
+   d'`as_of` × un régime (≈ 11 000 à 20 000 lignes), puis « le reste de
+   la journée ». Une tranche qui expire ne perd pas les précédentes, et
+   le coût par tranche ne dépend plus de la taille du retard ;
 3. **ne pas compter ce qu'on sait vide** : `_purge_caractere` lance un
    `HEAD count` puis un `DELETE` sur `last_day` (seq scan de 1,2 M lignes,
    0 ligne à effacer jusqu'en février 2027) — deux des trois expirations

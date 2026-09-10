@@ -279,9 +279,9 @@ def proposition(c: dict) -> str:
     mesuré le 10/09 (élaguer `units`, enquete-pente-10-09.md §2.5)."""
     if c["motif"] == MOTIF_PURGE:
         return ("   → à décider par Yann : depuis le 10/09 la purge va par tranches "
-                "(`delete_par_tranches`, 20 000 lignes, comptées) et le rattrapage "
-                "est `score.py --purge-seule` ;\n     si ça expire ENCORE, ce n'est "
-                "plus la taille du retard, c'est la base (enquete-pente-10-09.md "
+                "(`delete_par_tranches` : une journée × un régime, comptées) et le "
+                "rattrapage est `score.py --purge-seule` ;\n     si ça expire ENCORE, "
+                "ce n'est plus la taille du retard, c'est la base (enquete-pente-10-09.md "
                 "§1.6, §5). Ce script ne joue aucun SQL.")
     if c["motif"] == MOTIF_DUREE:
         minutes = int(c["cible"] // 60)

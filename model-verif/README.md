@@ -187,7 +187,7 @@ rejouer un run, jouer un SQL. Une remontée est un constat écrit dans
 l'en-tête de `10-timeout-s3.conf` avec sa mesure ; un rejeu est
 `run.sh score --day AAAA-MM-JJ`, à la main ; un SQL est joué par Yann.
 
-### Installer (proposé le 10/09, à lancer par Yann — rien n'a été exécuté)
+### Installer (joué le 10/09 entre 08:04 et 08:14 CEST — sha256 identiques des deux côtés, timer armé pour le 11/09 07:30, premier run réel : KAN-3, KAN-4, KAN-5)
 
 ```bash
 # 0. sur le Mac, depuis PWA/balise-watch-server — les bancs d'abord
@@ -210,7 +210,8 @@ ssh debian@51.91.102.146 'cd ~/balise-watch/balise-watch-server/model-verif/syst
   systemctl list-timers bw-model-controle.timer &&
   systemctl show bw-model-score.service -p Environment -p TimeoutStartUSec'
 
-# 3. le rétro-remplissage (une fois ; le droit de lire systemd est celui de sudo)
+# 3. le rétro-remplissage (FAIT le 10/09 à 08:12 : 41 runs — à rejouer seulement
+#    après un trou ; `ajouter` n'écrit jamais deux fois le même run)
 ssh debian@51.91.102.146 'sudo journalctl -u bw-model-score.service --since 2026-08-01 -o short-iso -q \
   | /home/debian/venv-balise/bin/python3 ~/balise-watch/balise-watch-server/model-verif/registre_nuit.py --retro \
   && /home/debian/venv-balise/bin/python3 ~/balise-watch/balise-watch-server/model-verif/registre_nuit.py --afficher'
@@ -240,10 +241,16 @@ ssh debian@51.91.102.146 'sha256sum /etc/systemd/system/bw-model-controle.servic
 Fait le même jour, dans `score.py` (bancs : test_score 1 099/0,
 mutations_memoire 16/16) :
 
-- **la purge de `model_score_zone` va par tranches** (`delete_par_tranches`,
-  20 000 lignes ordonnées sur `CLE_SCORE_ZONE`, comptées entre les passes,
-  arrêt sur 57014 sans perdre l'acquis) ; `score.py --purge-seule` joue
-  l'étape 6 seule — c'est le rattrapage du 10/09, idempotent ;
+- **la purge de `model_score_zone` va par tranches** (`delete_par_tranches` :
+  une journée d'`as_of` × un régime, `TRANCHES_SCORE_ZONE`, comptée avant et
+  après, arrêt au troisième 57014 sans perdre l'acquis) ; `score.py
+  --purge-seule` joue l'étape 6 seule — le rattrapage du 10/09, idempotent.
+  ⛔ **Pas `limit`** : mesuré le 10/09 sur cette base, PostgREST 14.5
+  l'ignore sur une mutation (`PATCH …&limit=2` → 21 lignes touchées, et le
+  premier rattrapage a effacé 94 488 lignes en une requête `limit=20000`).
+  Joué pour de vrai le 10/09 : 09-02 (94 488) puis 09-03 (95 373 en 9
+  tranches, 28 s, une tranche `calm` en 57014 rattrapée par « le reste de
+  la journée ») ;
 - **`model_character` n'est plus compté ni purgé avant le 04/02/2027**
   (`PREMIER_JOUR_CHARACTER`) : deux seq scans de 1,2 M lignes en moins
   par nuit, deux 57014 en moins ;
