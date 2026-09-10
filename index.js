@@ -4398,11 +4398,17 @@ async function refreshWindsmobiProviders(providers) {
           // ⚠️ Contrairement à `pres` (jamais repris, cf. le pavé
           // ci-dessus), la température n'a PAS de convention cachée : un
           // °C est un °C quel que soit le réseau source. Elle est donc
-          // reprise telle quelle. Couverture MESURÉE le 10/09/2026 sur
-          // les 16 réseaux dans la boîte : 864/1212 (71 %) — Holfuy et
-          // SLF 100 %, MeteoSuisse 96 %, mais FFVL 31 % seulement. C'est
-          // pourquoi la bulle est masquée quand elle manque plutôt que
-          // d'afficher un « – » permanent (cf. buildWindsmobiPopupEl).
+          // reprise telle quelle.
+          //
+          // ⚠️ COUVERTURE : la mesurer sur ce que CETTE route publie, pas
+          // ici. Vu de cette boucle (API brute, 16 réseaux dans la
+          // boîte), le 10/09/2026 : 864/1212 (71 %), FFVL à 31 %. Vu de
+          // /windsmobi-stations le même soir, après les deux
+          // dédoublonnages : 830/894 (93 %), FFVL à 146/192 (76 %). Les
+          // ~290 FFVL écartées comme doublons étaient massivement celles
+          // sans thermomètre — elles doublonnaient des Pioupiou, qui n'en
+          // ont pas non plus. Le premier chiffre décrit l'amont, le
+          // second décrit l'écran : c'est le second qu'on cite.
           temp: last.temp ?? null,
           lat, lon, alt: s.alt ?? null,
           nom: (s.name || s.short || s._id).trim(),
