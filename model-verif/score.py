@@ -325,6 +325,11 @@ ROLLING_DAYS = 15
 #: index-là, pas un tri qui lui ressemble.
 CLE_DAILY = "day,source,station_id,model,lead_h,fcst_src"
 
+#: ⛔ LA CLÉ PRIMAIRE DE `model_score_zone` (step35), écrite une fois — la
+#: purge par tranches en a besoin comme ORDRE (10/09/2026). Raccourcie,
+#: PostgREST refuserait, ou effacerait de travers.
+CLE_SCORE_ZONE = "as_of,zone_id,model,lead_h,window_kind,regime"
+
 #: ⛔ LES COLONNES QUE LA FENÊTRE GLISSANTE LIT — ET SEULEMENT ELLES
 #: (09/09/2026, contrôle du matin : ⛔ 2 du rapport-controle-scoring-09-09).
 #:
@@ -366,9 +371,39 @@ COLONNES_FENETRE = ",".join((
     "n_hours",
 ))
 
+#: ⛔ LES CLÉS QUE LA FENÊTRE REJOUÉE GARDE EN MÉMOIRE — ET SEULEMENT
+#: ELLES (10/09/2026, enquete-pente-10-09.md §2). Le même remède que
+#: `COLONNES_FENETRE`, un étage plus loin : le chemin régime ne lit pas
+#: Supabase, il relit 30 fichiers `replay_*.json.gz` (1 253 232
+#: balise-jours le 10/09, 33 clés par ligne) et gardait TOUT. Mesuré sur
+#: le VPS : 2 570 octets par ligne, ≈ 3 070 Mo pour la fenêtre — plus que
+#: la RAM disponible au moment du régime, d'où 2 Go de swap cette nuit-là.
+#: Élaguée aux clés que `_case_rows`, `regime_scores`, `stability_report`
+#: et `MX.bilan_dispersion` lisent vraiment : 1 301 octets, ≈ 1 550 Mo.
+#:
+#: ⚠️ LE MÊME PIÈGE QUE `COLONNES_FENETRE`, tenu par le même banc : une
+#: clé lue et absente d'ici rend `None` en silence — la métrique
+#: s'éteint, rien ne rougit. `test_score.py` extrait les lectures du
+#: source des quatre lecteurs et exige qu'elles soient ici.
+#: ⚠️ Le CACHE sur disque garde ses 33 clés (`_murphy`, `_biais_fin`,
+#: et tout ce qu'une formule future relira) : on élague la copie en
+#: mémoire, jamais le fichier.
+CLES_REJEU = frozenset(COLONNES_FENETRE.split(",")) | frozenset((
+    "regime",                       # regime_scores : la case
+    "spread_kmh", "err_vec_rms",    # MX.bilan_dispersion (bw_mix)
+    "unit",                         # dérivée au chargement, lue partout
+))
+
 RETENTION_DAILY_D = 30
 RETENTION_EVENT_D = 90
 RETENTION_SCORE_D = 7
+
+#: ⓘ Première écriture dans `model_character` (lot B, 08/08/2026). Tant que
+#: `today − RETENTION_CHARACTER_D` est avant cette date, la purge des
+#: accumulateurs n'a RIEN à effacer — et le mesurer coûtait deux seq scans
+#: de 1,2 M lignes par nuit (`HEAD count` + `DELETE` sur `last_day`, sans
+#: index), soit 2 des 3 expirations 57014 du bloc purge le 10/09.
+PREMIER_JOUR_CHARACTER = datetime(2026, 8, 8, tzinfo=timezone.utc)
 
 #: Silence au-delà duquel un accumulateur de caractère ne pèse plus rien.
 #:
@@ -1238,6 +1273,71 @@ class Supabase:
         except urllib.error.HTTPError as e:
             print(f"  ⚠️ purge {table} : HTTP {e.code} — "
                   f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
+
+    def delete_par_tranches(self, table: str, query: str, order: str,
+                            limit: int = 20000, max_passes: int = 100) -> int | None:
+        """Supprime PAR TRANCHES, et rend le nombre de lignes effacées
+        (ou `None` si le compte n'a pas pu être lu).
+
+        ⛔ POURQUOI (10/09/2026, enquete-pente-10-09.md §1). La purge de
+        `model_score_zone` (`as_of < J−7`, UNE requête) a expiré en 57014
+        avec 94 436 lignes à effacer — la charge d'une nuit ordinaire, +7 %
+        sur la veille — 70 s après l'upsert de 122 691 lignes sur la même
+        table. Et une purge ratée DOUBLE la suivante : deux journées le
+        lendemain, trois le surlendemain, jusqu'à ce que la rétention ne
+        soit plus qu'une ligne de journal. Le coût d'UNE requête dépendait
+        de la taille du retard ; ici chaque passe efface au plus `limit`
+        lignes, très sous les 8 s, et une passe qui expire ne perd pas
+        les précédentes.
+
+        ⚠️ `order` DOIT être la clé primaire complète : PostgREST refuse
+        un DELETE limité sans ordre sur des colonnes uniques (« Limited
+        Update/Delete »), et un ordre partiel ferait sauter des lignes.
+        ⚠️ On COMPTE avant et entre les passes (HEAD, sur l'index de la
+        clé — pas le seq scan de `model_character`) : c'est ce qui dit
+        quand s'arrêter ET si une passe n'a rien effacé (base en panne,
+        on ne boucle pas cent fois sur le même 57014).
+        """
+        sep = "&" if "?" in query else "?"
+        avant = self.compte(table, query)
+        if avant == 0:
+            print(f"  ⓘ purge {table} : rien à effacer ({query})")
+            return 0
+        if self.dry_run:
+            print(f"  (dry-run) delete par tranches {table}{query} ({avant} lignes)")
+            return 0
+        restant = avant
+        for passe in range(1, max_passes + 1):
+            req = self._req(f"{table}{query}{sep}order={order}&limit={limit}",
+                            "DELETE", None, {"Prefer": "return=minimal"})
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    r.read()
+            except urllib.error.HTTPError as e:
+                print(f"  ⚠️ purge {table} (tranche {passe}) : HTTP {e.code} — "
+                      f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
+                break
+            apres = self.compte(table, query)
+            if apres is None:
+                # Compte illisible : on continue sur la foi de `limit`,
+                # borné par `max_passes` — jamais en boucle aveugle.
+                restant = None if restant is None else max(0, restant - limit)
+                if restant == 0:
+                    break
+                continue
+            if apres >= (restant if restant is not None else apres + 1):
+                print(f"  ⚠️ purge {table} (tranche {passe}) : aucune ligne "
+                      f"effacée ({apres} restantes) — on s'arrête", file=sys.stderr)
+                restant = apres
+                break
+            restant = apres
+            if apres == 0:
+                break
+        effacees = None if (avant is None or restant is None) else avant - restant
+        print(f"  → purge {table} : {effacees if effacees is not None else '?'} "
+              f"ligne(s) effacée(s) en {passe} tranche(s)"
+              + (f", {restant} RESTANTE(S)" if restant else ""))
+        return effacees
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -2942,6 +3042,10 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
             if murphy_acc is not None and (murphy_exclus is None
                                            or unit not in murphy_exclus):
                 MU.accumule(murphy_acc, (unit, r["model"], r["lead_h"]), mo)
+            # ⛔ ÉLAGUÉE AUX CLÉS LUES (10/09/2026) — voir `CLES_REJEU` :
+            # ≈ −1 500 Mo sur la fenêtre du 10/09. APRÈS les deux `pop`
+            # et APRÈS Murphy, qui lisait la clé qu'on retire.
+            r = {k: v for k, v in r.items() if k in CLES_REJEU}
             rows.append(r)
     bilan = (f"{len(rows)} balise-jours sur {vus} journées "
              f"({rejoues} rejouée(s) cette nuit, {manquants} vide(s)"
@@ -5624,6 +5728,18 @@ def _purge_caractere(sb, today) -> None:
     # bruyamment, puisque c'est exactement le silence qu'on répare.
     seuil_caractere = today - timedelta(days=RETENTION_CHARACTER_D)
     filtre_caractere = f"?last_day=lt.{seuil_caractere:%Y-%m-%d}"
+    # ── 10/09/2026 — NE PAS MESURER CE QU'ON SAIT VIDE ─────────────
+    # ⛔ Le compte « qui n'a jamais échoué » (ci-dessus, 01/09) a expiré
+    # les 04, 08 et 10/09 : un seq scan de 1,2 M lignes oscille autour
+    # des 8 s. Il ne répond à rien avant février 2027 — la table est née
+    # le 08/08. Jusque-là : aucune requête, et le journal le dit avec la
+    # date. Le jour venu, la mesure reprend telle quelle.
+    if seuil_caractere < PREMIER_JOUR_CHARACTER:
+        print(f"  ⓘ purge model_character : rien avant le "
+              f"{PREMIER_JOUR_CHARACTER + timedelta(days=RETENTION_CHARACTER_D):%Y-%m-%d} "
+              f"(première écriture {PREMIER_JOUR_CHARACTER:%Y-%m-%d}, rétention "
+              f"{RETENTION_CHARACTER_D} j) — aucune requête lancée.")
+        return
     vieux_caractere = sb.compte("model_character", filtre_caractere)
     if vieux_caractere == 0:
         print(f"  ⓘ purge model_character : aucune ligne plus vieille "
@@ -6653,6 +6769,57 @@ def doit_republier(day: datetime, as_of: datetime,
     return day.date() >= hier
 
 
+
+def _purges(sb, today) -> None:
+    """L'étape 6 du run — les rétentions. Extraite de `main` le 10/09/2026
+    pour être rejouable SEULE (`--purge-seule`, le rattrapage de la purge
+    ratée) sans relire l'archive ni rien écrire d'autre. Idempotente."""
+    sb.delete("model_verif_daily",
+              f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
+    # Même rétention que sa sœur : la pression se rejoue depuis
+    # l'archive R2 comme le vent, donc garder 30 jours en base
+    # n'apporte rien de plus qu'à `model_verif_daily`.
+    # ⓘ `Supabase.delete` journalise et continue sur un HTTP d'erreur
+    # (cf. sa définition) : tant que le SQL du S1 n'est pas passé,
+    # cette ligne écrit un ⚠️ dans le journal et ne casse rien.
+    sb.delete("model_verif_daily_pres",
+              f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
+    sb.delete("model_verif_event",
+              f"?day=lt.{(today - timedelta(days=RETENTION_EVENT_D)):%Y-%m-%d}")
+    # ⛔ PAR TRANCHES depuis le 10/09 — voir `delete_par_tranches`.
+    # L'ordre est la clé primaire (step35), et pas un raccourci.
+    sb.delete_par_tranches(
+        "model_score_zone",
+        f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}",
+        order=CLE_SCORE_ZONE)
+    # ⛔ CETTE LIGNE A DIT LE CONTRAIRE DU 08/08 AU 25/08 : «
+    # `model_character` ne se purge JAMAIS : c'est son intérêt ».
+    # Elle était fausse, et pas seulement en principe — la table A
+    # DÉJÀ ÉTÉ PURGÉE en vrai, le 22/08, par le `step50` (métrique
+    # `speedRatio`, ~118 000 lignes). Le compte des `days` en porte
+    # encore la trace : `speedRatio` plafonne à 3 quand les quatre
+    # autres métriques sont à 18.
+    #
+    # ⚠️ CE QUI EST VRAI, C'EST AUTRE CHOSE, et c'est plus utile :
+    # un accumulateur ne se périme pas par son ÂGE — il n'a pas
+    # d'âge, il est mis à jour sur place — il se périme par son
+    # SILENCE. À `RETENTION_CHARACTER_D` jours sans nouvelle, il
+    # pèse 1,6 % d'une journée fraîche, et le jeter ne change aucun
+    # chiffre affiché.
+    #
+    # ⓘ Mesuré le 25/08 : CETTE LIGNE NE SUPPRIME RIEN AUJOURD'HUI
+    # (0 ligne concernée, la table a 18 jours). Elle est écrite pour
+    # le régime permanent, et elle est ici pour que la question ne
+    # se repose pas dans six mois. ⓘ Toujours vrai le 01/09
+    # (1 223 107 lignes, 25 jours) — et c'est désormais MESURÉ à
+    # chaque nuit plutôt que supposé : voir `_purge_caractere`, qui
+    # compte avant de supprimer.
+    #
+    # ⓘ L'archive R2, elle, ne se purge toujours pas — ~544 Mo/an
+    # mesurés, et c'est ce qui rend chaque amélioration de la
+    # formule rejouable.
+    _purge_caractere(sb, today)
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="/var/lib/bw-model-verif")
@@ -6661,6 +6828,9 @@ def main() -> int:
                     help="décalage local des sites, pour la fenêtre volable "
                          "(défaut : 2 = heure d'été française)")
     ap.add_argument("--no-purge", action="store_true")
+    ap.add_argument("--purge-seule", action="store_true",
+                    help="ne joue QUE l'étape 6 (purges), puis sort — le "
+                         "rattrapage du 10/09, et rien d'autre")
     ap.add_argument("--dry-run", action="store_true")
     # ⛔ LOT LR : la porte de sortie du garde-fou de `doit_republier`.
     # Nommee en toutes lettres pour qu'on ne la tape pas par reflexe.
@@ -6723,6 +6893,14 @@ def main() -> int:
         print(f"❌ {exc}", file=sys.stderr)
         return 1
     st = _storage()
+
+    if args.purge_seule:
+        # ⓘ 10/09/2026 : le rattrapage de la purge ratée, à la main,
+        # sans relire l'archive ni rien écrire d'autre. Idempotent.
+        print("▶ purges seules (--purge-seule) — aucune notation")
+        _purges(sb, datetime.now(timezone.utc))
+        print("✅ terminé (purges seules)")
+        return 0
 
     print(f"▶ journée notée : {day:%Y-%m-%d}")
 
@@ -7679,48 +7857,7 @@ def main() -> int:
 
     # ── 6. purge ─────────────────────────────────────────────────
     if not args.no_purge:
-        today = datetime.now(timezone.utc)
-        sb.delete("model_verif_daily",
-                  f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
-        # Même rétention que sa sœur : la pression se rejoue depuis
-        # l'archive R2 comme le vent, donc garder 30 jours en base
-        # n'apporte rien de plus qu'à `model_verif_daily`.
-        # ⓘ `Supabase.delete` journalise et continue sur un HTTP d'erreur
-        # (cf. sa définition) : tant que le SQL du S1 n'est pas passé,
-        # cette ligne écrit un ⚠️ dans le journal et ne casse rien.
-        sb.delete("model_verif_daily_pres",
-                  f"?day=lt.{(today - timedelta(days=RETENTION_DAILY_D)):%Y-%m-%d}")
-        sb.delete("model_verif_event",
-                  f"?day=lt.{(today - timedelta(days=RETENTION_EVENT_D)):%Y-%m-%d}")
-        sb.delete("model_score_zone",
-                  f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}")
-        # ⛔ CETTE LIGNE A DIT LE CONTRAIRE DU 08/08 AU 25/08 : «
-        # `model_character` ne se purge JAMAIS : c'est son intérêt ».
-        # Elle était fausse, et pas seulement en principe — la table A
-        # DÉJÀ ÉTÉ PURGÉE en vrai, le 22/08, par le `step50` (métrique
-        # `speedRatio`, ~118 000 lignes). Le compte des `days` en porte
-        # encore la trace : `speedRatio` plafonne à 3 quand les quatre
-        # autres métriques sont à 18.
-        #
-        # ⚠️ CE QUI EST VRAI, C'EST AUTRE CHOSE, et c'est plus utile :
-        # un accumulateur ne se périme pas par son ÂGE — il n'a pas
-        # d'âge, il est mis à jour sur place — il se périme par son
-        # SILENCE. À `RETENTION_CHARACTER_D` jours sans nouvelle, il
-        # pèse 1,6 % d'une journée fraîche, et le jeter ne change aucun
-        # chiffre affiché.
-        #
-        # ⓘ Mesuré le 25/08 : CETTE LIGNE NE SUPPRIME RIEN AUJOURD'HUI
-        # (0 ligne concernée, la table a 18 jours). Elle est écrite pour
-        # le régime permanent, et elle est ici pour que la question ne
-        # se repose pas dans six mois. ⓘ Toujours vrai le 01/09
-        # (1 223 107 lignes, 25 jours) — et c'est désormais MESURÉ à
-        # chaque nuit plutôt que supposé : voir `_purge_caractere`, qui
-        # compte avant de supprimer.
-        #
-        # ⓘ L'archive R2, elle, ne se purge toujours pas — ~544 Mo/an
-        # mesurés, et c'est ce qui rend chaque amélioration de la
-        # formule rejouable.
-        _purge_caractere(sb, today)
+        _purges(sb, today)
 
     print(f"✅ terminé ({sb.ecritures} lignes écrites en base)")
     return 0

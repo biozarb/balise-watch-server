@@ -65,8 +65,14 @@ check "A5  ⭐ l'inventaire == ce que run.sh CALCULE réellement, mode par mode"
       "$(diff <(printf '%s\n' "$CALCULES") <(bw_inv_construites "$RACINE" | sort -u) >/dev/null && echo identique || echo DIVERGENT)" \
       "identique"
 
-check "A6  20 variables de canal lues au total" \
-      "$(bw_inv_lues "$RACINE" | wc -l | tr -d ' ')" "20"
+# ⓘ 10/09 (lot REGISTRE ET PENTE) : 20 → 26. Le contrôle de pente lit
+# `BW_MODEL_CONTROLE_PING_URL` (littéral) et `tools/bw_jira.sh` les cinq
+# `BW_JIRA_*` — tous deux ajoutés à BW_RUNNERS_ALERTE.
+# … et `BW_AGRUME_PI_RAFALE_PING_URL` (run-ingest-pi-rafale.sh, 859970c) : 27.
+check "A6  27 variables de canal lues au total" \
+      "$(bw_inv_lues "$RACINE" | wc -l | tr -d ' ')" "27"
+check "A6b ⭐ les cinq BW_JIRA_* et le ping du contrôle sont LUS (pas « définies, jamais lues »)" \
+      "$(bw_inv_lues "$RACINE" | grep -cE '^(BW_JIRA_(URL|MAIL|TOKEN|PROJET|TYPE)|BW_MODEL_CONTROLE_PING_URL)$' | tr -d ' ')" "6"
 check "A7  ⛔ un nom cité SEULEMENT en commentaire n'est pas 'lu'" \
       "$(bw_inv_lues "$RACINE" | grep -cE '^(BW_PING_FAIL_URL|BW_MAIL_TO)$' | tr -d ' ')" "0"
 
@@ -290,8 +296,13 @@ NON644=$(find . -name '*.service' -o -name '*.timer' \
   | grep -v node_modules | grep -v _to_delete \
   | while IFS= read -r f; do [ "$(bw_mode "$f")" = "644" ] || printf '%s ' "$f"; done)
 check "E1  ⭐ AUCUN fichier d'unité du dépôt n'est en 600" "$(printf '%s' "$NON644")" ""
-check "E2  ⓘ et il y en a bien 37 à vérifier (le périmètre n'a pas fondu)" \
-      "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "37"
+# ⓘ 10/09 : 37 → 41 — bw-agrume-pi-rafale (.service + .timer, commit 859970c
+# du 09/09 au soir) et bw-model-controle (.service + .timer, lot REGISTRE ET
+# PENTE). ⚠️ Un dossier NON SUIVI par git (`discord-bridge/`, unités en 600)
+# fait rougir E1 et E2 tant qu'il vit dans l'arbre : à commettre en 644 (et
+# compter ici), ou à sortir de l'arbre.
+check "E2  ⓘ et il y en a bien 41 à vérifier (le périmètre n'a pas fondu)" \
+      "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "41"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
@@ -431,8 +442,9 @@ check "G9  ⭐ ni /var/lib/bw-model-verif — les ReadWritePaths sont disjoints"
       "$(bw_inv_journal_couvert "$RACINE" /var/lib/bw-model-verif/msmtp.log && echo couvert || echo non)" "non"
 check "G10 ⭐ seul le chemin VIDE passe : 'syslog on' n'écrit aucun fichier" \
       "$(bw_inv_journal_couvert "$RACINE" '' && echo couvert || echo non)" "couvert"
-check "G11 ⓘ et il y a bien 13 unités durcies à vérifier (le périmètre n'a pas fondu)" \
-      "$(bw_inv_unites_durcies "$RACINE" | wc -l | tr -d ' ')" "13"
+# ⓘ 10/09 : 13 → 14 (bw-model-controle.service, durcie comme la jauge R2).
+check "G11 ⓘ et il y a bien 14 unités durcies à vérifier (le périmètre n'a pas fondu)" \
+      "$(bw_inv_unites_durcies "$RACINE" | wc -l | tr -d ' ')" "14"
 
 # ⛔ G12 — UN CONTRÔLE QUI NE LIT RIEN NE DOIT PAS DIRE « OUI ». Sans
 # cette assertion, le jour où la recherche d'unités casse, tout chemin
@@ -459,6 +471,112 @@ check "G14 ⓘ … alors que le dossier lui-même l'est (sinon G13 serait vrai p
 # l'appelait).
 check "G15 ⭐ le déploiement DÉFINIT et APPELLE bw_controle_config_msmtp" \
       "$(grep -c 'bw_controle_config_msmtp' tools/deploy-agrume-vps.sh | tr -d ' ' | awk '$1>=3{print "oui"} $1<3{print "non"}')" "oui"
+
+# ══════════════════════════════════════════════════════════════════════
+#  H. LE CANAL JIRA — LA DÉRIVE, UN TICKET PAR MOTIF (10/09/2026)
+#
+#  ⛔ CE QUE CE BANC TIENT : (1) le jeton ne passe JAMAIS sur la ligne de
+#  commande (`-K -`, jamais `-u`) ; (2) on CHERCHE avant de créer, on
+#  COMMENTE si un ticket est ouvert, on CRÉE sinon — sans ça, 300 tickets
+#  par an ; (3) un commentaire par jour et par motif, jeton écrit EN
+#  DERNIER et seulement si quelque chose est parti ; (4) les labels
+#  `bw-surveillance` + motif, qui séparent la machine des humains
+#  (Discord : `discord`, `idees`) ; (5) sans configuration, on le DIT
+#  et on rend 0. Le faux `curl` lit sa config sur l'entrée standard
+#  comme le vrai, et répond selon l'URL.
+# ══════════════════════════════════════════════════════════════════════
+echo
+echo "▶ H. le canal Jira"
+
+cat > "$FAUX/curl" <<'EOS'
+#!/bin/sh
+# le faux curl du banc Jira : `-K -` → la config arrive par stdin
+CFG="$(cat)"
+echo "ARGS: $*" >> "$BANC_CURL"
+printf '%s\n' "$CFG" | sed 's/Authorization: Basic .*/Authorization: Basic <encode>/' >> "$BANC_CURL"
+URL=$(printf '%s\n' "$CFG" | sed -n 's/^url = "\(.*\)"$/\1/p')
+OUT=$(printf '%s\n' "$CFG" | sed -n 's/^output = "\(.*\)"$/\1/p')
+REQ=$(printf '%s\n' "$CFG" | sed -n 's/^data-binary = "@\(.*\)"$/\1/p')
+[ -n "$REQ" ] && [ -r "$REQ" ] && { echo "BODY: $(cat "$REQ")" >> "$BANC_CURL"; }
+case "$URL" in
+  */search/jql) if [ "${BANC_JIRA_TROUVE:-0}" = 1 ]; then echo '{"issues":[{"key":"KAN-7"}]}' > "$OUT"; else echo '{"issues":[]}' > "$OUT"; fi; printf 200 ;;
+  */comment)    echo '{}' > "$OUT"; printf 201 ;;
+  */rest/api/3/issue) echo '{"id":"10042","key":"KAN-42"}' > "$OUT"; printf 201 ;;
+  *) echo '{}' > "$OUT"; printf 500 ;;
+esac
+EOS
+chmod +x "$FAUX/curl"
+export BW_JIRA_URL="https://jira.invalid" BW_JIRA_MAIL="yann@example.invalid"
+export BW_JIRA_TOKEN="JETON-TRES-SECRET-1234567890"
+JIRA_ETAT="$TMP/etat-jira"; mkdir -p "$JIRA_ETAT"
+. tools/bw_jira.sh
+
+: > "$BANC_CURL"
+bw_jira_signaler bw-pente-duree "derive notation - duree" "durée 3 860 s, +197 s/nuit → franchit le garde le 18/09" "$JIRA_ETAT" >/dev/null
+check "H1  ⭐ on CHERCHE d'abord (search/jql, statusCategory != Done, label = motif)" \
+      "$(grep -c 'search/jql' "$BANC_CURL" | tr -d ' ')" "1"
+check "H1b … avec le bon JQL" \
+      "$(grep -cF 'labels = \"bw-pente-duree\" AND statusCategory != Done' "$BANC_CURL" | tr -d ' ')" "1"
+check "H2  ⭐ aucun ticket ouvert → CRÉATION (POST /rest/api/3/issue)" \
+      "$(grep -c 'url = "https://jira.invalid/rest/api/3/issue"$' "$BANC_CURL" | tr -d ' ')" "1"
+check "H3  ⭐ les labels bw-surveillance + motif sont sur le ticket" \
+      "$(grep -c '"labels":\["bw-surveillance","bw-pente-duree"\]' "$BANC_CURL" | tr -d ' ')" "1"
+check "H4  projet KAN et type Bug par défaut" \
+      "$(grep -c '"project":{"key":"KAN"},"issuetype":{"name":"Bug"}' "$BANC_CURL" | tr -d ' ')" "1"
+check "H5  ⛔⛔ le JETON n'apparaît JAMAIS sur la ligne de commande de curl" \
+      "$(grep '^ARGS:' "$BANC_CURL" | grep -c 'JETON-TRES-SECRET' | tr -d ' ')" "0"
+check "H5b ⛔ … ni « -u » : l'auth part par « -K - » (entrée standard)" \
+      "$(grep '^ARGS:' "$BANC_CURL" | grep -cE -- '(^| )-u( |$)' | tr -d ' ')" "0"
+check "H5c ⭐ et chaque appel est bien un « -K - »" \
+      "$(grep -c '^ARGS: -K -$' "$BANC_CURL" | tr -d ' ')" "$(grep -c '^ARGS:' "$BANC_CURL" | tr -d ' ')"
+check "H6  la clé du ticket touché est rendue à l'appelant" "$BW_JIRA_DERNIER" "KAN-42"
+check "H7  le jeton du jour est posé pour ce motif" \
+      "$(cat "$JIRA_ETAT/cri.jira.bw-pente-duree" 2>/dev/null)" "$(date -u +%Y-%m-%d)"
+
+: > "$BANC_CURL"
+bw_jira_signaler bw-pente-duree "derive notation - duree" "encore" "$JIRA_ETAT" >/dev/null
+check "H8  ⭐ le MÊME motif le même jour ne fait AUCUN appel (un commentaire par jour)" \
+      "$(grep -c '^ARGS:' "$BANC_CURL" | tr -d ' ')" "0"
+
+: > "$BANC_CURL"
+BANC_JIRA_TROUVE=1 bw_jira_signaler bw-pente-memoire "derive notation - memoire" "mémoire 2 897 Mo" "$JIRA_ETAT" >/dev/null
+check "H9  ⭐ un ticket OUVERT existe → on COMMENTE, on ne crée pas" \
+      "$(grep -c 'rest/api/3/issue/KAN-7/comment' "$BANC_CURL" | tr -d ' ')" "1"
+check "H9b … et aucune création" \
+      "$(grep -c 'url = "https://jira.invalid/rest/api/3/issue"$' "$BANC_CURL" | tr -d ' ')" "0"
+check "H10 le corps est de l'ADF (doc/paragraph/text), pas du texte nu" \
+      "$(grep -c '"type":"doc","version":1' "$BANC_CURL" | tr -d ' ')" "1"
+check "H10b les guillemets et accents du corps survivent à l'échappement JSON" \
+      "$(bw_jira_chaine 'a "b" \ é' )" 'a \"b\" \\ é'
+
+# ⛔ H11 — LE JETON S'ÉCRIT EN DERNIER, ET SEULEMENT SI QUELQUE CHOSE EST
+# PARTI. Un faux curl qui rend 500 : pas de ticket, pas de jeton, on
+# recrie demain. Bruyant, jamais muet.
+: > "$BANC_CURL"
+printf '#!/bin/sh\ncat >/dev/null; echo "ARGS: $*" >> "$BANC_CURL"; printf 500\n' > "$FAUX/curl"; chmod +x "$FAUX/curl"
+bw_jira_signaler bw-purge-57014 "purge" "57014" "$JIRA_ETAT" >/dev/null 2>&1
+check "H11 ⛔ canal en 500 → PAS de jeton (on recriera demain)" \
+      "$(test -e "$JIRA_ETAT/cri.jira.bw-purge-57014" && echo pose || echo absent)" "absent"
+check "H11b ⛔ et la fonction rend quand même 0 (elle ne tue jamais un runner)" "$?" "0"
+
+(unset BW_JIRA_TOKEN
+ : > "$BANC_CURL"
+ bw_jira_signaler bw-pente-duree "x" "y" "$TMP/etat-jira2" 2> "$TMP/jira-stderr.txt" >/dev/null
+ check "H12 sans configuration : AUCUN appel réseau…" "$(grep -c '^ARGS:' "$BANC_CURL" | tr -d ' ')" "0"
+ check "H12b … et le manque est DIT, avec le nom de la variable" \
+       "$(grep -c 'BW_JIRA_TOKEN' "$TMP/jira-stderr.txt" | tr -d ' ')" "1")
+
+# ⭐ H13 — `alerter()` de run.sh appelle ENFIN BW_WEBHOOK_URL (point ouvert
+# des rapports des 04/09 et 09/09), et ne le fait pas depuis un banc.
+CODE_ALERTER=$(sed -n '/^alerter() {/,/^}/p' model-verif/run.sh | sed 's/^[[:space:]]*#.*$//')
+check "H13 ⭐ alerter() lit BW_WEBHOOK_URL (le push des ⛔, enfin câblé)" \
+      "$(printf '%s\n' "$CODE_ALERTER" | grep -c 'BW_WEBHOOK_URL' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
+check "H13b ⛔ … et un banc (BW_AVERTIR_CONFIG_BANC) ne pousse pas sur le téléphone" \
+      "$(printf '%s\n' "$CODE_ALERTER" | grep -c 'BW_AVERTIR_CONFIG_BANC' | tr -d ' ')" "1"
+check "H14 ⛔ bw_jira.sh ne touche PAS à BW_WEBHOOK_URL (deux canaux, deux fonctions)" \
+      "$(sed 's/^[[:space:]]*#.*$//' tools/bw_jira.sh | grep -c 'BW_WEBHOOK_URL' | tr -d ' ')" "0"
+check "H15 le runner du contrôle appelle bw_jira_signaler ET a un repli si le fichier manque" \
+      "$(grep -c 'bw_jira_signaler' model-verif/controle_quotidien.sh | tr -d ' ' | awk '$1>=2{print "oui"} $1<2{print "non"}')" "oui"
 
 # ══════════════════════════════════════════════════════════════════════
 echo

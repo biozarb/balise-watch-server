@@ -168,6 +168,90 @@ pour les 648 points en prévisions, ~9 min avec les observations**).
 
 ---
 
+## Le registre des nuits et le contrôle de pente — lot REGISTRE ET PENTE, 10/09
+
+Le chien de garde de la notation a été remonté trois fois en dix-sept
+jours (40 → 65 → 90 min), chaque fois la veille du jour où il aurait
+mordu, chaque fois après quatre nuits de journal relues à la main. Depuis
+le 10/09, la pente se lit dans un registre et un contrôle la calcule.
+
+| pièce | rôle |
+|---|---|
+| `registre_nuit.py` | **une ligne JSON par nuit** dans `/var/lib/bw-model-verif/historique.jsonl` : durée, code, chien de garde APPLIQUÉ, jalons mémoire, pic mémoire **et pic de swap** (lus dans le cgroup du service tant qu'il vit), étapes, lignes, incidents. Appelé par `run.sh` en fin de run, dans les deux issues. `--retro` rétro-remplit depuis journald (28 nuits depuis le 03/08). |
+| `controle_quotidien.py` | lit le registre et ne rend qu'une chose, quand elle est due : **la date de franchissement** — `durée 3 860 s, +94 à +240 s/nuit → franchit le garde (5 400 s) entre le 17/09 et le 27/09`. Pente = 25e centile des différences (le silence, protégé des marches), date la plus proche au 75e (celle qu'un garde doit craindre). **Se tait** quand la pente est plate ou négative, ou l'échéance à plus de 30 j. **Ne remonte jamais le garde** : il propose la commande, Yann la lance. |
+| `controle_quotidien.sh` + `bw-model-controle.{service,timer}` | 07:30 Paris ; attend la fin de la notation ; constats → **Jira** (`tools/bw_jira.sh`, un ticket par motif `bw-pente-duree` / `bw-pente-memoire` / `bw-purge-57014`, un commentaire par jour) + journald + son check `BW_MODEL_CONTROLE_PING_URL`. |
+| `test_controle_quotidien.py` · `mutations_controle_quotidien.py` | 35 assertions, 17 mutations vues — dont les cinq du prompt : relevés non comparables, jalon absent lu comme 0, run en échec compté, seuil en dur, cri sur pente négative. Et le cas du lot : **calculé le 04/09 sur les nuits réelles, le contrôle annonçait la mémoire au-dessus du seuil « entre le 09/09 et le 17/09 » (réel : 09/09) et le garde de 3 900 s « entre le 11/09 et le 30/09 » (réel : 11/09).** |
+
+Ce que le contrôle ne fait PAS, et ne fera pas : remonter le drop-in,
+rejouer un run, jouer un SQL. Une remontée est un constat écrit dans
+l'en-tête de `10-timeout-s3.conf` avec sa mesure ; un rejeu est
+`run.sh score --day AAAA-MM-JJ`, à la main ; un SQL est joué par Yann.
+
+### Installer (proposé le 10/09, à lancer par Yann — rien n'a été exécuté)
+
+```bash
+# 0. sur le Mac, depuis PWA/balise-watch-server — les bancs d'abord
+python3 model-verif/test_controle_quotidien.py && python3 model-verif/mutations_controle_quotidien.py
+python3 model-verif/test_run_selftest.py && bash tools/test_alertes.sh
+
+# 1. le code (rsync, pas git — et tools/ AUSSI : bw_jira.sh y vit)
+rsync -av --exclude '__pycache__' model-verif/ \
+  debian@51.91.102.146:~/balise-watch/balise-watch-server/model-verif/
+rsync -av tools/bw_jira.sh tools/bw_inventaire_alertes.sh tools/test_alertes.sh \
+  debian@51.91.102.146:~/balise-watch/balise-watch-server/tools/
+
+# 2. les unités (une neuve + son timer, et le drop-in dont SEUL l'en-tête a changé)
+ssh debian@51.91.102.146 'cd ~/balise-watch/balise-watch-server/model-verif/systemd &&
+  sudo cp bw-model-controle.service bw-model-controle.timer /etc/systemd/system/ &&
+  sudo cp bw-model-score.service.d/10-timeout-s3.conf /etc/systemd/system/bw-model-score.service.d/ &&
+  sudo systemd-analyze verify /etc/systemd/system/bw-model-controle.service &&
+  sudo systemctl daemon-reload &&
+  sudo systemctl enable --now bw-model-controle.timer &&
+  systemctl list-timers bw-model-controle.timer &&
+  systemctl show bw-model-score.service -p Environment -p TimeoutStartUSec'
+
+# 3. le rétro-remplissage (une fois ; le droit de lire systemd est celui de sudo)
+ssh debian@51.91.102.146 'sudo journalctl -u bw-model-score.service --since 2026-08-01 -o short-iso -q \
+  | /home/debian/venv-balise/bin/python3 ~/balise-watch/balise-watch-server/model-verif/registre_nuit.py --retro \
+  && /home/debian/venv-balise/bin/python3 ~/balise-watch/balise-watch-server/model-verif/registre_nuit.py --afficher'
+#    ⚠️ le fichier appartient alors à debian (sudo ne porte que sur journalctl) ; contrôler : ls -l /var/lib/bw-model-verif/historique.jsonl
+
+# 4. le premier contrôle, à blanc, sans canal
+ssh debian@51.91.102.146 'cd ~/balise-watch/balise-watch-server/model-verif &&
+  /home/debian/venv-balise/bin/python3 controle_quotidien.py --verbeux'
+
+# 5. les cinq BW_JIRA_* et BW_MODEL_CONTROLE_PING_URL dans ~/.balise-watch-alertes.env
+#    (600 ; le jeton se copie, ne se retape pas) — puis le test que le prompt demandait :
+ssh debian@51.91.102.146 'set -a; . ~/.balise-watch-alertes.env; set +a;
+  printf "url = \"%s/rest/api/3/myself\"\nheader = \"Authorization: Basic %s\"\nsilent\noutput = /dev/null\nwrite-out = \"%%{http_code}\\n\"\n" \
+    "$BW_JIRA_URL" "$(printf %s:%s "$BW_JIRA_MAIL" "$BW_JIRA_TOKEN" | base64 | tr -d "\n")" | curl -K -'
+#    → attendu : 200. Le jeton ne passe ni dans ps ni dans le terminal.
+
+# 6. sha256 des deux côtés, après coup
+for f in model-verif/registre_nuit.py model-verif/controle_quotidien.py model-verif/controle_quotidien.sh \
+         model-verif/run.sh tools/bw_jira.sh model-verif/systemd/bw-model-controle.service \
+         model-verif/systemd/bw-model-controle.timer model-verif/systemd/bw-model-score.service.d/10-timeout-s3.conf; do
+  printf '%s  ' "$f"; shasum -a 256 "$f" | cut -c1-16
+  ssh debian@51.91.102.146 "sha256sum ~/balise-watch/balise-watch-server/$f" | cut -c1-16
+done
+ssh debian@51.91.102.146 'sha256sum /etc/systemd/system/bw-model-controle.service /etc/systemd/system/bw-model-score.service.d/10-timeout-s3.conf'
+```
+
+Fait le même jour, dans `score.py` (bancs : test_score 1 099/0,
+mutations_memoire 16/16) :
+
+- **la purge de `model_score_zone` va par tranches** (`delete_par_tranches`,
+  20 000 lignes ordonnées sur `CLE_SCORE_ZONE`, comptées entre les passes,
+  arrêt sur 57014 sans perdre l'acquis) ; `score.py --purge-seule` joue
+  l'étape 6 seule — c'est le rattrapage du 10/09, idempotent ;
+- **`model_character` n'est plus compté ni purgé avant le 04/02/2027**
+  (`PREMIER_JOUR_CHARACTER`) : deux seq scans de 1,2 M lignes en moins
+  par nuit, deux 57014 en moins ;
+- **`units` est élaguée aux 22 clés lues** (`CLES_REJEU`, ≈ −1 500 Mo),
+  le cache sur disque gardant ses 33.
+
+---
+
 ## Ce qui n'est pas fait, et qu'il ne faut pas croire fait
 
 - ~~**`station_zone` est vide.**~~ **Rempli le 08/08 (lot C)** :

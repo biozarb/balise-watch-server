@@ -6,6 +6,46 @@
 
 ---
 
+## 10/09/2026 (notation) — une purge qui expire une fois expire pour toujours
+
+`purge model_score_zone : HTTP 500 — 57014 canceling statement due to
+statement timeout`, première occurrence (cherchée depuis le 03/08). Le
+quatrième `57014` de la famille — et celui-ci n'était **pas** un
+rattrapage : la purge n'avait qu'UNE journée à effacer (`as_of` 09-02,
+94 436 lignes), comme chaque nuit ; la veille en avait effacé 87 942
+sans un mot. Elle est tombée dans un instant où la base ne répondait
+plus à 8 s (trois expirations en 19 s dans le bloc purge, dont un simple
+`HEAD count`), 70 s après l'upsert de 122 691 lignes sur la même table.
+
+Le piège réutilisable est dans la SUITE, pas dans la cause : un `DELETE
+… WHERE as_of < J-7` en une seule requête **s'auto-amplifie**. La nuit
+suivante doit effacer DEUX journées (≈ 190 000 lignes), donc expire à
+coup sûr, puis trois, et la table croît de ~100 000 lignes par jour sans
+qu'aucune requête ne rougisse plus fort que la première. La rétention
+n'est plus une rétention ; c'est une ligne de journal qu'on ne lit pas.
+
+Ce qui protège (à faire — enquete-pente-10-09.md §1.6) :
+
+1. **rattraper à la main, une fois** (SQL Editor, rôle `postgres` : 2 min
+   de délai au lieu des 8 s de `service_role`), journée par journée ;
+2. **purger par tranches** : PostgREST accepte `limit` + `order` sur un
+   `DELETE` (« Limited Update/Delete », ordre sur la clé primaire) —
+   une boucle de 20 000 lignes jusqu'à ce qu'une passe n'efface plus rien.
+   Une passe qui expire ne perd pas les précédentes, et le coût par
+   passe ne dépend plus de la taille du retard ;
+3. **ne pas compter ce qu'on sait vide** : `_purge_caractere` lance un
+   `HEAD count` puis un `DELETE` sur `last_day` (seq scan de 1,2 M lignes,
+   0 ligne à effacer jusqu'en février 2027) — deux des trois expirations
+   du bloc. Un garde-fou calendaire les supprime à coût zéro.
+
+Et la règle générale, transposée de la jauge R2 : **un compte qui
+« continue sur erreur » (`delete` journalise et continue, à raison —
+la purge est la dernière étape du run) doit être RELU le lendemain par
+autre chose que des yeux.** C'est ce que fait désormais
+`controle_quotidien.py` (motif `bw-purge-57014` → ticket Jira).
+
+---
+
 ## 08/09/2026 (pyramide `arome/lod/`) — un `reshape` par blocs ne sait pas dans quel coin il commence
 
 Piège **pris d'avance**, pas payé — parce que le calque isobares venait

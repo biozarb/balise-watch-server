@@ -1,0 +1,64 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-model-controle.service — le contrôle de pente de la notation
+#  (lot REGISTRE ET PENTE, 10/09/2026)
+#
+#  ⚠️ POURQUOI CE JOB EXISTE. Le chien de garde de la notation a été
+#  remonté trois fois en dix-sept jours (40 → 65 → 90 min), chaque fois
+#  la veille du jour où il aurait mordu, chaque fois après qu'un humain
+#  a relu quatre nuits de journal à la main. Le 09/09, il restait
+#  229 s ; le 10/09, sous l'ancien garde, il en serait resté 40. Ce
+#  service lit le registre des nuits (`historique.jsonl`, écrit par
+#  `run.sh`) et ne rend qu'une chose, quand elle est due : la DATE où la
+#  durée, ou la mémoire, franchit sa limite.
+#
+#  ⛔ IL NE REMONTE RIEN. Chaque remontée est un constat ÉCRIT dans
+#  l'en-tête de `10-timeout-s3.conf`, avec sa mesure — ce script la
+#  PROPOSE dans le ticket Jira, et c'est Yann qui la lance.
+#
+#  ⛔ IL SE TAIT quand la pente est plate ou négative, ou quand
+#  l'échéance est à plus de 30 jours : un détecteur de dérive qui crie
+#  tous les matins devient un détecteur qu'on ne lit plus (rapport du
+#  09/09, ⚠️ 3).
+#
+#  Canaux : Jira pour la dérive (un ticket par motif, un commentaire par
+#  jour) ; journald ; son check Healthchecks. PAS de mail, PAS de push —
+#  ceux-là restent aux ⛔ de run.sh (nuit morte, code 124, OOM).
+#
+#  Calqué sur `bw-garde-fou-r2.service` : chemins réels du VPS,
+#  utilisateur `debian`, pas d'EnvironmentFile (le .env est en
+#  `export VAR=…`, que systemd ne sait pas lire — le runner le source).
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — contrôle de pente de la notation (durée, mémoire → date de franchissement)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/model-verif/controle_quotidien.py
+After=network-online.target bw-model-score.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/model-verif
+ExecStart=/home/debian/balise-watch/balise-watch-server/model-verif/controle_quotidien.sh
+# Le contrôle dure une seconde ; l'attente de la fin de la notation, au
+# plus 40 min (ATTENTE_MAX_S). 60 min laisse la place et coupe avant
+# que la matinée soit passée.
+TimeoutStartSec=60min
+Nice=15
+
+# ── Cloisonnement, calqué sur bw-garde-fou-r2.service ────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-model-verif
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=Balise Watch — contrôle de pente de la notation, 07:30 Paris
+
+[Timer]
+# 07:30 heure de Paris : APRÈS la fin de la notation (05:55 → ~07:03 CEST
+# le 10/09, au plus tard 07:27 sous le garde de 90 min), AVANT que Yann
+# ne se lève. Le runner attend de toute façon que bw-model-score ait
+# fini. ⚠️ Fuseau EXPLICITE, contrairement aux autres timers en UTC : le
+# rendez-vous est un rendez-vous humain, il ne doit pas glisser d'une
+# heure au changement d'heure.
+OnCalendar=*-*-* 07:30:00 Europe/Paris
+# Une matinée sautée (VPS éteint) se rattrape : le registre est là.
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

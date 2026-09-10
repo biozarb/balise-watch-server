@@ -104,6 +104,49 @@ MUTATIONS = [
      SCORE, B_SCORE,
      '        jalon_memoire("le rejeu d\'archive")\n',
      ''),
+
+    # ══════════════════════════════════════════════════════════════
+    #  10/09/2026 — LA FENÊTRE REJOUÉE (≈ 3 070 Mo) ET LA PURGE
+    # ══════════════════════════════════════════════════════════════
+    ("⭐ l'élagage de `units` disparaît : 32 clés par ligne, ≈ 3 070 Mo, "
+     "le swap de 2 Go du 10/09 revient",
+     SCORE, B_SCORE,
+     '            r = {k: v for k, v in r.items() if k in CLES_REJEU}\n',
+     ''),
+
+    ("⭐ une clé LUE sort de `CLES_REJEU` (`spread_kmh`) : la dispersion "
+     "s'éteint en silence, `d.get` rend None, rien ne rougit",
+     SCORE, B_SCORE,
+     '    "spread_kmh", "err_vec_rms",    # MX.bilan_dispersion (bw_mix)',
+     '    "err_vec_rms",'),
+
+    ("l'élagage passe AVANT Murphy : `_murphy` est déjà retiré, "
+     "l'accumulateur ne reçoit plus rien",
+     SCORE, B_SCORE,
+     '            mo = r.pop(MU.MURPHY_KEY, None)\n',
+     '            r = {k: v for k, v in r.items() if k in CLES_REJEU}\n'
+     '            mo = r.pop(MU.MURPHY_KEY, None)\n'),
+
+    ("⭐ la purge de model_score_zone redevient UNE requête : le 57014 du "
+     "10/09, et sa boucle (une purge ratée double la suivante)",
+     SCORE, B_SCORE,
+     '    sb.delete_par_tranches(\n        "model_score_zone",\n'
+     '        f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}",\n'
+     '        order=CLE_SCORE_ZONE)',
+     '    sb.delete("model_score_zone",\n'
+     '              f"?as_of=lt.{(today - timedelta(days=RETENTION_SCORE_D)):%Y-%m-%d}")'),
+
+    ("l'ordre des tranches perd `regime` : PostgREST refuserait, ou "
+     "effacerait de travers — la clé n'est plus la clé primaire",
+     SCORE, B_SCORE,
+     'CLE_SCORE_ZONE = "as_of,zone_id,model,lead_h,window_kind,regime"',
+     'CLE_SCORE_ZONE = "as_of,zone_id,model,lead_h,window_kind"'),
+
+    ("⭐ le garde-fou calendaire de model_character disparaît : deux seq "
+     "scans de 1,2 M lignes par nuit, pour zéro ligne, et les 57014 avec",
+     SCORE, B_SCORE,
+     '    if seuil_caractere < PREMIER_JOUR_CHARACTER:\n',
+     '    if False:\n'),
 ]
 
 

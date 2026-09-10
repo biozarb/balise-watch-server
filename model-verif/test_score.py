@@ -1332,6 +1332,104 @@ def test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09():
           m.count('"model_verif_daily", "day",'), 1)
 
 
+def test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09():
+    """La fenêtre REJOUÉE (`units`) ne garde en mémoire que ce que le
+    chemin régime lit — le même remède que `COLONNES_FENETRE`, un étage
+    plus loin.
+
+    ⛔ CE QUI EST EN JEU (10/09/2026, enquete-pente-10-09.md §2). Le
+    porteur du pic mémoire n'était pas une requête : `replay_window`
+    relisait 1 253 232 balise-jours à 33 clés et gardait tout — 2 570 o
+    par ligne, ≈ 3 070 Mo mesurés sur le VPS, plus que la RAM au moment
+    du régime, 2 Go de swap. Élaguée aux 22 clés lues : ≈ 1 550 Mo.
+
+    ⛔ ET LE MÊME PIÈGE : une clé lue et absente de `CLES_REJEU` rend
+    `None` en silence. Le banc extrait donc les lectures des QUATRE
+    lecteurs de `units` et exige qu'elles soient dans la liste.
+    """
+    print("── mémoire : la fenêtre rejouée ne garde que ses clés (10/09) ──")
+    jeu = set(J.CLES_REJEU)
+    check("les 18 colonnes de la fenêtre glissante y sont (même `_case_rows`)",
+          set(J.COLONNES_FENETRE.split(",")) <= jeu, True)
+    check("`unit` et `regime` y sont — la clé d'appariement et la case",
+          {"unit", "regime"} <= jeu, True)
+
+    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+
+    def lues_dans(fn: str, var: str, source: str = src) -> set:
+        debut = source.index(f"def {fn}(")
+        fin = source.index("\ndef ", debut + 1)
+        corps = sans_commentaires(source[debut:fin])
+        out = set(re.findall(r'\b' + var + r'\[\"(\w+)\"\]', corps))
+        out |= set(re.findall(r'\b' + var + r'\.get\(\"(\w+)\"', corps))
+        return out
+    lues = lues_dans("_case_rows", "d") | lues_dans("regime_scores", "u")
+    lues |= lues_dans("stability_report", "u") | lues_dans("stability_report", "d")
+    import melange as _MX
+    src_mx = pathlib.Path(_MX.__file__).read_text(encoding="utf-8")
+    lues |= lues_dans("bilan_dispersion", "r", src_mx)
+    # `bilan_dispersion` lit aussi ses deux colonnes par PARAMÈTRE.
+    debut = src_mx.index("def bilan_dispersion(")
+    lues |= set(re.findall(r'cle_\w+: str = "(\w+)"',
+                           src_mx[debut:src_mx.index("\ndef ", debut + 1)]))
+    check("le banc a bien trouvé des lectures (sinon il ne garde rien)",
+          len(lues) >= 20, True)
+    check("… dont celles de la dispersion (`spread_kmh`, `err_vec_rms`)",
+          {"spread_kmh", "err_vec_rms", "model"} <= lues, True)
+    manquantes = sorted(lues - jeu)
+    check("⭐⭐ CHAQUE clé lue par le chemin régime est dans `CLES_REJEU` "
+          f"(manquantes : {manquantes})", manquantes, [])
+
+    # ⭐ LE MÊME SCORE, AVEC OU SANS LES CLÉS SUPERFLUES.
+    zone_of = {f"pioupiou:{i}": {"zone_id": "b1:valley", "landform": "valley",
+                                 "basin_id": "b1", "massif_id": "alpes-nord",
+                                 "basin_uncertain": False}
+               for i in range(830, 836)}
+    kind_of = {"b1:valley": "basin_landform", "alpes-nord:valley": "massif_landform",
+               "alpes-nord:*": "massif", "*:valley": "landform", "*:*": "global"}
+    units = []
+    for j in range(12):
+        d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+        for k, i in enumerate(range(830, 836)):
+            for model, base in (("icon_d2", 3.0), ("gfs_global", 8.0)):
+                u = _unit(d, i, model, base + (j % 5) + k * 0.5)
+                u.update({"fcst_src": "own_archive", "lead_exact_h": 24.0,
+                          "err_vec_p90": 9.9, "vector_ratio": 1.1,
+                          "bias_slope": 1.0, "mix_n_models": 3,
+                          "bias_fin_niveau": "x", "bias_fin_n_days": 2})
+                units.append(u)
+    large = [dict(u) for u in units]
+    etroit = [{k: v for k, v in u.items() if k in jeu} for u in units]
+    cle = lambda r: (r.get("zone_id"), r.get("model"), r.get("lead_h"),
+                     r.get("metric"), r.get("window_kind"), r.get("regime"))
+    check("⭐ `regime_scores` rend EXACTEMENT les mêmes lignes élagué ou non",
+          sorted(J.regime_scores(etroit, DAY, zone_of, kind_of), key=cle),
+          sorted(J.regime_scores(large, DAY, zone_of, kind_of), key=cle))
+    check("⭐ `stability_report` aussi",
+          J.stability_report(etroit, zone_of, DAY, kind_of),
+          J.stability_report(large, zone_of, DAY, kind_of))
+
+    # ⛔ ET `replay_window` ÉLAGUE POUR DE VRAI — sur un cache réel, avec
+    # ses 33 clés, y compris `_murphy` (lu par Murphy AVANT l'élagage).
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        u = dict(units[0]); u["_murphy"] = [1, 2, 3]; u["_biais_fin"] = {"a": 1}
+        u.pop("unit", None)
+        J.replay_write(root, DAY, [u])
+        rows, _ = J.replay_window(root, DAY, None, 7200, n_days=1)
+        check("⭐⭐ une ligne rejouée ne porte QUE les clés de `CLES_REJEU`",
+              set(rows[0]) <= jeu, True)
+        check("… `unit` est dérivée et présente",
+              rows[0].get("unit"), "pioupiou:830")
+        check("… et le cache sur disque, lui, garde ses clés (rien n'est perdu)",
+              "_murphy" in J.replay_read(root, DAY)[0], True)
+    m = src[src.index("def replay_window("):]
+    m = sans_commentaires(m[:m.index("\ndef ", 1)])
+    check("⭐ l'élagage vient APRÈS Murphy (qui lit `_murphy` sur la ligne)",
+          m.index("MU.accumule(") < m.index("if k in CLES_REJEU"), True)
+
+
 
 # ══════════════════════════════════════════════════════════════════
 #  FABRIQUE D'ARCHIVE — la forme EXACTE que `collect.py` écrit
@@ -5563,7 +5661,11 @@ def test_l13_on_ne_lance_pas_un_delete_qui_ne_supprime_rien():
     """
     print("── L13 : le DELETE ne part plus pour rien ──")
     U = timezone.utc
-    today = datetime(2026, 9, 1, 3, 59, tzinfo=U)
+    # ⓘ 10/09/2026 : les trois branches « on mesure » ne s'ouvrent plus
+    # qu'une fois la table assez vieille pour que la rétention puisse
+    # concerner une ligne — voir le garde-fou calendaire plus bas. On
+    # les joue donc à une date où c'est le cas (J−180 ≥ 08/08/2026).
+    today = datetime(2027, 3, 1, 3, 59, tzinfo=U)
 
     class _Sb:
         def __init__(self, n):
@@ -5586,7 +5688,7 @@ def test_l13_on_ne_lance_pas_un_delete_qui_ne_supprime_rien():
     check("L13 … mais le compte, lui, a bien eu lieu (on MESURE, on ne "
           "suppose pas)", len(vide.comptes), 1)
     check("L13 … et le filtre compté est celui de la rétention, J-180",
-          vide.comptes[0], ("model_character", "?last_day=lt.2026-03-05"))
+          vide.comptes[0], ("model_character", "?last_day=lt.2026-09-02"))
     check("L13 … et le journal dit ce qui n'a pas été fait, et pourquoi",
           "DELETE non lancé" in tampon.getvalue(), True)
 
@@ -5594,14 +5696,124 @@ def test_l13_on_ne_lance_pas_un_delete_qui_ne_supprime_rien():
     with contextlib.redirect_stdout(io.StringIO()):
         J._purge_caractere(plein, today)
     check("L13 ⭐ des lignes à jeter ⇒ le DELETE part, au même filtre",
-          plein.deletes, [("model_character", "?last_day=lt.2026-03-05")])
+          plein.deletes, [("model_character", "?last_day=lt.2026-09-02")])
 
     muet = _Sb(None)
     with contextlib.redirect_stdout(io.StringIO()):
         J._purge_caractere(muet, today)
     check("L13 ⛔ compte INDISPONIBLE ⇒ la purge part QUAND MÊME "
           "(« je ne sais pas » n'est pas « zéro »)",
-          muet.deletes, [("model_character", "?last_day=lt.2026-03-05")])
+          muet.deletes, [("model_character", "?last_day=lt.2026-09-02")])
+
+    # ── 10/09/2026 : NE PAS MESURER CE QU'ON SAIT VIDE ─────────────────
+    # ⛔ Le compte « qui n'a jamais échoué » a expiré les 04, 08 et 10/09
+    # (seq scan de 1,2 M lignes, autour des 8 s). Avant que J−180 n'ait
+    # atteint la naissance de la table (08/08/2026), il ne peut rien
+    # compter : AUCUNE requête, ni HEAD ni DELETE, et le journal dit
+    # jusqu'à quand.
+    jeune = _Sb(None)
+    tampon = io.StringIO()
+    with contextlib.redirect_stdout(tampon):
+        J._purge_caractere(jeune, datetime(2026, 9, 10, 5, 2, tzinfo=U))
+    check("10/09 ⭐⭐ table trop jeune pour la rétention ⇒ AUCUNE requête "
+          "(ni compte ni DELETE)", (jeune.comptes, jeune.deletes), ([], []))
+    check("10/09 … et le journal dit la date où la mesure reprendra",
+          "2027-02-04" in tampon.getvalue() and "aucune requête" in tampon.getvalue(), True)
+    limite = _Sb(0)
+    with contextlib.redirect_stdout(io.StringIO()):
+        J._purge_caractere(limite, J.PREMIER_JOUR_CHARACTER
+                           + timedelta(days=J.RETENTION_CHARACTER_D))
+    check("10/09 … et le jour même où J−180 atteint la naissance, on mesure "
+          "à nouveau", len(limite.comptes), 1)
+
+
+def test_10_09_la_purge_de_model_score_zone_va_par_tranches():
+    """⛔ LE 57014 DE LA PURGE DU 10/09, ET SA BOUCLE.
+
+    UNE requête `DELETE … as_of < J−7` a expiré avec 94 436 lignes — la
+    charge d'une nuit ordinaire. Et une purge ratée DOUBLE la suivante.
+    Le remède : des tranches bornées (`limit` + `order` sur la clé
+    primaire, « Limited Update/Delete » de PostgREST), comptées entre
+    chaque passe, qui s'arrêtent d'elles-mêmes quand rien ne bouge.
+    """
+    print("── 10/09 : la purge de model_score_zone va par tranches ──")
+    import io
+    import urllib.request as U
+
+    class _Fausse:
+        """Une table de `n` lignes ; chaque DELETE limité en efface `limit`."""
+        def __init__(self, n, panne_a=None):
+            self.n, self.appels, self.panne_a = n, [], panne_a
+        def urlopen(self, req, timeout=None):
+            self.appels.append(req.full_url)
+            if req.get_method() == "HEAD":
+                import email.message as _M
+                r = io.BytesIO(b"")
+                r.headers = _M.Message()           # insensible à la casse, comme urllib
+                r.headers["Content-Range"] = f"*/{self.n}"
+                r.__enter__ = lambda *a: r; r.__exit__ = lambda *a: None
+                return r
+            import urllib.parse as P
+            q = P.parse_qs(P.urlsplit(req.full_url).query)
+            if self.panne_a is not None and len([a for a in self.appels if "limit=" in a]) >= self.panne_a:
+                import urllib.error as E
+                raise E.HTTPError(req.full_url, 500, "x", {},
+                                  io.BytesIO(b'{"code":"57014","message":"timeout"}'))
+            self.n = max(0, self.n - int(q["limit"][0]))
+            r = io.BytesIO(b""); r.__enter__ = lambda *a: r; r.__exit__ = lambda *a: None
+            return r
+
+    sb = _sb_de_banc()
+    f = _Fausse(189_809)
+    vrai, U.urlopen = U.urlopen, f.urlopen
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            n = sb.delete_par_tranches("model_score_zone", "?as_of=lt.2026-09-04",
+                                       order=J.CLE_SCORE_ZONE, limit=20000)
+    finally:
+        U.urlopen = vrai
+    deletes = [a for a in f.appels if "limit=20000" in a]
+    check("10/09 ⭐ 189 809 lignes (deux journées) partent en 10 tranches de 20 000",
+          len(deletes), 10)
+    check("10/09 ⭐ … et le total effacé est rendu", n, 189_809)
+    check("10/09 ⛔ chaque tranche est ORDONNÉE sur la clé primaire complète "
+          "(PostgREST l'exige, et un ordre partiel sauterait des lignes)",
+          all(f"order={J.CLE_SCORE_ZONE}" in a for a in deletes), True)
+    check("10/09 le filtre de rétention est conservé sur chaque tranche",
+          all("as_of=lt.2026-09-04" in a for a in deletes), True)
+    check("10/09 rien à effacer ⇒ aucun DELETE", (lambda: (
+        setattr(U, "urlopen", _Fausse(0).urlopen),
+        sb.delete_par_tranches("model_score_zone", "?as_of=lt.2026-09-04",
+                               order=J.CLE_SCORE_ZONE)))()[1], 0)
+    U.urlopen = vrai
+
+    # ⛔ Une tranche qui expire ne perd pas les précédentes, et on ne
+    # boucle pas cent fois sur le même 57014.
+    f = _Fausse(100_000, panne_a=3)
+    U.urlopen = f.urlopen
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            n = sb.delete_par_tranches("model_score_zone", "?as_of=lt.2026-09-04",
+                                       order=J.CLE_SCORE_ZONE, limit=20000)
+    finally:
+        U.urlopen = vrai
+    check("10/09 ⛔ une tranche en 57014 arrête la boucle, les précédentes restent acquises",
+          n, 40_000)
+
+    # ⛔ ET `_purges` S'EN SERT — sur model_score_zone, avec l'ordre.
+    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+    corps = sans_commentaires(src[src.index("def _purges("):src.index("\ndef main(")])
+    check("10/09 ⭐⭐ `_purges` efface model_score_zone PAR TRANCHES, ordonnées "
+          "sur CLE_SCORE_ZONE",
+          'sb.delete_par_tranches(\n        "model_score_zone",' in corps
+          and "order=CLE_SCORE_ZONE" in corps, True)
+    check("10/09 … et plus jamais en une seule requête",
+          'sb.delete("model_score_zone"' in corps, False)
+    check("10/09 CLE_SCORE_ZONE est la clé primaire de step35",
+          J.CLE_SCORE_ZONE, "as_of,zone_id,model,lead_h,window_kind,regime")
+    check("10/09 `--purge-seule` existe (le rattrapage, sans notation)",
+          'ap.add_argument("--purge-seule"' in src
+          and "if args.purge_seule:" in src, True)
 
 
 def test_l13_rank_corr_davant_step52_dit_a_ecrire_jamais_step40():
@@ -6173,6 +6385,9 @@ def main() -> int:
                test_memoire_rolling_scores_sur_place_incident_07_09,
                # ── 09/09 : la fenêtre ne lit que ses colonnes ──
                test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09,
+               # ── 10/09 : la fenêtre rejouée ne garde que ses clés, la purge par tranches ──
+               test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09,
+               test_10_09_la_purge_de_model_score_zone_va_par_tranches,
                # ── lot LR (01/09) : le rejeu qui republiait le jour ──
                test_lr_le_rejeu_ancien_ne_republie_pas_le_classement,
                # ── lot L13 (01/09) : les deux dettes ops de l'audit ──

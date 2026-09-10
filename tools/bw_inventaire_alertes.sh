@@ -32,12 +32,24 @@
 # dépôt serveur. ⚠️ Ajouter un runner ici est le SEUL geste manuel de ce
 # fichier ; le banc `test_alertes.sh` vérifie qu'aucun autre script du
 # dépôt ne lit un `*_PING_URL` sans figurer dans cette liste.
+#
+# ⓘ 10/09/2026 (lot REGISTRE ET PENTE) : deux entrées de plus — le runner
+# du contrôle de pente (son `BW_MODEL_CONTROLE_PING_URL` est LITTÉRAL,
+# pas construit : ce n'est pas un mode de run.sh) et `tools/bw_jira.sh`,
+# le canal Jira, qui lit les cinq `BW_JIRA_*`. Sans cette ligne, le
+# `--controle-unites` du déploiement les compterait « définies mais
+# jamais lues » — le prompt du lot le disait attendu ; ce n'est plus vrai.
+# ⓘ Et `agrume/run-ingest-pi-rafale.sh` (commit 859970c du 09/09 au soir),
+# que C1 du banc nommait « hors liste » ce matin : il y entre.
 BW_RUNNERS_ALERTE="model-verif/run.sh
+model-verif/controle_quotidien.sh
 traces/infoclimat/poller.sh
 traces/entretien/entretien.sh
 agrume/run-ingest-pi.sh
 agrume/run-ingest-piaf.sh
-verif/run-confronter-quotidien.sh"
+agrume/run-ingest-pi-rafale.sh
+verif/run-confronter-quotidien.sh
+tools/bw_jira.sh"
 
 # ── Les modes de model-verif/run.sh, lus dans son `case` d'usage ──────
 bw_inv_modes() {
@@ -71,7 +83,7 @@ bw_inv_litterales() {
     [ -f "$racine/$f" ] || continue
     # ⚠️ On retire les lignes de commentaire AVANT de chercher.
     sed 's/^[[:space:]]*#.*$//' "$racine/$f" \
-      | grep -oE '\$\{?!?(BW_[A-Z0-9_]*_PING_URL|BW_ALERTE_MAIL|BW_WEBHOOK_URL|BW_PING_OK_URL|BW_MODEL_SELF_TEST_BLOQUANT)' \
+      | grep -oE '\$\{?!?(BW_[A-Z0-9_]*_PING_URL|BW_ALERTE_MAIL|BW_WEBHOOK_URL|BW_PING_OK_URL|BW_MODEL_SELF_TEST_BLOQUANT|BW_JIRA_(URL|MAIL|TOKEN|PROJET|TYPE))' \
       | grep -oE 'BW_[A-Z0-9_]+'
   done
 }

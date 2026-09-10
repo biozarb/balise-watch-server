@@ -404,6 +404,29 @@ alerter() {
       | systemd-cat -t "bw-model-$MODE" -p err 2>/dev/null || true
   fi
 
+  # ── Webhook push (ntfy) — CÂBLÉ LE 10/09/2026 (lot REGISTRE ET PENTE) ──
+  # ⛔ « BW_WEBHOOK_URL jamais appelé par alerter() » : point ouvert des
+  # rapports des 04/09 et 09/09. La variable était définie, sourcée à la
+  # l. 371, lue par `bw_avertir_config` — et le SEUL appelant qui porte
+  # les ⛔ (nuit morte, code 124, OOM) ne la regardait pas. Le mail
+  # arrivait ; le téléphone ne sonnait pas.
+  # ⚠️ Même forme que dans bw_avertir_config : le titre part dans un
+  # EN-TÊTE HTTP, donc en ASCII (défaut UTF-8 du 03/08) ; le corps en
+  # texte brut. Un canal cassé ne tue pas le run (`|| dire`).
+  # ⛔ Et UN BANC NE POUSSE PAS SUR LE TÉLÉPHONE : même drapeau que
+  # `bw_avertir_config` (`BW_AVERTIR_CONFIG_BANC`, posé par
+  # test_run_selftest.py). Le cri reste dans journald et dans le journal.
+  if [[ -n "${BW_WEBHOOK_URL:-}" && -z "${BW_AVERTIR_CONFIG_BANC:-}" ]]; then
+    local titre_h
+    titre_h=$(printf 'Balise Watch - %s' "$sujet" \
+      | { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; } \
+      | LC_ALL=C tr -cd '\40-\176')
+    curl -fsS --max-time 10 -o /dev/null \
+         -H "Title: ${titre_h:-Balise Watch}" -H "Priority: high" \
+         -d "$corps" "$BW_WEBHOOK_URL" >/dev/null 2>&1 \
+      || dire "⚠️ push non parti (webhook)"
+  fi
+
   # ⚠️ `Subject:` ne transporte pas d'UTF-8 (bug du 03/08 : un « é »
   # faisait rejeter l'envoi). Sujet translittéré, corps en UTF-8 déclaré.
   if [[ -n "${BW_ALERTE_MAIL:-}" ]] && command -v msmtp >/dev/null 2>&1; then
@@ -591,6 +614,40 @@ $(tail -n 25 "$LOG")"
   fi
 fi
 
+# ── Le registre des nuits (lot REGISTRE ET PENTE, 10/09/2026) ────────
+#
+# ⛔ POURQUOI C'EST ICI, ET PAS DANS UN LECTEUR DU JOURNAL. Le contrôle de
+# pente (`controle_quotidien.py`, 07:30) a besoin d'une ligne par nuit
+# avec la durée, le code, le chien de garde APPLIQUÉ, les jalons mémoire
+# et — la colonne qui manquait le 10/09 — le pic de SWAP. Or `debian`
+# n'a pas le droit de lire les lignes de systemd dans journald (pas de
+# `Consumed … memory peak`, pas de `Failed with result 'oom-kill'`), et le
+# pic de swap se lit dans le cgroup du service TANT QU'IL VIT. Seul le
+# run peut donc écrire cette ligne, et il l'écrit dans les DEUX issues :
+# un échec est une nuit aussi — ne pas l'écrire fabriquerait une pente
+# sur les seules bonnes nuits.
+# ⚠️ `|| true` partout : le registre ne doit jamais changer le code de
+# sortie d'une nuit. Une ligne manquée est un trou dans la pente, pas
+# une panne de notation. Le repli (script absent) est DIT dans le journal.
+# ⓘ `pswpout` (pages écrites vers le swap, machine entière) est relevé au
+# départ pour que le registre en écrive le delta : c'est la seule mesure
+# de swap PENDANT la nuit dont on dispose, systemd ne gardant que le pic.
+DEBUT_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+PSWP0=$(awk '/^pswpout /{print $2}' /proc/vmstat 2>/dev/null || true)
+registre_nuit() {
+  [[ "$MODE" == "score" ]] || return 0
+  local code_run="$1"
+  if [[ ! -f "$ICI/registre_nuit.py" ]]; then
+    dire "⚠️ registre_nuit.py absent — pas de relevé pour cette nuit, la pente aura un trou"
+    return 0
+  fi
+  "$PYTHON" "$ICI/registre_nuit.py" --fin-de-run --log "$LOG" --out "$ETAT" \
+      --duree "$duree" --code "$code_run" --garde-s $(( MAX_MINUTES * 60 )) \
+      --debut "$DEBUT_ISO" --fin "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      ${PSWP0:+--pswpout-depart "$PSWP0"} 2>&1 | tee -a "$LOG" || true
+  return 0
+}
+
 # ── Le run ───────────────────────────────────────────────────────────
 debut=$(date +%s)
 dire "▶ $MODE — bucket R2 « $BUCKET », python $PYTHON"
@@ -702,12 +759,16 @@ if (( code == 0 )); then
     bw_avertir_config "$PING_VAR" "$ALERTES_FILE" "bw-model-$MODE" "CE JOB ($MODE)" "$ETAT"
   fi
   dire "run $MODE OK en ${duree}s"
+  registre_nuit 0
   exit 0
 fi
 
 n=$(( $(cat "$ECHECS" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$ECHECS"
 dire "run $MODE en ÉCHEC (code $code, ${duree}s) — $n consécutif(s)"
+# ⚠️ AVANT `alerter` : le registre ne dépend pas des canaux, et un e-mail
+# qui bloque 10 s ne doit pas retarder une ligne qu'on sait déjà écrire.
+registre_nuit "$code"
 if (( n >= SEUIL_ALERTE )); then
   alerter "$LIBELLE ($MODE) en echec" \
     "$n run(s) consécutif(s) en échec (code $code, ${duree}s). Dernières lignes :
