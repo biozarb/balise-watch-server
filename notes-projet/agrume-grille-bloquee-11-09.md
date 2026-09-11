@@ -125,3 +125,24 @@ Bancs verts avant commit : `test_storage_cablage`, `test_audit_r2`,
    VPS, variable d'environnement) et `SEUIL_STOCKAGE_GO` (arrêt, dépôt,
    constante) se règlent à deux endroits sans que rien ne lie l'un à
    l'autre. C'est ce découplage qui a produit l'incident.
+
+## 23:07 — vérifié en ligne, sur un run réel
+
+Une ingestion a été déclenchée à la main (même `workflow_dispatch` que
+le guet, sur `61c089e`) plutôt que d'attendre le réseau 18 Z : 31 min,
+conclusion `success`, et cette fois la grille est publiée.
+
+```
+index.json  ecrit_le : 2026-09-11T21:07:23Z      (contre 02:54:47Z, figé 18 h)
+run en tête : 2026-09-11T15:00:00Z — 82 échéances, 0 → +141 h
+dernière validité : 17/09 14:00 locales           (contre 12/09 08:00)
+```
+
+Occupation R2 juste après : `agrume/grille` 3,375 Go — un run plein
+(1,77 Go) plus les deux anciens, partiels, de 0,473 et 0,341 Go. À trois
+runs pleins elle se stabilisera vers 5,2–5,3 Go, sous le seuil de 6,0,
+et le bucket vers 8,4–8,8 Go.
+
+⚠️ Le run 00 Z à 31 échéances reste en tête de rétention jusqu'à ce que
+deux réseaux de plus soient passés — sans conséquence, la PWA lit le run
+le plus récent par domaine.
