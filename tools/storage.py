@@ -113,8 +113,39 @@ CACHE_IMMUABLE = "max-age=21600"
 # Marge ×2 sur tout, comme dans `backfill_packs.py`. Ces seuils ne sont
 # pas des prévisions : ce sont des lignes au-delà desquelles on veut
 # être ARRÊTÉ et forcé de comprendre.
+# ⚠️ « ×2 sur tout » n'est plus vrai du STOCKAGE depuis le 11/09 : il est
+# à ×1,67 (6 Go sur 10). Les écritures, elles, restent à ×2. Le pourquoi
+# est écrit en toutes lettres sur `SEUIL_STOCKAGE_GO`.
 SEUIL_ECRITURES_MOIS = 500_000        # 50 % du palier Class A (1 M/mois)
-SEUIL_STOCKAGE_GO = 5.0               # 50 % du palier stockage (10 Go)
+# ⛔ 5,0 → 6,0 LE 11/09/2026, ET C'EST LA MOITIÉ D'UNE DÉCISION DÉJÀ
+# PRISE. Le 07/09, la couture IFS a porté le produit B de 52 à 80
+# échéances (+144 h) ; `BW_R2_SEUIL_GO` (l'alerte de l'audit, côté VPS) a
+# été relevée de 8,5 à 9,2 le jour même, « couture IFS ≈ +1,5 Go à trois
+# runs, décision de Yann ». CE seuil-ci — le garde-fou de CHAÎNE, celui
+# qui ARRÊTE — ne l'a pas été. Résultat mesuré : depuis le 10/09 au soir,
+# CHAQUE run publie le produit A puis abandonne la grille sur « stockage
+# projeté 5,19 à 5,39 Go > seuil 5,0 Go », en restant VERT (la grille est
+# écrite sous filet, à dessein). Seuls deux runs sont passés depuis, le
+# 11/09 à 02:27 et 02:35, parce qu'ils n'avaient encore que 25 et 31
+# échéances — donc la PWA est restée bloquée sur le réseau 00 Z, qui
+# s'arrête au 12/09 06 Z. Un garde-fou qui laisse tout vert n'arrête rien
+# d'autre que le produit.
+#
+# ⚠️ ET L'ESTIMATION DU 07/09 ÉTAIT BASSE DE 70 %. Mesuré sur le run
+# 15 Z du 11/09 : 80 échéances × 3 domaines = 1,73 Go PAR RUN publié
+# (les tampons `eNN.bin` PLUS `colonnes.bin`, qui republie les mêmes
+# valeurs sur l'axe orthogonal), soit 5,19 Go à trois runs contre 2,53
+# mesurés à 43 échéances — +2,66 Go, pas +1,5.
+#
+# Ce que 6,0 coûte, compté et pas supposé (audit du 11/09 04:59 Z :
+# 6,10 Go sur les trois buckets, dont 2,53 de grille) : 6,10 − 2,53
+# + 5,19 = ~8,8 Go sur le palier gratuit de 10. Marge 1,2 Go, et
+# `BW_R2_SEUIL_GO=9,2` criera AVANT le palier — c'est l'ordre qu'on veut.
+# ⛔ Il reste donc UNE marche, pas deux : le prochain domaine, le
+# prochain allongement d'horizon ou la prochaine chaîne se chiffrent ICI
+# avant d'être branchés, et la réponse sera probablement « non » tant que
+# `colonnes.bin` doublera la grille.
+SEUIL_STOCKAGE_GO = 6.0               # 60 % du palier stockage (10 Go)
 PALIER_CLASS_A_MOIS = 1_000_000
 PALIER_STOCKAGE_GO = 10.0
 
