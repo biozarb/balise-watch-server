@@ -7882,8 +7882,17 @@ def main() -> int:
                   f"zone×lead×modèle avec au moins une manche gagnée")
 
     # ── 6. purge ─────────────────────────────────────────────────
+    # ⛔ 11/09/2026 : cette ligne a passé `today` — un nom qui n'existe
+    # plus dans `main` depuis l'extraction de `_purges` (10/09). La nuit
+    # du 10→11 est morte ici, `NameError`, APRÈS avoir tout publié : la
+    # notation était bonne, seule l'étape 6 n'a jamais tourné, et son
+    # silence s'est lu comme « la purge ne rate plus ». Une purge sautée
+    # double la suivante (enquête §1.4) et le contrôle de pente a
+    # recommenté les chiffres de la veille sur KAN-3/KAN-4, faute d'un
+    # relevé comparable. Le banc `test_11_09_aucun_nom_lu_sans_etre_lie`
+    # tient désormais la classe entière : aucun nom lu sans être lié.
     if not args.no_purge:
-        _purges(sb, today)
+        _purges(sb, as_of)
 
     print(f"✅ terminé ({sb.ecritures} lignes écrites en base)")
     return 0

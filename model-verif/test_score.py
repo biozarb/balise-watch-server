@@ -6320,6 +6320,90 @@ def test_l19_la_table_colonne_sql_et_la_base():
           "une colonne)", out[0]["model"], MX.MODEL_MIX)
 
 
+def test_11_09_aucun_nom_lu_sans_etre_lie():
+    """⛔ LE `NameError` QUI A TUÉ LA NUIT DU 10→11/09, ET SA CLASSE.
+
+    `main` appelait `_purges(sb, today)`. `today` avait disparu de cette
+    portée en même temps que `_purges` en sortait (extraction du 10/09
+    pour `--purge-seule`) ; le frère jumeau, lui, passait bien
+    `datetime.now(timezone.utc)`. Python ne dit rien à l'import : il ne
+    résout un global qu'à l'EXÉCUTION de la ligne. Et cette ligne est la
+    DERNIÈRE du run — 3 675 s après le début, tout étant déjà publié.
+    Le banc l'aurait vue à coût nul ; il ne la voyait pas parce qu'il
+    teste des fonctions, jamais `main`.
+
+    ⛔ DONC PAS UNE ASSERTION SUR `today` : la classe entière. `symtable`
+    donne, par portée, les noms LUS sans y être liés ; un tel nom doit
+    exister au module ou dans les builtins, sinon c'est un `NameError`
+    qui attend son tour d'exécution. Balayé sur TOUS les modules de
+    production du dossier — le piège n'a rien de propre à `score.py`.
+
+    ⚠️ Les dunders du module (`__file__`, `__name__`…) sont posés par
+    l'interpréteur, pas par le source : `symtable` ne les connaît pas.
+    """
+    print("── 11/09 : aucun nom lu sans être lié (score.py et ses voisins) ──")
+    import builtins as _B
+    import symtable as _S
+
+    #: Posés par l'interpréteur au chargement, absents du source.
+    DUNDERS = {"__file__", "__name__", "__doc__", "__spec__",
+               "__package__", "__loader__", "__builtins__", "__debug__"}
+    connus = set(dir(_B)) | DUNDERS
+
+    def libres(src: str, nom: str) -> list[str]:
+        haut = _S.symtable(src, nom, "exec")
+        globaux = {s.get_name() for s in haut.get_symbols()
+                   if s.is_assigned() or s.is_imported() or s.is_namespace()}
+        trouves: list[str] = []
+
+        def visite(tab, chemin: str) -> None:
+            for s in tab.get_symbols():
+                n = s.get_name()
+                if (s.is_global() and not s.is_assigned()
+                        and n not in globaux and n not in connus):
+                    trouves.append(f"{chemin} → {n}")
+            for fils in tab.get_children():
+                visite(fils, f"{chemin}.{fils.get_name()}")
+
+        for fils in haut.get_children():
+            visite(fils, fils.get_name())
+        return trouves
+
+    ici = pathlib.Path(os.path.dirname(os.path.abspath(__file__)))
+    modules = sorted(p for p in ici.glob("*.py")
+                     if not p.name.startswith(("test_", "mutations_", "banc_")))
+    check("le balayage voit bien tout le dossier de production",
+          len(modules) >= 30, True)
+    check("… et `score.py` en fait partie",
+          "score.py" in {p.name for p in modules}, True)
+
+    fautifs: list[str] = []
+    for p in modules:
+        fautifs += [f"{p.name}:{f}" for f in libres(p.read_text(), p.name)]
+    check("⭐⭐ AUCUN nom lu sans être lié, dans aucune portée, dans aucun "
+          f"module de production (vus : {fautifs or '—'})", fautifs, [])
+
+    # ── la sonde attrape-t-elle vraiment le défaut du 10→11 ? ──
+    faux = ("def _purges(sb, today):\n    return today\n"
+            "def main():\n    as_of = 1\n    return _purges(None, today)\n")
+    check("⭐⭐ … et la sonde REVOIT le défaut exact du 10→11 si on le "
+          "réintroduit", libres(faux, "faux.py"), ["main → today"])
+    check("… tandis que la version corrigée la laisse muette",
+          libres(faux.replace("_purges(None, today)", "_purges(None, as_of)"),
+                 "faux.py"), [])
+
+    # ── et les appels réels, nommément, parce qu'ils ont coûté une nuit ──
+    # ⚠️ La SIGNATURE `def _purges(sb, today)` est hors sujet : le
+    # paramètre a le droit de s'appeler `today`, c'est de le LIRE au
+    # dehors qui tue. Le banc ne regarde donc que les sites d'appel.
+    src = (ici / "score.py").read_text()
+    appels = [l.strip() for l in src.splitlines()
+              if "_purges(" in l and not l.lstrip().startswith("def ")]
+    check("⭐⭐ les deux appels à `_purges` passent une horloge DÉFINIE "
+          f"dans leur portée (vus : {appels})", appels,
+          ["_purges(sb, datetime.now(timezone.utc))", "_purges(sb, as_of)"])
+
+
 def main() -> int:
     for fn in (test_chaine_de_repli, test_lignes_de_zone,
                test_agregat_quotidien, test_accumulateurs,
@@ -6414,6 +6498,8 @@ def main() -> int:
                # ── 10/09 : la fenêtre rejouée ne garde que ses clés, la purge par tranches ──
                test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09,
                test_10_09_la_purge_de_model_score_zone_va_par_tranches,
+               # ── 11/09 : le `NameError` de l'étape 6, et sa classe ──
+               test_11_09_aucun_nom_lu_sans_etre_lie,
                # ── lot LR (01/09) : le rejeu qui republiait le jour ──
                test_lr_le_rejeu_ancien_ne_republie_pas_le_classement,
                # ── lot L13 (01/09) : les deux dettes ops de l'audit ──
