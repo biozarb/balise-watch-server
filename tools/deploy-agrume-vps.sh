@@ -76,8 +76,15 @@ echec() { printf '\n❌ %s\n' "$*" >&2; exit 1; }
 #  n'était déployé par RIEN — ni par ce script, ni par un cron (il n'y
 #  en a pas sur le VPS), ni par un checkout (git n'est même pas installé
 #  là-bas). Sa copie distante datait du 03/08.
+#
+#  ⚠️ `discord-bridge/` ENTRE DANS LE PÉRIMÈTRE (17/09/2026). Le pont
+#  tournait sur le VPS depuis le 09/09 (`bw-discord-bridge.service`,
+#  active running) SANS être dans git ni dans ce transport — la copie
+#  distante était une copie à la main, en 600, et faisait rougir le banc
+#  des alertes (E1/E2/G11). Même faute que `traces/` le 31/08 : un
+#  dossier que rien ne déploie est un dossier qui diverge en silence.
 # ══════════════════════════════════════════════════════════════════════
-BW_DOSSIERS=(agrume verif tools model-verif traces)
+BW_DOSSIERS=(agrume verif tools model-verif traces discord-bridge)
 
 # ⚠️ QUI EST TRANSPORTÉ COMMENT — déclaré ICI, pas en dur dans le §1, pour
 # que le banc puisse vérifier LA propriété qui compte : *tout ce qui est
@@ -85,7 +92,7 @@ BW_DOSSIERS=(agrume verif tools model-verif traces)
 # dans aucune des deux listes ; le 26/08, `model-verif/` était contrôlé
 # sans être transporté. Deux fois la même faute, deux listes qui ne se
 # regardaient pas.
-BW_TRANSPORT_PERMS=(agrume verif tools traces)   # rsync -av
+BW_TRANSPORT_PERMS=(agrume verif tools traces discord-bridge)   # rsync -av
 BW_TRANSPORT_SANS_PERMS=(model-verif)            # rsync -rtv
 
 # ⛔ CHAQUE EXCLUSION PORTE SON MOTIF. Une exclusion sans raison écrite

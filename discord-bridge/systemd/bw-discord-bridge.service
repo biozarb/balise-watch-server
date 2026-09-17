@@ -1,0 +1,58 @@
+# ══════════════════════════════════════════════════════════════════════
+#  bw-discord-bridge.service — le pont Discord → Jira      (09/09/2026)
+#
+#  ⚠️ CE N'EST PAS UN TIMER, ET C'EST NÉCESSAIRE. Un bot Discord tient une
+#  connexion WebSocket permanente vers la passerelle : c'est elle qui
+#  livre l'évènement « un pilote vient d'ouvrir un post ». Un cron qui
+#  passerait toutes les 5 minutes raterait les tags posés puis retirés,
+#  et surtout ne pourrait pas accuser réception dans la seconde — or
+#  c'est l'accusé de réception qui fait qu'un pilote recommence.
+#  C'est aussi pour ça que Render (plan gratuit, qui s'endort) ne
+#  convenait pas, et que ce service atterrit ici.
+#
+#  Installation (à faire par Yann, ce service ne s'installe pas seul) :
+#    sudo cp discord-bridge/systemd/bw-discord-bridge.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now bw-discord-bridge
+#    journalctl -u bw-discord-bridge -f
+# ══════════════════════════════════════════════════════════════════════
+[Unit]
+Description=Balise Watch — pont Discord vers Jira (forums bugs et idées)
+Documentation=file:/home/debian/balise-watch/balise-watch-server/discord-bridge/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=debian
+Group=debian
+WorkingDirectory=/home/debian/balise-watch/balise-watch-server/discord-bridge
+ExecStart=/home/debian/balise-watch/balise-watch-server/discord-bridge/run.sh
+# Le pont doit survivre à une coupure réseau : un post ouvert pendant que
+# le bot est à terre n'est jamais rattrapé (Discord ne rejoue pas les
+# évènements manqués). Mais pas de rafale : une clé fausse doit se lire
+# dans le journal, pas se noyer sous mille redémarrages.
+Restart=always
+RestartSec=30
+# run.sh sort en 78 (EX_CONFIG) quand un secret manque : ça ne se
+# réparera pas tout seul, inutile d'insister.
+RestartPreventExitStatus=78
+Nice=10
+
+# ── Cloisonnement, calqué sur bw-agrume-poller.service ───────────────
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+# ⚠️ read-only et non true : run.sh lit ~/.balise-watch-discord.env.
+ProtectHome=read-only
+ReadWritePaths=/var/lib/bw-discord-bridge
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

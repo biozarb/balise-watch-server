@@ -301,8 +301,10 @@ check "E1  ⭐ AUCUN fichier d'unité du dépôt n'est en 600" "$(printf '%s' "$
 # PENTE). ⚠️ Un dossier NON SUIVI par git (`discord-bridge/`, unités en 600)
 # fait rougir E1 et E2 tant qu'il vit dans l'arbre : à commettre en 644 (et
 # compter ici), ou à sortir de l'arbre.
-check "E2  ⓘ et il y en a bien 41 à vérifier (le périmètre n'a pas fondu)" \
-      "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "41"
+# ⓘ 17/09 : 41 → 42 — bw-discord-bridge.service commis en 644 : le pont
+# tournait déjà sur le VPS (`active running`) sans être dans git.
+check "E2  ⓘ et il y en a bien 42 à vérifier (le périmètre n'a pas fondu)" \
+      "$(find . -name '*.service' -o -name '*.timer' | grep -v node_modules | grep -v _to_delete | wc -l | tr -d ' ')" "42"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
@@ -443,8 +445,9 @@ check "G9  ⭐ ni /var/lib/bw-model-verif — les ReadWritePaths sont disjoints"
 check "G10 ⭐ seul le chemin VIDE passe : 'syslog on' n'écrit aucun fichier" \
       "$(bw_inv_journal_couvert "$RACINE" '' && echo couvert || echo non)" "couvert"
 # ⓘ 10/09 : 13 → 14 (bw-model-controle.service, durcie comme la jauge R2).
-check "G11 ⓘ et il y a bien 14 unités durcies à vérifier (le périmètre n'a pas fondu)" \
-      "$(bw_inv_unites_durcies "$RACINE" | wc -l | tr -d ' ')" "14"
+# ⓘ 17/09 : 14 → 15 (bw-discord-bridge.service, commis ce jour).
+check "G11 ⓘ et il y a bien 15 unités durcies à vérifier (le périmètre n'a pas fondu)" \
+      "$(bw_inv_unites_durcies "$RACINE" | wc -l | tr -d ' ')" "15"
 
 # ⛔ G12 — UN CONTRÔLE QUI NE LIT RIEN NE DOIT PAS DIRE « OUI ». Sans
 # cette assertion, le jour où la recherche d'unités casse, tout chemin
