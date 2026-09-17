@@ -45,8 +45,22 @@ def depuis_r2(run, crier=print):
     from storage import Storage
     store = Storage("agrume-sonder", "AGRUME_BUCKET", "wind-grid")
     base = f"agrume/colonnes/{run}"
-    man = json.loads(store.get(f"{base}/manifest.json").decode("utf-8"))
+    # ⛔ 17/09/2026 — `store.get` rend None pour une clé absente (400/404
+    # traités pareil, cf. storage.py). Sans ce test, `.decode` sur None
+    # levait `AttributeError: 'NoneType' object has no attribute
+    # 'decode'`, et `confronter_quotidien` journalisait ce message-là
+    # comme « cause » — cinq fois par jour depuis que les lâchers 12 Z
+    # cherchent un run 06 Z que l'archive glissante ne garde pas. Le
+    # constat était juste, le diagnostic illisible. On nomme la clé.
+    brut_man = store.get(f"{base}/manifest.json")
+    if brut_man is None:
+        raise Abort(f"aucun objet {base}/manifest.json sur R2 — ce run "
+                    f"n'est pas (ou plus) dans l'archive glissante")
+    man = json.loads(brut_man.decode("utf-8"))
     brut = store.get(f"{base}/colonnes.npz")
+    if brut is None:
+        raise Abort(f"manifest présent mais aucun objet {base}/colonnes.npz "
+                    f"sur R2 — archive incomplète pour ce run")
     tmp = Path(os.environ.get("TMPDIR", "/tmp")) / f"agrume-{run.replace(':', '')}.npz"
     tmp.write_bytes(brut)
     try:
