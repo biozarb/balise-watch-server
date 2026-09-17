@@ -2457,6 +2457,59 @@ corrigé, placebo) à chaque run et publie la part imputable au site dans
 le journal ET dans le `meta` du JSON publié — pour qu'on ne puisse pas
 lire le gain sans son témoin.
 
+---
+
+## Un fichier source PRÉSENT peut être INCOMPLET (17/09/2026, isobares)
+
+**Symptôme** : trois échecs d'affilée de `ARPEGE isobars ingestion`
+(run #232, ses 3 tentatives, puis #233 relancé à la main), tous sur
+`ValueError: Child with name 'pressure_msl' does not exist`, à ~3 min
+de run. Les runs #230/#231 du même jour étaient verts.
+
+**Cause** : UNE échéance du run 12 Z ARPEGE-Europe côté Open-Meteo,
+`2026-09-19T1100.om` (+47 h), était incomplète : 2,4 Mo et 16 variables
+au lieu de 19,5 Mo et ~150, `pressure_msl` absente. Les 102 autres
+échéances du même run, et les 103 du run 06 Z, étaient complètes — d'où
+le vert le matin et le rouge l'après-midi. `latest.json` disait
+`completed: true` et listait cette échéance dans ses `valid_times` :
+**le manifeste amont ne garantit pas le contenu des fichiers qu'il
+annonce.**
+
+**Piège réutilisable** : `read_fields` traitait déjà le fichier ABSENT
+comme normal (`except FileNotFoundError: return None` — purgé ou pas
+encore publié) mais n'avait pas de troisième état pour le fichier
+présent-mais-troué. Un octet de source manquant tuait donc le run
+entier : 102 échéances Europe saines non recalculées, et toute la
+grille Monde jamais atteinte. *Toute lecture d'une source externe a
+trois issues, pas deux : conforme, absente, et présente mais pas
+conforme.*
+
+**Deuxième piège, celui qui aurait fait des dégâts silencieux** : sauter
+simplement l'échéance trouée l'aurait sortie de `manifest_times`, donc
+`purge_stale` aurait SUPPRIMÉ l'objet correct produit par le run 06 Z
+pour le remplacer par un trou définitif (le fichier amont ne se remplit
+pas). Une échéance déjà publiée est donc CONSERVÉE telle quelle, et
+`future_done` l'inclut — sinon `nowIndex` se décale, exactement comme
+au 23/07.
+
+**Fix** : `SourceIncomplete`, levée par `read_fields` après un
+inventaire des variables réellement portées par le `.om` (l'arbre est
+déjà dans le pied du fichier, zéro requête S3 de plus, et on ne se fie
+pas au texte du `ValueError` d'omfiles). Traitée échéance par échéance
+dans `process_grid` ; ignorée par `past_times` (un fichier incomplet ne
+raccourcit pas la fenêtre passée, seul un fichier absent marque la fin
+de la rétention) ; et bornée par `INCOMPLETE_ABORT_RATIO = 0.25` — au-delà
+d'un quart d'échéances trouées, le manifest n'est PAS réécrit et le run
+reste rouge, parce qu'un calque figé sur le run précédent sous une
+`referenceTime` toute neuve mentirait sur l'âge de la prévision.
+
+**Vérifié** : sur le bucket réel, les trois issues de `read_fields`
+(échéance saine → champ 521×741, `2026-09-19T11:00` → `SourceIncomplete`,
+échéance hors rétention → `None`) ; et sur `process_grid`, les trois
+scénarios (trouée déjà publiée → conservée, `nowIndex` juste ; trouée
+non publiée → sautée, run poursuivi ; majoritairement trouée →
+`RuntimeError`, aucun manifest écrit).
+
 ## Voir aussi
 
 - `agrume-implementation-tah-15-08.md` (projet Claude « balise watch ») —

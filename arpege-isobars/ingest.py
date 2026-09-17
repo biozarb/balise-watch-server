@@ -311,6 +311,21 @@ PAST_MAX_RUNS = 60             # garde-fou dur (~15 jours) — la vraie limite
 # Un rattrapage de l'existant se fait avec tools/purge_isobars_orphans.py.
 PAST_RETENTION_H = int(os.environ.get("PAST_RETENTION_H", "72"))
 
+# 17/09/2026 — runs #232 (3 tentatives) et #233 morts sur
+# `ValueError: Child with name 'pressure_msl' does not exist`. Un SEUL
+# fichier du run 12 Z Europe (`2026-09-19T1100.om`, +47 h) était
+# incomplet côté Open-Meteo : 2,4 Mo et 16 variables au lieu de 19,5 Mo
+# et ~150, la pression absente (vérifié sur le bucket ; les 102 autres
+# échéances du même run et les 103 du run 06 Z étaient complètes). Un
+# fichier ABSENT était déjà traité comme normal (`return None`), un
+# fichier PRÉSENT MAIS INCOMPLET tuait le run entier — les 102 autres
+# échéances Europe ET toute la grille Monde avec lui.
+# Ce ratio borne la tolérance : une échéance trouée se saute, un run
+# massivement troué (source cassée, renommage de variable en amont)
+# doit rester un échec bruyant plutôt qu'un calque silencieusement
+# figé sur le run précédent avec une `referenceTime` toute neuve.
+INCOMPLETE_ABORT_RATIO = 0.25
+
 # Centres de pression (L/H), pour l'animation du sens de rotation du vent
 # côté frontend (retour Yann 23/07). Fenêtre glissante simple (pas de scipy) :
 # un point est un centre s'il est le min/max strict de son voisinage.
@@ -417,6 +432,18 @@ FRONT_FIELDS = ("temperature_850hPa", "relative_humidity_850hPa",
 # l'on lit cinq variables par fichier, 64 Ko ailleurs.
 OM_BLOCK_SIZE = {"meteofrance_arpege_world025": 1 << 20}
 
+class SourceIncomplete(Exception):
+    """Le `.om` demandé EXISTE côté Open-Meteo mais ne porte pas (encore)
+    toutes les variables attendues. Distinct de l'absence de fichier
+    (`read_fields` renvoie None) et distinct d'un bug ici : c'est un état
+    de la SOURCE, que l'appelant doit pouvoir traiter échéance par
+    échéance. Cf. INCOMPLETE_ABORT_RATIO."""
+
+    def __init__(self, uri, manquantes):
+        self.uri, self.manquantes = uri, list(manquantes)
+        super().__init__(f"{uri} : variable(s) absente(s) : "
+                         + ", ".join(self.manquantes))
+
 def read_fields(model, dt_utc, names, reference_time=None):
     """Lit plusieurs variables (grille complète) du même `.om`. Renvoie
     (lon2d, lat2d, {nom: tableau}) ou None si le fichier est absent.
@@ -448,6 +475,18 @@ def read_fields(model, dt_utc, names, reference_time=None):
     fields = {}
     try:
         with OmFileReader(backend) as root:
+            # 17/09/2026 — on INVENTORIE avant de lire. `get_child_by_name`
+            # lève un `ValueError` générique sur une variable absente, au
+            # milieu de la boucle : impossible à distinguer d'un vrai bug
+            # sans se fier au texte du message. L'arbre des variables est
+            # déjà dans le pied du fichier (celui-là même qu'il faut lire
+            # pour résoudre le moindre enfant), donc cet inventaire ne
+            # coûte aucune requête S3 de plus.
+            presentes = {root.get_child_by_index(i).name
+                         for i in range(root.num_children)}
+            manquantes = [n for n in (*names, "crs_wkt") if n not in presentes]
+            if manquantes:
+                raise SourceIncomplete(uri, manquantes)
             for n in names:
                 fields[n] = root.get_child_by_name(n).read_array((...))
             bbox = _BBOX_RE.search(root.get_child_by_name("crs_wkt").read_scalar())
@@ -1266,8 +1305,18 @@ def past_times(reference_time, model):
     for _ in range(PAST_MAX_RUNS):
         if dt < horizon:
             break
-        if read_pressure(model, dt) is None:
-            break
+        # 17/09/2026 — un fichier ABSENT marque la fin de la rétention et
+        # arrête la remontée ; un fichier INCOMPLET ne marque rien du tout
+        # (la rétention, elle, est intacte) et ne doit donc pas raccourcir
+        # la fenêtre : on garde l'échéance dans la série et c'est
+        # `process_grid` qui décide — l'objet déjà publié y sera conservé
+        # plutôt que purgé.
+        try:
+            if read_pressure(model, dt) is None:
+                break
+        except SourceIncomplete as exc:
+            print(f"  ⚠️ passé {dt:%Y-%m-%dT%H:%M} incomplet côté source "
+                  f"({', '.join(exc.manquantes)}) — fenêtre inchangée")
         out.append(dt)
         dt -= timedelta(hours=PAST_STEP_HOURS)
     out.reverse()
@@ -1434,6 +1483,7 @@ def process_grid(key, cfg):
     reprocess_past = FORCE_REPROCESS_PAST or not profil_ok
 
     manifest_times, done, future_done = [], 0, 0
+    incompletes = 0
     for dt in all_times:
         iso = dt.strftime("%Y-%m-%dT%H:%M")
         obj_path = f"{key}/{iso}.json"
@@ -1456,7 +1506,28 @@ def process_grid(key, cfg):
         # 08/09/2026 (fronts) : les 4 champs 850 hPa sont lus dans le MÊME
         # fichier que la pression, en une seule ouverture.
         names = ("pressure_msl",) + (FRONT_FIELDS if cfg.get("fronts") else ())
-        result = read_fields(model, dt, names, reference_time=None if is_past else reference_time)
+        # 17/09/2026 — une échéance incomplète côté source se traite ici,
+        # pas en remontant jusqu'à `main()`. Et surtout : si elle est DÉJÀ
+        # publiée (produite par un run précédent, quand la source était
+        # complète), elle reste dans le manifest. Sans ça `purge_stale`
+        # supprimerait un objet correct pour le remplacer par un trou —
+        # définitif, puisque le fichier amont ne se remplira pas.
+        try:
+            result = read_fields(model, dt, names,
+                                 reference_time=None if is_past else reference_time)
+        except SourceIncomplete as exc:
+            incompletes += 1
+            quoi = ", ".join(exc.manquantes)
+            if iso in publiees:
+                manifest_times.append(iso)
+                if not is_past:
+                    future_done += 1
+                print(f"  ⚠️ {iso} incomplet côté source ({quoi}) — "
+                      f"objet du run précédent conservé")
+            else:
+                print(f"  ⚠️ {iso} incomplet côté source ({quoi}) — "
+                      f"échéance manquante dans ce calque")
+            continue
         if result is None:
             print(f"  ⚠️ {iso} absent (purgé ou pas encore publié) — ignoré")
             continue
@@ -1511,6 +1582,20 @@ def process_grid(key, cfg):
         if not is_past:
             future_done += 1
     print(f"  {done} échéance(s) (re)calculée(s), {len(manifest_times)} au total")
+    if incompletes:
+        toleres = max(1, int(INCOMPLETE_ABORT_RATIO * len(all_times)))
+        print(f"  ⚠️ {incompletes} échéance(s) incomplète(s) côté Open-Meteo "
+              f"sur {len(all_times)} demandée(s) (toléré jusqu'à {toleres})")
+        # Au-delà du seuil on n'écrit RIEN : le manifest précédent reste
+        # servi (même règle que `purge_stale`, cf. plus bas) et le run est
+        # rouge — un calque figé sur le run d'avant sous une
+        # `referenceTime` toute neuve serait un mensonge silencieux sur
+        # l'âge de la prévision.
+        if incompletes > toleres:
+            raise RuntimeError(
+                f"{key} : {incompletes}/{len(all_times)} échéance(s) incomplète(s) "
+                f"côté Open-Meteo — manifest NON réécrit, vérifier la source "
+                f"(variable renommée ? run amont cassé ?)")
 
     manifest = dict(
         model=model, referenceTime=reference_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -1528,6 +1613,10 @@ def process_grid(key, cfg):
         # partiel de la prévision (ex. bug de chemin S3 ci-dessus)
         # décalait silencieusement `nowIndex`, jusqu'à le faire sortir de
         # la plage valide (observé : -34 pour 33 échéances réelles).
+        # 17/09/2026 : `future_done` compte donc TOUTE entrée future du
+        # manifest — recalculée OU conservée telle quelle faute de source
+        # complète. Ne l'incrémenter que sur les recalculs redonnerait le
+        # `nowIndex` décalé de 2026-07-23.
         nowIndex=len(manifest_times) - future_done)  # frontend : jalon "maintenant"
     # cache court/no-cache : ce fichier est réécrit à chaque run (cf. note
     # dans sb_upload) — contrairement aux geojson par échéance ci-dessus.
