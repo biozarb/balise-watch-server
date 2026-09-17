@@ -1961,7 +1961,11 @@ def test_s15_garde_du_lot_rpc():
     """
     print("── S15 : le garde de `RPC_LOT` ──")
     sb = _sb_de_banc()
-    check("le plafond est celui mesuré le 25/08", J.Supabase.RPC_LOT, 5000)
+    # ⛔ 17/09/2026 : 5 000 → 2 000, mesuré par la nuit du 16/09 (huit
+    # `57014` sur ce RPC, le troisième d'un même lot a tué le run).
+    check("le plafond est celui mesuré le 16/09", J.Supabase.RPC_LOT, 2000)
+    check("le plancher de la coupe en deux existe et tient",
+          0 < J.Supabase.RPC_LOT_PLANCHER < J.Supabase.RPC_LOT, True)
 
     # ⛔ UN ESPION, PAS UN `try` NU. Sans lui, le banc ne distingue pas
     # « refusé AVANT de partir » de « parti, puis tombé sur le réseau » —
@@ -2016,13 +2020,73 @@ def test_s15_compte_ce_qui_est_applique():
     n = sb.avance_caractere(rows, "2026-08-24")
 
     check("le découpage suit RPC_LOT", [e[1] for e in envoyes],
-          [5000, 5000, 2000])
+          [2000] * 6)
     check("toutes les journées envoyées sont la même",
           {e[2] for e in envoyes}, {"2026-08-24"})
+    # (six lots de 2 000 depuis le 17/09 : le serveur en « perd » un par lot)
     check("le compte rendu est celui du SERVEUR, pas la taille envoyée",
-          n, 12_000 - 3)
+          n, 12_000 - 6)
     check("… et c'est lui qui alimente le compteur d'écritures",
-          sb.ecritures, 12_000 - 3)
+          sb.ecritures, 12_000 - 6)
+
+
+def test_s15_lot_tombe_coupe_en_deux():
+    """⛔ 17/09/2026 — un lot qui tombe en `57014` est COUPÉ EN DEUX, pas
+    rejoué tel quel trois fois puis abandonné.
+
+    C'est la nuit du 16/09 : trois `57014` sur un même lot de 5 000,
+    `Abort`, et plus rien derrière (événements, fenêtre, régime, R2).
+    Le banc simule un serveur qui refuse tout lot de plus de 700 lignes,
+    et vérifie que TOUT finit par passer, en tranches plus petites, sans
+    qu'aucune ligne soit envoyée deux fois avec succès.
+    """
+    print("── S15 : un lot tombé se coupe en deux ──")
+    sb = _sb_de_banc()
+    passes = []
+
+    def serveur_etroit(fonction, corps):
+        n = len(corps["p_rows"])
+        if n > 700:
+            raise J.Abort(f"rpc {fonction} : échec après 2 reprises — "
+                          f"HTTP Error 500: 57014 (simulé, lot de {n})")
+        passes.append(n)
+        return n
+
+    sb.rpc = serveur_etroit
+    rows = [{"zone_id": "b1:valley", "model": "icon_d2", "lead_h": 24,
+             "regime": "fluxN", "band": "strong", "metric": "errKmh",
+             "x": float(i)} for i in range(2000)]
+    n = sb.avance_caractere(rows, "2026-09-15")
+    check("toutes les lignes ont fini par passer", n, 2000)
+    check("… en tranches sous la limite du serveur",
+          all(k <= 700 for k in passes), True)
+    check("… 2 000 → 1 000 → 500 : quatre tranches de 500",
+          passes, [500, 500, 500, 500])
+    check("… et le compteur d'écritures est celui du serveur",
+          sb.ecritures, 2000)
+
+    # ⛔ Un 4xx (corps fautif) n'est PAS coupé : il se répéterait à
+    # l'identique dans chaque moitié.
+    def serveur_4xx(fonction, corps):
+        raise J.Abort(f"rpc {fonction} : HTTP 400 — doublon de clé")
+    sb.rpc = serveur_4xx
+    motif = None
+    try:
+        sb.avance_caractere(rows[:100], "2026-09-15")
+    except J.Abort as exc:
+        motif = str(exc)
+    check("un 4xx remonte tel quel", "HTTP 400" in (motif or ""), True)
+
+    # ⛔ Sous le plancher, on s'arrête : ce n'est plus le lot, c'est la base.
+    sb.rpc = lambda f, c: (_ for _ in ()).throw(
+        J.Abort(f"rpc {f} : échec après 2 reprises — 57014"))
+    motif = None
+    try:
+        sb.avance_caractere(rows[:100], "2026-09-15")
+    except J.Abort as exc:
+        motif = str(exc)
+    check("sous le plancher, l'Abort dit que c'est la base",
+          "plancher" in (motif or ""), True)
 
 
 def test_scores_de_zone():
@@ -6411,6 +6475,7 @@ def main() -> int:
                test_s15_contrat_de_la_rpc,
                test_s15_garde_du_lot_rpc,
                test_s15_compte_ce_qui_est_applique,
+               test_s15_lot_tombe_coupe_en_deux,
                test_scores_de_zone, test_score_par_regime,
                test_rétrécissement_vers_le_parent,
                test_rejeu_darchive,

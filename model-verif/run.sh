@@ -342,10 +342,31 @@ elif [[ "$MODE" == "garde-fou-r2" ]]; then
   # est de prévenir tôt. Attendre un second échec annulerait sa raison
   # d'être.
   SEUIL_ALERTE=1
+elif [[ "$MODE" == "score" ]]; then
+  MAX_MINUTES="${BW_MODEL_VERIF_MAX_MINUTES:-25}"
+  # ⛔ SEUIL_ALERTE=1 DEPUIS LE 17/09/2026 — ET C'EST UNE NUIT PERDUE QUI
+  # L'A DÉCIDÉ, PAS UN CONFORT. Jusque-là ce mode était dans le `else`
+  # à 2, avec ce raisonnement : « la notation se rejoue sur l'archive
+  # autant de fois qu'on veut (`score.py --day`), un échec isolé n'est
+  # pas une urgence ». Le 16/09 à 06:22, le run est mort (Abort sur
+  # `bw_character_avance`, 57014), n=1, et les TROIS canaux sont restés
+  # muets : pas d'e-mail, pas de ping `/fail`, pas de push. Personne ne
+  # l'a su avant le contrôle du 17/09 au matin. `model_score_zone` vide
+  # pour l'as_of du 16, `model_verif_event` vide pour le 15, et les
+  # pilotes ont lu la veille toute la journée.
+  # ⚠️ « Rattrapable » et « rattrapé » ne sont pas la même chose. Le
+  # rejeu existe, mais il coûte aujourd'hui ~75 min de run diurne au
+  # même profil mémoire que la nuit (3 317 Mo de jalon, 200 Mo de
+  # réserve avant l'OOM), et surtout il suppose que quelqu'un SACHE
+  # qu'il faut le lancer. Un seuil à 2 fait le pari qu'un humain lit le
+  # journal chaque matin ; ce pari a été perdu. Une nuit de notation
+  # vaut donc, pour l'alerte, ce que vaut une nuit de collecte.
+  SEUIL_ALERTE=1
 else
   MAX_MINUTES="${BW_MODEL_VERIF_MAX_MINUTES:-25}"
-  # La notation, elle, se rejoue sur l'archive autant de fois qu'on veut
-  # (`score.py --day AAAA-MM-JJ`). Un échec isolé n'est pas une urgence.
+  # Les autres flux d'archive (agrume-court, agrume-quart…) se rejouent
+  # sur le produit A comme `agrume` : un échec isolé n'est pas une
+  # urgence. ⚠️ `score` a quitté cette branche le 17/09 — voir au-dessus.
   SEUIL_ALERTE=2
 fi
 

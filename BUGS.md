@@ -6,6 +6,64 @@
 
 ---
 
+## 17/09/2026 (notation) — « rattrapable » n'est pas « rattrapé » : une nuit morte sans un son
+
+La nuit du 16/09 est morte à 06:22 CEST — `Abort: rpc bw_character_avance :
+échec après 2 reprises — HTTP Error 500` (huit `57014` sur ce seul RPC,
+le troisième d'un même lot de 5 000). `model_score_zone` vide pour
+l'as_of du 16, `model_verif_event` vide pour le 15, et les pilotes ont
+lu la veille toute la journée. **Découvert le 17 au matin par un
+contrôle, pas par une alerte.** Trois pièges, tous les trois déjà
+écrits quelque part sans qu'on en tire la conséquence.
+
+1. **Un seuil d'alerte raisonné en août ne l'était plus en septembre.**
+   `run.sh` mettait `score` à `SEUIL_ALERTE=2` avec un argument juste :
+   « la notation se rejoue sur l'archive » (`score.py --day`). Sauf que
+   le rejeu coûte désormais ~75 min au même profil mémoire que la nuit
+   (3 317 Mo de jalon, 200 Mo de réserve avant l'OOM), et surtout il
+   suppose que quelqu'un SACHE qu'il faut le lancer. Un seuil à 2 parie
+   qu'un humain lit le journal chaque matin. Le pari a été perdu, et les
+   trois canaux (`msmtp`, `/fail` Healthchecks, push) sont restés muets.
+   → `score` a sa propre branche à `SEUIL_ALERTE=1`. Le raisonnement
+   d'origine est conservé dans le commentaire, avec la nuit qui l'a
+   invalidé.
+
+2. **Rejouer trois fois un lot trop gros ne le rend pas plus petit.**
+   `RPC_LOT=5000` avait été mesuré le 25/08 contre 739 916 lignes,
+   « marge ×3, et la table va grandir ». Elle a grandi (503 120
+   accumulateurs le 09/09, plus comptable le 17 : un `count=exact` rend
+   lui-même `57014`). Les deux reprises de `rpc()` rejouaient le même
+   lot de 5 000 contre le même délai de 8 s — trois chances identiques.
+   → `RPC_LOT` 5 000 → 2 000, et `avance_caractere` **coupe en deux**
+   un lot qui tombe encore (`_avance_lot`, plancher 250). C'est sûr
+   parce que la RPC est UNE transaction (un lot tombé n'a rien écrit)
+   et que `where p_day > mc.last_day` rend inerte une clé déjà
+   intégrée — les deux propriétés que la docstring de `rpc` exige.
+   Banc : `test_s15_lot_tombe_coupe_en_deux`.
+
+3. **Le garde-fou LR retenait plus que ce qu'il visait.** Le rejeu de
+   la journée du 15/09, lancé le 17, tombait dans `elif not republier`
+   (journée plus vieille qu'hier) et sautait TOUT le bloc — y compris
+   `model_verif_event`, une table clé par `day` (delete + insert de la
+   journée), que rien n'empêchait de rejouer. Le lot LR (01/09) ne
+   visait que ce qui est clé par `as_of` ; la construction du bloc a
+   emporté le reste. → `_ecrire_la_journee()` (zones, accumulateurs,
+   événements) est appelé des deux côtés. Sur une vieille journée les
+   accumulateurs restent inertes par la RPC — réserve connue du L12 —
+   mais les événements, eux, reviennent.
+
+Le piège réutilisable : **une alerte dimensionnée sur « ça se
+rattrape » doit être redimensionnée le jour où le rattrapage cesse
+d'être gratuit** — et un rattrapage qui suppose qu'on sache le lancer
+n'est jamais gratuit.
+
+⚠️ Non traité ce jour : `model_character` a intégré le 16/09 pour
+toutes les clés, donc le 15/09 est refusé à jamais pour celles des lots
+tombés (`p_day > last_day`). Un jour sur 180 de décroissance ; à
+mesurer, pas à corriger à l'aveugle.
+
+---
+
 ## 10/09/2026 (notation) — une purge qui expire une fois expire pour toujours
 
 `purge model_score_zone : HTTP 500 — 57014 canceling statement due to

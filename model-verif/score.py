@@ -1086,7 +1086,27 @@ class Supabase:
     #: ⛔ NE PAS AUGMENTER POUR ALLER PLUS VITE — même défaut que `PAGE`
     #: contre `PLAFOND_SERVEUR`, et même conséquence : une écriture
     #: coupée au milieu, un soir où personne ne regarde.
-    RPC_LOT = 5000
+    #:
+    #: ⛔ 17/09/2026 — 5 000 → 2 000, ET C'EST LA NUIT DU 16/09 QUI L'A
+    #: MESURÉ. « La table va grandir » : elle l'a fait (419 023
+    #: accumulateurs le 04/09, 503 120 le 09/09, plus comptable le 17/09
+    #: — un `count=exact` rend lui-même `57014`). À 5 000 la RPC a rendu
+    #: `57014` HUIT fois dans la nuit du 16/09, et le troisième sur un
+    #: même lot a tué le run (`Abort: rpc bw_character_avance : échec
+    #: après 2 reprises`) : `model_score_zone` vide pour l'as_of du 16,
+    #: `model_verif_event` vide pour le 15 — et aucune alerte, parce que
+    #: `SEUIL_ALERTE=2` sur le mode score. La nuit du 17/09, encore 4
+    #: reprises sur ce RPC, rattrapées de justesse. 2 000 lignes se
+    #: mesuraient à 0,78 / 0,97 s le 25/08 sur 739 916 lignes : c'est la
+    #: marge ×8 d'alors, pas ×3, pour absorber la croissance à venir.
+    #: ⚠️ Et `avance_caractere` ne se contente plus de ce nombre : un
+    #: lot qui tombe encore en `57014` est COUPÉ EN DEUX et rejoué (la
+    #: RPC est une transaction, un lot tombé n'a rien écrit ; le
+    #: `where p_day > mc.last_day` rend une clé rejouée inerte). Le
+    #: plancher est `RPC_LOT_PLANCHER` : en dessous, ce n'est plus la
+    #: taille du lot qui manque, c'est la base.
+    RPC_LOT = 2000
+    RPC_LOT_PLANCHER = 250
 
     def rpc(self, fonction: str, corps: dict):
         """Appelle une fonction SQL par PostgREST (`/rpc/…`).
@@ -1168,10 +1188,52 @@ class Supabase:
             return len(rows)
         n = 0
         for i in range(0, len(rows), lot):
-            n += int(self.rpc("bw_character_avance",
-                              {"p_rows": rows[i:i + lot], "p_day": jour}))
+            n += self._avance_lot(rows[i:i + lot], jour, lot)
         self.ecritures += n
         return n
+
+    def _avance_lot(self, tranche: list[dict], jour: str, lot: int) -> int:
+        """Un lot vers `bw_character_avance` — COUPÉ EN DEUX s'il tombe.
+
+        ⛔ 17/09/2026. La nuit du 16/09 est morte ici : trois `57014` de
+        suite sur un même lot de 5 000, `Abort` après les deux reprises
+        de `rpc`, et tout ce qui suit (événements, fenêtre glissante,
+        régime, R2) n'a jamais eu lieu. Le lot n'était pas fautif — la
+        table avait grossi jusqu'à ce que 5 000 lignes ne tiennent plus
+        dans les 8 s de Supabase, parfois. Rejouer le même lot trois
+        fois ne change rien à sa taille ; le couper en deux, si.
+
+        ⚠️ POURQUOI C'EST SÛR, ET PAS SEULEMENT PRATIQUE : la RPC est
+        UNE transaction plpgsql — un lot tombé en `57014` n'a rien écrit
+        (rollback), donc en rejouer une moitié n'écrit rien deux fois ;
+        et `where p_day > mc.last_day` rend inerte toute clé qui aurait
+        déjà intégré la journée. Les deux propriétés que la docstring
+        de `rpc` exige pour toute reprise sont là.
+
+        ⓘ Un `Abort` levé par un 4xx (corps fautif) est REJETÉ tel quel,
+        pas coupé : un doublon de clé se répète à l'identique dans une
+        moitié comme dans l'autre. On ne coupe que sur le motif du
+        serveur (`57014`, ou un 5xx sans corps lisible).
+        """
+        try:
+            return int(self.rpc("bw_character_avance",
+                                {"p_rows": tranche, "p_day": jour}))
+        except Abort as exc:
+            motif = str(exc)
+            if "échec après" not in motif:
+                raise                       # 4xx : faute du client, inchangée
+            if len(tranche) <= self.RPC_LOT_PLANCHER or len(tranche) < 2:
+                raise Abort(f"rpc bw_character_avance : lot de {len(tranche)} "
+                            f"ligne(s) tombé sous le plancher "
+                            f"RPC_LOT_PLANCHER={self.RPC_LOT_PLANCHER} — ce "
+                            f"n'est plus la taille du lot, c'est la base "
+                            f"({motif})")
+            moitie = len(tranche) // 2
+            print(f"     ⚠️ bw_character_avance : lot de {len(tranche)} tombé "
+                  f"({motif[-90:]}) — coupé en deux ({moitie} + "
+                  f"{len(tranche) - moitie}) et rejoué", file=sys.stderr)
+            return (self._avance_lot(tranche[:moitie], jour, lot)
+                    + self._avance_lot(tranche[moitie:], jour, lot))
 
     def insert(self, table: str, rows: list[dict], chunk: int = 500) -> int:
         """Insertion simple, pour les tables SANS clé d'unicité.
@@ -6846,6 +6908,96 @@ def _purges(sb, today) -> None:
     # formule rejouable.
     _purge_caractere(sb, today)
 
+
+
+def _ecrire_la_journee(sb, day, banded, zone_of, snapshots, obs_day,
+                       utc_offset_s) -> None:
+    """Ce qui est CLÉ PAR `day` : les zones, les accumulateurs, les
+    événements. Écrit pour la nuit courante ET pour un rejeu.
+
+    ⛔ 17/09/2026 — SORTI DU BLOC `republier`, ET C'EST UNE MESURE. La
+    nuit du 16/09 est morte APRÈS `model_verif_daily` et AVANT
+    `model_verif_event` (Abort sur `bw_character_avance`). Le rejeu de
+    la journée du 15/09, lancé le 17, tombait dans `elif not republier`
+    et SAUTAIT ce bloc : `model_verif_event?day=eq.2026-09-15` restait à
+    0 — alors que cette table est clé par `day` (delete + insert de la
+    journée entière), pas par `as_of`. Le garde-fou LR ne visait que
+    ce qui est clé par `as_of` (score_zone, Murphy, R2) ; il retenait
+    aussi ceci, par la seule construction du bloc.
+
+    ⚠️ Pour les accumulateurs, un rejeu vieux de deux jours n'écrit
+    RIEN — le `where p_day > mc.last_day` de la RPC refuse une journée
+    plus vieille que la dernière intégrée, et le journal le dit
+    (« N ligne(s) non appliquée(s) »). C'est la réserve du lot L12,
+    connue et acceptée : on ne perd rien de plus qu'avant, on cesse
+    seulement de perdre les événements avec.
+    """
+    needed = zone_rows_needed(list(zone_of.values()))
+    if needed:
+        sb.upsert("model_zone", needed, "zone_id")
+
+    # ⛔ LOT S15 — LA RELECTURE DES ACCUMULATEURS A DISPARU D'ICI, ET
+    # C'ÉTAIT TOUT L'OBJET DU LOT. Le job lisait la table ENTIÈRE
+    # chaque nuit (739 916 lignes, 142–157 s le 25/08) pour n'en
+    # faire qu'une chose : appliquer une récurrence pure. Cette
+    # récurrence vit maintenant dans `bw_accumulate` (step51), et le
+    # job n'envoie plus que la MÉDIANE DU JOUR. Le seul des quatre
+    # coûts de cette étape qui grandissait sans plafond — parce
+    # qu'il grandissait avec l'HISTOIRE et non avec le travail du
+    # jour — n'existe plus.
+    #
+    # ⚠️ ET L'IDEMPOTENCE A CHANGÉ DE CAMP AVEC LUI. Avant, elle
+    # était ici : `accumulate` rendait l'accumulateur inchangé si la
+    # journée était déjà intégrée, et le job envoyait un état
+    # ABSOLU — rejouer une nuit réécrivait les mêmes valeurs.
+    # Maintenant le job envoie un DELTA, et c'est le
+    # `where … p_day > mc.last_day` de la RPC qui empêche une nuit
+    # rejouée de compter DEUX FOIS. Le banc de double rejeu
+    # (`test_score`) est ce qui tient cette propriété : qui retire
+    # ce `where` fait rougir ce banc-là, et lui seul.
+    #
+    # ⓘ `select_par_cle` reste dans `Supabase` : elle sert encore
+    # ailleurs, et elle est le chemin de repli si ce lot était
+    # annulé.
+    updates = accumulator_updates(banded, zone_of)
+    if updates:
+        n = sb.avance_caractere(updates, f"{day:%Y-%m-%d}")
+        print(f"  → model_character : {n} accumulateurs avancés "
+              f"sur {len(updates)} envoyés")
+        if n != len(updates):
+            # ⓘ L'ÉCART N'EST PAS DU BRUIT, et il est normal : ce
+            # sont les valeurs non finies écartées par la RPC, plus
+            # les clés dont la journée était déjà intégrée (un
+            # rejeu). Le dire à voix haute, parce que `sb.upsert`
+            # comptait jusqu'ici ce qu'il ENVOYAIT — et c'est
+            # exactement ce qui a rendu impossible, le 25/08, de
+            # réconcilier les 3 615 845 « avancées » du journal avec
+            # les 3 270 977 `days` de la table.
+            print(f"     ⓘ {len(updates) - n} ligne(s) non appliquée(s) "
+                  f"(valeur non finie, ou journée déjà intégrée)")
+
+    # ── 4 bis. événements (lot F) ────────────────────────────
+    # ⚠️ Après les zones, jamais avant : `model_verif_event.zone_id`
+    # porte une clé étrangère, et un événement sans case fine n'a de
+    # toute façon aucun sens — la confirmation réseau se fait entre
+    # balises d'une MÊME case.
+    ev_rows, bilan = event_rows(day, snapshots, obs_day, zone_of, utc_offset_s)
+    print(f"  événements : {bilan}")
+    # Purge d'abord : la table n'a pas de clé d'unicité (une ligne par
+    # événement individuel), donc seule la réécriture complète de la
+    # journée rend le run rejouable sans doubler les lignes.
+    sb.delete("model_verif_event", f"?day=eq.{day:%Y-%m-%d}")
+    if ev_rows:
+        n = sb.insert("model_verif_event", ev_rows)
+        par_type = defaultdict(int)
+        for r in ev_rows:
+            par_type[r["event_type"]] += 1
+        detail = ", ".join(f"{k} {v}" for k, v in sorted(par_type.items()))
+        print(f"  → model_verif_event : {n} lignes ({detail})")
+    else:
+        print("  → model_verif_event : aucune ligne (aucun événement "
+              "confirmé par le réseau cette journée)")
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", default="/var/lib/bw-model-verif")
@@ -7364,72 +7516,17 @@ def main() -> int:
               f"{15 + trop.days} jours publiés sous l'étiquette "
               f"`rolling15`. (lot LR — `--publier-quand-meme` pour")
         print(f"     passer outre en connaissance de cause.)")
+        # ⛔ 17/09/2026 — MAIS CE QUI EST CLÉ PAR `day` S'ÉCRIT QUAND MÊME :
+        # zones, accumulateurs (inertes sur une vieille journée, par la
+        # RPC), et surtout les ÉVÉNEMENTS de la journée rejouée. Voir
+        # `_ecrire_la_journee` — c'est la nuit du 16/09 qui l'a mesuré.
+        _ecrire_la_journee(sb, day, banded, zone_of, snapshots, obs_day,
+                           utc_offset_s)
+        print(f"  ✅ journée {day:%Y-%m-%d} rejouée : daily, archive, duel, "
+              f"zones, événements — rien de clé par `as_of`.")
     else:
-        needed = zone_rows_needed(list(zone_of.values()))
-        if needed:
-            sb.upsert("model_zone", needed, "zone_id")
-
-        # ⛔ LOT S15 — LA RELECTURE DES ACCUMULATEURS A DISPARU D'ICI, ET
-        # C'ÉTAIT TOUT L'OBJET DU LOT. Le job lisait la table ENTIÈRE
-        # chaque nuit (739 916 lignes, 142–157 s le 25/08) pour n'en
-        # faire qu'une chose : appliquer une récurrence pure. Cette
-        # récurrence vit maintenant dans `bw_accumulate` (step51), et le
-        # job n'envoie plus que la MÉDIANE DU JOUR. Le seul des quatre
-        # coûts de cette étape qui grandissait sans plafond — parce
-        # qu'il grandissait avec l'HISTOIRE et non avec le travail du
-        # jour — n'existe plus.
-        #
-        # ⚠️ ET L'IDEMPOTENCE A CHANGÉ DE CAMP AVEC LUI. Avant, elle
-        # était ici : `accumulate` rendait l'accumulateur inchangé si la
-        # journée était déjà intégrée, et le job envoyait un état
-        # ABSOLU — rejouer une nuit réécrivait les mêmes valeurs.
-        # Maintenant le job envoie un DELTA, et c'est le
-        # `where … p_day > mc.last_day` de la RPC qui empêche une nuit
-        # rejouée de compter DEUX FOIS. Le banc de double rejeu
-        # (`test_score`) est ce qui tient cette propriété : qui retire
-        # ce `where` fait rougir ce banc-là, et lui seul.
-        #
-        # ⓘ `select_par_cle` reste dans `Supabase` : elle sert encore
-        # ailleurs, et elle est le chemin de repli si ce lot était
-        # annulé.
-        updates = accumulator_updates(banded, zone_of)
-        if updates:
-            n = sb.avance_caractere(updates, f"{day:%Y-%m-%d}")
-            print(f"  → model_character : {n} accumulateurs avancés "
-                  f"sur {len(updates)} envoyés")
-            if n != len(updates):
-                # ⓘ L'ÉCART N'EST PAS DU BRUIT, et il est normal : ce
-                # sont les valeurs non finies écartées par la RPC, plus
-                # les clés dont la journée était déjà intégrée (un
-                # rejeu). Le dire à voix haute, parce que `sb.upsert`
-                # comptait jusqu'ici ce qu'il ENVOYAIT — et c'est
-                # exactement ce qui a rendu impossible, le 25/08, de
-                # réconcilier les 3 615 845 « avancées » du journal avec
-                # les 3 270 977 `days` de la table.
-                print(f"     ⓘ {len(updates) - n} ligne(s) non appliquée(s) "
-                      f"(valeur non finie, ou journée déjà intégrée)")
-
-        # ── 4 bis. événements (lot F) ────────────────────────────
-        # ⚠️ Après les zones, jamais avant : `model_verif_event.zone_id`
-        # porte une clé étrangère, et un événement sans case fine n'a de
-        # toute façon aucun sens — la confirmation réseau se fait entre
-        # balises d'une MÊME case.
-        ev_rows, bilan = event_rows(day, snapshots, obs_day, zone_of, utc_offset_s)
-        print(f"  événements : {bilan}")
-        # Purge d'abord : la table n'a pas de clé d'unicité (une ligne par
-        # événement individuel), donc seule la réécriture complète de la
-        # journée rend le run rejouable sans doubler les lignes.
-        sb.delete("model_verif_event", f"?day=eq.{day:%Y-%m-%d}")
-        if ev_rows:
-            n = sb.insert("model_verif_event", ev_rows)
-            par_type = defaultdict(int)
-            for r in ev_rows:
-                par_type[r["event_type"]] += 1
-            detail = ", ".join(f"{k} {v}" for k, v in sorted(par_type.items()))
-            print(f"  → model_verif_event : {n} lignes ({detail})")
-        else:
-            print("  → model_verif_event : aucune ligne (aucun événement "
-                  "confirmé par le réseau cette journée)")
+        _ecrire_la_journee(sb, day, banded, zone_of, snapshots, obs_day,
+                           utc_offset_s)
 
         # ══════════════════════════════════════════════════════════
         #  ⛔ L'OUBLI DU CHEMIN J-0 — LA CAUSE DE L'OOM DU 28/08
