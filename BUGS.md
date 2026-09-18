@@ -2510,6 +2510,69 @@ scénarios (trouée déjà publiée → conservée, `nowIndex` juste ; trouée
 non publiée → sautée, run poursuivi ; majoritairement trouée →
 `RuntimeError`, aucun manifest écrit).
 
+---
+
+## Le backend R2 n'avait AUCUN réessai, là où Supabase en avait trois (18/09/2026)
+
+**Symptôme** : deux runs perdus le même jour, sur deux chaînes sans
+rapport — `AROME wind grid ingestion` #435 (schedule) et
+`AGRUME — colonnes` #852 (manuel). Même trace exactement :
+
+```
+botocore.exceptions.ReadTimeoutError: Read timeout on endpoint URL: "https://….r2.cloudflarestorage.com"
+  File "tools/storage.py", line 407, in put
+    self.client.put_object(**kw)
+```
+
+L'un plantait sur un `sol/<lat>_<lon>.json` de quelques kilo-octets,
+l'autre sur `colonnes.npz` (63 Mo en un seul PUT). Dans les deux cas
+après plusieurs minutes de travail déjà fait : GRIB téléchargés, grille
+calculée, tout jeté.
+
+**Cause** : `_R2.put` faisait UN `put_object` et rien d'autre.
+`max_attempts=1` désarmait en plus le réessai interne de botocore. Le
+commentaire qui justifiait ça — « une boucle de réessai est LE scénario
+qui crame 1 M d'opérations » — est vrai d'une boucle **non bornée et non
+comptée**, pas d'un réessai borné. Pendant ce temps `_Supabase.put`
+réessayait trois fois depuis toujours : c'est exactement ce qui a sauvé
+le run isobares #234 d'un `HTTP 502` la veille. Le même incident était
+fatal d'un côté, invisible de l'autre.
+
+**Piège réutilisable** : *deux implémentations de la même interface
+n'ont pas la même robustesse tant que personne ne l'a vérifié.* Le
+`Storage` à deux backends donnait l'illusion d'un comportement unique ;
+`both` écrivait dans un backend qui pardonne et un qui ne pardonne pas.
+
+**Le piège dans le correctif** : compter les tentatives seulement quand
+l'upload finit par réussir sous-estime précisément les runs qui coûtent
+le plus. D'où le `try/finally` dans `Storage.put` — un upload qui échoue
+définitivement a quand même consommé ses trois Class A.
+
+**Fix** : réessai **borné à 3** dans `_R2.put`, uniquement sur les
+erreurs TRANSITOIRES (`ReadTimeoutError`, `ConnectTimeoutError`,
+`EndpointConnectionError`, `ConnectionClosedError`, `IncompleteReadError`,
+`ResponseStreamingError`, et HTTP 429/500/502/503/504). Un 403 (jeton
+périmé), un 404 (bucket absent) ou un corps invalide lèvent **du premier
+coup** : les rejouer, c'est payer trois fois la même erreur et masquer sa
+nature. `PutObject` étant idempotent, rejouer ne crée pas de doublon.
+Les tentatives en trop sont ajoutées aux `écritures` (une tentative =
+une Class A, aboutie ou non) et affichées dans la ligne `[compteurs]`
+sous `dont réessais=`. Timeouts botocore explicites : `connect 20 s`,
+`read 180 s` au lieu des 60 s par défaut, trop courts pour que R2 accuse
+réception d'un objet de 63 Mo.
+
+**Vérifié** : six scénarios avec un client boto stubbé — succès direct
+(1 appel) ; 2 timeouts puis succès (3 appels, 3 écritures, 2 réessais) ;
+timeout permanent (3 appels, **3 écritures comptées malgré l'échec**) ;
+HTTP 503 puis succès ; HTTP 403 et `ValueError` → 1 seul appel. Plus le
+backend Supabase, dont les réessais apparaissent désormais eux aussi
+dans le bilan.
+
+**Pas fait, noté** : `colonnes.npz` part en un seul PUT de 63 Mo. Un
+upload multipart serait plus robuste sur lien instable, mais coûte une
+Class A par part — à arbitrer contre le garde-fou n°1 si le cas se
+répète.
+
 ## Voir aussi
 
 - `agrume-implementation-tah-15-08.md` (projet Claude « balise watch ») —

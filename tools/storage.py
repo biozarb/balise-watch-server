@@ -268,6 +268,7 @@ class _Supabase:
     def put(self, path, body, cache_control, content_type, content_encoding,
             tries=3):
         last = None
+        self.tentatives_en_trop = 0
         for attempt in range(tries):
             hdrs = {"Content-Type": content_type, "x-upsert": "true",
                     "Cache-Control": cache_control}
@@ -288,6 +289,7 @@ class _Supabase:
                 last = f"{type(e).__name__}: {e}"
             print(f"  ⚠️ upload {path} tentative {attempt + 1}/{tries} : {last}",
                   file=sys.stderr)
+            self.tentatives_en_trop += 1
             time.sleep(1 + 2 * attempt)
         raise Abort(f"upload {path} : échec après {tries} tentatives — {last}")
 
@@ -369,15 +371,41 @@ class _Supabase:
 #  BACKEND R2
 # ══════════════════════════════════════════════════════════════════════
 class _R2:
-    """boto3, `max_attempts=1`. Aucun réessai automatique de botocore :
-    une boucle de réessai est LE scénario qui crame 1 M d'opérations.
-    On préfère un échec visible, repris au run suivant."""
+    """boto3, réessai automatique de botocore DÉSARMÉ (`max_attempts=1`) :
+    une boucle de réessai opaque et non comptée est LE scénario qui crame
+    1 M d'opérations. Le réessai vit ici, à la place : BORNÉ (3), limité
+    aux pannes TRANSITOIRES, journalisé, et compté comme des écritures."""
 
     nom = "r2"
+
+    # 18/09/2026 — deux runs perdus le même jour (AROME wind #435 sur un
+    # JSON de quelques kilo-octets, AGRUME colonnes #852 sur un `.npz` de
+    # 63 Mo), même trace : `botocore ReadTimeoutError` sur `put_object`,
+    # et rien derrière. Seules ces erreurs-là se rejouent : elles disent
+    # « le réseau a lâché » ou « reviens plus tard ». Un 403 (jeton
+    # périmé), un 404 (bucket absent), un corps invalide ne guériront
+    # jamais d'un réessai — les rejouer, c'est payer trois fois pour la
+    # même erreur et masquer sa vraie nature.
+    _TRANSITOIRES = ("ReadTimeoutError", "ConnectTimeoutError",
+                     "ConnectionError", "EndpointConnectionError",
+                     "ConnectionClosedError", "IncompleteReadError",
+                     "ResponseStreamingError")
+    _HTTP_TRANSITOIRES = {429, 500, 502, 503, 504}
+
+    @classmethod
+    def _transitoire(cls, exc):
+        if type(exc).__name__ in cls._TRANSITOIRES:
+            return True
+        meta = getattr(exc, "response", None)
+        if isinstance(meta, dict):
+            code = meta.get("ResponseMetadata", {}).get("HTTPStatusCode")
+            return code in cls._HTTP_TRANSITOIRES
+        return False
 
     def __init__(self, bucket):
         self.bucket = bucket
         self.client = None
+        self.tentatives_en_trop = 0
         if DRY_RUN:
             return
         try:
@@ -395,17 +423,39 @@ class _R2:
             aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
             region_name="auto",
-            config=Config(retries={"max_attempts": 1, "mode": "standard"}),
+            config=Config(
+                retries={"max_attempts": 1, "mode": "standard"},
+                # 18/09/2026 — les défauts botocore (60 s) ont lâché sur
+                # l'upload du `.npz` AGRUME (63 Mo en un seul PUT) : R2
+                # accuse réception APRÈS avoir digéré le corps, et
+                # 60 s n'y suffisent pas toujours depuis un runner. 180 s
+                # reste très en deçà du `timeout-minutes: 60` du
+                # workflow, même au pire cas (3 tentatives = 9 min).
+                connect_timeout=20, read_timeout=180,
+            ),
         )
 
     def put(self, path, body, cache_control, content_type, content_encoding,
-            tries=1):
+            tries=3):
         kw = dict(Bucket=self.bucket, Key=path, Body=body,
                   ContentType=content_type, CacheControl=cache_control)
         if content_encoding:
             kw["ContentEncoding"] = content_encoding
-        self.client.put_object(**kw)
-        return 200
+        self.tentatives_en_trop = 0
+        for attempt in range(tries):
+            try:
+                # `PutObject` est idempotent : même clé, même corps, même
+                # résultat. Rejouer ne crée pas de doublon, ne coûte
+                # qu'une Class A de plus — et celle-là est comptée.
+                self.client.put_object(**kw)
+                return 200
+            except Exception as e:                       # noqa: BLE001
+                if attempt == tries - 1 or not self._transitoire(e):
+                    raise
+                print(f"  ⚠️ upload R2 {path} tentative {attempt + 1}/{tries} : "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
+                self.tentatives_en_trop += 1
+                time.sleep(2 + 4 * attempt)
 
     def get(self, path):
         """`GetObject` sur une clé CONNUE — facturé Class B (10 M/mois),
@@ -487,6 +537,11 @@ class Storage:
         self.suppressions = 0
         self.lectures = 0
         self.octets = 0
+        # 18/09/2026 — les réessais d'upload COMPTENT comme des écritures
+        # (une tentative = une Class A côté R2, facturée qu'elle aboutisse
+        # ou non). Les laisser hors du compte, c'est fausser exactement la
+        # mesure qui protège du dépassement.
+        self.reessais = 0
 
         bucket_sb = os.environ.get(bucket_env) or defaut
         bucket_r2 = os.environ.get("R2_BUCKET") or defaut
@@ -517,8 +572,23 @@ class Storage:
             return 0
         statut = 0
         for cible in self.cibles:
-            statut = cible.put(path, body, cache_control, content_type,
-                               content_encoding)
+            # Les tentatives ratées sont facturées comme les autres : on
+            # les ajoute au compte APRÈS coup (le plafond a déjà été
+            # vérifié pour celle qui était prévue), de sorte que le
+            # prochain `put` voie le compte vrai et abandonne au bon
+            # moment. Le réessai étant borné à 3, le dépassement possible
+            # du plafond vaut au plus 2 écritures.
+            # ⚠️ `finally` et pas une ligne après l'appel : un upload qui
+            # ÉCHOUE définitivement a quand même consommé ses trois
+            # Class A. Les compter seulement quand ça marche, c'est
+            # sous-estimer précisément les runs qui coûtent le plus.
+            try:
+                statut = cible.put(path, body, cache_control, content_type,
+                                   content_encoding)
+            finally:
+                en_trop = getattr(cible, "tentatives_en_trop", 0)
+                self.ecritures += en_trop
+                self.reessais += en_trop
         return statut
 
     # ── lecture ───────────────────────────────────────────────────────
@@ -595,12 +665,18 @@ class Storage:
         cibles = "+".join(c.nom for c in self.cibles)
         log(f"[compteurs {self.chaine}] backend={cibles} "
             f"écritures={self.ecritures} (plafond {self.plafond}) "
-            f"lectures={self.lectures} suppressions={self.suppressions} "
+            + (f"dont réessais={self.reessais} " if self.reessais else "")
+            + f"lectures={self.lectures} suppressions={self.suppressions} "
             f"octets={self.octets/1e6:.1f} Mo"
             + ("  [DRY_RUN — rien n'a été écrit]" if DRY_RUN else ""))
         if self.ecritures >= self.plafond:
             log(f"⚠️ [{self.chaine}] le plafond a été ATTEINT — le run est "
                 f"incomplet. Comprendre pourquoi avant de relever le seuil.")
+        if self.reessais:
+            log(f"ℹ️ [{self.chaine}] {self.reessais} réessai(s) d'upload — "
+                f"transitoire tant que ça reste rare ; si ça devient "
+                f"systématique, c'est la taille des objets ou le réseau "
+                f"du runner qu'il faut regarder, pas le seuil.")
         return {"backend": cibles, "ecritures": self.ecritures,
                 "lectures": self.lectures, "suppressions": self.suppressions,
-                "octets": self.octets}
+                "octets": self.octets, "reessais": self.reessais}
