@@ -7513,6 +7513,56 @@ def main() -> int:
               f"notation continue, le bloc `duels` sera vide ce soir.",
               file=sys.stderr)
 
+    # ── 19/09/2026 : les autres échéances du duel (+24 h) ────────────
+    #
+    # ⛔ UN `try` PAR ÉCHÉANCE, ET PAS LE MÊME QUE CELUI DU +6 h. Les
+    # lignes d'ici sont AJOUTÉES au bloc ; si leur lecture tombe, les
+    # quatre séries +6 h — dont le cumul du L1, attendu à ~40 j — ne
+    # doivent pas disparaître avec elles. Et l'inverse : un +6 h tombé
+    # ne doit pas taire le +24 h.
+    #
+    # ⚠️ LECTURE ÉTROITE, PAR CLÉ SUR `day` (règle du 19/09, tenue par
+    # le banc AST) : seuls les modèles des paires de CETTE échéance —
+    # voir `duel.PAIRES_AUTRES_LEADS` pour ce que la ligne mesure, et
+    # pourquoi une seule paire.
+    for _lead, _paires in DUEL.PAIRES_AUTRES_LEADS.items():
+        try:
+            depuis_lead = (day - timedelta(days=DUEL.DUEL_DAYS - 1)
+                           ).strftime("%Y-%m-%d")
+            daily_lead = sb.select_par_cle(
+                "model_verif_daily", "day", order=CLE_DAILY,
+                query=DUEL.query_duel(depuis_lead, paires=_paires,
+                                      lead_h=_lead))
+            # Le même filtre que le +6 h, recalculé ici : `doublons_duel`
+            # n'existe pas si le bloc du dessus est tombé avant lui.
+            hors_lead = unites_hors_notation(zone_of)
+            avant_lead = len(daily_lead)
+            if hors_lead:
+                daily_lead = [r for r in daily_lead
+                              if f"{r['source']}:{r['station_id']}"
+                              not in hors_lead]
+            rows_lead = DUEL.duels(daily_lead, paires=_paires, lead_h=_lead)
+            print(f"  duel apparié ({DUEL.DUEL_VALUE_KEY}, lead {_lead}, "
+                  f"{DUEL.DUEL_SOURCE}) : {len(daily_lead)} lignes lues "
+                  f"depuis le {depuis_lead}"
+                  + (f" ({avant_lead - len(daily_lead)} retirée(s) : "
+                     f"doublon d'inscription ou position suspecte)"
+                     if avant_lead != len(daily_lead) else ""))
+            for _d in rows_lead:
+                print(DUEL.dire(_d))
+                if _d["excluded_duplicates"]:
+                    print(f"     ⚠️ {_d['excluded_duplicates']} balise-jour(s)"
+                          f" écartée(s) : deux `fcst_src` pour une même "
+                          f"balise-jour (cf. duel.lignes_du_modele)",
+                          file=sys.stderr)
+            # ⛔ APRÈS les lignes +6 h, jamais avant : leur place dans le
+            # bloc ne bouge pas.
+            duels_rows.extend(rows_lead)
+        except Exception as exc:                   # noqa: BLE001
+            print(f"  ⚠️ duel apparié +{_lead} h : {type(exc).__name__} — "
+                  f"{exc}. La notation continue, le bloc `duels` n'aura "
+                  f"pas cette échéance ce soir.", file=sys.stderr)
+
     if not zone_of:
         print("  ⓘ `station_zone` est vide : aucune balise n'est encore")
         print("     rattachée à son bassin-versant. Les accumulateurs et les")

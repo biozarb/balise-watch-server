@@ -393,6 +393,40 @@ for morceau in ("day=gte.2026-07-29", "lead_h=eq.6", "source=eq.pioupiou",
 check("… et elle ne demande PAS toutes les colonnes",
       "select=*" not in q, q)
 
+# ── 19/09/2026 : les autres échéances (+24 h) ─────────────────────
+check("une échéance de plus est suivie : +24 h",
+      set(D.PAIRES_AUTRES_LEADS) == {24})
+check("… pour la SEULE paire du L19 (les autres n'y apprennent rien)",
+      D.PAIRES_AUTRES_LEADS[24] == (("agrume_pi", "bw_mix"),))
+check("… et le +6 h n'y est PAS redéfini (il reste `PAIRES_SUIVIES`)",
+      D.DUEL_LEAD_H not in D.PAIRES_AUTRES_LEADS and D.DUEL_LEAD_H == 6)
+q24 = D.query_duel("2026-07-29", paires=D.PAIRES_AUTRES_LEADS[24], lead_h=24)
+check("la requête +24 h porte son lead et ses deux modèles",
+      "lead_h=eq.24" in q24 and "model=in.(agrume_pi,bw_mix)" in q24
+      and "source=eq.pioupiou" in q24, q24)
+check("… et AUCUN des modèles des autres paires (lecture étroite)",
+      "arome_r2" not in q24 and "meteofrance" not in q24
+      and "select=*" not in q24, q24)
+rows_h24 = [
+    ligne("2026-07-01", "pioupiou:1", "agrume_pi", 4.0, lead_h=6),
+    ligne("2026-07-01", "pioupiou:1", "bw_mix", 3.5, lead_h=6),
+    ligne("2026-07-01", "pioupiou:1", "agrume_pi", 8.0, lead_h=24),
+    ligne("2026-07-01", "pioupiou:1", "bw_mix", 7.0, lead_h=24),
+]
+b24 = D.duels(rows_h24, paires=D.PAIRES_AUTRES_LEADS[24], lead_h=24)
+check("le bloc +24 h rend UNE ligne, qui porte son échéance",
+      len(b24) == 1 and b24[0]["lead_h"] == 24, str(b24[0]["lead_h"]))
+check("⭐ … et ne lit QUE les lignes +24 h (8,0 − 7,0, pas 4,0 − 3,5)",
+      b24[0]["n_pairs"] == 1 and b24[0]["mean_diff"] == 1.0,
+      f"{b24[0]['n_pairs']} / {b24[0]['mean_diff']}")
+check("la ligne de journal DIT son échéance (la paire paraît deux fois)",
+      "agrume_pi ↔ bw_mix (+24 h)" in D.dire(b24[0]), D.dire(b24[0]))
+check("… y compris quand elle est vide",
+      "(+24 h)" in D.dire(D.duels([], paires=D.PAIRES_AUTRES_LEADS[24],
+                                  lead_h=24)[0]))
+check("… et le +6 h dit la sienne",
+      "(+6 h)" in D.dire(D.duels(rows_h24)[1]), D.dire(D.duels(rows_h24)[1]))
+
 vide = D.duels([])
 check("aucune donnée → quatre lignes quand même, à zéro",
       len(vide) == 4 and all(v["n_pairs"] == 0 for v in vide))

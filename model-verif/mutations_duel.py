@@ -101,6 +101,24 @@ MUTATIONS = [
      '    return None if x is None or not S._finite(x) else round(float(x), nd)',
      '    return None if x is None or not S._finite(x) else round(float(x), 1)'),
 
+    # ── 19/09/2026 : les autres échéances (+24 h) ───────────────────
+    ("l'échéance ajoutée REDÉFINIT le +6 h au lieu de s'y ajouter",
+     DUEL,
+     '    24: (("agrume_pi", "bw_mix"),),',
+     '    6: (("agrume_pi", "bw_mix"),),'),
+
+    ("le +24 h relit les QUATRE paires (la lecture cesse d'être étroite)",
+     DUEL,
+     '    24: (("agrume_pi", "bw_mix"),),',
+     '    24: PAIRES_SUIVIES,'),
+
+    ("la ligne de journal tait son échéance (deux lignes indiscernables)",
+     DUEL,
+     "    return (f\"  · {duel['model_a']} ↔ {duel['model_b']}{lead} : \"\n"
+     "            f\"n = {duel['n_pairs']} balise-jours",
+     "    return (f\"  · {duel['model_a']} ↔ {duel['model_b']} : \"\n"
+     "            f\"n = {duel['n_pairs']} balise-jours"),
+
     # ── le trajet jusqu'à l'objet publié (piège nº 7) ───────────────
     ("le bloc `duels` n'arrive jamais dans le fichier léger",
      SCORE,

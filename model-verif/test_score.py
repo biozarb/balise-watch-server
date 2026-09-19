@@ -1333,8 +1333,11 @@ def test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09():
     # compte donc plus les lectures — il exige de CHACUNE ce qui compte :
     # une liste de colonnes explicite, jamais `select=*`.
     lectures_daily = m.count('"model_verif_daily", "day",')
+    # ⓘ TROIS depuis le 19/09 au soir : le duel a gagné une échéance
+    # (+24 h, `duel.PAIRES_AUTRES_LEADS`), lue à part et étroite.
     check("… les lectures de `model_verif_daily` par clé sont connues "
-          "(fenêtre glissante + duel depuis le 19/09)", lectures_daily, 2)
+          "(fenêtre glissante + duel +6 h + duel des autres échéances)",
+          lectures_daily, 3)
     check("⭐ AUCUNE ne ramène `select=*` — chacune nomme ses colonnes "
           "(`COLONNES_FENETRE` ici, `DUEL_COLONNES` pour le duel)",
           [b.split(")")[0] for b in m.split('"model_verif_daily", "day",')[1:]
@@ -1342,6 +1345,20 @@ def test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09():
     check("… et le duel passe bien par `query_duel`, qui nomme "
           "`DUEL_COLONNES`",
           'query=DUEL.query_duel(depuis_duel))' in m, True)
+    # ── 19/09 : les autres échéances s'AJOUTENT, elles ne remplacent pas ─
+    check("… la lecture des autres échéances passe aussi par `query_duel`, "
+          "restreinte aux paires et au lead de l'échéance",
+          'query=DUEL.query_duel(depuis_lead, paires=_paires,' in m
+          and 'lead_h=_lead))' in m, True)
+    check("⭐ les lignes des autres échéances sont posées APRÈS celles du "
+          "+6 h (`extend`, jamais une réaffectation de `duels_rows`)",
+          m.index("duels_rows = DUEL.duels(daily_duel)")
+          < m.index("duels_rows.extend(rows_lead)")
+          and m.count("duels_rows = DUEL.duels(") == 1, True)
+    check("⭐ … sous leur PROPRE `try` : un +24 h tombé ne vide pas le +6 h",
+          m.index("le bloc `duels` sera vide ce soir")
+          < m.index("for _lead, _paires in DUEL.PAIRES_AUTRES_LEADS.items():")
+          < m.index("pas cette échéance ce soir"), True)
 
 
 def test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09():

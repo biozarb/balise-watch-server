@@ -40,7 +40,9 @@ phrases ne parlent pas de la même chose.
    (`test_bout_a_bout_la_mediane_est_structurellement_aveugle`).
 
 2. **Lead 6 h, source `pioupiou`.** Les trois paires suivies n'ont de
-   population commune qu'à cette échéance et sur ce réseau : AGRUME ne
+   population commune qu'à cette échéance et sur ce réseau (ⓘ 19/09 :
+   vrai le 27/08 ; depuis le L20 une paire en a une à +24 h aussi —
+   voir `PAIRES_AUTRES_LEADS`, qui AJOUTE sans rien redéfinir) : AGRUME ne
    produit rien d'appariable au-delà de +6 h (moins de
    `MIN_HOURS_DAILY` heures), et sa population est le millier de
    Pioupiou du produit A. Élargir la source est le lot L7, pas
@@ -119,6 +121,45 @@ DUEL_VALUE_KEY = "err_vec_rms"
 #: La classe d'échéance. `6` et pas `+6 h` : c'est la valeur écrite en
 #: base par `daily_rows` (`LEAD_BY_OFFSET`).
 DUEL_LEAD_H = 6
+
+#: ═══ LES AUTRES ÉCHÉANCES (19/09/2026) ═══
+#:
+#: Le §2 de l'en-tête disait « AGRUME ne produit rien d'appariable
+#: au-delà de +6 h ». C'était vrai le 27/08 ; ça ne l'est plus depuis le
+#: lot L20 (04/09) : `agrume` et `agrume_pi` ont une ligne SŒUR à +24 h,
+#: lue dans `arome_r2`. Et `bw_mix` est écrit aux trois classes depuis
+#: sa naissance. La paire du L19 a donc une population commune à +24 h —
+#: sondée en lecture seule le 19/09 : 3 557 balise-jours sur 15 j
+#: (04/09→18/09), médiane +0,604 km/h, IC95j [+0,382 ; +0,832],
+#: `b_better`, quinze journées positives sur quinze (à +6 h, le même
+#: jour : +0,404 [+0,266 ; +0,537]).
+#:
+#: ⛔ CE QUE CETTE LIGNE MESURE, ET CE N'EST PAS LA MÊME QUESTION QU'À
+#: +6 h. À +24 h, `agrume_pi` EST l'AROME brut (la sœur du L20 — il n'y
+#: a plus de PI à cette échéance ; vérifié le 19/09 : `agrume ↔
+#: agrume_pi` à +24 h rend 0,000 sur 3 571 paires, par construction). Le
+#: duel +24 h répond donc à « le mélange ferait-il mieux que ce
+#: qu'AGRUME sert AU-DELÀ de la fenêtre PI », c'est-à-dire exactement là
+#: où une réinjection aurait le plus à apporter. Il ne dit rien de PI.
+#:
+#: ⚠️ UNE SEULE PAIRE, ET C'EST UN CHOIX DE COÛT. Les trois autres
+#: n'apprennent rien à +24 h : `agrume ↔ agrume_pi` y vaut zéro par
+#: construction, et `agrume ↔ HD` y REDEVIENT le plancher de chaîne
+#: `arome_r2 ↔ HD` (+0,191 contre +0,156 le 19/09). Les lire chaque
+#: nuit coûterait ~42 000 lignes de plus sur une table dont la lecture
+#: est le point fragile du run (incidents du 07/09 et du 19/09) ; la
+#: paire seule en coûte ~14 000 à trente jours.
+#:
+#: ⚠️ CE SONT DES LIGNES EN PLUS, PAS UNE REDÉFINITION. Les séries +6 h
+#: ne changent ni de population ni de place : les lignes d'ici sont
+#: AJOUTÉES APRÈS elles dans le bloc `duels`, chacune avec son `lead_h`.
+#: Un lecteur qui identifiait un duel par (`model_a`, `model_b`) seuls
+#: doit désormais lire aussi `lead_h` — aucun n'existe au 19/09 (la PWA
+#: ne lit pas ce bloc ; le rapport de contrôle en lit le COMPTE, qui
+#: passe de 4 à 5).
+PAIRES_AUTRES_LEADS: dict[int, tuple[tuple[str, str], ...]] = {
+    24: (("agrume_pi", "bw_mix"),),
+}
 
 #: Le réseau. `None` = toutes les sources (voir §2 de l'en-tête — et la
 #: réserve de rupture de définition qui va avec).
@@ -367,13 +408,17 @@ def query_duel(since: str, paires: Sequence[tuple[str, str]] = PAIRES_SUIVIES,
 
 def dire(duel: Mapping) -> str:
     """Une ligne de journal, lisible sans le JSON."""
+    # ⓘ 19/09 : l'échéance voyage avec la ligne — depuis
+    # `PAIRES_AUTRES_LEADS` la même paire peut paraître deux fois.
+    lead = ("" if duel.get("lead_h") is None
+            else f" (+{duel['lead_h']} h)")
     if duel["n_pairs"] == 0:
-        return (f"  · {duel['model_a']} ↔ {duel['model_b']} : "
+        return (f"  · {duel['model_a']} ↔ {duel['model_b']}{lead} : "
                 f"AUCUNE balise-jour commune")
     ic = ("" if duel["ci_low"] is None
           else f", IC95j médiane [{duel['ci_low']:+.3f} ; "
                f"{duel['ci_high']:+.3f}]")
-    return (f"  · {duel['model_a']} ↔ {duel['model_b']} : "
+    return (f"  · {duel['model_a']} ↔ {duel['model_b']}{lead} : "
             f"n = {duel['n_pairs']} balise-jours sur {duel['n_days']} j "
             f"({duel['first_day']}→{duel['last_day']}), "
             f"moyenne {duel['mean_diff']:+.3f}, "
@@ -406,11 +451,23 @@ def main() -> int:
            else datetime.now(timezone.utc) - timedelta(days=1))
     since = (day - timedelta(days=args.jours - 1)).strftime("%Y-%m-%d")
     sb = SC.Supabase()
-    daily = sb.select("model_verif_daily", query_duel(since),
-                      order="day,source,station_id,model,lead_h,fcst_src")
-    print(f"▶ duel : {len(daily)} lignes lues depuis le {since} "
-          f"(lead {DUEL_LEAD_H}, source {DUEL_SOURCE}, {DUEL_VALUE_KEY})")
-    blocs = duels(daily, fenetre_jours=args.jours)
+    # ⛔ 19/09 : PAR CLÉ sur `day`, comme `score.main`. La lecture par
+    # décalage de ce rapport expirait à l'offset 45 000 (`57014`) — le
+    # même défaut que celui qui vidait le bloc `duels` en silence.
+    # ⚠️ Ce rapport ne retire PAS les unités hors notation (doublons
+    # d'inscription, positions suspectes) : il ne lit pas
+    # `station_zone`. Ses chiffres diffèrent donc de ceux du run d'un
+    # petit pour cent de paires — c'est un coup d'œil, pas la mesure.
+    blocs = []
+    for lead, paires in ((DUEL_LEAD_H, PAIRES_SUIVIES),
+                         *PAIRES_AUTRES_LEADS.items()):
+        daily = sb.select_par_cle(
+            "model_verif_daily", "day", order=SC.CLE_DAILY,
+            query=query_duel(since, paires=paires, lead_h=lead))
+        print(f"▶ duel : {len(daily)} lignes lues depuis le {since} "
+              f"(lead {lead}, source {DUEL_SOURCE}, {DUEL_VALUE_KEY})")
+        blocs += duels(daily, paires=paires, lead_h=lead,
+                       fenetre_jours=args.jours)
     if args.json:
         print(json.dumps(blocs, indent=1, ensure_ascii=False))
     else:
