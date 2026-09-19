@@ -756,8 +756,25 @@ class Supabase:
     #: espacées, uniquement sur les 5xx et les coupures réseau — jamais
     #: sur un 4xx, qui est une faute du client et se répéterait à
     #: l'identique.
-    RELECTURES = 2
-    RELECTURE_PAUSE_S = (2.0, 6.0)
+    #
+    # ⛔ TROIS REPRISES, PAS DEUX, ET LA DERNIÈRE ATTEND LONGTEMPS
+    # (19/09/2026). Deux ne suffisaient pas : la nuit du 18→19 est morte
+    # sur `model_verif_event [0-999]` après 1ʳᵉ, 2ᵉ ET 3ᵉ essai — les
+    # trois dans les 8 premières secondes de pause cumulée.
+    #
+    # ⚠️ ET CE QUI LE JUSTIFIE N'EST PAS UNE INTUITION. Mesuré le 19/09
+    # sur la production, la MÊME requête, cinq fois de suite :
+    #
+    #     0,07 s · 0,08 s · 0,08 s · 0,07 s · ⛔ 8,46 s, `57014`
+    #
+    # Une requête à 70 ms qui expire à 8 s au cinquième tir : ce n'est
+    # plus la forme de la requête, c'est la base qui a un hoquet. Contre
+    # un hoquet, la seule défense est d'attendre qu'il passe — 15 s, un
+    # ordre de grandeur au-dessus du délai de coupure lui-même. Le run
+    # a la marge : 3 361 s sous le chien de garde la dernière nuit
+    # verte, contre au pire ~25 s ajoutées ici.
+    RELECTURES = 3
+    RELECTURE_PAUSE_S = (2.0, 6.0, 15.0)
 
     def _page(self, base: str, deb: int, fin: int) -> list[dict]:
         """Une page, avec reprise sur 5xx. Le seul endroit qui lit le réseau."""
@@ -7416,9 +7433,28 @@ def main() -> int:
     try:
         depuis_duel = (day - timedelta(days=DUEL.DUEL_DAYS - 1)
                        ).strftime("%Y-%m-%d")
-        daily_duel = sb.select(
-            "model_verif_daily", DUEL.query_duel(depuis_duel),
-            order=CLE_DAILY)
+        # ⛔ CONVERTIE LE 19/09/2026 — le seuil que le pavé ci-dessus
+        # fixait lui-même (« au-delà de ~2 s sur la dernière page ») est
+        # franchi, et il ne l'est plus de justesse. `sonde_duel_offset.py`
+        # rejouée sur la production ce matin-là :
+        #
+        #     offset 45 000 → ⛔ 57014, les deux reprises expirent
+        #     offset 48 000 → ⛔ 57014, les trois essais expirent
+        #
+        # La sonde ne va PLUS AU BOUT. La tranche a grossi comme annoncé
+        # (37 528 lignes et 0,19 s le 07/09 ; ici elle dépasse 48 000
+        # sans pouvoir se lire), pour la raison écrite plus haut : un
+        # modèle suivi de plus, et `bw_mix` qui écrit tous les jours.
+        #
+        # ⚠️ CE BLOC EST SOUS `try` : il ne tombait donc pas la nuit,
+        # il se TAISAIT — « le bloc `duels` sera vide ce soir », une
+        # ligne d'avertissement dans le journal et rien d'autre. C'est
+        # le pire des deux mondes : le diagnostic disparaît sans que
+        # rien ne devienne rouge. Le journal du 19/09 le montre juste
+        # avant le crash.
+        daily_duel = sb.select_par_cle(
+            "model_verif_daily", "day", order=CLE_DAILY,
+            query=DUEL.query_duel(depuis_duel))
         # ── lot L17 : les doublons d'inscription sortent du duel aussi ─
         #
         # ⛔ POURQUOI ICI ET PAS DANS `duel.py`. Le duel lit une requête
@@ -7572,10 +7608,48 @@ def main() -> int:
         jalon_memoire("l'oubli du chemin J-0")
 
         since_ev = (day - timedelta(days=ROLLING_DAYS - 1)).strftime("%Y-%m-%d")
-        # ⛔ `cle_unique` : `id` est la clé primaire — pagination par clé,
-        # pas par décalage (mort à la page 782 le 02/09, voir `select`).
-        ev_all = sb.select("model_verif_event", f"?day=gte.{since_ev}",
-                           order="id", cle_unique=True)
+        # ⛔⛔ LA QUATRIÈME TABLE, ET LA MÊME LEÇON AU CARRÉ (19/09/2026).
+        # Cette lecture a tué la nuit du 18→19 : trois `57014 statement
+        # timeout` de suite sur sa PREMIÈRE page, `Range: 0-999`.
+        #
+        # ⚠️ ET `cle_unique` ÉTAIT DÉJÀ LÀ — c'est bien ce qui rend
+        # l'incident instructif. La pagination par clé du 02/09 a réglé
+        # la PROFONDEUR (la page 782 ne coûte plus 782 fois la première)
+        # ; elle ne pouvait rien contre la page 1, et le défaut était
+        # tout entier dans la page 1. `?day=gte.<J-14>&order=id`
+        # demande à PostgreSQL de balayer l'index de `id` DEPUIS LE
+        # DÉBUT en jetant tout ce qui tombe hors de la fenêtre — or
+        # `RETENTION_EVENT_D` vaut 90 jours (le Journal de fiabilité de
+        # la PWA les lit, cf. `modelVerifFetch.ts`) quand `ROLLING_DAYS`
+        # n'en veut que 15. Le run demandait donc de sauter les trois
+        # quarts de la table AVANT de lire sa première ligne utile.
+        #
+        # ⛔ MESURÉ SUR LA PRODUCTION LE 19/09, la table à 1 864 836
+        # lignes dont 950 193 hors fenêtre :
+        #
+        #   `?day=gte.<J-14>&select=*&order=id`, Range 0-999
+        #     essai 1 → ⛔ 8,13 s, 57014      essai 2 → 6,62 s
+        #     essai 3 → 1,29 s                 (le couperet est à 8 s)
+        #
+        #   `order=day,id`, borné journée par journée (ci-dessous)
+        #     939 requêtes, 914 643 lignes, cumul 82,7 s
+        #     PIRE page 1,30 s — la plupart à 0,10 s
+        #
+        # ⚠️ CE N'EST PAS LA TAILLE DE LA TABLE QUI DÉCIDE, C'EST LA
+        # PART HORS FENÊTRE, et elle grossit de ~50 000 lignes chaque
+        # nuit jusqu'à ce que la rétention à 90 jours commence à mordre
+        # (~06/11/2026). La veille, le 18/09, la même requête est passée
+        # — à 7,63 s. Une nuit de marge.
+        #
+        # `select_par_cle` sur `day` attaque `model_verif_event_day_idx`
+        # (step35) : la borne `day=gt.` ne parcourt jamais rien avant la
+        # fenêtre, et les décalages ne parcourent jamais plus qu'UNE
+        # journée (~50 000 lignes, offset le plus profond mesuré à
+        # 0,18 s). `day,id` est un ordre UNIQUE — `id` est la clé
+        # primaire — donc le contrat de la méthode est tenu.
+        ev_all = sb.select_par_cle(
+            "model_verif_event", "day", order="day,id",
+            query=f"?day=gte.{since_ev}")
         ev_scores, rejets, inconnues, retenues = event_scores(ev_all, zone_of)
         # ⓘ 15 jours de `model_verif_event`, dont plus rien ne se sert
         # dès que les scores d'événement sont calculés.

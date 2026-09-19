@@ -1327,9 +1327,21 @@ def test_memoire_la_fenetre_ne_lit_que_ses_colonnes_09_09():
           '            order=CLE_DAILY,\n'
           '            query=f"?day=gte.{since}&select={COLONNES_FENETRE}")'
           in m, True)
-    check("… et aucune lecture de `model_verif_daily` par clé ne "
-          "ramène plus `select=*` (une seule lecture par clé, restreinte)",
-          m.count('"model_verif_daily", "day",'), 1)
+    # ⚠️ ELLES SONT DEUX DEPUIS LE 19/09 : la fenêtre glissante et le
+    # duel, converti le matin où sa lecture par décalage a cessé d'aller
+    # au bout (offset 48 000, `57014` aux trois essais). Le banc ne
+    # compte donc plus les lectures — il exige de CHACUNE ce qui compte :
+    # une liste de colonnes explicite, jamais `select=*`.
+    lectures_daily = m.count('"model_verif_daily", "day",')
+    check("… les lectures de `model_verif_daily` par clé sont connues "
+          "(fenêtre glissante + duel depuis le 19/09)", lectures_daily, 2)
+    check("⭐ AUCUNE ne ramène `select=*` — chacune nomme ses colonnes "
+          "(`COLONNES_FENETRE` ici, `DUEL_COLONNES` pour le duel)",
+          [b.split(")")[0] for b in m.split('"model_verif_daily", "day",')[1:]
+           if "select=*" in b.split(")")[0]], [])
+    check("… et le duel passe bien par `query_duel`, qui nomme "
+          "`DUEL_COLONNES`",
+          'query=DUEL.query_duel(depuis_duel))' in m, True)
 
 
 def test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09():
@@ -5547,6 +5559,108 @@ def test_manches_pas_de_rejeu_historique_sous_min_block_days():
 #  le classement du jour. Trouvé par l'oracle du lot L12.
 # ══════════════════════════════════════════════════════════════════
 
+def _lectures_filtrees_par_jour(source: str, builders: set[str]) -> list[tuple]:
+    """Toute lecture Supabase de `source` dont la requête filtre sur `day`.
+
+    Rend `(ligne, methode, table, cle, texte_de_la_requete)`. Sert au banc
+    ci-dessous ET à sa propre vérification sur un faux source.
+    """
+    import ast as A
+
+    arbre = A.parse(source)
+    trouvees = []
+    for n in A.walk(arbre):
+        if not isinstance(n, A.Call) or not isinstance(n.func, A.Attribute):
+            continue
+        methode = n.func.attr
+        if methode not in ("select", "select_par_cle"):
+            continue
+        # la requête : 2ᵉ positionnel pour `select`, 4ᵉ ou `query=` pour
+        # `select_par_cle`. On prend TOUT ce qui pourrait la porter.
+        morceaux = [A.unparse(a) for a in n.args[1:]]
+        morceaux += [A.unparse(k.value) for k in n.keywords
+                     if k.arg in (None, "query")]
+        texte = " ".join(morceaux)
+        filtre_jour = "day=gte." in texte or any(
+            re.search(rf"\b{b}\b", texte) for b in builders)
+        if not filtre_jour:
+            continue
+        table = A.unparse(n.args[0]) if n.args else "?"
+        cle = (A.unparse(n.args[1]) if methode == "select_par_cle"
+               and len(n.args) > 1 else None)
+        trouvees.append((n.lineno, methode, table, cle, texte))
+    return trouvees
+
+
+def test_19_09_une_lecture_filtree_sur_day_pagine_sur_day():
+    """⛔ LE BANC DE LA NUIT DU 18→19/09, ET DE SA CLASSE ENTIÈRE.
+
+    `model_verif_event` était DÉJÀ en pagination par clé (`cle_unique`,
+    correctif du 02/09) — et la nuit est morte quand même, sur sa
+    PREMIÈRE page. Le défaut n'était pas la profondeur mais la BORNE :
+    `?day=gte.<J-14>&order=id` fait balayer l'index de `id` depuis
+    zéro pour jeter tout ce qui tombe hors fenêtre. La table garde
+    90 jours (le Journal de la PWA les lit), le run n'en veut que 15 :
+    950 193 lignes à sauter avant la première ligne utile, et ~50 000
+    de plus chaque nuit. Mesuré le 19/09 : 8,13 s → `57014`, quand la
+    même lecture bornée sur `day` tient en 1,30 s au pire.
+
+    ⛔ DONC PAS UNE ASSERTION SUR CETTE LIGNE-LÀ : la règle. Une
+    lecture filtrée sur `day` DOIT paginer sur `day` — c'est la seule
+    forme dont le coût ne dépende ni de la taille de la table ni de
+    la part qu'on jette. C'est déjà ce que fait la fenêtre glissante
+    (07/09) ; ce banc interdit qu'une cinquième table l'oublie.
+
+    ⚠️ Les requêtes construites ailleurs comptent aussi : `query_duel`
+    porte son `day=gte.` dans `duel.py`, et c'est précisément la
+    lecture qui se taisait — le duel est sous `try`, il ne tombait pas,
+    il disparaissait du journal.
+    """
+    print("── une lecture filtrée sur `day` pagine sur `day` (19/09) ──")
+    import ast as A
+
+    ici = pathlib.Path(__file__).resolve().parent
+    # Les fabricants de requêtes : toute fonction du dossier dont le
+    # corps écrit `day=gte.`. Sans eux, `query_duel(...)` passerait pour
+    # une requête sans filtre.
+    builders = set()
+    for f in sorted(ici.glob("*.py")):
+        try:
+            arbre = A.parse(f.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for n in A.walk(arbre):
+            if isinstance(n, A.FunctionDef) and "day=gte." in A.unparse(n):
+                builders.add(n.name)
+    check("`query_duel` est bien vue comme une fabrique de requête",
+          "query_duel" in builders, True)
+
+    src = (ici / "score.py").read_text(encoding="utf-8")
+    lectures = _lectures_filtrees_par_jour(src, builders)
+    check("les lectures filtrées sur `day` sont bien trouvées",
+          len(lectures) >= 3, True)
+    fautives = [(l, m, t) for l, m, t, c, _ in lectures
+                if m != "select_par_cle" or c not in ("'day'", '"day"')]
+    check("⛔ AUCUNE lecture filtrée sur `day` ne pagine autrement",
+          fautives, [])
+    for ligne, _, table, _, _ in lectures:
+        print(f"     · l. {ligne} {table} — bornée sur `day`")
+
+    # ── le banc se vérifie lui-même : on réintroduit le défaut exact ──
+    faux = (
+        "since_ev = '2026-09-04'\n"
+        "ev_all = sb.select('model_verif_event', f'?day=gte.{since_ev}',\n"
+        "                   order='id', cle_unique=True)\n")
+    vu = _lectures_filtrees_par_jour(faux, builders)
+    check("le balayage VOIT le défaut du 19/09 quand on le réintroduit",
+          [(m, c) for _, m, _, c, _ in vu], [("select", None)])
+    bon = ("ev_all = sb.select_par_cle('model_verif_event', 'day',\n"
+           "    order='day,id', query=f'?day=gte.{since_ev}')\n")
+    vu2 = _lectures_filtrees_par_jour(bon, builders)
+    check("… et il ACCEPTE la forme corrigée",
+          [(m, c) for _, m, _, c, _ in vu2], [("select_par_cle", "'day'")])
+
+
 def test_lr_le_rejeu_ancien_ne_republie_pas_le_classement():
     """`doit_republier` : hier oui, avant-hier non, et la frontière est
     CALENDAIRE."""
@@ -6565,6 +6679,8 @@ def main() -> int:
                test_10_09_la_purge_de_model_score_zone_va_par_tranches,
                # ── 11/09 : le `NameError` de l'étape 6, et sa classe ──
                test_11_09_aucun_nom_lu_sans_etre_lie,
+               # ── 19/09 : la borne d'une lecture filtrée sur `day` ──
+               test_19_09_une_lecture_filtree_sur_day_pagine_sur_day,
                # ── lot LR (01/09) : le rejeu qui republiait le jour ──
                test_lr_le_rejeu_ancien_ne_republie_pas_le_classement,
                # ── lot L13 (01/09) : les deux dettes ops de l'audit ──
