@@ -86,3 +86,30 @@ transition. Statut des deux : « À faire ».
 **VPS** : rien hors Jira (`tail` du registre, `journalctl`, `list-timers`,
 `free`, `controle_quotidien.py --verbeux`, lecture de `bw_jira.sh`).
 **Mac** : cette note et son commit local — pas de `git push`.
+
+## 18:45 — session Cowork avec Yann : KAN-3 fermé, trou du 19/09 comblé, avis sur la mémoire
+
+- **KAN-3 fermé** sur décision de Yann : commentaire de clôture (HTTP 201),
+  transition 41 « Terminé » (HTTP 204), statut relu `Terminé / done`. Si la
+  pente revient, `bw_jira.sh` ouvrira un ticket neuf (sa recherche ignore
+  la catégorie Done). **KAN-4 reste ouvert.**
+- **Trou du 19/09** : `claude/verdict-pente-19-09.md` créé côté projet ; le
+  miroir garde le texte tronqué d'origine intact, suivi d'une
+  reconstitution marquée comme telle (sources : registre,
+  `session-lecture-day-19-09.md`, `verdict-pente-20-09.md`).
+- **Levier mémoire — avis donné à Yann, rien de codé** :
+  1. d'abord les **chaînes partagées** dans `replay_window` (l. ~3154,
+     `memo.setdefault` sur les valeurs `str`, `unit` compris) : aucun
+     lecteur touché, −253 o/ligne mesurés le 11/09, soit ≈ −470 Mo au
+     prorata de la fenêtre d'aujourd'hui (1 859 008 lignes, non re-mesuré).
+     Ne suffit pas seul : à +77 Mo/nuit, ça achète ~une semaine ;
+  2. ensuite la **ligne en tuple** (≈ −1 030 o/ligne cumulés, ≈ −1,9 Go
+     au prorata) : le vrai remède, mais `_case_rows`, `regime_scores`,
+     `stability_report`, `bilan_dispersion` passent à l'accès par index —
+     mesurer `tuple` vs `namedtuple` à la sonde AVANT de choisir (leçon §2.3) ;
+  3. `--regime-days` seulement en frein d'urgence : la fenêtre est à
+     30 jours fixes, elle grossit parce que chaque journée porte plus de
+     lignes ; raccourcir la fenêtre ne coupe qu'une fois et change ce que
+     le score par régime mesure.
+  ⚠️ §2.4 : le jalon ne baissera pas au prorata (tas non rendu au noyau) ;
+  le signe attendu est d'abord le swap au pic qui s'effondre.
