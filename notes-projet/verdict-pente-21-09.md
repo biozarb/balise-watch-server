@@ -113,3 +113,38 @@ transition. Statut des deux : « À faire ».
      le score par régime mesure.
   ⚠️ §2.4 : le jalon ne baissera pas au prorata (tas non rendu au noyau) ;
   le signe attendu est d'abord le swap au pic qui s'effondre.
+
+## 19:15 — session Cowork avec Yann : chaînes partagées codées, DÉPLOYÉES et poussées
+
+Sur feu vert explicite de Yann (« Déployer + push »).
+
+- **Code** (`af25efb`, dépôt serveur) — `replay_window` : un seul
+  `memo: dict[str, str]` pour TOUTE la fenêtre (pas un par journée), et
+  après l'élagage chaque valeur `str` de la ligne pointe vers l'exemplaire
+  partagé. L'élagage (`if k in CLES_REJEU`) est laissé tel quel, ligne
+  comprise (les mutations du 10/09 la visent). Aucun lecteur touché.
+  `unit` passe par le même partage (elle est dans la ligne), pas de ligne
+  à part : elle aurait fait une mutation équivalente.
+- **Banc** : `test_21_09_la_fenetre_rejouee_partage_ses_chaines` regarde
+  l'IDENTITÉ des objets (le score, lui, ne bouge pas) — avec un témoin qui
+  prouve d'abord que `json.loads` seul ne partage pas. Mac **1 130/0**,
+  VPS **1 128/0** (le même écart de 2 que d'habitude).
+- **Mutations** (`mutations_memoire.py`) : 2 nouvelles, toutes deux VUES
+  (partage retiré ; dictionnaire remis à zéro chaque journée). Les 2 non
+  vues d'avant (n° 2 motif introuvable, n° 5 `gc.collect`) : inchangées, dette.
+- **Mesuré ce soir sur le VPS** (sonde, 3 journées, lecture seule) :
+  `telquel` 2 303 o/ligne → `memo` 2 051 o/ligne, **−252 o/ligne**, soit
+  4 083 → 3 637 Mo extrapolés sur 1 859 008 lignes (**≈ −446 Mo**). La
+  sonde partage par journée ; le code partage sur la fenêtre, donc au
+  moins autant.
+- **Déployé** : `rsync model-verif/` → 3 fichiers seulement
+  (`score.py`, `test_score.py`, `mutations_memoire.py`), sha256 identiques
+  des deux côtés (`score.py` `bb1e42f4…126b`). Aucun service touché ;
+  `bw-model-score.timer` prendra le code le **mar. 22/09 à 05:59:47 CEST**.
+- **Poussé** : `0d108d7..af25efb` (inclut les notes `notes-projet/` des
+  20 et 21/09).
+
+**À lire demain matin** : le swap au pic (2 251,8 Mo ce matin) et les
+pages sorties doivent chuter nettement ; le jalon baissera moins que
+−446 Mo (§2.4). Si le swap ne bouge pas, le partage n'a pas pris et il
+faut le mesurer en production avant d'attaquer la ligne en tuple.
