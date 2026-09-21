@@ -1459,6 +1459,61 @@ def test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09():
           m.index("MU.accumule(") < m.index("if k in CLES_REJEU"), True)
 
 
+def test_21_09_la_fenetre_rejouee_partage_ses_chaines():
+    """Les valeurs `str` de la fenêtre rejouée sont PARTAGÉES — un seul
+    exemplaire de « icon_d2 » pour 1,86 M de lignes, pas 1,86 M.
+
+    ⛔ CE QUI EST EN JEU (21/09/2026, enquete-pente-10-09.md §2.6).
+    L'élagage du 10/09 a rendu −124 Mo au lieu des −1 500 annoncés :
+    le poids n'était pas dans le nombre de clés mais dans les VALEURS.
+    `json.loads` fabrique une `str` neuve par valeur ; la sonde du 11/09
+    (`memo`) chiffre le partage à −253 o/ligne. Le jalon du 21/09 est à
+    3 510 Mo, record, seuil franchi trois fois.
+
+    ⚠️ Rien ne rougit si le partage disparaît : le score est identique
+    (une `str` est une `str`). Seule l'IDENTITÉ des objets le trahit,
+    donc c'est elle que le banc regarde — et il vérifie d'abord que
+    `json.loads` seul ne partage PAS, sans quoi le banc ne prouverait rien.
+    """
+    print("── mémoire : la fenêtre rejouée partage ses chaînes (21/09) ──")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        root = pathlib.Path(tmp)
+        for j in range(2):
+            d = (DAY - timedelta(days=j)).strftime("%Y-%m-%d")
+            lignes = []
+            for sid in (830, 831):
+                u = _unit(d, sid, "icon_d2", 3.0 + sid - 830)
+                u.pop("unit", None)
+                lignes.append(u)
+            J.replay_write(root, DAY - timedelta(days=j), lignes)
+
+        brut = J.replay_read(root, DAY)
+        check("témoin : `json.loads` seul NE partage PAS « icon_d2 » "
+              "(sinon ce banc ne prouve rien)",
+              brut[0]["model"] is brut[1]["model"], False)
+
+        rows, _ = J.replay_window(root, DAY, None, 7200, n_days=2)
+        check("la fenêtre porte bien ses 4 balise-jours", len(rows), 4)
+        check("⭐⭐ UN SEUL objet « icon_d2 » pour toute la fenêtre "
+              "(deux journées, deux balises)",
+              len({id(r["model"]) for r in rows}), 1)
+        check("⭐ `source` et `regime` aussi",
+              (len({id(r["source"]) for r in rows}),
+               len({id(r["regime"]) for r in rows})), (1, 1))
+        par_unit = {}
+        for r in rows:
+            par_unit.setdefault(r["unit"], set()).add(id(r["unit"]))
+        check("⭐ `unit` (dérivée au chargement) est partagée D'UNE JOURNÉE "
+              "À L'AUTRE — le dictionnaire vaut pour toute la fenêtre",
+              sorted(len(v) for v in par_unit.values()), [1, 1])
+        check("… et les valeurs n'ont pas bougé",
+              sorted((r["day"], r["unit"], r["model"], r["err_vec_med"])
+                     for r in rows),
+              sorted((r["day"], f"pioupiou:{r['station_id']}", "icon_d2",
+                      3.0 + int(r["station_id"]) - 830) for r in rows))
+
+
 
 # ══════════════════════════════════════════════════════════════════
 #  FABRIQUE D'ARCHIVE — la forme EXACTE que `collect.py` écrit
@@ -6694,6 +6749,8 @@ def main() -> int:
                # ── 10/09 : la fenêtre rejouée ne garde que ses clés, la purge par tranches ──
                test_memoire_la_fenetre_rejouee_ne_garde_que_ses_cles_10_09,
                test_10_09_la_purge_de_model_score_zone_va_par_tranches,
+               # ── 21/09 : la fenêtre rejouée partage ses chaînes ──
+               test_21_09_la_fenetre_rejouee_partage_ses_chaines,
                # ── 11/09 : le `NameError` de l'étape 6, et sa classe ──
                test_11_09_aucun_nom_lu_sans_etre_lie,
                # ── 19/09 : la borne d'une lecture filtrée sur `day` ──

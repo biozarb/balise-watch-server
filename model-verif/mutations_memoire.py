@@ -114,6 +114,21 @@ MUTATIONS = [
      '            r = {k: v for k, v in r.items() if k in CLES_REJEU}\n',
      ''),
 
+    # ── 21/09/2026 — les chaînes partagées de la fenêtre rejouée ──
+    ("⭐ les valeurs `str` ne sont plus partagées : une « icon_d2 » par "
+     "ligne, ≈ −470 Mo perdus sur la fenêtre du 21/09, AUCUN score ne bouge",
+     SCORE, B_SCORE,
+     '            for c, v in r.items():\n'
+     '                if type(v) is str:\n'
+     '                    r[c] = memo.setdefault(v, v)\n',
+     ''),
+
+    ("le dictionnaire repart à zéro CHAQUE JOURNÉE : le partage marche "
+     "dans un jour, `unit` est recopiée trente fois",
+     SCORE, B_SCORE,
+     '        vus += 1\n        for r in cached:\n',
+     '        vus += 1\n        memo = {}\n        for r in cached:\n'),
+
     ("⭐ une clé LUE sort de `CLES_REJEU` (`spread_kmh`) : la dispersion "
      "s'éteint en silence, `d.get` rend None, rien ne rougit",
      SCORE, B_SCORE,

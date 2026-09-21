@@ -3110,6 +3110,16 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
     """
     rows: list[dict] = []
     vus, rejoues, manquants, ignores = 0, 0, 0, 0
+    # ⛔ CHAÎNES PARTAGÉES (21/09/2026, enquete-pente-10-09.md §2.6).
+    # `json.loads` fabrique un objet `str` NEUF pour chaque valeur : le
+    # même « icon_d2 », le même « pioupiou », le même jour, recopiés sur
+    # 1,86 M de lignes. Un seul dictionnaire pour TOUTE la fenêtre (pas
+    # un par journée : `unit`, `model`, `regime` reviennent d'un jour à
+    # l'autre) rend chaque ligne porteuse d'un pointeur vers l'exemplaire
+    # unique. Mesuré le 11/09 (`sonde_fenetre_rejeu.py memo`) : −253 o
+    # par ligne, sans retirer une clé à personne. Les lecteurs n'y voient
+    # rien : une `str` est immuable, `==` ne change pas.
+    memo: dict[str, str] = {}
     for k in range(n_days):
         d = day - timedelta(days=k)
         cached = replay_read(root, d)
@@ -3152,6 +3162,12 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
             # ≈ −1 500 Mo sur la fenêtre du 10/09. APRÈS les deux `pop`
             # et APRÈS Murphy, qui lisait la clé qu'on retire.
             r = {k: v for k, v in r.items() if k in CLES_REJEU}
+            # ⛔ Et chaque valeur `str` pointe vers l'exemplaire partagé
+            # (voir `memo` plus haut). APRÈS l'élagage : on ne partage
+            # pas ce qu'on va jeter.
+            for c, v in r.items():
+                if type(v) is str:
+                    r[c] = memo.setdefault(v, v)
             rows.append(r)
     bilan = (f"{len(rows)} balise-jours sur {vus} journées "
              f"({rejoues} rejouée(s) cette nuit, {manquants} vide(s)"
