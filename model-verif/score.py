@@ -2572,7 +2572,8 @@ def _jour_index(day: datetime) -> int:
 
 
 def prior_biais(root: pathlib.Path, day: datetime,
-                n_jours: int = BIAIS_PRIOR_JOURS) -> dict:
+                n_jours: int = BIAIS_PRIOR_JOURS,
+                naiss: dict[str, str] | None = None) -> dict:
     """L'antécédent du jour `day`, bâti sur les jours STRICTEMENT avant.
 
     Rend `{(unit, model, lead): (pente, ecart_cap_deg, n_jours)}`.
@@ -2604,6 +2605,8 @@ def prior_biais(root: pathlib.Path, day: datetime,
             if pente is None and cap is None:
                 continue
             key = (f"{r['source']}:{r['station_id']}", r["model"], r["lead_h"])
+            if avant_naissance(naiss, key[0], d):
+                continue                       # lot L15-bis : autre endroit
             if pente is not None and pente > 0:
                 acc_pente.setdefault(key, AccBiais()).push(di, math.log(pente))
             if cap is not None:
@@ -2628,6 +2631,7 @@ def prior_biais(root: pathlib.Path, day: datetime,
 
 
 def prior_biais_fin(root: pathlib.Path, day: datetime,
+                    naiss: dict[str, str] | None = None,
                     n_jours: int = BIAIS_PRIOR_JOURS) -> dict:
     """L'antécédent FIN du jour `day` (lot L19) : `{(unit, model, lead):
     BF.PriorFin}`, bâti sur les sommes `_biais_fin` du cache de rejeu des
@@ -2648,12 +2652,15 @@ def prior_biais_fin(root: pathlib.Path, day: datetime,
             if not sommes:
                 continue
             key = (f"{r['source']}:{r['station_id']}", r["model"], r["lead_h"])
+            if avant_naissance(naiss, key[0], d):
+                continue                       # lot L15-bis : autre endroit
             out.setdefault(key, BF.PriorFin()).push(di, sommes)
     return {k: v for k, v in out.items() if not v.vide()}
 
 
 def prior_poids(root: pathlib.Path, day: datetime,
-                n_jours: int = MX.MIX_PRIOR_JOURS) -> dict:
+                n_jours: int = MX.MIX_PRIOR_JOURS,
+                naiss: dict[str, str] | None = None) -> dict:
     """Les POIDS du mélange du jour `day` (lot L19) : `{(unit, lead):
     {model: poids}}`, l'inverse de l'EWMA de `err_vec_rms²` de chaque
     modèle sur cette balise, lue dans le cache des jours STRICTEMENT
@@ -2679,6 +2686,8 @@ def prior_poids(root: pathlib.Path, day: datetime,
             if r["lead_h"] not in LEAD_BY_OFFSET.values():
                 continue
             key = (f"{r['source']}:{r['station_id']}", r["lead_h"])
+            if avant_naissance(naiss, key[0], d):
+                continue                       # lot L15-bis : autre endroit
             accs.setdefault(key, {}).setdefault(r["model"], MX.AccMse()).push(
                 di, float(rms) ** 2)
     out: dict[tuple, dict[str, float]] = {}
@@ -3049,8 +3058,14 @@ def replay_read(root: pathlib.Path, day: datetime) -> list[dict] | None:
 
 
 def replay_day(root: pathlib.Path, day: datetime, storage,
-               utc_offset_s: int) -> list[dict]:
-    """Les balise-jours d'UNE journée : du cache, ou recalculés."""
+               utc_offset_s: int,
+               naiss: dict[str, str] | None = None) -> list[dict]:
+    """Les balise-jours d'UNE journée : du cache, ou recalculés.
+
+    ⓘ `naiss` (lot L15-bis) ne sert qu'au recalcul : les antécédents
+    d'une journée rejouée ne doivent pas lire une balise avant sa
+    naissance. Le cache, lui, est filtré à la lecture par
+    `replay_window`."""
     cached = replay_read(root, day)
     if cached is not None:
         return cached
@@ -3074,11 +3089,12 @@ def replay_day(root: pathlib.Path, day: datetime, storage,
     # ── lot L19 : le mélange entre dans les snapshots, AVANT la
     # notation, avec les poids d'AVANT cette journée-ci (même règle que
     # l'antécédent du biais, juste au-dessus).
-    snapshots, _ = MX.ajouter_melange(snapshots, prior_poids(root, day),
+    snapshots, _ = MX.ajouter_melange(snapshots,
+                                      prior_poids(root, day, naiss=naiss),
                                       LEAD_BY_OFFSET)
     rows, _ = daily_rows(day, snapshots, obs_day, obs_prev, utc_offset_s,
-                         bias_prior=prior_biais(root, day),
-                         bias_prior_fin=prior_biais_fin(root, day))
+                         bias_prior=prior_biais(root, day, naiss=naiss),
+                         bias_prior_fin=prior_biais_fin(root, day, naiss=naiss))
     replay_write(root, day, rows)
     return rows
 
@@ -3087,8 +3103,16 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
                   utc_offset_s: int, n_days: int = REGIME_REPLAY_DAYS,
                   budget_new_days: int | None = None,
                   murphy_acc: dict | None = None,
-                  murphy_exclus: set[str] | None = None):
+                  murphy_exclus: set[str] | None = None,
+                  naiss: dict[str, str] | None = None):
     """La fenêtre rejouée, la plus récente d'abord.
+
+    ⚠️ `naiss` (lot L15-bis, 22/09/2026) : `{unit: 'YYYY-MM-DD'}` des
+    balises qui ont DÉMÉNAGÉ et renaissent sous leur identifiant. Leurs
+    balise-jours d'AVANT sont écartés ICI, À LA LECTURE — ni dans
+    `rows` (régime, glissant, stabilité, mélange), ni dans Murphy — et
+    pas après coup : la fenêtre pèse 3,5 Go de jalon, on ne charge pas
+    ce qu'on va jeter. Compté dans le bilan.
 
     ⚠️ `murphy_exclus` (02/09/2026) : les unités que Murphy ne doit
     PAS accumuler — `unites_hors_notation(zone_of)`, doublons et
@@ -3110,6 +3134,7 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
     """
     rows: list[dict] = []
     vus, rejoues, manquants, ignores = 0, 0, 0, 0
+    avant_naiss = 0
     # ⛔ CHAÎNES PARTAGÉES (21/09/2026, enquete-pente-10-09.md §2.6).
     # `json.loads` fabrique un objet `str` NEUF pour chaque valeur : le
     # même « icon_d2 », le même « pioupiou », le même jour, recopiés sur
@@ -3127,13 +3152,18 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
             if budget_new_days is not None and rejoues >= budget_new_days:
                 ignores += 1
                 continue
-            cached = replay_day(root, d, storage, utc_offset_s)
+            cached = replay_day(root, d, storage, utc_offset_s, naiss=naiss)
             rejoues += 1
         if not cached:
             manquants += 1
             continue
         vus += 1
+        jour = d.strftime("%Y-%m-%d")
         for r in cached:
+            if naiss and avant_naissance(naiss, f"{r['source']}:{r['station_id']}",
+                                         jour):
+                avant_naiss += 1
+                continue
             r = dict(r)
             unit = f"{r['source']}:{r['station_id']}"
             r["unit"] = unit
@@ -3172,6 +3202,9 @@ def replay_window(root: pathlib.Path, day: datetime, storage,
     bilan = (f"{len(rows)} balise-jours sur {vus} journées "
              f"({rejoues} rejouée(s) cette nuit, {manquants} vide(s)"
              + (f", {ignores} REPORTÉE(S) faute de budget" if ignores else "")
+             + (f", {avant_naiss} balise-jour(s) écarté(s) : antérieur(s) "
+                f"à la naissance de leur balise (lot L15-bis)"
+                if avant_naiss else "")
              + ")")
     return rows, bilan
 
@@ -3192,7 +3225,8 @@ CLIM_MIN_DAYS = 5
 
 
 def climatology_by_station(root: pathlib.Path, day: datetime, storage,
-                           utc_offset_s: int, n_days: int = CLIM_DAYS):
+                           utc_offset_s: int, n_days: int = CLIM_DAYS,
+                           naiss: dict[str, str] | None = None):
     """Le vent HABITUEL de chaque balise, heure locale par heure locale.
 
     ⚠️ POURQUOI UNE SECONDE RÉFÉRENCE. Le skill se mesure aujourd'hui
@@ -3229,7 +3263,18 @@ def climatology_by_station(root: pathlib.Path, day: datetime, storage,
     # sortis nuls, `mse_comb` serait resté vide, et rien ne l'aurait dit.
     # Un cache qui change de CONTENU change de nom, comme une formule de
     # rejeu change de numéro.
-    cache = root / CLIM_SUBDIR / f"clim_{day:%Y-%m-%d}_{n_days}_v2.json.gz"
+    # ⚠️ Lot L15-bis : une naissance CHANGE la climatologie de la balise
+    # (ses journées d'avant, à l'autre endroit, n'y entrent plus). Le
+    # cache porte donc l'empreinte des naissances connues — sinon un
+    # cache écrit avant la pose de `notee_depuis` servirait encore
+    # l'ancienne climatologie, sans rien dire.
+    empreinte = ""
+    if naiss:
+        import hashlib
+        empreinte = "_n" + hashlib.sha1(
+            json.dumps(sorted(naiss.items())).encode()).hexdigest()[:8]
+    cache = (root / CLIM_SUBDIR
+             / f"clim_{day:%Y-%m-%d}_{n_days}_v2{empreinte}.json.gz")
     if cache.exists():
         try:
             d = json.loads(gzip.decompress(cache.read_bytes()).decode("utf-8"))
@@ -3242,9 +3287,12 @@ def climatology_by_station(root: pathlib.Path, day: datetime, storage,
     obs_by_unit_day: dict[str, dict[str, list]] = defaultdict(dict)
     for k in range(n_days):
         d = day - timedelta(days=k)
+        jour = d.strftime("%Y-%m-%d")
         for row in all_obs_rows(root, d, storage):
             unit = f"{row['source']}:{row['station_id']}"
-            obs_by_unit_day[unit][d.strftime("%Y-%m-%d")] = to_obs_samples(row)
+            if naiss and avant_naissance(naiss, unit, jour):
+                continue                       # lot L15-bis : autre endroit
+            obs_by_unit_day[unit][jour] = to_obs_samples(row)
 
     out: dict[str, dict[int, tuple]] = {}
     poids: dict[str, float] = {}
@@ -3405,6 +3453,67 @@ def est_doublon(zone: dict | None) -> bool:
     continueraient de compter deux fois, sans rien faire rougir.
     """
     return bool(zone and zone.get(COL_DOUBLON))
+
+
+#: LOT L15-bis (22/09/2026) — LA DATE DE NAISSANCE D'UNE BALISE.
+#: Colonne `station_zone.notee_depuis` (date, nullable). Posée quand le
+#: garde-fou de position a été tranché « la balise a DÉMÉNAGÉ, c'est une
+#: autre balise » : elle garde son identifiant (les observations
+#: continuent d'arriver sous lui), l'axe AGRUME est regelé à sa nouvelle
+#: position (`freeze_balises.py --deplacer`), et TOUT ce qui note ignore
+#: ses balise-jours d'avant cette date. Sans cette coupure, une fenêtre
+#: glissante, un régime rejoué, un duel ou une climatologie
+#: mélangeraient deux endroits sous un nom — exactement le défaut que le
+#: garde-fou nomme.
+#:
+#: ⓘ Posée À CÔTÉ de `position_suspecte` et de `doublon_de`, pour la
+#: même raison que ces deux-là sont à côté l'une de l'autre : trois
+#: exclusions, trois motifs, et on doit pouvoir défaire chacune sans
+#: toucher aux autres. Celle-ci est la seule qui dépend du JOUR.
+COL_NAISSANCE = "notee_depuis"
+
+
+def nee_apres(zone: dict | None, day) -> bool:
+    """Le balise-jour `day` précède-t-il la NAISSANCE de la balise ?
+
+    True = à écarter. `day` est un « YYYY-MM-DD » ou un datetime ; la
+    comparaison est lexicale sur l'ISO, ce qui est exact pour ce format.
+    Une balise sans `notee_depuis` est née avant tout : jamais écartée.
+
+    ⚠️ UN SEUL TEST POUR TOUS LES APPELANTS (même règle que
+    `est_doublon`) : `_case_rows` (glissant, régime, stabilité),
+    `accumulator_updates`, le duel, Murphy, la climatologie et
+    l'antécédent du biais. Un chemin qui l'oublierait noterait cette
+    balise sur une autre population que les autres — le défaut du 02/09.
+    """
+    if not zone:
+        return False
+    n = zone.get(COL_NAISSANCE)
+    if not n:
+        return False
+    d = day if isinstance(day, str) else day.strftime("%Y-%m-%d")
+    return d[:10] < str(n)[:10]
+
+
+def naissances(zone_of: dict[str, dict]) -> dict[str, str]:
+    """`{unit: 'YYYY-MM-DD'}` pour les seules balises qui ont une date
+    de naissance — la forme légère à passer aux lecteurs d'archive
+    (`replay_window`, `climatology_by_station`, `prior_biais`), qui
+    n'ont pas besoin de `zone_of` entier."""
+    return {u: str(z[COL_NAISSANCE])[:10] for u, z in zone_of.items()
+            if z and z.get(COL_NAISSANCE)}
+
+
+def avant_naissance(naiss: dict[str, str] | None, unit: str, day) -> bool:
+    """La forme « dictionnaire léger » de `nee_apres`, pour les lecteurs
+    d'archive. True = à écarter."""
+    if not naiss:
+        return False
+    n = naiss.get(unit)
+    if not n:
+        return False
+    d = day if isinstance(day, str) else day.strftime("%Y-%m-%d")
+    return d[:10] < n
 
 
 def unites_hors_notation(zone_of: dict[str, dict]) -> set[str]:
@@ -4119,11 +4228,17 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict]):
     #: ⚠️ Une liste d'un élément et pas un `int` : le compteur est
     #: incrémenté dans la boucle, et `nonlocal` n'existe pas ici.
     n_doublons = [0]
+    n_nes = 0
     for b in banded:
         z = zone_of.get(b["key"])
         if z is None or z.get("basin_uncertain"):
             # Une balise dont le bassin est indéterminé (§16.4, défaut
             # n°2) est EXCLUE, pas rangée de travers.
+            continue
+        if nee_apres(z, b.get("day", "")):
+            # Lot L15-bis : entre le regel et la naissance, la balise
+            # n'entre PAS dans la mémoire longue de sa zone.
+            n_nes += 1
             continue
         if z.get("position_suspecte"):
             # Coordonnées contredites par une source indépendante du
@@ -4185,6 +4300,10 @@ def accumulator_updates(banded: list[dict], zone_of: dict[str, dict]):
         print(f"  ⓘ accumulateurs : {n_doublons[0]} entrée(s) écartée(s) "
               f"— seconde inscription d'un capteur déjà noté "
               f"(`{COL_DOUBLON}`, lot L17)")
+    if n_nes:
+        print(f"  ⓘ accumulateurs : {n_nes} entrée(s) écartée(s) — "
+              f"antérieure(s) à la naissance de la balise "
+              f"(`{COL_NAISSANCE}`, lot L15-bis)")
     out: list[dict] = []
     for key, values in buckets.items():
         if len(values) < 1:
@@ -4283,6 +4402,7 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
     #: raison. Les deux nombres sont justes ; comparer l'un à l'autre
     #: comme s'ils disaient la même chose ferait croire à une fuite.
     n_doublons = 0
+    n_nes = 0
     for d in units:
         z = zone_of.get(d["unit"])
         if z is None or z.get("basin_uncertain"):
@@ -4290,6 +4410,12 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         if z.get("position_suspecte"):
             # Même exclusion qu'accumulator_updates — voir le
             # commentaire là-bas (étape 42, 10/08).
+            continue
+        if nee_apres(z, d.get("day", "")):
+            # Lot L15-bis : la balise a déménagé et renaît sous son
+            # identifiant — ses balise-jours d'AVANT parlent d'un autre
+            # endroit. Écartés en entier, comme un doublon.
+            n_nes += 1
             continue
         if est_doublon(z):
             # ⛔ LE GESTE DU LOT L17. Écarter la balise-jour ENTIÈRE,
@@ -4616,6 +4742,10 @@ def _case_rows(units: list[dict], zone_of: dict[str, dict], as_of: datetime,
         print(f"  ⓘ {n_doublons} balise-jour(s) écarté(s) : seconde "
               f"inscription d'un capteur déjà noté (`{COL_DOUBLON}`, "
               f"lot L17) [{window_kind}/{regime}]")
+    if n_nes:
+        print(f"  ⓘ {n_nes} balise-jour(s) écarté(s) : antérieur(s) à la "
+              f"naissance de la balise (`{COL_NAISSANCE}`, lot L15-bis) "
+              f"[{window_kind}/{regime}]")
     if sous_plancher[0] or sous_plancher[1]:
         print(f"  ⓘ skill nul sur {sous_plancher[0]} case(s) "
               f"(persistance) et {sous_plancher[1]} (climatologie) : "
@@ -7173,13 +7303,31 @@ def main() -> int:
 
     jalon_memoire("la relecture de l'archive")
 
+    # ── 1 bis-b. `station_zone`, LUE ICI (lot L15-bis, 22/09/2026) ───
+    # Elle était lue à l'étape 4-5, après l'agrégat quotidien. Mais
+    # depuis que `notee_depuis` existe, TROIS lecteurs d'archive placés
+    # AVANT cet agrégat — le mélange, la climatologie, les antécédents
+    # du biais — doivent savoir quelles balises sont nées quand. Une
+    # lecture, une fois, tôt ; le dictionnaire est petit (≈ 4 000
+    # lignes) et vit jusqu'à la fin du run comme avant.
+    # ⚠️ Chaque `select` passe la clé primaire de sa table en `order` :
+    # c'est ce qui rend la pagination cohérente (cf. `Supabase.select`).
+    zones_raw = sb.select("station_zone", order="source,station_id")
+    zone_of = {f"{z['source']}:{z['station_id']}": z for z in zones_raw}
+    naiss = naissances(zone_of)
+    if naiss:
+        print(f"  ⓘ {len(naiss)} balise(s) née(s) sous leur identifiant "
+              f"(`{COL_NAISSANCE}`, lot L15-bis) : "
+              + ", ".join(f"{u} ({d})" for u, d in sorted(naiss.items())[:12])
+              + (" …" if len(naiss) > 12 else ""))
+
     # ── 1 ter. le mélange multi-modèle (lot L19) ──────────────────
     # ⛔ AVANT `daily_rows`, qui ne saura pas qu'il est là. Les poids
     # viennent du cache des jours < J (`prior_poids`) ; sans poids —
     # cache creux, ou moins de `MX.MIX_MIN_JOURS` journées par membre —
     # la balise n'a pas de `bw_mix` cette nuit, et le bilan le compte.
     t_mix = time.monotonic()
-    poids_mix = prior_poids(root, day)
+    poids_mix = prior_poids(root, day, naiss=naiss)
     snapshots, bilan_mix = MX.ajouter_melange(snapshots, poids_mix,
                                               LEAD_BY_OFFSET)
     print(f"  mélange multi-modèle : {len(poids_mix)} balise×échéance "
@@ -7289,7 +7437,8 @@ def main() -> int:
 
     # ── 2-3. apparier et écrire l'agrégat quotidien ──────────────
     t_clim = time.monotonic()
-    clim, poids_comb = climatology_by_station(root, day, st, utc_offset_s)
+    clim, poids_comb = climatology_by_station(root, day, st, utc_offset_s,
+                                              naiss=naiss)
     print(f"  climatologie horaire : {len(clim)} balises "
           f"({time.monotonic() - t_clim:.1f} s)"
           + ("" if clim else " — archive trop courte, seconde référence "
@@ -7312,7 +7461,7 @@ def main() -> int:
               "courte) — `mse_comb` restera nul cette nuit.")
     # ── l'antécédent du biais de site (lot S2) ───────────────────
     t_prior = time.monotonic()
-    prior = prior_biais(root, day)
+    prior = prior_biais(root, day, naiss=naiss)
     print(f"  antécédent du biais : {len(prior)} couples balise×modèle×échéance "
           f"sur {BIAIS_PRIOR_JOURS} j de cache ({time.monotonic() - t_prior:.1f} s)"
           + ("" if prior else
@@ -7320,7 +7469,7 @@ def main() -> int:
              f"formule ({REPLAY_FORMULA}). Les colonnes corrigées resteront "
              f"nulles cette nuit ; `--replay-budget 30` comble d'un coup."))
     # ── lot L19 : l'antécédent FIN (secteur × tranche) ────────────
-    prior_fin = prior_biais_fin(root, day)
+    prior_fin = prior_biais_fin(root, day, naiss=naiss)
     print(f"  antécédent fin du biais : {len(prior_fin)} couples "
           f"balise×modèle×échéance avec au moins une cellule qui parle"
           + ("" if prior_fin else " — ⓘ vide : le cache ne porte pas "
@@ -7362,13 +7511,7 @@ def main() -> int:
     jalon_memoire("l'agrégat quotidien (chemin J-0)")
 
     # ── 4-5. zones, accumulateurs, scores ────────────────────────
-    # ⚠️ Chaque `select` passe la clé primaire de sa table en `order` :
-    # c'est ce qui rend la pagination cohérente (cf. `Supabase.select`).
-    # `station_zone` tenait sous les 1 000 lignes (647 le 08/08) et
-    # n'était donc pas tronquée — mais rien ne garantit qu'elle y reste,
-    # et un plafond qu'on ne franchit pas encore reste un plafond.
-    zones_raw = sb.select("station_zone", order="source,station_id")
-    zone_of = {f"{z['source']}:{z['station_id']}": z for z in zones_raw}
+    # ⓘ `zone_of` est lue à l'étape 1 bis-b depuis le lot L15-bis.
 
     # ── 3 bis. la pression (E6, lot S1) ───────────────────────────
     #
@@ -7495,11 +7638,15 @@ def main() -> int:
         # suspecte (lot L15), le même ensemble que Murphy. Le nom
         # `doublons_duel` reste pour que le journal ne change pas.
         doublons_duel = unites_hors_notation(zone_of)
-        if doublons_duel:
+        naiss_duel = naissances(zone_of)
+        if doublons_duel or naiss_duel:
             avant_duel = len(daily_duel)
             daily_duel = [r for r in daily_duel
                           if f"{r['source']}:{r['station_id']}"
-                          not in doublons_duel]
+                          not in doublons_duel
+                          and not avant_naissance(
+                              naiss_duel, f"{r['source']}:{r['station_id']}",
+                              r.get("day", ""))]
             retires_duel = avant_duel - len(daily_duel)
         else:
             retires_duel = 0
@@ -7552,11 +7699,16 @@ def main() -> int:
             # Le même filtre que le +6 h, recalculé ici : `doublons_duel`
             # n'existe pas si le bloc du dessus est tombé avant lui.
             hors_lead = unites_hors_notation(zone_of)
+            naiss_lead = naissances(zone_of)
             avant_lead = len(daily_lead)
-            if hors_lead:
+            if hors_lead or naiss_lead:
                 daily_lead = [r for r in daily_lead
                               if f"{r['source']}:{r['station_id']}"
-                              not in hors_lead]
+                              not in hors_lead
+                              and not avant_naissance(
+                                  naiss_lead,
+                                  f"{r['source']}:{r['station_id']}",
+                                  r.get("day", ""))]
             rows_lead = DUEL.duels(daily_lead, paires=_paires, lead_h=_lead)
             print(f"  duel apparié ({DUEL.DUEL_VALUE_KEY}, lead {_lead}, "
                   f"{DUEL.DUEL_SOURCE}) : {len(daily_lead)} lignes lues "
@@ -7837,7 +7989,7 @@ def main() -> int:
         units, bilan_replay = replay_window(
             root, day, st, utc_offset_s, args.regime_days,
             args.replay_budget, murphy_acc=murphy_acc,
-            murphy_exclus=murphy_exclus)
+            murphy_exclus=murphy_exclus, naiss=naiss)
         print(f"  rejeu d'archive : {bilan_replay} en "
               f"{time.monotonic() - t_replay:.1f} s")
         jalon_memoire("le rejeu d'archive")

@@ -1,6 +1,6 @@
 {
  "produit": "AGRUME — axe des balises, figé (tous domaines)",
- "ecrit_le": "2026-08-28T01:25:38Z",
+ "ecrit_le": "2026-09-22T05:55:36Z",
  "domaines": {
   "nord-alpes": {
    "latmin": 43.7,
@@ -47,14 +47,14 @@
    "lonmax": 2.53
   }
  },
- "n": 1256,
+ "n": 1286,
  "n_par_domaine": {
-  "nord-alpes": 765,
-  "tarn-aveyron-herault": 107,
-  "pyrenees": 249,
-  "hors domaine": 135
+  "nord-alpes": 778,
+  "tarn-aveyron-herault": 113,
+  "pyrenees": 256,
+  "hors domaine": 139
  },
- "n_hors_domaine": 132,
+ "n_hors_domaine": 136,
  "note": "Fusion À AJOUT SEUL : une balise hors ligne n'est jamais retirée, sinon l'axe de l'archive se décalerait et son historique deviendrait orphelin. ⚠️ L'ajout seul garantit qu'aucune balise ne DISPARAÎT ; il ne garantit PAS que les positions dans ce fichier ne bougent pas — l'axe est trié par identifiant (cf. `_rang`), donc une balise d'identifiant plus petit décale les suivantes. Chaque archive porte SA propre liste et la recherche se fait par identifiant, jamais par indice. ⚠️ Le nom du fichier dit « nord-alpes » pour des raisons de continuité ; l'axe couvre tous les domaines de `domaine.DOMAINES`. Régénérer avec `python3 agrume/freeze_balises.py`.",
  "balises": [
   {
@@ -186,6 +186,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "000D7",
+   "source": "infoclimat",
+   "lat": 43.7631,
+   "lon": 5.5897,
+   "name": "infoclimat 000D7",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "000DE",
@@ -1826,6 +1836,16 @@
    "position_suspecte": false,
    "hors_domaine": true,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "1025X",
+   "source": "aemet",
+   "lat": 43.0546,
+   "lon": -2.232,
+   "name": "aemet 1025X",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "1026X",
@@ -3478,6 +3498,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "STATIC0289",
+   "source": "infoclimat",
+   "lat": 43.6009,
+   "lon": 3.872,
+   "name": "infoclimat STATIC0289",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "STATIC0302",
    "source": "infoclimat",
    "lat": 45.6621,
@@ -3688,6 +3718,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "STATIC0380",
+   "source": "infoclimat",
+   "lat": 43.8609,
+   "lon": 2.9675,
+   "name": "infoclimat STATIC0380",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "STATIC0386",
    "source": "infoclimat",
    "lat": 46.1869,
@@ -3726,6 +3766,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "STATIC0398",
+   "source": "infoclimat",
+   "lat": 43.5492,
+   "lon": -1.0739,
+   "name": "infoclimat STATIC0398",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "STATIC0402",
@@ -3946,6 +3996,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "STATIC0496",
+   "source": "infoclimat",
+   "lat": 43.7196,
+   "lon": 0.8114,
+   "name": "infoclimat STATIC0496",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-10",
@@ -4948,6 +5008,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "ffvl-2367",
+   "source": "windsmobi",
+   "lat": 43.0074,
+   "lon": 0.9189,
+   "name": "Le Relais",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "ffvl-2373",
    "source": "windsmobi",
    "lat": 43.8455,
@@ -4968,6 +5038,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "ffvl-2413",
+   "source": "windsmobi",
+   "lat": 42.7715,
+   "lon": 1.9132,
+   "name": "Camurac- Pic de Pénédis",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "ffvl-2414",
    "source": "windsmobi",
    "lat": 42.9217,
@@ -4976,6 +5056,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "ffvl-2443",
+   "source": "windsmobi",
+   "lat": 44.0162,
+   "lon": 2.1346,
+   "name": "Cap Découverte TARN",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-2456",
@@ -5196,6 +5286,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "ffvl-28",
+   "source": "windsmobi",
+   "lat": 45.0074,
+   "lon": 5.3179,
+   "name": "St Jean-en Royans",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-2800",
@@ -5988,6 +6088,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "ffvl-3743",
+   "source": "windsmobi",
+   "lat": 42.7987,
+   "lon": 0.3824,
+   "name": "Val Louron 600",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "ffvl-3763",
    "source": "windsmobi",
    "lat": 45.4316,
@@ -6048,6 +6158,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "ffvl-4017",
+   "source": "windsmobi",
+   "lat": 44.9495,
+   "lon": 6.7075,
+   "name": "Chalvet 2577m",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "ffvl-43",
    "source": "windsmobi",
    "lat": 43.2946,
@@ -6056,6 +6176,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "ffvl-44",
+   "source": "windsmobi",
+   "lat": 42.5133,
+   "lon": 1.9906,
+   "name": "Targasonne Mauroux",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-49",
@@ -6106,6 +6236,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "ffvl-5006",
+   "source": "windsmobi",
+   "lat": 44.6983,
+   "lon": 6.3062,
+   "name": "Cairn Orcières ",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-5017",
@@ -6206,6 +6346,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "ffvl-5061",
+   "source": "windsmobi",
+   "lat": 44.5659,
+   "lon": 6.2195,
+   "name": "Atterro des Césaris",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-5064",
@@ -6386,6 +6536,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "ffvl-5123",
+   "source": "windsmobi",
+   "lat": 46.1484,
+   "lon": 6.1889,
+   "name": "Salève - la table",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "ffvl-54",
@@ -6712,7 +6872,7 @@
    "source": "windsmobi",
    "lat": 46.4427,
    "lon": 6.1591,
-   "name": "1402 Vieux Chateau N",
+   "name": "Vieux Chateau",
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
@@ -6762,7 +6922,7 @@
    "source": "windsmobi",
    "lat": 46.4446,
    "lon": 6.176,
-   "name": "1895 CVLD Bosse",
+   "name": "Bosse",
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
@@ -7502,7 +7662,7 @@
    "source": "windsmobi",
    "lat": 46.2708,
    "lon": 7.0526,
-   "name": "Paramax",
+   "name": "Bex",
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
@@ -7526,6 +7686,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "windspots-CHGE04",
+   "source": "windsmobi",
+   "lat": 46.1284,
+   "lon": 6.173,
+   "name": "Salève, Les Crêts",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "windspots-CHGE05",
@@ -7658,6 +7828,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "00028",
+   "source": "infoclimat",
+   "lat": 45.5044,
+   "lon": 5.2173,
+   "name": "infoclimat 00028",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "00032",
    "source": "infoclimat",
    "lat": 43.9667,
@@ -7679,6 +7859,16 @@
    "vue_le": "2026-08-12"
   },
   {
+   "id": "00055",
+   "source": "infoclimat",
+   "lat": 42.9364,
+   "lon": 0.1428,
+   "name": "infoclimat 00055",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "00065",
    "source": "infoclimat",
    "lat": 43.2656,
@@ -7687,6 +7877,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "69",
+   "source": "pioupiou",
+   "lat": 46.1483,
+   "lon": 6.1889,
+   "name": "Pioupiou 69",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "70",
@@ -8200,6 +8400,16 @@
    "vue_le": "2026-08-16"
   },
   {
+   "id": "443",
+   "source": "pioupiou",
+   "lat": 44.0682,
+   "lon": 2.163,
+   "name": "Cap Découverte",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "459",
    "source": "pioupiou",
    "lat": 46.1563,
@@ -8308,6 +8518,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-16"
+  },
+  {
+   "id": "563",
+   "source": "pioupiou",
+   "lat": 46.3392,
+   "lon": 5.659,
+   "name": "Montcusel",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "582",
@@ -8578,6 +8798,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "906",
+   "source": "pioupiou",
+   "lat": 44.4385,
+   "lon": 6.3294,
+   "name": "Les Laphonds",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "922",
@@ -8977,7 +9207,7 @@
    "source": "pioupiou",
    "lat": 46.0987,
    "lon": 5.8497,
-   "name": "WindBird de pret pour MCPB",
+   "name": "WINDBIRD - Décollage A5 ou déco Nord",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
@@ -9105,12 +9335,19 @@
   {
    "id": "1363",
    "source": "pioupiou",
-   "lat": 45.0741,
-   "lon": 7.3557,
-   "name": "Decollo TRUCETTI 980m",
+   "lat": 45.0764,
+   "lon": 7.3473,
+   "name": "Decollo TRUCETTI 980m (1363)",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-10"
+   "vue_le": "2026-08-10",
+   "ancienne_position": [
+    45.0741,
+    7.3557
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 707,
+   "hors_domaine": false
   },
   {
    "id": "1365",
@@ -9157,12 +9394,19 @@
   {
    "id": "1375",
    "source": "pioupiou",
-   "lat": 46.2029,
-   "lon": 6.8764,
+   "lat": 46.194,
+   "lon": 6.8696,
    "name": "Les Pétis 1502m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-10"
+   "vue_le": "2026-08-10",
+   "ancienne_position": [
+    46.2029,
+    6.8764
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 1120,
+   "hors_domaine": false
   },
   {
    "id": "1376",
@@ -9258,12 +9502,19 @@
   {
    "id": "1414",
    "source": "pioupiou",
-   "lat": 43.2079,
-   "lon": 2.3054,
+   "lat": 43.2008,
+   "lon": 2.2464,
    "name": "Les Ailes d'Alairac ",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    43.2079,
+    2.3054
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 4847,
+   "hors_domaine": false
   },
   {
    "id": "1417",
@@ -9479,12 +9730,19 @@
   {
    "id": "1495",
    "source": "pioupiou",
-   "lat": 45.0959,
-   "lon": 5.5995,
+   "lat": 45.0892,
+   "lon": 5.5936,
    "name": "Déco Belvédère de Lans en Vercors",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-10"
+   "vue_le": "2026-08-10",
+   "ancienne_position": [
+    45.0959,
+    5.5995
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 877,
+   "hors_domaine": false
   },
   {
    "id": "1498",
@@ -9515,6 +9773,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-16"
+  },
+  {
+   "id": "1519",
+   "source": "pioupiou",
+   "lat": 43.299,
+   "lon": -2.0671,
+   "name": "Mendizorrotz",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "1525",
@@ -9549,12 +9817,19 @@
   {
    "id": "1531",
    "source": "pioupiou",
-   "lat": 43.3133,
-   "lon": 2.8926,
+   "lat": 43.3091,
+   "lon": 2.8974,
    "name": "Base ULM Privé (Argeliers 11) - LF1159 - 43 m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    43.3133,
+    2.8926
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 607,
+   "hors_domaine": false
   },
   {
    "id": "1536",
@@ -9612,7 +9887,7 @@
    "source": "pioupiou",
    "lat": 46.0988,
    "lon": 5.8499,
-   "name": "WindBird 1548",
+   "name": "WindBird de démo",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
@@ -9785,12 +10060,18 @@
   {
    "id": "1595",
    "source": "pioupiou",
-   "lat": 46.355,
-   "lon": 6.0196,
+   "lat": 46.3582,
+   "lon": 6.0181,
    "name": "Petit Mont-Rond 1 535m",
    "position_suspecte": false,
    "hors_domaine": false,
-   "vue_le": "2026-08-16"
+   "vue_le": "2026-08-16",
+   "ancienne_position": [
+    46.355,
+    6.0196
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 374
   },
   {
    "id": "1601",
@@ -9861,6 +10142,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "1627",
+   "source": "pioupiou",
+   "lat": 45.3104,
+   "lon": 5.8876,
+   "name": "WindBird de démo",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "1636",
@@ -10155,6 +10446,16 @@
    "vue_le": "2026-08-10"
   },
   {
+   "id": "1743",
+   "source": "pioupiou",
+   "lat": 42.7987,
+   "lon": 0.3824,
+   "name": "Val Louron-600",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
+  },
+  {
    "id": "1746",
    "source": "pioupiou",
    "lat": 42.4473,
@@ -10247,12 +10548,19 @@
   {
    "id": "2005",
    "source": "pioupiou",
-   "lat": 42.9053,
-   "lon": 1.5866,
+   "lat": 42.9217,
+   "lon": 1.581,
    "name": "Déco Prat d'Albis 1205m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    42.9053,
+    1.5866
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 1880,
+   "hors_domaine": false
   },
   {
    "id": "2007",
@@ -10319,7 +10627,7 @@
    "source": "pioupiou",
    "lat": 46.0987,
    "lon": 5.8498,
-   "name": "WindBird 2023",
+   "name": "WINDBIRD - Atterrissage A1 LUMBIN",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
@@ -10393,6 +10701,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "2056",
+   "source": "pioupiou",
+   "lat": 43.1333,
+   "lon": 0.506,
+   "name": "CORPPO",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "2057",
@@ -10491,7 +10809,7 @@
    "source": "pioupiou",
    "lat": 44.6983,
    "lon": 6.3062,
-   "name": "Le Cairn - Oricieres",
+   "name": "Le Cairn - Orcieres",
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-16"
@@ -10609,12 +10927,19 @@
   {
    "id": "2139",
    "source": "pioupiou",
-   "lat": 42.5408,
-   "lon": 2.0579,
+   "lat": 42.5724,
+   "lon": 2.0558,
    "name": "Les Angles télécabine des Pèlerins",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    42.5408,
+    2.0579
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 3518,
+   "hors_domaine": false
   },
   {
    "id": "2147",
@@ -10721,12 +11046,19 @@
   {
    "id": "2189",
    "source": "pioupiou",
-   "lat": 46.2464,
-   "lon": 6.1741,
+   "lat": 46.2291,
+   "lon": 6.1913,
    "name": "Windbird 2189",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-10"
+   "vue_le": "2026-08-10",
+   "ancienne_position": [
+    46.2464,
+    6.1741
+   ],
+   "deplacee_le": "2026-09-22",
+   "deplacee_de_m": 2335,
+   "hors_domaine": false
   },
   {
    "id": "2190",
@@ -10737,6 +11069,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "2216",
+   "source": "pioupiou",
+   "lat": 43.5381,
+   "lon": 3.8858,
+   "name": "Modèle Air Club de l'Hérault",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "2338",
@@ -11637,6 +11979,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "34107006",
+   "source": "mf",
+   "lat": 43.6333,
+   "lon": 2.8255,
+   "name": "mf 34107006",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "34178001",
@@ -12587,6 +12939,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "84086001",
+   "source": "mf",
+   "lat": 43.811,
+   "lon": 5.146,
+   "name": "mf 84086001",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-09-22"
   },
   {
    "id": "84094001",

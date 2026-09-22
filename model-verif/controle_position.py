@@ -465,7 +465,72 @@ def sql_suspension(r, catalogue=None):
           "-- contrôle après exécution :",
           "-- select source, station_id, position_suspecte, position_note",
           "--   from station_zone where position_suspecte;"]
+    L += renaissance_sql(r, catalogue)
     return "\n".join(L)
+
+
+#: Lot L15-bis : jours entre le regel et la naissance. AGRUME sert des
+#: colonnes jusqu'à +48 h calculées AVANT le regel ; la première journée
+#: entièrement archivée à la nouvelle position est J+3 si le regel est
+#: déployé le jour J avant la passe du soir. Conservateur, et dit.
+NAISSANCE_DELAI_J = 3
+
+
+def renaissance_sql(r, catalogue=None):
+    """La VARIANTE « seconde décision » (lot L15-bis, 22/09/2026), en
+    commentaire sous la suspension : la balise a déménagé, c'est une
+    autre balise, elle renaît sous son identifiant.
+
+    ⚠️ COMMENTÉE, PAS JOUABLE TELLE QUELLE — et c'est le point. Ces deux
+    lignes ne valent qu'APRÈS le regel de l'axe (`freeze_balises.py
+    --deplacer …`) déployé sur le VPS : poser `notee_depuis` sans
+    regeler laisserait AGRUME lire sa colonne au vieil endroit, sous une
+    balise que `score.py` croit propre. L'ordre est écrit ici pour que
+    le prochain déménagement n'ait pas à le redécouvrir. Ne propose que
+    les cas où le catalogue live a tranché DÉMÉNAGEMENT ; un référentiel
+    faux n'est pas une naissance.
+    """
+    par_id = {x["id"]: x for x in r["lignes"]}
+    dem = [i for i in sorted(r["confirmees"])
+           if str((catalogue or {}).get(i, {}).get("verdict", "")
+                  ).startswith("DEMENAGEMENT")]
+    if not dem:
+        return []
+    naissance = (datetime.now(timezone.utc)
+                 + timedelta(days=NAISSANCE_DELAI_J)).strftime("%Y-%m-%d")
+    ids = ",".join(i for i in dem)
+    L = ["",
+         "-- ══════════════════════════════════════════════════════════",
+         "--  VARIANTE « seconde décision » (lot L15-bis) : la balise a",
+         "--  DÉMÉNAGÉ, c'est une AUTRE balise — elle renaît sous son",
+         "--  identifiant. À jouer À LA PLACE de la suspension ci-dessus,",
+         "--  et SEULEMENT après le regel déployé :",
+         f"--    python3 agrume/freeze_balises.py --referentiels <rep> "
+         f"--deplacer {ids}",
+         "--    tools/deploy-agrume-vps.sh",
+         f"--  `notee_depuis` = J+{NAISSANCE_DELAI_J} ({naissance}) : première "
+         "journée entièrement",
+         "--  archivée à la nouvelle position (colonnes AGRUME +48 h).",
+         "--  Colonne requise : alter table station_zone add column if not",
+         "--  exists notee_depuis date;",
+         "-- ══════════════════════════════════════════════════════════"]
+    for i in dem:
+        x = par_id[i]
+        note = (f"Lot L15-bis ({datetime.now(timezone.utc):%d/%m/%Y}) : "
+                f"DÉMÉNAGEMENT confirmé par le catalogue live — gel "
+                f"({x['gel'][0]:.4f}, {x['gel'][1]:.4f}) → référentiel "
+                f"({x['vivante'][0]:.4f}, {x['vivante'][1]:.4f}), "
+                f"{x['metres']} m. Décision : autre balise. Axe AGRUME "
+                f"regelé à la nouvelle position ; notée sous cet "
+                f"identifiant depuis {naissance}, rien d'avant ne compte "
+                f"(glissant, régime, duels, Murphy, climatologie, "
+                f"antécédents).")
+        L.append(
+            f"-- update station_zone set notee_depuis = '{naissance}', "
+            f"position_suspecte = false, position_note = {_lit(note)} "
+            f"where source = {_lit(x['source'])} "
+            f"and station_id = {_lit(x['station_id'])};")
+    return L
 
 
 def _lit(s):

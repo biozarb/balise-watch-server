@@ -299,6 +299,33 @@ check("⭐ le verdict du troisième avis, quand il existe, entre dans la note "
       "REFERENTIEL FAUX" in CP.sql_suspension(
           _r, {"pioupiou:1": {"verdict": "REFERENTIEL FAUX (le gel a raison)"}}))
 
+# ── 7 bis. LOT L15-bis : la variante « renaissance », commentée ──
+_sql_dem = CP.sql_suspension(
+    _r, {"pioupiou:1": {"verdict": "DEMENAGEMENT (le gel est perime)"}})
+check("⭐ un DÉMÉNAGEMENT confirmé fait proposer la variante « seconde "
+      "décision » sous la suspension", "seconde décision" in _sql_dem
+      and "notee_depuis" in _sql_dem, _sql_dem[-900:])
+check("… COMMENTÉE : chaque update de renaissance commence par `-- `, "
+      "jamais jouable par accident",
+      all(l.startswith("-- update") for l in _sql_dem.splitlines()
+          if "notee_depuis = '" in l)
+      and sum(1 for l in _sql_dem.splitlines() if "notee_depuis = '" in l) == 1,
+      _sql_dem[-900:])
+check("… et la suspension, elle, reste jouable (une ligne update nue)",
+      sum(1 for l in _sql_dem.splitlines()
+          if l.startswith("update station_zone")) == 1)
+check("… la naissance est à J+3 (colonnes AGRUME +48 h calculées avant "
+      "le regel)", f"J+{CP.NAISSANCE_DELAI_J}" in _sql_dem
+      and CP.NAISSANCE_DELAI_J == 3, _sql_dem[-900:])
+check("… et l'ORDRE est écrit : regel `--deplacer` puis déploiement, avant "
+      "le SQL", "--deplacer pioupiou:1" in _sql_dem
+      and "deploy-agrume-vps.sh" in _sql_dem, _sql_dem[-900:])
+check("un REFERENTIEL FAUX n'est PAS une naissance : aucune variante",
+      "notee_depuis" not in CP.sql_suspension(
+          _r, {"pioupiou:1": {"verdict": "REFERENTIEL FAUX (le gel a raison)"}}))
+check("sans troisième avis, aucune variante non plus (on ne renaît pas "
+      "sur un soupçon)", "notee_depuis" not in _sql)
+
 # ══════════════════════════════════════════════════════════════════
 #  8. LE JOURNAL PARLE MÊME QUAND TOUT VA BIEN
 # ══════════════════════════════════════════════════════════════════

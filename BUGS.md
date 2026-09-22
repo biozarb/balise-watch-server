@@ -2623,6 +2623,61 @@ transforme un échec en fichier valide.* Partout où un fichier est écrit
 au fil de l'eau et béni ensuite par un contrôle de forme, l'exception
 doit ranger le fichier avant de remonter.
 
+## Le garde-fou de position nommait, sans geste de sortie (22/09/2026, lot L15-bis)
+
+**Symptôme** : cri du 22/09 — 9 balises dont le gel et le référentiel
+ne tombent plus dans la même maille depuis ≥ 10 j. Troisième avis
+(`sonde_position_l15.py --catalogue`) : 9 × DÉMÉNAGEMENT, le gel est
+périmé. La « seconde décision » que `freeze_balises.geler` propose
+depuis le 10/08 (« la balise a déménagé, c'est une autre balise »)
+n'avait AUCUNE implémentation : l'identité est `(source, id)` partout,
+`geler` refuse de bouger, `score.py` ne sait pas couper une série.
+Seule issue réelle : `position_suspecte = true` à vie. Neuf sites de vol
+(Prat d'Albis, Lans-en-Vercors, Les Angles…) qui émettent toujours,
+plus jamais notés — et chaque saison en ajoute.
+
+**Ce qui n'était pas un levier** : « remettre à zéro les accumulateurs
+de la balise ». `model_character` est par ZONE (médiane des balises de
+la zone, `accumulator_updates`), pas par balise : il n'y a rien à
+remettre à zéro par balise, et remettre la zone punirait les autres.
+
+**Fix** — même identifiant, une date de naissance :
+- `station_zone.notee_depuis date` (SQL joué par Yann).
+- `score.py` : `nee_apres(zone, day)` / `naissances()` /
+  `avant_naissance()` — un seul test, façon `est_doublon`, appliqué dans
+  `_case_rows` (glissant, régime, stabilité), `accumulator_updates`, le
+  duel (+6 h et +24 h), `replay_window` (régime, Murphy, mélange —
+  écarté À LA LECTURE, pas après coup : la fenêtre pèse 3,5 Go),
+  `climatology_by_station` (et le nom du cache porte l'empreinte des
+  naissances), `prior_biais`, `prior_biais_fin`, `prior_poids`.
+  `station_zone` est lue plus tôt dans `main` (étape 1 bis-b) pour que
+  ces lecteurs la connaissent.
+- `freeze_balises.py --deplacer id[,id…]` : le SEUL chemin où une
+  position figée bouge, sur décision explicite ; l'artefact garde
+  `ancienne_position`, `deplacee_le`, `deplacee_de_m`. Une identité
+  citée mais non déplacée est nommée.
+- `controle_position.py` : le `.sql` proposé porte, en commentaire, la
+  variante renaissance (à J+3 : colonnes AGRUME +48 h calculées avant
+  le regel), avec l'ORDRE — regel, déploiement, puis SQL.
+
+**Vérifié** : test_score 1 151/0 (nouveau `test_l15bis_naissance` : 
+`_case_rows` perd exactement les 5 j × 2 modèles d'avant, une balise
+pas encore née n'entre pas dans la mémoire longue, `replay_window`
+n'a pas chargé la ligne ni Murphy, les trois antécédents vides pour la
+née) ; test_controle_position 43/0 ; test_freeze_balises OK (9 cas
+`deplacer`) ; mutations position_l15, freeze_l7, doublon_de toutes vues.
+
+**Piège réutilisable** : *un garde-fou qui nomme sans geste de sortie
+finit par n'avoir qu'un geste : « tais-toi pour toujours ».* La règle
+« on signale, on ne corrige pas » est juste ; elle impose d'écrire la
+correction quelque part où quelqu'un peut la décider.
+
+**Non fait, noté** : `model_verif_event` (événements) n'écarte ni
+`position_suspecte` ni la naissance — il ne les écartait déjà pas avant
+ce lot. Le regel du 22/09 a aussi fait entrer 30 balises apparues
+depuis le 28/08 (ajout seul), dont 4 hors boîte sans sol dans
+l'artefact des isolées (`z_*` non posés, toléré par `ingest_colonnes`).
+
 ## Voir aussi
 
 - `agrume-implementation-tah-15-08.md` (projet Claude « balise watch ») —

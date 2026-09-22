@@ -4895,6 +4895,144 @@ def test_l17_doublon_ecarte_des_accumulateurs():
     check("deux balises (3, 4) → médiane 3,5", med_apres.get(cle), 3.5)
 
 
+def test_l15bis_naissance():
+    """Lot L15-bis (22/09/2026) : une balise qui a DÉMÉNAGÉ renaît sous
+    son identifiant à `notee_depuis`. Tout ce qui note doit ignorer ses
+    balise-jours d'avant — et, entre le regel et la naissance, la balise
+    n'entre nulle part. Un chemin oublié = deux populations."""
+    print("── lot L15-bis : la naissance coupe la série, partout ──")
+    check("`nee_apres` : pas de zone → jamais écartée",
+          [J.nee_apres(None, "2026-08-01"), J.nee_apres({}, "2026-08-01"),
+           J.nee_apres({"notee_depuis": None}, "2026-08-01")],
+          [False, False, False])
+    z = {"notee_depuis": "2026-08-03"}
+    check("`nee_apres` : la veille est écartée, le jour même et après non",
+          [J.nee_apres(z, "2026-08-02"), J.nee_apres(z, "2026-08-03"),
+           J.nee_apres(z, "2026-08-04"), J.nee_apres(z, DAY)],
+          [True, False, False, False])
+    check("… et une date Postgres avec heure est lue sur ses 10 premiers "
+          "caractères", J.nee_apres({"notee_depuis": "2026-08-03T00:00:00"},
+                                    "2026-08-02"), True)
+    zo = {"pioupiou:1": {"notee_depuis": "2026-08-03"},
+          "pioupiou:2": {}, "pioupiou:3": {"notee_depuis": None}}
+    check("`naissances` ne garde que les balises nées",
+          J.naissances(zo), {"pioupiou:1": "2026-08-03"})
+    n = J.naissances(zo)
+    check("`avant_naissance` dit la même chose que `nee_apres`",
+          [J.avant_naissance(n, "pioupiou:1", "2026-08-02"),
+           J.avant_naissance(n, "pioupiou:1", "2026-08-03"),
+           J.avant_naissance(n, "pioupiou:2", "2026-08-02"),
+           J.avant_naissance(None, "pioupiou:1", "2026-08-02"),
+           J.avant_naissance({}, "pioupiou:1", "2026-08-02")],
+          [True, False, False, False, False])
+
+    # ── _case_rows : la balise née à mi-fenêtre ne compte que depuis ──
+    trois = ["pioupiou:1", "pioupiou:2", "pioupiou:3"]
+    daily = _daily_l17(trois, n_jours=10)
+    units = [dict(d, unit=f"{d['source']}:{d['station_id']}") for d in daily]
+    base = J._case_rows(units, _zones_l17(trois), DAY, "rolling15", "all",
+                        J.MIN_STATIONS_ZONE, with_ci=False)
+    n_base = sum(int(r.get("occurrences") or 0) for r in base
+                 if r["agg_level"] == "basin_landform")
+    z_nee = _zones_l17(trois)
+    naissance = (DAY - timedelta(days=4)).strftime("%Y-%m-%d")
+    z_nee["pioupiou:3"]["notee_depuis"] = naissance
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        apres = J._case_rows(units, z_nee, DAY, "rolling15", "all",
+                             J.MIN_STATIONS_ZONE, with_ci=False)
+    n_apres = sum(int(r.get("occurrences") or 0) for r in apres
+                  if r["agg_level"] == "basin_landform")
+    # 10 jours (J−9 … J) × 2 modèles par balise ; née à J−4, la 3 perd
+    # ses 5 jours d'avant (J−9 … J−5).
+    check("⭐ `_case_rows` écarte les balise-jours d'AVANT la naissance "
+          "(5 j × 2 modèles)", n_base - n_apres, 10)
+    check("… et le journal le DIT, avec le motif", "naissance" in buf.getvalue()
+          and "10 balise-jour" in buf.getvalue(), True)
+    check("la balise reste comptée dans la case (elle n'est pas un doublon)",
+          max(int(r.get("n_stations") or 0) for r in apres), 3)
+
+    # ── accumulator_updates : entre regel et naissance, dehors ──
+    banded = [{"key": u, "model": "icon_d2", "lead_h": 6, "regime": "fluxN",
+               "band": "10-20", "errKmh": 3.0 + i, "day": DAY.strftime("%Y-%m-%d")}
+              for i, u in enumerate(trois)]
+    z_fut = _zones_l17(trois)
+    z_fut["pioupiou:3"]["notee_depuis"] = (DAY + timedelta(days=2)).strftime("%Y-%m-%d")
+    with contextlib.redirect_stdout(io.StringIO()):
+        acc_apres = J.accumulator_updates(banded, z_fut)
+    cle = ("b1:valley", "fluxN", "10-20")
+    med = {(r["zone_id"], r["regime"], r["band"]): r["x"]
+           for r in acc_apres if r["metric"] == "errKmh"}
+    check("⭐ une balise pas encore née n'entre pas dans la mémoire longue "
+          "(médiane 3,5 sur deux balises, pas 4 sur trois)", med.get(cle), 3.5)
+    z_nee2 = _zones_l17(trois)
+    z_nee2["pioupiou:3"]["notee_depuis"] = DAY.strftime("%Y-%m-%d")
+    acc_jour = J.accumulator_updates(banded, z_nee2)
+    med2 = {(r["zone_id"], r["regime"], r["band"]): r["x"]
+            for r in acc_jour if r["metric"] == "errKmh"}
+    check("… née LE jour même, elle entre", med2.get(cle), 4.0)
+
+    # ── replay_window : écarté À LA LECTURE, Murphy compris ──
+    import tempfile
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    rows_j = [{"day": DAY.strftime("%Y-%m-%d"), "source": "pioupiou",
+               "station_id": "3", "model": "icon_d2", "lead_h": 6,
+               "err_vec_med": 3.0, "regime": "fluxN",
+               J.MU.MURPHY_KEY: [1, 1.0, 2.0, 1.0, 4.0, 2.0]},
+              {"day": DAY.strftime("%Y-%m-%d"), "source": "pioupiou",
+               "station_id": "1", "model": "icon_d2", "lead_h": 6,
+               "err_vec_med": 3.0, "regime": "fluxN",
+               J.MU.MURPHY_KEY: [1, 1.0, 2.0, 1.0, 4.0, 2.0]}]
+    J.replay_write(tmp, DAY, rows_j)
+    acc = {}
+    lus, bilan = J.replay_window(tmp, DAY, None, 7200, n_days=1, murphy_acc=acc,
+                                 naiss={"pioupiou:3": (DAY + timedelta(days=1))
+                                        .strftime("%Y-%m-%d")})
+    check("⭐ `replay_window` n'a PAS chargé la balise-jour d'avant la "
+          "naissance", [l["unit"] for l in lus], ["pioupiou:1"])
+    check("… ni Murphy", any(k[0] == "pioupiou:3" for k in acc), False)
+    check("… et le bilan le compte", "1 balise-jour(s) écarté(s) : antérieur"
+          in bilan, True)
+    lus0, _ = J.replay_window(tmp, DAY, None, 7200, n_days=1,
+                              naiss={"pioupiou:3": DAY.strftime("%Y-%m-%d")})
+    check("née le jour même : chargée", len(lus0), 2)
+
+    # ── les antécédents lus dans le cache ──
+    veille = DAY - timedelta(days=1)
+    rows_v = [{"day": veille.strftime("%Y-%m-%d"), "source": "pioupiou",
+               "station_id": "3", "model": "icon_d2", "lead_h": 6,
+               "bias_slope": 1.2, "bias_dir_deg": 5.0, "err_vec_rms": 4.0}
+              for _ in range(1)]
+    for k in range(1, 12):
+        dk = (DAY - timedelta(days=k)).strftime("%Y-%m-%d")
+        J.replay_write(tmp, DAY - timedelta(days=k),
+                       [dict(rows_v[0], day=dk),
+                        dict(rows_v[0], day=dk, model="icon_eu",
+                             err_vec_rms=5.0)])
+    pr = J.prior_biais(tmp, DAY)
+    pr_n = J.prior_biais(tmp, DAY, naiss={"pioupiou:3": DAY.strftime("%Y-%m-%d")})
+    check("⭐ `prior_biais` : avec une naissance aujourd'hui, l'antécédent "
+          "de la balise est VIDE (rien d'avant ne compte)",
+          [("pioupiou:3", "icon_d2", 6) in pr, ("pioupiou:3", "icon_d2", 6) in pr_n],
+          [True, False])
+    pw = J.prior_poids(tmp, DAY)
+    pw_n = J.prior_poids(tmp, DAY, naiss={"pioupiou:3": DAY.strftime("%Y-%m-%d")})
+    check("`prior_poids` : même coupure pour les poids du mélange",
+          [("pioupiou:3", 6) in pw, ("pioupiou:3", 6) in pw_n], [True, False])
+    pf_n = J.prior_biais_fin(tmp, DAY, naiss={"pioupiou:3": DAY.strftime("%Y-%m-%d")})
+    check("`prior_biais_fin` accepte `naiss` et ne rend rien pour la née",
+          any(k[0] == "pioupiou:3" for k in pf_n), False)
+
+    # ── le nom du cache de climatologie porte l'empreinte des naissances ──
+    src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
+    deb = src.index("def climatology_by_station(")
+    corps = src[deb:src.index("\ndef ", deb + 10)]
+    check("le cache `clim_*` change de nom quand une naissance existe",
+          "empreinte" in corps and "_n" in corps, True)
+    check("… et les obs d'avant la naissance sont écartées à la lecture",
+          "avant_naissance(naiss, unit, jour)" in corps, True)
+
+
 def test_light_scores_sous_ensemble_exact():
     print("── S13.0 : le léger est un sous-ensemble exact du gros ──")
     plein = {
@@ -6714,6 +6852,7 @@ def main() -> int:
                # ── lot L17 (27/08) : les doublons d'inscription ──
                test_l17_doublon_ecarte_du_classement,
                test_l17_doublon_ecarte_des_accumulateurs,
+               test_l15bis_naissance,
                # ── lot L3 (27/08) : multiplicité + gap apparié ──
                test_l3_gap_apparie_bout_en_bout,
                test_l3_fdr_tue_la_limite_et_garde_la_franche,

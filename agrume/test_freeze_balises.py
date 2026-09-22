@@ -233,6 +233,62 @@ def main(argv=None):
              "différents restent deux balises", len(fusion3) == 3
              and ajouts3 == 3, f"{len(fusion3)} balise(s), {ajouts3} ajout(s)")
 
+    print("\n── 7. LOT L15-bis — `deplacer` : une position figée ne bouge que "
+          "sur décision ──")
+    gel = [dict(id="2189", source="pioupiou", lat=lat0, lon=lon0,
+                name="Windbird 2189", position_suspecte=True,
+                hors_domaine=False, vue_le="2026-08-10"),
+           dict(id="1595", source="pioupiou", lat=lat0, lon=lon0 + 0.1,
+                name="Petit Mont-Rond", position_suspecte=False,
+                hors_domaine=False, vue_le="2026-08-16")]
+    bouge = [dict(id="2189", source="pioupiou", lat=lat0 - 0.02, lon=lon0,
+                  name="Windbird 2189"),
+             dict(id="1595", source="pioupiou", lat=lat0 - 0.02, lon=lon0 + 0.1,
+                  name="Petit Mont-Rond")]
+    dits = []
+    f4, _, dep4 = F.fusionner(gel, bouge, crier=dits.append)
+    b2189 = next(b for b in f4 if b["id"] == "2189")
+    verifier("sans `deplacer`, les deux déplacements sont SIGNALÉS et la "
+             "position figée est conservée",
+             len(dep4) == 2 and b2189["lat"] == lat0
+             and "ancienne_position" not in b2189, str(dep4))
+    dits = []
+    f5, _, dep5 = F.fusionner(gel, bouge, crier=dits.append,
+                              deplacer=["2189"])
+    b2189 = next(b for b in f5 if b["id"] == "2189")
+    b1595 = next(b for b in f5 if b["id"] == "1595")
+    verifier("avec `deplacer=['2189']`, SEULE 2189 reprend la position du "
+             "candidat", abs(b2189["lat"] - (lat0 - 0.02)) < 1e-9
+             and b1595["lat"] == lat0, f"{b2189['lat']} / {b1595['lat']}")
+    verifier("la trace reste dans l'artefact : ancienne_position, "
+             "deplacee_le, deplacee_de_m",
+             b2189.get("ancienne_position") == [lat0, lon0]
+             and len(b2189.get("deplacee_le", "")) == 10
+             and b2189.get("deplacee_de_m", 0) > 2000,
+             str({k: b2189.get(k) for k in
+                  ("ancienne_position", "deplacee_le", "deplacee_de_m")}))
+    verifier("la balise déplacée n'est plus `position_suspecte`",
+             b2189["position_suspecte"] is False)
+    verifier("1595, non autorisée, reste dans `deplacements` (signalée) ; "
+             "2189 n'y est plus", [d[0] for d in dep5] == ["1595"], str(dep5))
+    verifier("le geste est DIT dans le journal",
+             any("DÉPLACÉE" in d and "2189" in d for d in dits), str(dits[:2]))
+    dits = []
+    f6, _, _ = F.fusionner(gel, bouge, crier=dits.append,
+                           deplacer=[("pioupiou", "2189"), "424242"])
+    verifier("une identité autorisée mais absente des candidats est "
+             "NOMMÉE comme non déplacée",
+             any("NON déplacée" in d and "pioupiou:424242" in d for d in dits),
+             str([d for d in dits if "NON" in d]))
+    verifier("la forme (source, id) est acceptée",
+             next(b for b in f6 if b["id"] == "2189").get("deplacee_le"))
+    dits = []
+    f7, _, dep7 = F.fusionner(gel, [dict(bouge[0], lat=lat0 + 0.0005)],
+                              crier=dits.append, deplacer=["2189"])
+    verifier("autorisée mais écart sous le seuil : rien ne bouge, et c'est "
+             "dit", next(b for b in f7 if b["id"] == "2189")["lat"] == lat0
+             and any("NON déplacée" in d for d in dits))
+
     print("\n  freeze_balises :", "OK" if not echecs else f"ÉCHEC ({len(echecs)})")
     return 0 if not echecs else 1
 

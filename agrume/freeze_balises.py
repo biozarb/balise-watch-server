@@ -293,10 +293,23 @@ def _identite(b):
     return (b.get("source") or "pioupiou", str(b["id"]))
 
 
-def fusionner(existantes, candidates, crier=print):
+def fusionner(existantes, candidates, crier=print, deplacer=()):
     """Fusion À AJOUT SEUL, comme `collect.py`.
 
     Renvoie (liste triée, nb_ajouts, deplacements).
+
+    ⚠️ `deplacer` (lot L15-bis, 22/09/2026) : les identités
+    `(source, id)` — ou les `id` nus, lus comme Pioupiou — pour
+    lesquelles le DÉPLACEMENT EST AUTORISÉ. C'est la « seconde
+    décision » que le pavé ci-dessous demande depuis le 10/08 : la
+    balise a déménagé, c'est une AUTRE balise. Elle reprend la position
+    du candidat, garde son identifiant (les observations continuent
+    d'arriver sous lui), et l'artefact conserve `ancienne_position` et
+    `deplacee_le` pour que personne ne relise une archive d'avant comme
+    si elle parlait du même endroit. La coupure de l'historique se
+    joue côté notation : `station_zone.notee_depuis`, honoré par
+    `score.py` (`nee_apres`). Une identité citée ici mais qui n'a PAS
+    bougé (≤ SEUIL_DEPLACEMENT_M) n'est pas touchée, et c'est dit.
 
     ⚠️ Une balise absente du catalogue n'est PAS retirée : elle est
     peut-être seulement hors ligne. La retirer décalerait l'axe de
@@ -305,6 +318,9 @@ def fusionner(existantes, candidates, crier=print):
     """
     connues = {_identite(b): dict(b) for b in existantes}
     ajouts, deplacements = 0, []
+    autorisees = {(("pioupiou", str(x)) if not isinstance(x, (tuple, list))
+                   else (str(x[0]), str(x[1]))) for x in deplacer}
+    deplacees = set()
     for c in candidates:
         # ⚠️ Les points de RADIOSONDAGE sont volontairement HORS du
         # domaine (Payerne est 0,51° au nord de `latmax`). Ils ne sont
@@ -332,7 +348,25 @@ def fusionner(existantes, candidates, crier=print):
             ajouts += 1
             continue
         d = distance_m((ancienne["lat"], ancienne["lon"]), (c["lat"], c["lon"]))
-        if d > SEUIL_DEPLACEMENT_M:
+        if d > SEUIL_DEPLACEMENT_M and cle in autorisees:
+            # ⚠️ LE SEUL ENDROIT OÙ UNE POSITION FIGÉE BOUGE, et sur
+            # décision explicite. La trace reste dans l'artefact.
+            ancienne["ancienne_position"] = [ancienne["lat"], ancienne["lon"]]
+            ancienne["deplacee_le"] = (datetime.now(timezone.utc)
+                                       .strftime("%Y-%m-%d"))
+            ancienne["deplacee_de_m"] = round(d)
+            ancienne["lat"], ancienne["lon"] = c["lat"], c["lon"]
+            ancienne["position_suspecte"] = False
+            # `hors_domaine` se recalcule sur la NOUVELLE position, dans
+            # les deux sens : une balise peut sortir d'une boîte en
+            # déménageant, et ce n'est pas un rétrécissement de domaine.
+            ancienne["hors_domaine"] = (not dans_domaine(c["lat"], c["lon"])
+                                        and c.get("source") != "radiosondage")
+            deplacees.add(cle)
+            crier(f"  ↪ {c['id']} · {ancienne['name']} : DÉPLACÉE de "
+                  f"{round(d)} m sur décision ({ancienne['ancienne_position']}"
+                  f" → [{c['lat']}, {c['lon']}])")
+        elif d > SEUIL_DEPLACEMENT_M:
             deplacements.append((c["id"], ancienne["name"], round(d)))
         ancienne["name"] = c["name"] or ancienne["name"]
         # ⛔ 15/08 — `hors_domaine` N'ÉTAIT JAMAIS RECALCULÉ POUR UNE
@@ -362,10 +396,18 @@ def fusionner(existantes, candidates, crier=print):
         etait_hors = ancienne.get("hors_domaine", False)
         est_hors = (not dans_domaine(ancienne["lat"], ancienne["lon"])
                    and ancienne.get("source") != "radiosondage")
-        if etait_hors and not est_hors:
+        if etait_hors and not est_hors and cle not in deplacees:
             crier(f"  ⓘ {c['id']} · {ancienne['name']} : entre dans un "
                   f"domaine de production (n'est plus hors_domaine)")
             ancienne["hors_domaine"] = False
+    non_vues = autorisees - deplacees
+    if non_vues:
+        # Citée, mais absente des candidats ou pas déplacée : on le DIT,
+        # sinon l'utilisateur croit le regel fait.
+        crier(f"  ⚠️ {len(non_vues)} identité(s) autorisée(s) à se déplacer "
+              f"mais NON déplacée(s) (absente(s) des candidats, ou écart "
+              f"≤ {SEUIL_DEPLACEMENT_M:.0f} m) : "
+              + ", ".join(f"{s_}:{i}" for s_, i in sorted(non_vues)))
     return sorted(connues.values(), key=_rang), ajouts, deplacements
 
 
@@ -419,7 +461,7 @@ def points_radiosondage():
 
 
 def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print,
-          rebornage=()):
+          rebornage=(), deplacer=()):
     # ⛔⛔ NE PAS REMETTRE `except Abort` ICI. C'est le bug du 15/08, et il
     # a coûté trois balises : lire « artefact incohérent » comme
     # « artefact inexistant » fait sauter la discipline d'ajout seul, et
@@ -435,7 +477,8 @@ def geler(candidates, suspectes=(), chemin=ARTEFACT, crier=print,
     # dupliquer, et une station qu'on désactive dans `radiosondage.py`
     # n'est pas retirée de l'axe pour autant — sinon l'axe se décalerait.
     balises, ajouts, deplacements = fusionner(
-        existantes, list(candidates) + points_radiosondage(), crier)
+        existantes, list(candidates) + points_radiosondage(), crier,
+        deplacer=deplacer)
     sus = {str(x) for x in suspectes}
     for b in balises:
         if b["id"] in sus:
@@ -511,6 +554,14 @@ def main(argv=None):
                         "cf. REFERENTIELS_RESEAUX. Mutuellement exclusif "
                         "avec --stations/--catalogue.")
     p.add_argument("--suspectes", default=None)
+    p.add_argument("--deplacer", default=None, metavar="IDS",
+                   help="LOT L15-bis : identités `source:id` (ou `id` nu = "
+                        "Pioupiou) séparées par des virgules, AUTORISÉES à "
+                        "reprendre la position du référentiel. C'est la "
+                        "« seconde décision » du garde-fou de position : "
+                        "la balise a déménagé, elle renaît sous le même "
+                        "identifiant. À coupler avec "
+                        "`station_zone.notee_depuis` (SQL joué par Yann).")
     p.add_argument("--radiosondages-seulement", action="store_true",
                    help="ajoute uniquement les points de radiosondage, sans "
                         "toucher aux balises")
@@ -581,7 +632,13 @@ def main(argv=None):
                         "--radiosondages-seulement")
         suspectes = (json.loads(Path(a.suspectes).read_text(encoding="utf-8"))
                      if a.suspectes else [])
-        geler(candidates, suspectes, rebornage=a.rebornage)
+        deplacer = []
+        for x in (a.deplacer or "").split(","):
+            x = x.strip()
+            if not x:
+                continue
+            deplacer.append(tuple(x.split(":", 1)) if ":" in x else x)
+        geler(candidates, suspectes, rebornage=a.rebornage, deplacer=deplacer)
         return 0
     except Abort as e:
         print(f"❌ {e}", file=sys.stderr)
