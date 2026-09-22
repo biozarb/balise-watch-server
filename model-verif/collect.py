@@ -1385,6 +1385,45 @@ def _get_text(url: str, timeout: int = 120) -> str:
         return r.read().decode("utf-8", "replace")
 
 
+#: Pauses entre les tentatives METAR — 3 essais, 20 s puis 60 s. Borné
+#: et court : on est en fin de run, sous le chien de garde de `run.sh`.
+METAR_PAUSES_S = (20.0, 60.0)
+
+
+def _get_text_retry(url: str, label: str = "METAR") -> str:
+    """`_get_text` avec un réessai BORNÉ sur les pannes transitoires.
+
+    ⚠️ AJOUTÉ LE 22/09/2026, après un `HTTP 503` d'Iowa State à
+    l'unique requête de la journée : la passe entière tombait sur un
+    accident d'une seconde. Un 5xx, un timeout, une coupure réseau sont
+    des accidents : on retente deux fois, en laissant au service le
+    temps de respirer. Un 4xx (URL refusée, station inconnue, 404) est
+    une DÉCISION : on le rend du premier coup, le rejouer masquerait sa
+    nature. Le 429 n'a jamais été vu sur ce service ; il est traité
+    comme transitoire, avec la même pause.
+
+    ⓘ Passe par la globale `_get_text` (et non par une référence
+    capturée) pour que les bancs qui la remplacent restent valables.
+    """
+    derniere: Exception | None = None
+    for i in range(len(METAR_PAUSES_S) + 1):
+        try:
+            return _get_text(url)
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 and exc.code != 429:
+                raise
+            derniere = exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            derniere = exc
+        if i < len(METAR_PAUSES_S):
+            print(f"  ⏸ {label} : {derniere!r} — nouvel essai dans "
+                  f"{METAR_PAUSES_S[i]:.0f}s ({i + 2}/{len(METAR_PAUSES_S) + 1})",
+                  file=sys.stderr)
+            time.sleep(METAR_PAUSES_S[i])
+    assert derniere is not None
+    raise derniere
+
+
 def metar_stations(cache: pathlib.Path) -> list[dict]:
     """Le référentiel des aérodromes, avec cache sur disque.
 
@@ -1469,7 +1508,7 @@ def metar_rows(stations: list[dict], day: str):
          ("missing", "empty"), ("trace", "0.0001"), ("report_type", "3")]
     q += [("data", c) for c in METAR_CHAMPS]
     q += [("station", sid) for sid in sorted(par_id)]
-    txt = _get_text(f"{METAR_ASOS}?{urllib.parse.urlencode(q)}")
+    txt = _get_text_retry(f"{METAR_ASOS}?{urllib.parse.urlencode(q)}")
 
     lignes = txt.splitlines()
     if not lignes:
@@ -2374,10 +2413,49 @@ def write_ndjson_gz(path: pathlib.Path, rows_iter) -> int:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     n = 0
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        for row in rows_iter:
-            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
-            n += 1
+    try:
+        with gzip.open(path, "wt", encoding="utf-8") as fh:
+            for row in rows_iter:
+                fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+                n += 1
+    except BaseException:
+        # ⛔ UNE EXCEPTION À MI-ÉCRITURE NE LAISSE PAS UNE ARCHIVE
+        # « SAINE » DERRIÈRE ELLE (débug du 22/09/2026). Le `with` ferme
+        # le flux gzip proprement — pied, CRC, tout y est — et le
+        # fichier passe donc `gz_lisible()`. Constaté : Iowa State a
+        # rendu un 503 à la première ligne de `metar_rows`, il restait
+        # sur le disque un `obsmetar_2026-09-21.ndjson.gz` de 52 octets,
+        # VIDE et parfaitement valide. Sans témoin, `en_retard()` l'a
+        # vu et le run est sorti en 2 — alors que le §2 bis promet qu'un
+        # échec METAR « ne change pas le code de sortie ». Pire : le
+        # `rattraper()` de la nuit suivante l'aurait monté sur R2 et
+        # posé son témoin, faisant d'une journée VIDE l'archive
+        # officielle du 21/09, pour toujours et sans un mot.
+        #
+        # Un flux tué par SIGKILL, lui, reste tronqué et `rattraper()`
+        # le refuse ; c'est l'exception PROPRE qui contournait le
+        # garde-fou. Donc : rien collecté → on efface ; quelque chose
+        # collecté → on garde sous `.partiel` (hors des motifs
+        # d'`en_retard()`, donc jamais monté ni béni), pour
+        # `reparer_archive.py` ou une relecture à la main. Et on relève
+        # l'exception : c'est l'appelant qui décide si la passe est
+        # rattrapable.
+        try:
+            if n == 0:
+                path.unlink(missing_ok=True)
+                print(f"  ⓘ {path.name} : rien collecté avant l'échec — "
+                      f"archive vide EFFACÉE (pas de faux témoin possible)",
+                      file=sys.stderr)
+            else:
+                partiel = path.with_name(path.name + ".partiel")
+                path.replace(partiel)
+                print(f"  ⚠️  {path.name} : {n} ligne(s) écrite(s) avant "
+                      f"l'échec — mise de côté en {partiel.name}, PAS "
+                      f"montée sur R2 (archive incomplète)", file=sys.stderr)
+        except OSError as exc:                            # noqa: BLE001
+            print(f"  ⚠️  impossible de mettre {path.name} de côté : {exc}",
+                  file=sys.stderr)
+        raise
     return n
 
 

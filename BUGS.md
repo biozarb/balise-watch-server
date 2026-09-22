@@ -2573,6 +2573,56 @@ upload multipart serait plus robuste sur lien instable, mais coûte une
 Class A par part — à arbitrer contre le garde-fou n°1 si le cas se
 répète.
 
+## Une exception PROPRE à mi-écriture fabrique une archive « saine » et vide (22/09/2026, collect)
+
+**Symptôme** : `run collect en ÉCHEC (code 2, 1644s)` le 22/09 au matin,
+avec en dernière ligne `❌ 1 archive(s) ne sont PAS sur R2 … :
+obsmetar/2026/09/obsmetar_2026-09-21.ndjson.gz`. Or la passe METAR est
+sous filet (`try/except`) et le §2 bis promet qu'un échec là « ne change
+pas le code de sortie ». Plus haut dans le journal : `⚠️ passe METAR
+abandonnée (<HTTPError 503: 'Service Unavailable'>)` — Iowa State a
+rendu un 503 à l'unique requête de la journée (le service répondait
+200 deux heures plus tard).
+
+**Cause** : `write_ndjson_gz` ouvre le gzip AVANT de tirer la première
+ligne du générateur. L'exception traverse le `with`, qui ferme le flux
+proprement — pied, CRC, tout y est. Il reste sur le disque un
+`obsmetar_2026-09-21.ndjson.gz` de **52 octets, vide et parfaitement
+valide** (`gzip -t` passe), sans témoin `.r2ok`. `en_retard()` le voit
+→ `rc = 2`. Le garde-fou du 24/08 (`gz_lisible`) protège d'un flux
+TRONQUÉ (SIGKILL/TERM) ; il ne voit rien à redire à un flux vide et
+complet.
+
+**Le vrai danger n'était pas le run rouge** : la nuit suivante,
+`rattraper()` aurait trouvé une archive « saine », l'aurait montée sur
+R2 et aurait posé son témoin. Une journée VIDE serait devenue l'archive
+officielle du 21/09, pour toujours, et le run serait passé au vert.
+Même mécanique pour une passe qui lève après N lignes : une archive
+INCOMPLÈTE mais valide, bénie le lendemain. Le garde-fou vérifiait la
+forme (« ça se décompresse »), pas le contenu (« c'est la journée »).
+
+**Fix** (`collect.py`) :
+- `write_ndjson_gz` attrape toute exception venue du générateur : rien
+  écrit → le fichier est **effacé** ; N lignes écrites → renommé en
+  `.ndjson.gz.partiel`, hors des motifs d'`en_retard()`, donc jamais
+  monté ni béni (pour `reparer_archive.py` ou une relecture à la main).
+  Puis l'exception est relevée : c'est l'appelant qui sait si la passe
+  est rattrapable.
+- `_get_text_retry` pour METAR : 3 essais (pauses 20 s puis 60 s) sur
+  5xx/429/timeout/coupure réseau ; un 4xx lève du premier coup. Passe
+  par la globale `_get_text` pour que les bancs qui la remplacent
+  restent valables.
+
+**Vérifié** : exception à la 1re ligne → fichier absent ; après 2 lignes
+→ `.partiel` à 2 lignes et `en_retard()` vide ; nominal inchangé ;
+503-503-200 → 3 appels, texte rendu ; 404 → 1 appel ; 503 permanent →
+3 appels puis lève. `test_collect.py` : 215/0.
+
+**Piège réutilisable** : *un `with` qui ferme proprement sur exception
+transforme un échec en fichier valide.* Partout où un fichier est écrit
+au fil de l'eau et béni ensuite par un contrôle de forme, l'exception
+doit ranger le fichier avant de remonter.
+
 ## Voir aussi
 
 - `agrume-implementation-tah-15-08.md` (projet Claude « balise watch ») —
