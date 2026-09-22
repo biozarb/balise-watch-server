@@ -2618,6 +2618,16 @@ forme (« ça se décompresse »), pas le contenu (« c'est la journée »).
 503-503-200 → 3 appels, texte rendu ; 404 → 1 appel ; 503 permanent →
 3 appels puis lève. `test_collect.py` : 215/0.
 
+**Le piège dans le correctif** (trouvé par les bancs du déploiement,
+`test_collect_reduit`) : la première version mettait TOUTE exception
+de côté — y compris `ArretDemande`, le `SIGTERM` transformé en
+exception par `collect_reduit.armer_arret_propre` (24/08), dont le but
+est précisément que l'archive COURTE mais lisible reste à sa place et
+monte au rattrapage (10 985 lignes irremplaçables). Deux décisions
+opposées sur la même ligne de code : l'accident (réseau, bug) ne se
+bénit pas, l'arrêt demandé se garde. Distingués par le nom de
+l'exception ; un arrêt demandé à zéro ligne efface quand même.
+
 **Piège réutilisable** : *un `with` qui ferme proprement sur exception
 transforme un échec en fichier valide.* Partout où un fichier est écrit
 au fil de l'eau et béni ensuite par un contrôle de forme, l'exception

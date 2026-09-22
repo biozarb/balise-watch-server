@@ -1881,6 +1881,135 @@ verifie(True,
         "détail du rejeu")
 
 
+# ══════════════════════════════════════════════════════════════════
+#  22/09/2026 — une exception à mi-écriture ne laisse pas une archive
+#  « saine » (le 503 Iowa State et l'archive METAR vide de 52 octets)
+# ══════════════════════════════════════════════════════════════════
+print("\n── 22/09 : write_ndjson_gz et l'exception à mi-écriture ──")
+_d22 = pathlib.Path(tempfile.mkdtemp(prefix="w22-"))
+_p22 = _d22 / "obsmetar" / "2026" / "09" / "obsmetar_2026-09-21.ndjson.gz"
+
+
+def _gen_vide_503():
+    raise urllib.error.HTTPError("u", 503, "Service Unavailable", None, None)
+    yield  # noqa: RET503 — générateur
+
+
+_err22 = _io.StringIO()
+try:
+    with _cx.redirect_stderr(_err22):
+        C.write_ndjson_gz(_p22, _gen_vide_503())
+except urllib.error.HTTPError:
+    pass
+verifie(not _p22.exists(),
+        "⭐⭐ exception à la PREMIÈRE ligne → aucune archive vide et « valide » "
+        "ne reste (elle aurait été montée et bénie par `rattraper()` la nuit "
+        "suivante)")
+verifie("EFFACÉE" in _err22.getvalue(), "… et c'est dit")
+verifie(C.en_retard(_d22) == [], "… donc `en_retard()` ne voit rien, rc reste 0")
+
+
+def _gen_deux_puis_boom():
+    yield {"a": 1}
+    yield {"a": 2}
+    raise RuntimeError("boom")
+
+
+try:
+    with _cx.redirect_stderr(_io.StringIO()):
+        C.write_ndjson_gz(_p22, _gen_deux_puis_boom())
+except RuntimeError:
+    pass
+_partiel = _p22.with_name(_p22.name + ".partiel")
+verifie(not _p22.exists() and _partiel.exists(),
+        "⭐ exception après N lignes → mise de côté en `.partiel`, jamais "
+        "montée ni bénie")
+with gzip.open(_partiel, "rt") as _fh:
+    verifie(sum(1 for _ in _fh) == 2, "… et le `.partiel` garde les 2 lignes")
+verifie(C.en_retard(_d22) == [], "… hors des motifs d'`en_retard()`")
+
+
+class ArretDemande(Exception):                   # même NOM que collect_reduit
+    pass
+
+
+def _gen_dix_puis_term():
+    for i in range(10):
+        yield {"i": i}
+    raise ArretDemande("TERM")
+
+
+try:
+    C.write_ndjson_gz(_p22, _gen_dix_puis_term())
+except ArretDemande:
+    pass
+verifie(_p22.exists() and C.gz_lisible(_p22),
+        "⭐ un ARRÊT DEMANDÉ (SIGTERM, décision du 24/08) garde l'archive "
+        "COURTE mais lisible À SA PLACE — ce cas-là n'est pas un accident")
+_p22.unlink()
+
+
+def _gen_term_a_zero():
+    raise ArretDemande("TERM")
+    yield
+
+
+try:
+    with _cx.redirect_stderr(_io.StringIO()):
+        C.write_ndjson_gz(_p22, _gen_term_a_zero())
+except ArretDemande:
+    pass
+verifie(not _p22.exists(), "… mais un arrêt demandé à ZÉRO ligne efface "
+        "quand même : une archive vide n'est jamais « courte »")
+verifie(C.write_ndjson_gz(_p22, iter([{"a": 1}])) == 1 and _p22.exists(),
+        "le chemin nominal est inchangé")
+
+# le réessai METAR
+C.METAR_PAUSES_S = (0.0, 0.0)
+_appels: list = []
+
+
+def _faux_503_503_ok(url, timeout=120):
+    _appels.append(url)
+    if len(_appels) < 3:
+        raise urllib.error.HTTPError(url, 503, "SU", None, None)
+    return "ok"
+
+
+_texte_avant = C._get_text
+try:
+    C._get_text = _faux_503_503_ok
+    with _cx.redirect_stderr(_io.StringIO()):
+        verifie(C._get_text_retry("u") == "ok" and len(_appels) == 3,
+                "⭐ `_get_text_retry` : 503, 503, 200 → trois appels, texte rendu")
+    _appels.clear()
+
+    def _faux_404(url, timeout=120):
+        _appels.append(url)
+        raise urllib.error.HTTPError(url, 404, "NF", None, None)
+    C._get_text = _faux_404
+    try:
+        C._get_text_retry("u")
+        verifie(False, "un 404 doit lever")
+    except urllib.error.HTTPError as _e:
+        verifie(_e.code == 404 and len(_appels) == 1,
+                "un 4xx lève DU PREMIER COUP (rejouer masquerait sa nature)")
+    _appels.clear()
+
+    def _faux_503(url, timeout=120):
+        _appels.append(url)
+        raise urllib.error.HTTPError(url, 503, "SU", None, None)
+    C._get_text = _faux_503
+    try:
+        with _cx.redirect_stderr(_io.StringIO()):
+            C._get_text_retry("u")
+        verifie(False, "un 503 permanent doit lever")
+    except urllib.error.HTTPError as _e:
+        verifie(_e.code == 503 and len(_appels) == 3,
+                "un 503 permanent lève après 3 essais, pas plus")
+finally:
+    C._get_text = _texte_avant
+
 print(f"\n{ok} assertions vertes, {len(ko)} en échec")
 for m in ko:
     print(f"  ❌ {m}")

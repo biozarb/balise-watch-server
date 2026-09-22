@@ -2418,7 +2418,20 @@ def write_ndjson_gz(path: pathlib.Path, rows_iter) -> int:
             for row in rows_iter:
                 fh.write(json.dumps(row, separators=(",", ":")) + "\n")
                 n += 1
-    except BaseException:
+    except BaseException as exc:
+        # ⚠️ SAUF L'ARRÊT DEMANDÉ (`SIGTERM`/`SIGINT` → `ArretDemande` de
+        # `collect_reduit.armer_arret_propre`, décision du 24/08/2026) :
+        # là, l'archive COURTE MAIS LISIBLE reste À SA PLACE et monte au
+        # rattrapage — « 10 985 lignes irremplaçables » valent mieux
+        # qu'un trou, et ce choix a été fait en connaissance de cause.
+        # Le cas traité ci-dessous est l'ACCIDENT (réseau, bug) : on ne
+        # sait pas ce qui manque, on ne bénit pas. Un arrêt demandé à
+        # zéro ligne tombe quand même dans l'effacement : une archive
+        # vide n'est jamais « courte ».
+        arret_demande = type(exc).__name__ in ("ArretDemande",
+                                               "KeyboardInterrupt")
+        if arret_demande and n > 0:
+            raise
         # ⛔ UNE EXCEPTION À MI-ÉCRITURE NE LAISSE PAS UNE ARCHIVE
         # « SAINE » DERRIÈRE ELLE (débug du 22/09/2026). Le `with` ferme
         # le flux gzip proprement — pied, CRC, tout y est — et le
