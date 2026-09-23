@@ -111,12 +111,48 @@ FORMAT_GRIB = "application/wmo-grib"
 # impossible à distinguer d'un run non publié (piège nº 2).
 AXES_VERTICAUX_CONNUS = ("height", "z", "elevation", "vertical", "depth")
 
-# Plancher de plausibilité d'un GRIB2. ⚠️ Il ne protège pas d'un GRIB
-# corrompu — il protège du cas VRAIMENT vicieux : HTTP 200, corps vide
-# ou tronqué. Le champ deviendrait alors une nappe de NaN, indiscernable
-# d'un trou légitime. L'en-tête GRIB2 seul fait déjà 16 octets, et le
-# plus petit champ réel mesuré sur ce domaine en fait 7 957.
-MIN_OCTETS_GRIB = 256
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔⛔ 23/09 — LE PLANCHER DE 256 OCTETS REFUSAIT DE LA VRAIE DONNÉE.
+#     IL EST TOMBÉ À 16, ET C'EST LA LONGUEUR ANNONCÉE QUI GARDE.
+#
+#  `bw-agrume-piaf` est tombé en boucle les 05, 06, 22 et 23/09 — 55
+#  échecs d'affilée le 22 au soir — sur un corps de **203 octets servi
+#  en HTTP 200**. Le pavé ci-dessous affirmait « le plus petit champ
+#  réel mesuré sur ce domaine en fait 7 957 ». C'ÉTAIT FAUX, et personne
+#  ne pouvait le savoir : le plancher refusait avant que quiconque
+#  regarde le contenu.
+#
+#  ⛔ CAPTURÉ ET DÉCODÉ LE 23/09 (passe 05:30Z rejouée, rangs 16 à 36).
+#  Les 203 octets sont un GRIB2 COMPLET ET VALIDE :
+#
+#      GRIB … 7777 · longueur annoncée en section 0 = 203 = la taille
+#      shortName = tp · Ni = 1472 · Nj = 912
+#      numberOfDataPoints = 1 342 464   ⟵ la grille ENTIÈRE, la bonne
+#      packingType = grid_simple · bitsPerValue = 0
+#      valeurs : 1 342 464 points, min 0.0, max 0.0, aucun NaN
+#
+#  ⚠️ `bitsPerValue = 0` EST LA RÉPONSE. Un champ constant ne coûte
+#  aucun bit par point : GRIB2 n'encode alors que la constante. « Zéro
+#  bit par point » veut dire ici « il ne pleut nulle part sur cette
+#  échéance » — et les rangs concernés sont les DERNIERS de la passe
+#  (75-80 min, 80-85 min…), c'est-à-dire là où la prévision immédiate
+#  a fini de décroître. Par temps sec, la moitié des tranches sont
+#  ainsi, et UNE seule suffisait à tuer la passe entière.
+#
+#  ⛔ CE QUE LE PLANCHER CROYAIT MESURER. Il visait le corps VIDE ou
+#  TRONQUÉ, pas le corps PETIT — et la taille ne distingue pas les
+#  trois. Ce qui les distingue, c'est la STRUCTURE : un GRIB2 déclare
+#  sa propre longueur dans sa section 0. Un message tronqué en annonce
+#  PLUS qu'il n'en porte ; une page d'erreur ne commence pas par
+#  « GRIB » ; un champ constant, lui, est cohérent de bout en bout.
+#  On garde donc sur la longueur ANNONCÉE, jamais sur une taille
+#  attendue — celle-là dépend de la météo, pas du protocole.
+#
+#  ⓘ Le plancher qui reste (16 o) n'est plus une plausibilité : c'est
+#  la taille de la section 0, sans laquelle on ne peut même pas LIRE la
+#  longueur annoncée.
+# ══════════════════════════════════════════════════════════════════════
+MIN_OCTETS_GRIB = 16
 
 # ══════════════════════════════════════════════════════════════════════
 #  ⛔⛔ 27/08 — LE PLANCHER DE 256 OCTETS NE VOIT QUE LE CORPS *VIDE*,
@@ -173,18 +209,38 @@ def corps_grib_invalide(octets):
     """
     if len(octets) < MIN_OCTETS_GRIB:
         # ⚠️ 07/09 — ON DIT CE QU'IL Y A DEDANS. Les 05 et 06/09, la
-        # passerelle a rendu **203 octets en HTTP 200** pendant des
-        # heures (17 h–20 h, 23 h–0 h, 3 h, puis 20 h le lendemain) :
-        # 30 mails DOWN/UP, et pas UNE ligne de journal qui dise si
-        # c'était une saturation (`mw:code` 868502), un quota, ou une
-        # clé refusée. Sans le corps, on ne peut ni trancher ni
-        # rapporter à Météo-France. Cent soixante caractères suffisent.
+        # passerelle a rendu 203 octets en HTTP 200 pendant des heures
+        # (17 h–20 h, 23 h–0 h, 3 h, puis 20 h le lendemain) : 30 mails
+        # DOWN/UP, et pas UNE ligne de journal qui dise si c'était une
+        # saturation (`mw:code` 868502), un quota, ou une clé refusée.
+        # C'est CE journal-là qui a permis de trancher le 23/09 — les
+        # 203 octets commençaient par « GRIB », et tout est parti de
+        # cette ligne. On la garde pour le corps VRAIMENT court.
         apercu = octets[:160].decode("utf-8", "replace").replace("\n", " ")
-        return (f"{len(octets)} octets, trop court pour un GRIB2 "
-                f"(plancher {MIN_OCTETS_GRIB}) — corps : {apercu!r}")
+        return (f"{len(octets)} octets — même pas la section 0 d'un GRIB2 "
+                f"({MIN_OCTETS_GRIB} o) — corps : {apercu!r}")
     if not octets.startswith(MAGIE_GRIB_DEBUT):
         return (f"ne commence pas par « GRIB » mais par {octets[:24]!r} — "
                 f"c'est un corps d'erreur servi en HTTP 200")
+    # ⛔ LE GARDE-FOU RÉEL DEPUIS LE 23/09, et il ne suppose aucune
+    # taille : un GRIB2 porte sa longueur totale sur huit octets en
+    # section 0 (octets 8 à 15). Un message TRONQUÉ en annonce plus
+    # qu'il n'en porte — c'est exactement le cas que le plancher
+    # croyait attraper, et celui-ci l'attrape vraiment, quelle que soit
+    # la taille du champ.
+    #
+    # ⚠️ `>` et NON `!=` : un corps peut porter plusieurs messages
+    # concaténés, ou un blanc de fin (d'où le `rstrip` ci-dessous, qui
+    # date du 27/08 et répond à un cas vu). Annoncer MOINS que la
+    # taille reçue n'est donc pas une faute ; annoncer PLUS l'est
+    # toujours.
+    annoncee = int.from_bytes(octets[8:16], "big")
+    if annoncee == 0 or annoncee > len(octets):
+        return (f"section 0 annonce {annoncee} octets, le corps en porte "
+                f"{len(octets)} — message GRIB2 TRONQUÉ")
+    if octets[7] != 2:
+        return (f"édition GRIB {octets[7]}, pas 2 — ce n'est pas le "
+                f"format que ce code décode")
     if not octets.rstrip().endswith(MAGIE_GRIB_FIN):
         return ("ne se termine pas par « 7777 » — message GRIB2 TRONQUÉ "
                 "(eccodes en ferait quand même un handle)")
