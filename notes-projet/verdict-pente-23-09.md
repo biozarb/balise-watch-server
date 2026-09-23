@@ -144,4 +144,4 @@ lectures Jira en GET). Aucun `systemctl`, aucun SQL, aucun rsync.
 5. `delete_par_tranches` toujours pas éprouvé en vrai.
 6. `mutations_memoire` : 2 mutations non vues.
 
-Miroir git : `notes-projet/verdict-pente-23-09.md`, commit local `2384c6a`, pas de push.
+Miroir git : `notes-projet/verdict-pente-23-09.md`, commit local `328a131`, pas de push.
