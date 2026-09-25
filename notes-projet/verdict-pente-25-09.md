@@ -174,3 +174,5 @@ ont été effacés).
 5. **L'alerte position** : n'a pas crié cette nuit, à confirmer.
 6. `mutations_memoire` : 2 mutations non vues.
 7. Corriger le prompt de la routine : KAN-5 n'est pas clos.
+
+Miroir git : `notes-projet/verdict-pente-25-09.md`, commit local `d79d577`, pas de push.
