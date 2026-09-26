@@ -191,3 +191,5 @@ jamais lu.
 5. `mutations_memoire` : 2 mutations non vues.
 6. **Corriger le prompt de la routine** : KAN-5 n'est pas clos (signalé
    le 25/09, non fait).
+
+Miroir git : `notes-projet/verdict-pente-26-09.md`, commit local `b9052b1`, pas de push.
