@@ -1550,6 +1550,21 @@ def index_apres(index, run, domaine, cles, retention=RETENTION_RUNS):
         a_supprimer.extend(e.get("cles") or [])
     ancien = [e for e in ancien if e.get("domaine")]
 
+    # ⛔ 26/09 — UN RUN REPUBLIÉ PLUS COURT NE DOIT PAS OUBLIER SES CLÉS.
+    # Le même run passe plusieurs fois (rallonge AROME, couture IFS) et
+    # sa liste de clés CHANGE : 80 échéances avec la couture, 52 à la
+    # passe suivante sans elle. Remplacer l'entrée tout court laissait
+    # e54 → e135 hors index ET hors purge — 177 orphelins (0,64 Go)
+    # relevés par le garde-fou R2 le 26/09. Ce que l'entrée précédente
+    # réclamait et que la nouvelle ne réclame plus part à la
+    # SUPPRESSION ; le garde-fou `encore` plus bas protège toujours ce
+    # que la nouvelle passe publie.
+    neuves = set(cles)
+    for e in ancien:
+        if e.get("run") == run and e.get("domaine") == domaine:
+            a_supprimer.extend(c for c in (e.get("cles") or [])
+                               if c not in neuves)
+
     garde = [e for e in ancien
              if not (e.get("run") == run and e.get("domaine") == domaine)]
     garde.insert(0, dict(run=run, domaine=domaine, cles=list(cles)))

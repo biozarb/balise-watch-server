@@ -705,6 +705,33 @@ def main():
     verifier("⚠️ et ne demande PAS de supprimer ses propres clés",
              not any(c in cles(runs[-1]) for c in a_sup), str(a_sup))
 
+    # ⛔ 26/09 — LE RUN REPUBLIÉ PLUS COURT. Une passe cousue IFS publie
+    # le run 03 Z à 80 échéances (e54 → e135 comprises) ; une passe
+    # suivante du MÊME run, sans rallonge IFS, le republie à 52. L'entrée
+    # (run, domaine) était remplacée sans que les clés disparues partent
+    # nulle part : ni réclamées, ni supprimées — 177 orphelins, 0,64 Go,
+    # relevés par le garde-fou R2 le 26/09 (et 93 la nuit du 25T18).
+    R = runs[-1]
+    avec_ifs = GR.cles_du_run(R, D, STEPS + [54, 57])
+    idx_ifs, _ = GR.index_apres(index, R, D, avec_ifs)
+    idx_ifs = GR.index_apres_purge(idx_ifs, [])
+    court, a_sup_c = GR.index_apres(idx_ifs, R, D, cles(R))
+    perdues = [GR.cle_echeance(R, D, 54), GR.cle_echeance(R, D, 57)]
+    verifier("⛔ un run republié PLUS COURT envoie ses échéances "
+             "disparues à la SUPPRESSION, pas à l'oubli",
+             all(c in a_sup_c for c in perdues), str(a_sup_c))
+    verifier("  et ne touche à AUCUNE clé que la nouvelle passe publie",
+             not any(c in cles(R) for c in a_sup_c), str(a_sup_c))
+    verifier("  et les clés disparues sont dans `restes` (index écrit "
+             "AVANT la purge)", all(c in court["restes"] for c in perdues))
+    reclamees = {c for e in court["runs"] for c in e["cles"]}
+    verifier("  ⚠️ aucune clé jamais publiée n'est ni réclamée ni à "
+             "supprimer (la définition même d'un orphelin)",
+             all(c in reclamees or c in a_sup_c for c in avec_ifs))
+    long_, a_sup_l = GR.index_apres(court, R, D, avec_ifs)
+    verifier("un run republié PLUS LONG ne supprime rien de neuf",
+             not any(c in avec_ifs for c in a_sup_l), str(a_sup_l))
+
     # Un échec de suppression doit survivre au run suivant.
     idx2 = GR.index_apres_purge(index, ["agrume/grille/vieux/grille.npz"])
     idx3, a_sup3 = GR.index_apres(idx2, "2026-08-10T12:00:00Z", D,
