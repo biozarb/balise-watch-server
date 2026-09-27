@@ -202,3 +202,5 @@ passés par un `mktemp -d` en 700, effacé après).
 6. `mutations_memoire` : 2 mutations non vues.
 7. **Corriger le prompt de la routine** : KAN-5 n'est pas clos depuis le
    10/09 (signalé le 25/09 et le 26/09, toujours pas fait).
+
+Miroir git : `notes-projet/verdict-pente-27-09.md`, commit local `0768711`, pas de push.
