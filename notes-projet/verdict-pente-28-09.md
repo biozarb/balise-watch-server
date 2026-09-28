@@ -165,7 +165,7 @@ imprimé.
 ⚠️ Trois tables distinctes ont maintenant expiré en quatre nuits
 (`model_verif_daily`, `rpc/bw_character_avance`, `model_score_zone`).
 Ça ressemble moins à une requête à corriger qu'à une base sous tension —
-même conclusion que §2.3.
+même conclusion que le point 3 du §2.
 
 ## 6. Tickets — deux commentaires, aucune transition
 
@@ -260,3 +260,5 @@ après). `~/.balise-watch-alertes.env` **sourcé**, jamais lu.
    le 10/09 (signalé les 25, 26 et 27/09 — toujours pas fait), et KAN-3
    est en « Terminé » (`statusCategory = done`) alors que le prompt le
    décrit comme suivi — la date de fermeture n'a pas été relevée.
+
+Miroir git : `notes-projet/verdict-pente-28-09.md`, commit local `bc057e4`, pas de push.
