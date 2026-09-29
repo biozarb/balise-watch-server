@@ -1362,12 +1362,61 @@ class Supabase:
             print(f"  ⚠️ purge {table} : HTTP {e.code} — "
                   f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
 
+    def _plus_vieille_journee(self, table: str, colonne_jour: str, query: str):
+        """La plus vieille journée sous le filtre — UNE sonde d'index.
+
+        `select=<jour>&order=<jour>&limit=1` : le planificateur n'a
+        qu'un chemin, l'index de la clé primaire (`as_of` en tête), et
+        il s'arrête à la première ligne vivante. C'est la SEULE question
+        qu'on pose encore à la base sur `as_of < seuil` (voir
+        `delete_par_tranches`, 29/09). Rend une `datetime` (naïve), ou
+        `None` s'il n'y a rien, ou la chaîne `"illisible"` si le serveur
+        a refusé — trois réponses distinctes, l'appelant les sépare.
+        """
+        req = self._req(f"{table}{query}&select={colonne_jour}"
+                        f"&order={colonne_jour}&limit=1", "GET", None, {})
+        for essai in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    lignes = json.loads(r.read().decode("utf-8"))
+                if not lignes:
+                    return None
+                return datetime.strptime(lignes[0][colonne_jour], "%Y-%m-%d")
+            except (urllib.error.HTTPError, urllib.error.URLError, ValueError,
+                    KeyError, TypeError) as e:
+                detail = (_detail_erreur(e.read(ERREUR_OCTETS))
+                          if isinstance(e, urllib.error.HTTPError) else str(e))
+                print(f"  ⚠️ purge {table} : plus vieille journée illisible "
+                      f"(essai {essai}/2 : {detail})", file=sys.stderr)
+                if essai == 1:
+                    time.sleep(3)
+        return "illisible"
+
+    @staticmethod
+    def _lignes_touchees(entete: str) -> int | None:
+        """Le nombre de lignes qu'une mutation a touchées, lu dans son
+        `Content-Range` (`0-14999/15000` → 15 000 ; `*/0` ou `*/*` → 0 ;
+        rien de lisible → `None`). PostgREST pose cet en-tête sur un
+        DELETE/PATCH même en `return=minimal` — c'est ce que la
+        contre-épreuve du 10/09 avait lu (`PATCH …&limit=2` →
+        `Content-Range: 0-20/21`)."""
+        if not entete:
+            return None
+        plage, _, total = entete.partition("/")
+        if plage != "*" and "-" in plage:
+            a, _, b = plage.partition("-")
+            if a.isdigit() and b.isdigit():
+                return int(b) - int(a) + 1
+        if plage == "*":
+            return int(total) if total.isdigit() else 0
+        return None
+
     def delete_par_tranches(self, table: str, colonne_jour: str, seuil,
                             tranches, max_jours: int = 60) -> int | None:
         """Supprime `colonne_jour < seuil` PAR TRANCHES — une journée à la
         fois, et chaque journée découpée par `tranches` (une liste de
         sous-filtres PostgREST, ex. `regime=eq.fluxN`). Rend le nombre
-        de lignes effacées, ou `None` si le compte n'a pas pu être lu.
+        de lignes effacées, ou `None` si une tranche n'a pas dit combien.
 
         ⛔ POURQUOI (10/09/2026, enquete-pente-10-09.md §1). La purge de
         `model_score_zone` (`as_of < J−7`, UNE requête) a expiré en 57014
@@ -1389,61 +1438,108 @@ class Supabase:
         derrière la passerelle Supabase. On découpe donc par CLÉ, ce que
         le serveur ne peut pas ignorer.
 
-        ⚠️ On COMPTE avant et après (HEAD, sur l'index de la clé — pas le
-        seq scan de `model_character`) : c'est ce qui dit ce qui reste.
+        ⛔ CE QUI A CHANGÉ LE 29/09/2026 — la deuxième vraie épreuve
+        (28/09) et la nuit suivante ont montré que ce n'était PAS la
+        taille des tranches, c'était LES TROIS REQUÊTES AUTOUR :
+
+        1. **Plus de `HEAD count` sur `as_of < seuil`, ni avant ni
+           après.** Un `count=exact` sur ce filtre laisse le choix du
+           plan au serveur ; avec des statistiques qui datent d'avant la
+           purge, `as_of < seuil` est estimé à une fraction entière de la
+           table et part en balayage séquentiel — 57014 le 28/09 (deux
+           fois) et le 29/09, sur une table qui ne contenait alors plus
+           RIEN sous le seuil. Le compte venait de là, pas du DELETE : le
+           `? ligne(s) effacée(s)` du journal était le compte, pas la
+           purge. Le nombre de lignes effacées se lit désormais dans le
+           `Content-Range` de CHAQUE DELETE (`_lignes_touchees`) — zéro
+           requête de plus.
+        2. **Plus de tranche « le reste de la journée ».** `regime` est
+           `not null` avec un CHECK sur exactement les huit valeurs de
+           `TRANCHES_SCORE_ZONE` (step35) : la neuvième tranche ne peut
+           rien trouver. Mais un DELETE sur `as_of=eq.J` SANS régime vise
+           ≈ 1/8 de la table — assez pour que le planificateur préfère
+           là aussi le balayage séquentiel. C'est LA tranche qui a rendu
+           57014 le 28/09 (`?as_of=eq.2026-09-21`, sans `&regime=`),
+           après que les huit tranches par régime avaient déjà tout
+           effacé. On l'a payée pour rien, et elle a fait croire à un
+           retard qui n'existait pas.
+        3. **Plus de repli aveugle sur 60 jours.** Quand la plus vieille
+           journée était illisible, la boucle partait de `seuil − 60 j`
+           et jouait 540 DELETE à vide (29/09, 30 s). La sonde d'index
+           (`_plus_vieille_journee`) se rejoue une fois ; si elle échoue
+           encore, on s'arrête et on le dit — le reste attendra demain,
+           la purge est idempotente.
+        4. Une tranche en 57014 est **rejouée une fois** après 5 s avant
+           de compter comme un échec ; trois échecs arrêtent toujours
+           la boucle. Et la borne est alignée sur le filtre : on efface
+           les journées `< seuil` (date), pas la journée du seuil
+           elle-même — la boucle en prenait une de plus que le compte.
         """
-        query = f"?{colonne_jour}=lt.{seuil:%Y-%m-%d}"
-        avant = self.compte(table, query)
-        if avant == 0:
+        seuil_jour = seuil.replace(tzinfo=None).replace(hour=0, minute=0,
+                                                         second=0, microsecond=0)
+        query = f"?{colonne_jour}=lt.{seuil_jour:%Y-%m-%d}"
+        if self.dry_run:
+            print(f"  (dry-run) delete par tranches {table}{query}")
+            return 0
+        premier = self._plus_vieille_journee(table, colonne_jour, query)
+        if premier is None:
             print(f"  ⓘ purge {table} : rien à effacer ({query})")
             return 0
-        if self.dry_run:
-            print(f"  (dry-run) delete par tranches {table}{query} ({avant} lignes)")
-            return 0
-        # La plus vieille journée présente : une lecture d'une ligne.
-        premier = None
-        try:
-            req = self._req(f"{table}{query}&select={colonne_jour}"
-                            f"&order={colonne_jour}&limit=1", "GET", None, {})
-            with urllib.request.urlopen(req, timeout=120) as r:
-                lignes = json.loads(r.read().decode("utf-8"))
-            if lignes:
-                premier = datetime.strptime(lignes[0][colonne_jour], "%Y-%m-%d")
-        except (urllib.error.HTTPError, urllib.error.URLError, ValueError,
-                KeyError, TypeError) as e:
-            print(f"  ⚠️ purge {table} : plus vieille journée illisible ({e})",
+        if premier == "illisible":
+            print(f"  ⚠️ purge {table} : la base ne dit pas par où commencer "
+                  f"— aucune tranche lancée, le reste attendra demain",
                   file=sys.stderr)
-        if premier is None:
-            premier = seuil - timedelta(days=max_jours)
-        jour = premier.replace(tzinfo=None)
-        fin = seuil.replace(tzinfo=None)
-        passes, echecs = 0, 0
-        while jour < fin and passes < max_jours * (len(tranches) + 1):
-            for sous in list(tranches) + [""]:      # "" = le reste de la journée
-                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}" + (f"&{sous}" if sous else "")
-                req = self._req(f"{table}{q}", "DELETE", None,
-                                {"Prefer": "return=minimal"})
+            return None
+        jour = premier
+        passes, echecs, effacees, inconnues = 0, 0, 0, 0
+        while jour < seuil_jour and passes < max_jours * len(tranches):
+            for sous in tranches:
+                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}&{sous}"
                 passes += 1
-                try:
-                    with urllib.request.urlopen(req, timeout=120) as r:
-                        r.read()
-                except urllib.error.HTTPError as e:
+                n = self._delete_tranche(table, q)
+                if n == "echec":
                     echecs += 1
-                    print(f"  ⚠️ purge {table} ({q}) : HTTP {e.code} — "
-                          f"{_detail_erreur(e.read(ERREUR_OCTETS))}", file=sys.stderr)
                     if echecs >= 3:
                         break
+                elif n is None:
+                    inconnues += 1
+                else:
+                    effacees += n
             if echecs >= 3:
                 print(f"  ⚠️ purge {table} : trois tranches en échec — on "
                       f"s'arrête, le reste attendra demain", file=sys.stderr)
                 break
             jour += timedelta(days=1)
-        restant = self.compte(table, query)
-        effacees = None if (avant is None or restant is None) else avant - restant
-        print(f"  → purge {table} : {effacees if effacees is not None else '?'} "
-              f"ligne(s) effacée(s) en {passes} tranche(s)"
-              + (f", {restant} RESTANTE(S)" if restant else ""))
-        return effacees
+        reste = self._plus_vieille_journee(table, colonne_jour, query)
+        total = None if inconnues else effacees
+        suffixe = ""
+        if isinstance(reste, datetime):
+            suffixe = f", des lignes RESTENT (plus vieille journée : {reste:%Y-%m-%d})"
+        elif reste == "illisible":
+            suffixe = ", reste inconnu (sonde illisible)"
+        print(f"  → purge {table} : {total if total is not None else '?'} "
+              f"ligne(s) effacée(s) en {passes} tranche(s){suffixe}")
+        return total
+
+    def _delete_tranche(self, table: str, q: str):
+        """UN DELETE de tranche, rejoué une fois s'il expire. Rend le
+        nombre de lignes touchées, `None` si l'en-tête ne le dit pas,
+        ou `"echec"` si les deux essais ont été refusés."""
+        req = self._req(f"{table}{q}", "DELETE", None,
+                        {"Prefer": "return=minimal, count=exact"})
+        for essai in (1, 2):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    r.read()
+                    return self._lignes_touchees(r.headers.get("content-range") or "")
+            except urllib.error.HTTPError as e:
+                print(f"  ⚠️ purge {table} ({q}) : HTTP {e.code} — "
+                      f"{_detail_erreur(e.read(ERREUR_OCTETS))}"
+                      f"{' — rejouée dans 5 s' if essai == 1 else ''}",
+                      file=sys.stderr)
+                if essai == 1:
+                    time.sleep(5)
+        return "echec"
 
 
 # ══════════════════════════════════════════════════════════════════

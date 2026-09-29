@@ -6,6 +6,51 @@
 
 ---
 
+## 29/09/2026 (notation) — le 57014 de la purge n'était pas la purge : c'était le `count` autour, et une tranche qui ne pouvait rien trouver
+
+Deux nuits (28 et 29/09) ont écrit `⚠️ compte model_score_zone : HTTP 500`
+puis `→ purge model_score_zone : ? ligne(s) effacée(s) en 18 tranche(s)`
+(540 le 29/09), et la routine du matin en a conclu « la journée du 21/09
+reste en base, le retard double ». **Faux** : les huit tranches par régime
+du 21/09 avaient réussi. Trois pièges dans `delete_par_tranches`, tous
+AUTOUR des tranches qu'on avait soigneusement dimensionnées.
+
+1. **Un `HEAD … Prefer: count=exact` n'est pas gratuit parce qu'il est
+   sur l'index.** `count(*) where as_of < seuil` laisse le plan au
+   serveur ; avec des statistiques d'avant la purge, `as_of < seuil`
+   est estimé à une fraction entière de la table et part en balayage
+   séquentiel — 57014 sur une table qui ne contenait plus RIEN sous le
+   seuil. Le `?` du journal était CE compte, pas le DELETE.
+   → Plus aucun `count` dans la purge. La plus vieille journée se lit par
+   UNE sonde d'index (`select=as_of&order=as_of&limit=1`), et le nombre
+   de lignes effacées vient du `Content-Range` de chaque DELETE
+   (`_lignes_touchees`).
+
+2. **Une tranche « le reste de la journée » qui ne peut rien trouver
+   coûte quand même un plan.** `regime` est `not null` + CHECK sur
+   exactement les huit valeurs de `TRANCHES_SCORE_ZONE` : la neuvième
+   tranche (`as_of=eq.J` sans régime) était vide par construction, mais
+   elle vise ≈ 1/8 de la table — assez pour un balayage séquentiel. C'est
+   ELLE qui a rendu 57014 le 28/09, après que tout était déjà effacé.
+   → Supprimée. Une tranche porte toujours un régime.
+
+3. **Un repli « aveugle » qui part de `seuil − 60 j` joue 540 DELETE à
+   vide** quand la sonde échoue (29/09, 30 s de requêtes pour rien).
+   → La sonde se rejoue une fois ; si elle échoue encore, on s'arrête et
+   on le dit. La purge est idempotente : le reste attendra demain.
+
+Leçon transversale : sur cette base (8 s pour `service_role`), **toute
+requête dont le filtre couvre ≥ ~10 % d'une table est un 57014 en
+puissance**, quel que soit l'index — le planificateur peut préférer le
+balayage. Et **un `?` dans le journal n'est pas un retard** : le retard
+ne se conclut que d'une sonde (`des lignes RESTENT (plus vieille
+journée : J)`), jamais d'un compte qui a échoué.
+Banc : `test_score.py` (section 10/09, cas 29/09) et
+`mutations_memoire.py` (5 mutations neuves). Diagnostic base à jouer par
+Yann : `model-verif/diagnostic_base_sous_tension_2026-09-29.sql`.
+
+---
+
 ## 17/09/2026 (notation) — « rattrapable » n'est pas « rattrapé » : une nuit morte sans un son
 
 La nuit du 16/09 est morte à 06:22 CEST — `Abort: rpc bw_character_avance :

@@ -160,8 +160,59 @@ MUTATIONS = [
     ("les tranches redeviennent un `limit` — que cette base IGNORE "
      "(mesuré le 10/09 : `limit=2` → 21 lignes touchées)",
      SCORE, B_SCORE,
-     '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}" + (f"&{sous}" if sous else "")',
+     '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}&{sous}"',
      '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}&limit=20000"'),
+
+    # ── 29/09 : les trois requêtes qui expiraient AUTOUR des tranches ──
+    ("⭐ le `HEAD count` sur `as_of < seuil` revient avant la purge — "
+     "c'est LUI qui a rendu 57014 les 28 et 29/09 (plan à balayage)",
+     SCORE, B_SCORE,
+     '        premier = self._plus_vieille_journee(table, colonne_jour, query)\n'
+     '        if premier is None:\n',
+     '        if self.compte(table, query) == 0:\n'
+     '            premier = None\n'
+     '        else:\n'
+     '            premier = self._plus_vieille_journee(table, colonne_jour, query)\n'
+     '        if premier is None:\n'),
+
+    ("⭐ la tranche « reste de la journée » (as_of=eq.J SANS régime, "
+     "≈ 1/8 de la table) revient — le 57014 du 28/09",
+     SCORE, B_SCORE,
+     '            for sous in tranches:\n'
+     '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}&{sous}"',
+     '            for sous in list(tranches) + [""]:\n'
+     '                q = f"?{colonne_jour}=eq.{jour:%Y-%m-%d}" + (f"&{sous}" if sous else "")'),
+
+    ("⭐ sonde illisible ⇒ la boucle repart aveugle de seuil − 60 j "
+     "(les 540 DELETE à vide du 29/09)",
+     SCORE, B_SCORE,
+     '        if premier == "illisible":\n'
+     '            print(f"  ⚠️ purge {table} : la base ne dit pas par où commencer "\n'
+     '                  f"— aucune tranche lancée, le reste attendra demain",\n'
+     '                  file=sys.stderr)\n'
+     '            return None\n',
+     '        if premier == "illisible":\n'
+     '            premier = seuil_jour - timedelta(days=max_jours)\n'),
+
+    ("le nombre de lignes effacées n'est plus lu dans le Content-Range "
+     "du DELETE : le journal retombe à `?`",
+     SCORE, B_SCORE,
+     '                    return self._lignes_touchees(r.headers.get("content-range") or "")',
+     '                    return None'),
+
+    ("une tranche en 57014 n'est plus rejouée : un seul refus suffit à "
+     "la compter en échec",
+     SCORE, B_SCORE,
+     '        for essai in (1, 2):\n'
+     '            try:\n'
+     '                with urllib.request.urlopen(req, timeout=120) as r:\n'
+     '                    r.read()\n'
+     '                    return self._lignes_touchees(',
+     '        for essai in (1,):\n'
+     '            try:\n'
+     '                with urllib.request.urlopen(req, timeout=120) as r:\n'
+     '                    r.read()\n'
+     '                    return self._lignes_touchees('),
 
     ("⭐ le garde-fou calendaire de model_character disparaît : deux seq "
      "scans de 1,2 M lignes par nuit, pour zéro ligne, et les 57014 avec",

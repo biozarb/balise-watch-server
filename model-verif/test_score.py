@@ -6161,8 +6161,14 @@ def test_10_09_la_purge_de_model_score_zone_va_par_tranches():
             if self.panne_apres is not None and n_del > self.panne_apres:
                 raise E.HTTPError(req.full_url, 500, "x", {},
                                   io.BytesIO(b'{"code":"57014","message":"timeout"}'))
+            touchees = 0
             for k in self._lignes(op, val, reg):
+                touchees += self.t[k]
                 self.t[k] = 0
+            # PostgREST pose le Content-Range d'une mutation même en
+            # return=minimal : `0-N/T` si des lignes sont touchées, `*/0` sinon.
+            r.headers["Content-Range"] = (f"0-{touchees - 1}/{touchees}"
+                                          if touchees else "*/0")
             return r
 
     regimes = list(J.S.REGIMES) + ["unknown", "all"]
@@ -6183,10 +6189,21 @@ def test_10_09_la_purge_de_model_score_zone_va_par_tranches():
     finally:
         U.urlopen = vrai
     deletes = [u for m, u in f.appels if m == "DELETE"]
-    check("10/09 ⭐ deux journées (189 809 lignes) partent en 2 × 9 tranches "
-          "(8 régimes + le reste de la journée)", len(deletes), 18)
+    check("10/09 ⭐ deux journées (189 809 lignes) partent en 2 × 8 tranches "
+          "(8 régimes — le « reste de la journée » est parti le 29/09)",
+          len(deletes), 16)
     attendu = sum(v for k, v in table.items() if k[0] < "2026-09-04")
     check("10/09 ⭐ … et le total effacé est rendu", n, attendu)
+    check("29/09 ⛔ AUCUN `count` sur `as_of=lt.` : plus un HEAD dans la purge "
+          "(c'est LUI qui expirait les 28 et 29/09, pas le DELETE)",
+          any(m == "HEAD" for m, _ in f.appels), False)
+    check("29/09 ⛔ chaque DELETE porte un régime — jamais `as_of=eq.J` nu "
+          "(≈ 1/8 de la table : le planificateur part en balayage)",
+          all("regime=eq." in u for u in deletes), True)
+    sondes = [u for m, u in f.appels if m == "GET"]
+    check("29/09 la plus vieille journée se lit par UNE sonde d'index "
+          "(order + limit=1), avant et après — et rien d'autre en lecture",
+          (len(sondes), all("order=as_of&limit=1" in u for u in sondes)), (2, True))
     check("10/09 ⛔ AUCUNE tranche n'est un `limit` (ignoré par cette base)",
           any("limit=" in u for u in deletes), False)
     check("10/09 ⛔ chaque tranche est un FILTRE SUR LA CLÉ : as_of=eq.<jour>",
@@ -6194,6 +6211,8 @@ def test_10_09_la_purge_de_model_score_zone_va_par_tranches():
     check("10/09 … huit tranches par jour portent un régime (dont `all` = la "
           "fenêtre glissante)",
           sum("regime=eq." in u for u in deletes), 16)
+    check("29/09 ⛔ la journée du seuil elle-même n'est PAS effacée (borne "
+          "alignée sur `lt.`)", any("as_of=eq.2026-09-04" in u for u in deletes), False)
     check("10/09 ⭐⭐ ce qui est APRÈS le seuil n'est pas touché",
           sum(v for k, v in f.t.items() if k[0] == "2026-09-09"), 8000)
     check("10/09 rien à effacer ⇒ aucun DELETE", (lambda: (
@@ -6205,14 +6224,46 @@ def test_10_09_la_purge_de_model_score_zone_va_par_tranches():
     # ⛔ Trois tranches en 57014 arrêtent la boucle ; les précédentes restent.
     f = _Fausse(table, panne_apres=3)
     U.urlopen = f.urlopen
+    vrai_sleep, J.time.sleep = J.time.sleep, lambda s: None
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             n = sb.delete_par_tranches("model_score_zone", "as_of", seuil,
                                        tranches=J.TRANCHES_SCORE_ZONE)
     finally:
         U.urlopen = vrai
-    check("10/09 ⛔ trois tranches en 57014 arrêtent la boucle, l'acquis reste",
-          0 < n < 94436 and len([u for m, u in f.appels if m == "DELETE"]) == 6, True)
+        J.time.sleep = vrai_sleep
+    # 29/09 : chaque tranche refusée est REJOUÉE une fois (2 appels), puis
+    # comptée en échec ; trois échecs = 3 réussites + 3 × 2 refus = 9 DELETE.
+    check("10/09 ⛔ trois tranches en 57014 arrêtent la boucle, l'acquis reste "
+          "(29/09 : chacune rejouée une fois avant de compter)",
+          n is not None and 0 < n < 94436
+          and len([u for m, u in f.appels if m == "DELETE"]) == 9, True)
+
+    # 29/09 ⛔ sonde illisible ⇒ AUCUNE tranche (fini les 540 DELETE à vide).
+    class _Aveugle(_Fausse):
+        def urlopen(self, req, timeout=None):
+            if req.get_method() == "GET":
+                self.appels.append(("GET", req.full_url))
+                raise E.HTTPError(req.full_url, 500, "x", {},
+                                  io.BytesIO(b'{"code":"57014","message":"timeout"}'))
+            return super().urlopen(req, timeout)
+    f = _Aveugle(table)
+    U.urlopen = f.urlopen
+    vrai_sleep, J.time.sleep = J.time.sleep, lambda s: None
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            n = sb.delete_par_tranches("model_score_zone", "as_of", seuil,
+                                       tranches=J.TRANCHES_SCORE_ZONE)
+    finally:
+        U.urlopen = vrai
+        J.time.sleep = vrai_sleep
+    check("29/09 ⛔ plus vieille journée illisible ⇒ zéro DELETE, `None` rendu "
+          "(le 29/09 la boucle aveugle avait joué 540 tranches à vide)",
+          (n, len([u for m, u in f.appels if m == "DELETE"])), (None, 0))
+    check("29/09 `_lignes_touchees` lit le Content-Range d'une mutation",
+          [J.Supabase._lignes_touchees(h) for h in
+           ("0-14999/15000", "0-20/21", "*/0", "*/*", "", "n'importe quoi")],
+          [15000, 21, 0, 0, None, None])
 
     # ⛔ ET `_purges` S'EN SERT — sur model_score_zone, avec les tranches.
     src = pathlib.Path(J.__file__).read_text(encoding="utf-8")
