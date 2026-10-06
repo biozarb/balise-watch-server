@@ -520,12 +520,14 @@ définie**) ; `curl -K -`, jamais `-u`. Les deux scripts passés au VPS l'ont
 été par `ssh 'bash -s' <` depuis le Mac — **rien n'a été déposé sur le
 VPS**.
 
-**Mac** : cette note et son miroir git, plus deux scripts jetables dans
+**Mac** : cette note et son miroir git, plus trois scripts jetables dans
 `/Users/yann/` (hors dépôt : `bw-jira-get-06-10.sh`,
-`bw-jira-post-06-10.sh`) — **pas de `git push`**.
+`bw-jira-post-06-10.sh`, `bw-commit-06-10.sh`) — **pas de `git push`**.
 
 Miroir git : `notes-projet/verdict-pente-06-10.md`, commité en local depuis
-la racine du dépôt serveur. Pas de `git push`.
+la racine du dépôt serveur — **commit `7193c35`**, puis un second commit
+pour ce paragraphe (le hash ne peut pas se citer lui-même). Pas de
+`git push`.
 
 ## 10. Ce qui reste — et ce qui demande Yann
 
