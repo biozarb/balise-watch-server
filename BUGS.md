@@ -6,6 +6,116 @@
 
 ---
 
+## 07/10/2026 (alertes) — le push ne partait pas à cause du préfixe IPv6 PARTAGÉ d'OVH, et le `curl` cachait la raison depuis huit jours
+
+Trois cris réels perdus (30/09, 02/10, 07/10) : le mail arrivait, le
+téléphone restait muet, et le journal ne disait qu'une chose,
+`⚠️ push non parti (webhook)`. **La variable était bonne, le `POST` aussi.**
+
+1. **`ntfy.sh` limite les visiteurs ANONYMES à 250 messages / 12 h et les
+   regroupe PAR PRÉFIXE /64 en IPv6.** Le VPS sort en IPv6 sur
+   `2001:41d0:404:200::/64`, un préfixe **OVH partagé** : les voisins
+   mangeaient le quota et notre cri repartait en **HTTP 429**. Mesuré à la
+   même seconde — `GET /v1/account` en IPv6 : `messages 250/250,
+   restants 0` ; en **IPv4** : `0/250, restants 250`. Le `POST` en IPv4
+   rend **200**, en IPv6 **429**. L'IPv4 du VPS est à nous seuls, donc son
+   quota aussi.
+   → **`--ipv4` sur tout appel ntfy** (`run.sh` `alerter()`,
+   `tools/bw_avertir_config.sh`, `traces/entretien/entretien.sh`).
+   ⚠️ Le cache du sujet était à **0 message sur 12 h** : ce n'est donc pas
+   « on pousse trop », c'est « on partage une adresse ». Ne cherche pas un
+   coupable chez nous avant d'avoir lu `/v1/account` **dans les deux
+   familles d'adresses**.
+
+2. **Un canal qui échoue en silence est pire qu'un canal absent.**
+   L'ancien appel finissait par `>/dev/null 2>&1` : huit jours à voir
+   « push non parti » sans jamais pouvoir savoir pourquoi, et une question
+   restée ouverte trois matins de suite dans les notes.
+   → Le **code HTTP** et le **code de sortie `curl`** vont au journal, et
+   un 429 s'y nomme (« quota ntfy épuisé pour ce visiteur »). Un canal
+   cassé doit s'expliquer tout seul.
+
+3. **Et l'affectation doit survivre à un futur `set -e`.**
+   `push_code=$(curl …)` sous `set -e` tue la nuit entière quand le DNS
+   tombe. `run.sh` est en `set -uo pipefail` aujourd'hui — ça ne garantit
+   pas demain. → `… ) || push_sortie=$?`. **Un canal ne tue pas un
+   runner** (règle du 10/09). Banc des quatre cas : 200 / DNS cassé
+   (`000`, `curl=6`) / 400 / drapeau de banc muet, et le run continue.
+
+Leçon transversale : **un quota « par IP » sur un service gratuit n'est
+pas par machine.** Dès qu'un hébergeur donne un /64 partagé, toute limite
+anonyme est une limite de voisinage.
+
+---
+
+## 07/10/2026 (alertes) — « un commentaire par jour et par motif » : le garde-fou était coupé en deux, et la correction évidente l'aurait cassé pour de bon
+
+Deux écrivains sur les trois mêmes motifs Jira, deux dossiers de jetons
+qui ne se parlaient pas : le contrôle de 07:30 écrit dans
+`/var/lib/bw-model-verif`, la routine Balise Watch dans
+`$HOME/.balise-watch-etat-alertes`. Relevé le 06/10 :
+`cri.jira.bw-purge-57014` valait **2026-10-06** d'un côté et
+**2026-10-05** de l'autre. Le garde-fou protégeait chacun contre lui-même
+et **aucun contre l'autre** : rien n'empêchait techniquement un double
+commentaire le même jour. Ce matin-là, seule une lecture humaine du
+journal du contrôle l'a évité.
+
+⛔ **ET LA « CORRECTION D'UNE LIGNE » QUI VIENT À L'ESPRIT EST UN PIÈGE.**
+La note du 06/10 proposait de « retirer `$ETAT` de l'appel, et laisser le
+défaut de `bw_jira_signaler` faire son travail ». **Ne fais pas ça.**
+L'unit `bw-model-controle.service` porte `ProtectHome=read-only` avec
+`ReadWritePaths=/var/lib/bw-model-verif` — comme `bw-model-score`,
+`bw-model-collect` et `bw-garde-fou-r2`. **`$HOME` est interdit en
+écriture à tous les services.** Le contrôle ne passe donc pas `$ETAT` par
+confusion entre deux notions : c'est son **seul chemin inscriptible**. Le
+lui retirer, c'est un jeton qui ne s'écrit **jamais** et un commentaire
+Jira sur le même motif **tous les matins, sans fin**.
+
+→ Réparé dans `tools/bw_jira.sh` : le garde-fou **LIT LES DEUX** dossiers
+(`$etat`, `BW_MODEL_VERIF_ETAT`, `BW_ETAT_ALERTES`) et il suffit qu'**un
+seul** porte la date du jour pour se taire ; chacun continue d'**écrire**
+là où il peut. Le piège est commenté aux deux endroits.
+
+⚠️ Conséquence à connaître : quand le contrôle (07:30) parle le premier, la
+routine qui passe après est **légitimement** refusée par la garde. Si elle
+a davantage à dire, c'est un `POST` direct sur
+`/rest/api/3/issue/<clé>/comment`, délibéré et assumé — pas un
+contournement de la garde.
+
+---
+
+## 07/10/2026 (contrôle de pente) — une tranche de purge rejouée PUIS rattrapée comptait comme un échec
+
+`incidents`, dans le registre des nuits, **conserve** la ligne
+`⚠️ purge … HTTP 500` même quand la tranche est rejouée 5 s plus tard et
+qu'elle passe. Le 06/10, `controle_quotidien.py` a donc écrit à KAN-5
+« **purge en échec cette nuit** » alors que la purge avait **abouti** :
+8 tranches, 124 678 lignes effacées. C'est exactement l'erreur de lecture
+du 28/09 — côté machine cette fois.
+
+Le registre ne porte **aucun champ de bilan de purge**. `score.log`, si.
+→ `constats()` prend un `journal` optionnel, et `bilan_purge()` y cherche
+un `→ purge … N ligne(s) effacée(s) en T tranche(s)` **postérieur au
+dernier avertissement**. Quatre cas, et le doute profite toujours au
+constat :
+
+| au journal | le canal |
+|---|---|
+| avertissement **puis** bilan chiffré | **se tait** (rejeu rattrapé) |
+| avertissement, **aucun** bilan après | parle, et dit « **NON rattrapée** » |
+| bilan à `?` ligne(s) | parle, et nomme le `Content-Range` manquant |
+| pas de journal du tout | parle, et dit « statut réel **INCONNU** » |
+
+⚠️ La **sonde** (`plus vieille journée illisible`) n'est **pas** une
+tranche : elle a ses deux essais à elle et se compte à part.
+⚠️ Lecture **seule**, après la notation, **hors du chemin critique de la
+nuit** : un journal absent rend `None`, jamais une exception.
+⚠️ Les noms de tables restent **dans l'ordre du journal** (`dict.fromkeys`,
+pas `set`) : l'ordre dit laquelle a lâché la première, et c'est l'ordre que
+le ticket porte depuis le 10/09 — un `sorted()` casse le test du lot.
+
+---
+
 ## 29/09/2026 (notation) — le 57014 de la purge n'était pas la purge : c'était le `count` autour, et une tranche qui ne pouvait rien trouver
 
 Deux nuits (28 et 29/09) ont écrit `⚠️ compte model_score_zone : HTTP 500`

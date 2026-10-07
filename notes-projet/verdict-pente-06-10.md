@@ -399,6 +399,23 @@ réouverture.
 
 ## 7-bis. ⛔ TROUVÉ CE MATIN : le garde-fou « un commentaire par jour et par motif » est COUPÉ EN DEUX
 
+> ⛔ **CORRECTION AJOUTÉE LE 07/10/2026 — LIS CECI AVANT D'APPLIQUER CE QUI
+> SUIT.** Le constat de cette section est juste (deux magasins de jetons qui
+> ne se parlent pas), mais **son diagnostic et le correctif qu'elle propose
+> sont FAUX**, et le correctif aurait cassé le contrôle pour de bon.
+> `controle_quotidien.sh` ne passe pas `$ETAT` par confusion entre deux
+> notions : l'unit `bw-model-controle.service` porte
+> `ProtectHome=read-only` avec `ReadWritePaths=/var/lib/bw-model-verif`
+> (comme `bw-model-score`, `bw-model-collect` et `bw-garde-fou-r2`), donc
+> **`$HOME` est interdit en écriture à tous les services**. `$ETAT` est son
+> SEUL chemin inscriptible. Lui retirer, c'est un jeton qui ne s'écrit
+> **jamais** et un commentaire Jira sur le même motif **tous les matins,
+> sans fin**.
+> ⇒ Réparé le 07/10 **dans `tools/bw_jira.sh`** : le garde-fou **lit les
+> deux** dossiers et se tait dès qu'un seul porte la date du jour ; chacun
+> continue d'écrire là où il peut. Voir `BUGS.md`, entrée du 07/10, et la
+> note `verdict-pente-07-10.md` §12.
+
 En vérifiant les jetons avant d'écrire, une incohérence : le contrôle a
 commenté KAN-5 à 07:30:54, et pourtant
 `~/.balise-watch-etat-alertes/cri.jira.bw-purge-57014` était **resté au
@@ -564,6 +581,13 @@ pour ce paragraphe (le hash ne peut pas se citer lui-même). Pas de
    contrôle l'a évité sur KAN-5. **Correctif à décider par toi** : soit le
    contrôle cesse de passer `$ETAT` (une ligne), soit les deux passent
    explicitement par le même dossier. Rien n'a été touché.
+   > ⛔ **CORRIGÉ ET DÉMENTI LE 07/10/2026.** La première branche (« le
+   > contrôle cesse de passer `$ETAT` ») **aurait cassé le contrôle** :
+   > `ProtectHome=read-only` lui interdit `$HOME` en écriture, `$ETAT` est
+   > son seul chemin inscriptible, et son jeton ne se serait plus jamais
+   > écrit — un commentaire par matin, sans fin. Réparé autrement, dans
+   > `tools/bw_jira.sh` : le garde-fou **lit les deux** dossiers. Voir
+   > `BUGS.md` du 07/10 et §7-bis ci-dessus.
 5. ⚠️ **LE CONSTAT DU CONTRÔLE SUR-LIT LES REJEUX.** Il a écrit à KAN-5
    « purge **en échec** cette nuit », alors que la tranche a été rejouée et
    que la purge a abouti. Il lit la liste `incidents` du registre, qui garde

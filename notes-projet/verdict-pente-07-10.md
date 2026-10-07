@@ -476,21 +476,15 @@ racine du dépôt serveur — **commit `7e4c40e`**. Pas de `git push`.
 6. ✅ **PURGE PROPRE : compteur 1 / 3.** 126 857 lignes en 8 tranches, zéro
    57014, sonde intacte. La question de la fermeture de KAN-5 **n'est pas
    reposée** — pas avant 3/3.
-7. ⛔ **GARDE-FOU CASSÉ (relevé à nouveau ce matin) : les jetons « un
-   commentaire par jour et par motif » vivent dans DEUX dossiers.** Le contrôle
-   écrit dans `/var/lib/bw-model-verif` (`controle_quotidien.sh:98` passe
-   `$ETAT`), la routine dans `$HOME/.balise-watch-etat-alertes`. Relevé
-   aujourd'hui : `bw-purge-57014` = 2026-10-06 côté contrôle, 2026-10-05 côté
-   routine **avant** notre écriture. **Correctif à décider par toi** : soit le
-   contrôle cesse de passer `$ETAT` (une ligne), soit les deux passent
-   explicitement par le même dossier. Rien n'a été touché.
-8. ⚠️ **LE CONSTAT DU CONTRÔLE SUR-LIT LES REJEUX.** Il a écrit à KAN-5 le
-   06/10 « purge **en échec** » alors que la tranche avait été rejouée et la
-   purge avait abouti. Il lit la liste `incidents`, qui garde l'avertissement
-   après un rejeu réussi. ⇒ dans `controle_quotidien.py`, un
-   `⚠️ purge … rejouée dans 5 s` suivi d'un `→ purge … N ligne(s) effacée(s)`
-   **ne devrait pas** compter comme un échec. (Le sujet de KAN-5 porte encore
-   cette formulation fausse.)
+7. ✅ **GARDE-FOU CASSÉ → CORRIGÉ À 10:05 (§12 n° 2).** ⚠️ Et le correctif
+   que ce point proposait (« soit le contrôle cesse de passer `$ETAT` »)
+   **était faux et aurait cassé le contrôle** : `ProtectHome=read-only` lui
+   interdit `$HOME` en écriture. Réparé autrement, dans `tools/bw_jira.sh`.
+8. ✅ **LE CONSTAT DU CONTRÔLE SUR-LISAIT LES REJEUX → CORRIGÉ À 10:05
+   (§12 n° 3).** ⚠️ **Reste** : le **sujet** de KAN-5 porte toujours la
+   formulation fausse du 10/09 (« purge en echec cette nuit (model_score_zone,
+   model_character) ») — c'est un champ de ticket, pas un commentaire, et je
+   ne l'ai pas touché (§12, ce qui demande encore ton accord).
 9. ⚠️ **POSITION : 4 CONFIRMÉES, cri parti, geste attendu de toi.**
    `pioupiou:1333` (87,7 km) et `pioupiou:2171` (38,9 km) → candidates
    **AUTRE balise** ; ⚠️ `pioupiou:1388` (2 363 m, s'était **éloignée** de
@@ -517,3 +511,245 @@ racine du dépôt serveur — **commit `7e4c40e`**. Pas de `git push`.
     que le nombre de cases monte (58 → 65 → 67). À lire à côté du §7 : les deux
     disent peut-être la même chose sur la journée notée.
 14. `mutations_memoire` : 3 mutations non vues (dette antérieure, inchangée).
+
+## 10:05 (Paris) — ⛔ SORTIE DU PÉRIMÈTRE DE SURVEILLANCE, SUR AUTORISATION EXPLICITE DE YANN : trois correctifs écrits, testés, déployés
+
+⚠️ **Ce qui suit n'est pas de la surveillance.** À 09:20 Yann a demandé
+« fais toutes les actions nécessaires pour corriger ce qu'il y a à
+corriger », puis à 09:35 « tu peux avoir accès au VPS avec Desktop
+Commander, je t'y autorise ». La règle « **VPS en lecture seule** » est donc
+**levée pour cette session, et pour elle seule** — la prochaine routine
+repart sous la règle d'origine. ⛔ **N'ont PAS été touchés malgré
+l'autorisation** : le chien de garde `10-timeout-s3.conf` (« jamais, c'est
+Yann qui lance » — et `proposition()` n'a rien formulé), aucun
+`systemctl start/restart/daemon-reload`, aucun `enable`, aucun SQL joué,
+aucune unit de `/etc`, aucun `git push`.
+
+### 1. ⛔ LE WEBHOOK `push` : CAUSE TROUVÉE, ET CE N'ÉTAIT NI LA VARIABLE NI LE `POST`
+
+La panne tenait depuis le 30/09 et trois cris réels (30/09, 02/10, 07/10).
+Le journal ne disait qu'une chose : `⚠️ push non parti (webhook)`.
+
+**Mesures, toutes à la même minute, depuis le VPS :**
+
+```
+appel tel quel                → HTTP 429
+  {"code":42908,"error":"limit reached: daily message quota reached; …"}
+GET /v1/account en IPv6       → basis=ip, messages 250/250, restants 0
+GET /v1/account en IPv4       → basis=ip, messages   0/250, restants 250
+cache du SUJET sur 12 h       → 0 message
+sortie IPv4 du VPS            → 51.91.102.146
+sortie IPv6 du VPS            → 2001:41d0:404:200:… (/64 OVH)
+même POST avec --ipv4         → HTTP 200   ✅
+même POST sans --ipv4         → HTTP 429   ⛔
+```
+
+⇒ **`ntfy.sh` limite les visiteurs ANONYMES à 250 messages / 12 h et les
+regroupe PAR PRÉFIXE /64 en IPv6.** Le VPS sort en IPv6 sur un préfixe
+**OVH partagé** : les voisins mangeaient le quota, et notre cri repartait
+en 429. ⓘ Le cache du sujet à **0 message** le prouve dans l'autre sens :
+ce n'est **pas** nous qui poussons trop, c'est l'adresse qui est partagée.
+Le mail passait parce qu'il ne dépend pas de ça. **Une seule variable du
+`.env` pointe vers ntfy** (`BW_WEBHOOK_URL`) ; tous les `*_PING_URL` vont
+ailleurs, ils ne sont pas en cause. Et seulement **3** cris au journal du
+VPS aujourd'hui : le serveur n'y est pour rien.
+
+**Corrigé dans les trois appelants** — `run.sh` `alerter()`,
+`tools/bw_avertir_config.sh`, `traces/entretien/entretien.sh` :
+
+- **`--ipv4`** sur l'appel ntfy. L'IPv4 du VPS est à lui seul, donc son
+  quota aussi.
+- ⛔ **on ne jette plus l'erreur.** L'ancien `>/dev/null 2>&1` a caché la
+  raison **huit jours** — c'est lui, autant que le 429, le vrai défaut. Le
+  **code HTTP** et le **code de sortie `curl`** vont au journal, et un 429
+  s'y nomme (« quota ntfy épuisé pour ce visiteur ; vérifier
+  `curl --ipv4 https://ntfy.sh/v1/account` »). Un succès se dit aussi
+  (`ⓘ push parti (webhook, HTTP 200)`) : on saura désormais que le canal
+  vit, sans attendre un ⛔ pour l'apprendre.
+- ⚠️ **`|| push_sortie=$?`** et pas un `;` nu : `run.sh` est en
+  `set -uo pipefail` aujourd'hui, mais si quelqu'un y ajoute un jour
+  `set -e`, une affectation depuis un `curl` en échec tuerait **la nuit
+  entière** pour un canal d'alerte. *Un canal ne tue pas un runner.*
+
+**Banc des quatre cas, joué sur le VPS sur le bloc VERBATIM :** URL réelle
+→ `HTTP 200` · hôte inexistant (échec DNS, le pire cas) → `HTTP 000,
+curl=6` · hôte qui rend 400 → `HTTP 400, curl=0` · drapeau de banc posé →
+**rien ne part**. Et le script continue dans les quatre.
+
+⚠️ **Ce qui n'est PAS réglé, et que seul toi peux trancher** : le quota
+IPv4 est à nous, mais c'est toujours **250 messages / 12 h en anonyme**.
+Tant qu'on reste sur le ntfy.sh gratuit sans jeton, un voisinage IPv4 ou
+un emballement chez nous nous remettrait au silence. Les deux sorties
+durables sont un **compte ntfy** (le quota suit le jeton, plus l'adresse)
+ou un **sujet réservé**. §13 n° 1.
+
+### 2. ⛔ LE GARDE-FOU DES JETONS : RÉPARÉ — ET MA PROPRE NOTE PROPOSAIT UN CORRECTIF QUI L'AURAIT CASSÉ
+
+⚠️ **À lire en entier, parce que c'est la deuxième fois en deux jours
+qu'une de ces notes se trompe en étant sûre d'elle.**
+
+Le constat du 06/10 (§7-bis) était juste : deux magasins de jetons qui ne
+se parlent pas, `bw-purge-57014` à 2026-10-06 côté contrôle et 2026-10-05
+côté routine. **Mais le diagnostic était faux.** La note écrivait que
+« `BW_MODEL_VERIF_ETAT` et le dossier d'état des alertes sont deux choses
+différentes et le code les confond », et proposait, comme premier
+correctif, « soit le contrôle cesse de passer `$ETAT` (une ligne) ».
+
+**Relevé ce matin sur le VPS :**
+
+```
+bw-model-controle.service : ProtectHome=read-only
+                            ReadWritePaths=/var/lib/bw-model-verif
+bw-model-score.service    : idem
+bw-model-collect.service  : idem (+ /var/lib/bw-quota)
+bw-garde-fou-r2.service   : idem
+```
+
+⇒ **`$HOME` est interdit en écriture à TOUS les services.**
+`~/.balise-watch-etat-alertes` n'est inscriptible que par une session
+humaine en ssh — c'est pour ça que la routine y écrit et que le contrôle
+n'y écrit pas. Le contrôle ne passe donc **pas** `$ETAT` par confusion :
+c'est son **seul chemin inscriptible**. ⛔ **Appliquer « une ligne » aurait
+fait tomber son jeton sur un chemin non inscriptible, il ne se serait
+JAMAIS écrit, et le contrôle aurait commenté le même motif Jira tous les
+matins, sans fin.** Un correctif qui transforme un trou de garde-fou en
+spam quotidien.
+
+**Réparé autrement, dans `tools/bw_jira.sh`** : le garde-fou **lit
+maintenant les trois chemins possibles** (`$etat`, `BW_MODEL_VERIF_ETAT`,
+`BW_ETAT_ALERTES`) et il suffit qu'**un seul** porte la date du jour pour
+qu'il se taise ; chacun continue d'**écrire** là où il peut. Le piège est
+commenté **aux deux endroits** (`bw_jira.sh` et `controle_quotidien.sh`,
+avec un « ne simplifie pas cette ligne »), et dans `BUGS.md`.
+
+**Preuve, jouée sur le VPS (aucun commentaire n'est parti) :**
+
+```
+simulation du contrôle de 07:30, qui passe /var/lib/bw-model-verif :
+  bw-pente-duree    → ⓘ déjà signalé aujourd'hui (jeton de ~/.balise-watch-etat-alertes)
+  bw-pente-memoire  → ⓘ déjà signalé aujourd'hui (jeton de ~/.balise-watch-etat-alertes)
+  bw-purge-57014    → ⓘ déjà signalé aujourd'hui (jeton de ~/.balise-watch-etat-alertes)
+motif jamais vu     → passe la garde (et échoue plus loin sur la config, comme prévu)
+```
+
+Avant ce matin, ces trois lignes auraient **doublé** les commentaires du
+jour sans un mot.
+
+⚠️ **Conséquence à connaître, et c'est un choix que je te laisse (§13
+n° 2)** : quand le contrôle parle le premier (07:30), la routine qui passe
+après est **légitimement** refusée par la garde. C'est la règle « un
+commentaire par jour et par motif » qui s'applique enfin — mais la routine
+a souvent plus à dire que le contrôle. Deux choses atténuent cela : le
+correctif n° 3 ci-dessous fait **taire** le contrôle sur les nuits de purge
+rattrapée (le cas qui s'est produit le 06/10), et la routine sait déjà
+poser un `POST` direct quand elle le décide (elle l'a fait ce matin sur
+KAN-3).
+
+### 3. ⛔ LE CONTRÔLE NE PREND PLUS UN REJEU RÉUSSI POUR UN ÉCHEC
+
+`incidents` **conserve** la ligne `⚠️ purge … HTTP 500` même quand la
+tranche est rejouée 5 s plus tard et qu'elle passe. Le 06/10 le contrôle a
+donc écrit à KAN-5 « purge **en échec** cette nuit » alors que la purge
+avait **abouti** : 8 tranches, 124 678 lignes.
+
+Le registre ne porte **aucun** champ de bilan de purge (vérifié : 30 clés,
+aucune ne parle de purge). `score.log`, si — et il est dans le même dossier
+d'état. `constats()` prend donc un **`journal` optionnel**, et
+`bilan_purge()` y cherche un `→ purge … N ligne(s) effacée(s) en
+T tranche(s)` **postérieur au dernier avertissement** :
+
+| au journal | le canal |
+|---|---|
+| avertissement **puis** bilan chiffré | **se tait** (rejeu rattrapé) |
+| avertissement, **aucun** bilan après | parle, et dit « **NON rattrapée** » |
+| bilan à `?` ligne(s) | parle, et nomme le `Content-Range` manquant |
+| pas de journal du tout | parle, et dit « statut réel **INCONNU** » |
+
+⚠️ **Le doute profite toujours au constat** : jamais un faux calme.
+⚠️ La **sonde** (`plus vieille journée illisible`) est distinguée de la
+**tranche** — ce n'en est pas une, elle a ses deux essais à elle.
+⚠️ **Lecture seule, après la notation, hors du chemin critique de la
+nuit** : un journal absent rend `None`, pas une exception. Je n'ai
+volontairement **pas** touché à `run.sh`/`score.py` pour y ajouter un champ
+de bilan au registre — ce serait plus propre, mais ça met en jeu le chemin
+qui écrit la nuit, pour un message de ticket. §13 n° 3.
+
+**Cinq tests neufs**, ceux qui auraient attrapé le bug du 06/10, dont le
+cas réel du 06/10 ligne pour ligne.
+
+### 4. Validation, et ce qui a été touché
+
+| | résultat |
+|---|---|
+| `test_controle_quotidien` (Mac, puis python du VPS) | **40 / 40 OK** |
+| `tools/test_alertes.sh` (Mac, puis VPS) | **85 assertions vertes, 0 rouge** |
+| `bash -n` sur les 5 scripts, des deux côtés | OK |
+| `controle_quotidien.py --verbeux` réel, après déploiement | « rien à dire », **code 0**, aucune régression |
+| sha256 Mac ↔ VPS, fichier par fichier, après copie | **7 / 7 identiques** |
+| modes des fichiers, avant ↔ après | **7 / 7 inchangés** (755/755/755/644/644/644/711) |
+
+**Fichiers modifiés** (commit local `78ad775`, **pas de `git push`**) :
+`model-verif/run.sh` · `model-verif/controle_quotidien.sh` ·
+`model-verif/controle_quotidien.py` · `model-verif/test_controle_quotidien.py` ·
+`tools/bw_jira.sh` · `tools/bw_avertir_config.sh` ·
+`traces/entretien/entretien.sh`. Plus `BUGS.md` (trois entrées du 07/10) et
+cette note.
+
+**Sur le VPS** : **sauvegarde des 7 fichiers d'origine** dans
+`~/sauvegardes-balise-watch/avant-correctifs-07-10/` (hors de l'arbre
+déployé) **avant** toute copie — un `cp -p` suffit à revenir en arrière.
+Déploiement par `scp` fichier par fichier, **pas par `rsync`** (rien ne
+peut être supprimé par erreur). Trois scripts de banc passés par
+`ssh 'bash -s' <` depuis le Mac : **rien n'a été déposé sur le VPS** hors
+les 7 fichiers et la sauvegarde.
+⚠️ **Deux notifications de test sont parties sur ton téléphone** (l'épreuve
+IPv4 et le banc du bloc) — c'était le seul moyen de prouver le canal.
+
+**Jetons** : inchangés depuis 09:15 (les trois à `2026-10-07` côté
+routine). Aucune migration : avec le garde-fou qui lit les deux, elle est
+inutile.
+
+**Jira** : **aucune écriture dans cette phase.** Les trois commentaires du
+jour sont ceux de 09:15, et la garde — maintenant réparée — refuserait
+d'elle-même un quatrième.
+
+### 5. ⚠️ Ce que ces correctifs NE règlent pas
+
+- La **durée** monte toujours (§2), la **mémoire** bat toujours son record
+  (§3). Rien de ce qui est fait ci-dessus n'y touche : ce sont les canaux
+  et les constats qui ont été réparés, pas la notation.
+- Le **cri de position** attend toujours ton arbitrage sur les 4 cas (§6).
+- Le dossier **« base sous tension »** attend toujours ton SQL Editor (§5).
+- Le **sujet de KAN-5** porte toujours la formulation fausse du 10/09.
+
+## 13. Ce qui demande encore Yann — après les correctifs
+
+1. ⚠️ **NTFY : le 429 peut revenir.** Le quota IPv4 est à nous, mais c'est
+   toujours 250 messages / 12 h **en anonyme**. Veux-tu passer sur un
+   **compte ntfy** (le quota suit le jeton, plus l'adresse — c'est la vraie
+   sortie) ou garder l'anonyme et accepter le risque ? ⓘ Je peux câbler le
+   jeton exactement comme `BW_JIRA_TOKEN` (`curl -K -`, jamais en clair),
+   mais ça demande d'écrire dans `~/.balise-watch-alertes.env`, donc ton
+   accord.
+2. ⚠️ **QUI PARLE LE PREMIER, LE CONTRÔLE OU LA ROUTINE ?** Le garde-fou
+   marche enfin, et sa conséquence est que le contrôle de 07:30 prend la
+   place du jour. Trois options : (a) on laisse ainsi (le contrôle est
+   désormais plus juste, et plus souvent muet) ; (b) la routine pose
+   toujours son commentaire par `POST` direct, délibérément, quand elle a
+   plus à dire ; (c) le contrôle n'écrit plus à Jira du tout et se contente
+   de son journal, la routine portant seule le canal. **Mon avis : (b)** —
+   le contrôle garde son rôle de filet quand aucune session ne tourne, et
+   la routine assume son `POST` quand elle a de l'analyse à ajouter.
+3. ⓘ **Faut-il un champ de bilan de purge AU REGISTRE ?** Ce serait la
+   correction propre du n° 3 (au lieu de relire `score.log`), mais elle
+   touche `run.sh`/`score.py`, c'est-à-dire le chemin qui écrit la nuit.
+   Je ne l'ai pas prise de ma propre initiative pour un message de ticket.
+4. ⚠️ **Le sujet de KAN-5 est faux** (« purge en echec cette nuit
+   (model_score_zone, model_character) », écrit par le contrôle le 10/09).
+   Je ne l'ai pas corrigé : un `summary` n'est ni un commentaire ni une
+   transition, et c'était la limite posée au canal Jira. Veux-tu que je le
+   réécrive ?
+5. Les points **1, 2, 3, 9, 10 et 11** du §11 restent entiers : la hausse
+   de durée et son hors-étapes non instrumenté, `bw-regime-sensibilite`,
+   les témoins du mélange sous la barre, les 4 balises de position, le
+   `.sql` « base sous tension », et le cri à front ou à état.
