@@ -753,3 +753,221 @@ d'elle-même un quatrième.
    de durée et son hors-étapes non instrumenté, `bw-regime-sensibilite`,
    les témoins du mélange sous la barre, les 4 balises de position, le
    `.sql` « base sous tension », et le cri à front ou à état.
+
+## 13:00 (Paris) — les quatre arbitrages de Yann, et une réponse qu'il a fallu reprendre
+
+Yann a répondu aux quatre questions du §13. Trois ont été appliquées telles
+quelles ; **la première a dû être reprise, parce qu'elle ne réglait pas le
+problème** — et le dire plutôt que de l'exécuter est le point important de
+cette section.
+
+### 1. ⛔ « Compte ntfy + jeton » : REFUSÉ APRÈS VÉRIFICATION, rien n'a été câblé
+
+Yann avait choisi le compte ntfy, sur la foi de ce que §12 n° 1 affirmait
+(« le quota suit le jeton, plus l'adresse »). **C'était faux, et c'est moi
+qui l'avais écrit.** Vérifié avant de câbler quoi que ce soit :
+
+- La doc de ntfy confirme la mesure : `visitor-prefix-bits-ipv6` vaut **64**
+  par défaut, et « *all visitors in the same /64 subnet are treated as one
+  visitor* ».
+- Mais **un compte GRATUIT ne déplace pas la limite** : les comptes free
+  authentifiés restent comptés **par IP**, volontairement. L'issue #1726
+  demandait exactement ce changement ; le mainteneur l'a **fermée** —
+  « *This is not a bug. It's by design. Otherwise people could trivially
+  circumvent the rate limiting.* »
+- Seul un **palier payant** compte : « *Once a user is associated with a
+  tier, some limits are overridden based on the tier* » — et un compte
+  gratuit n'a **pas** de palier.
+
+⇒ Câbler un jeton nous aurait coûté du travail pour **exactement le même
+429**. Question reposée à Yann avec les vraies options (Discord / palier
+payant / auto-hébergement / statu quo). **Réponse : Discord.**
+
+ⓘ **Leçon de méthode, et elle vaut pour les deux sens** : la recherche web
+est autorisée « pour vérifier un comportement d'API externe plutôt que de
+le supposer ». Ici elle a évité un chantier inutile — mais seulement parce
+qu'elle a été faite **après** que Yann ait répondu, sur une réponse qu'il
+avait donnée en se fiant à ma note. **La vérification doit venir avant la
+question, pas après.**
+
+### 2. ✅ ET LA VRAIE QUESTION : EST-CE NOUS QUI BRÛLONS LE QUOTA ?
+
+Il fallait trancher ça, sinon `--ipv4` n'aurait tenu qu'un jour. Et il y
+avait une raison sérieuse de se le demander : le commentaire du **01/09**
+dans `bw_avertir_config.sh` raconte un jeton non inscriptible
+(`ProtectHome`) qui faisait partir « **un push toutes les 5 minutes, soit
+288 par jour** » — l'ordre de grandeur **exact** du quota de 250. Ce mode
+de panne a donc déjà existé ici.
+
+```
+lignes de sévérité err sur 24 h, tout le VPS  :  7  (toutes bw-model-score)
+quota ntfy IPv4 après mes deux pushes de banc :  2 / 250
+quota ntfy IPv6                               : 250 / 250
+cache de NOTRE sujet sur 12 h                 :  0 message
+variables du .env pointant vers ntfy.sh       :  1  (BW_WEBHOOK_URL seule)
+```
+
+⇒ **Ce n'est pas nous.** Notre trafic réel est de **2 à 7 messages par
+jour**, le `2/250` étant littéralement mes deux tests. Les 250 de l'IPv6
+appartiennent au voisinage du /64. `--ipv4` tient donc pour notre volume,
+et le seuil de vigilance est écrit dans le prompt de la routine : au-delà
+de quelques dizaines de messages par jour, c'est un runner qui s'emballe,
+pas les voisins.
+
+### 3. ✅ SECOND CANAL : Discord, codé et testé — mais PAS ENCORE ACTIF
+
+`bw_push_discord()` dans `tools/bw_avertir_config.sh`, branché dans
+`alerter()` **et** dans `bw_avertir_config`, **à côté de ntfy et sans le
+remplacer** (les deux partent).
+
+- JSON (`content`, 2 000 caractères max) échappé en `sed`/`awk` comme
+  `bw_jira_chaine` — **pas de python** : ce fichier doit vivre dans un
+  runner shell nu.
+- Muet si `BW_DISCORD_WEBHOOK_URL` est absente, muet sous le drapeau de
+  banc, et **rend toujours 0** (un canal ne tue pas un runner).
+- ⚠️ **Donc il expose son résultat par `BW_PUSH_DISCORD_CODE`**, comme
+  `ALERTE_LIVREE` : ma première version testait `if bw_push_discord …`, ce
+  qui aurait écrit « push parti » **même sur un refus**. Corrigé avant
+  déploiement.
+
+**Banc des 8 cas** : variable absente → `000` · drapeau de banc → `000` ·
+webhook inexistant → `404` · corps hostile (guillemets, antislash,
+tabulation, accents, emoji) → `404`, **et le JSON relu par `json.load`**
+pour prouver qu'il est valide · `bw_jira_commenter` sans configuration et
+sans clé → refuse proprement et rend 1.
+
+⚠️ **Il reste muet jusqu'à ce que Yann lance
+`~/installer-webhook-discord.sh`** (sur le Mac). Ce script lit l'URL **sans
+l'afficher** (`read -rs`), la pose sur le VPS **par un tube** — elle
+n'apparaît ni à l'écran, ni dans l'historique du shell, ni dans `ps`, ni
+dans aucune conversation —, sauvegarde le `.env` avant d'écrire, conserve
+ses droits, puis **éprouve le canal pour de vrai** et affiche le quota ntfy
+restant. Même règle que `BW_JIRA_TOKEN`.
+
+### 4. ✅ QUI PARLE À JIRA : la routine POSTe délibérément (option b)
+
+`bw_jira_commenter <CLÉ> <sujet> <corps>` ajouté à `tools/bw_jira.sh`.
+
+⛔ **Ce n'est pas un contournement du garde-fou, et la différence tient à
+un mot : « délibéré ».** `bw_jira_signaler` est le canal **automatique** —
+il cherche, crée au besoin, se tait si le motif a déjà parlé.
+`bw_jira_commenter` est le canal **humain** : une session qui a **lu** le
+journal du contrôle, qui sait qu'il a déjà commenté, et qui a les chiffres
+ou une correction de la veille à ajouter.
+
+Il prend une **clé**, pas un motif : il ne cherche rien, ne crée rien, ne
+transite rien, **ne touche pas au jeton du jour**. Ce qui règle au passage
+le cas du ticket « Terminé », intouchable autrement — `bw_jira_chercher`
+filtre `statusCategory != Done`, donc un `bw_jira_signaler` sur
+`bw-pente-duree` **créerait un ticket neuf**. C'est ce qui a imposé le
+`POST` à la main sur KAN-3 les **01, 06 et 07/10** : trois fois le même
+script jetable, d'où cette fonction.
+
+### 5. ✅ LE SUJET DE KAN-5 EST RÉÉCRIT
+
+```
+avant : derive notation - bw-purge-57014 - purge en echec cette nuit
+        (model_score_zone, model_character) : ? purge … HTTP 500 …
+après : derive notation - bw-purge-57014 - 57014 recurrent sur la purge par
+        tranches de model_score_zone (statement timeout 8 s) : suivi nuit
+        apres nuit, ferme apres 3 nuits propres consecutives
+```
+
+`PUT` du **seul** champ `summary`, HTTP 204. **Labels, statut et les
+12 commentaires : intacts** (vérifié par GET avant et après). Le sujet
+décrivait une **nuit** dans un champ qui doit décrire un **motif suivi**,
+et cette nuit-là il était en plus inexact.
+
+### 6. ✅ `bw-regime-sensibilite` : UN SEUL CRITÈRE, les deux règles ne se contredisent plus
+
+Il y avait **deux règles incompatibles** : l'arbitrage du 29/09 (« la hausse
+s'additionne deux nuits de suite ») et le seuil de 14,5 ms posé par la note
+du 06/10. Le 07/10 la première disait non et la seconde oui. Yann a tranché
+pour « **veille prolongée, seuil redéfini** » : **le critère du 29/09 seul**
+— deux hausses **consécutives**, pas un niveau absolu. Un coût élevé qui
+**recule**, même en restant haut, ne remplit pas le critère. Le seuil de
+14,5 ms est **retiré**. Écrit dans le prompt de la routine.
+
+### 7. Le prompt de la routine est à jour
+
+Mis à jour (et **re-signé par Claude Desktop**, la tâche exigeant cet
+ordinateur) : les trois acquis du 07/10 avec le ⛔ « ne refais pas ces
+enquêtes », l'arbitrage `regime` unique, la section « qui parle à Jira et
+avec quelle fonction », les deux rapports utiles (coût par ligne rejouée,
+coût par ligne de `regime`, et `cpu_s` contre durée pour séparer calcul et
+attente), la lecture du bloc purge avec le « **un rejeu rattrapé n'est pas
+un échec** », les points ouverts refaits au 07/10, et l'astuce
+`local_path` pour déposer la note sans la retranscrire.
+
+⛔ **Et la règle « VPS en lecture seule » y est rétablie**, avec la mention
+explicite que Yann l'avait levée **nommément et pour cette session-là
+seulement**. La prochaine routine repart sous la règle d'origine.
+
+### 8. Validation de la seconde vague
+
+| | résultat |
+|---|---|
+| `tools/test_alertes.sh` | **94 assertions vertes, 0 rouge** (85 avant), Mac **et** VPS |
+| `test_controle_quotidien` | **40 / 40**, Mac **et** VPS |
+| banc Discord / `bw_jira_commenter` | **8 cas**, tous conformes |
+| sha256 Mac ↔ VPS après copie | **4 / 4 identiques** |
+| modes des fichiers | inchangés |
+| KAN-5 après `PUT` | sujet neuf, labels + statut + 12 commentaires intacts |
+
+⚠️ **Trois tests ont rougi avant d'être justes, et les trois méritent d'être
+notés** :
+
+1. **H13b** comptait « exactement 1 » occurrence du drapeau de banc dans
+   `alerter()`. Ce n'était pas l'invariant voulu, c'était **le nombre de
+   canaux du jour** : le second canal l'a fait rougir alors que le
+   comportement était devenu **plus** correct. Réécrite sur l'invariant —
+   *tout* canal de push garde le drapeau dans sa condition. Un troisième
+   canal ne la cassera plus ; en **oublier** le garde, si.
+2. **H16c** cherchait l'appel sur **une** ligne, alors qu'il est sur
+   plusieurs (le corps du commentaire contient des sauts de ligne).
+3. La même H16c, aplatie avec `tr` puis un intervalle `.{0,400}`, marche
+   sous **GNU** grep et rend **vide** sous le grep **BSD** de macOS, où les
+   bancs tournent aussi. D'où `awk`, identique des deux côtés.
+
+**Commits locaux** (pas de `git push`) : `78ad775` (les trois correctifs),
+`db731b0` (BUGS.md + démenti de la note du 06/10), `1abb8c3` (Discord +
+`bw_jira_commenter` + 9 assertions). **Sauvegarde** des 7 fichiers d'origine
+dans `~/sauvegardes-balise-watch/avant-correctifs-07-10/` sur le VPS.
+
+⚠️ **Trois notifications de test sont parties sur ton téléphone** (deux
+épreuves ntfy en IPv4, une du banc) : c'était le seul moyen de prouver le
+canal.
+
+## 14. Ce qui reste — après les deux vagues
+
+**Pour toi, et rien ne bougera sans toi :**
+
+1. ⛔ **Lancer `~/installer-webhook-discord.sh`** depuis le Terminal du Mac.
+   Jusque-là, le second canal est codé mais **muet**, et ntfy reste seul —
+   avec son quota de voisinage.
+2. ⛔ **Jouer `diagnostic_base_sous_tension_2026-09-29.sql`** dans le SQL
+   Editor (lecture seule, 9 blocs). Il attend depuis huit jours.
+3. ⛔ **Trancher les 4 cas de position** (`1333` et `2171` → AUTRE balise ?
+   `1388` qui s'éloigne ? `STATIC0491` → maille ?), puis poser
+   `position_suspecte` + `position_note` par `.sql`.
+4. ⚠️ **Dire si tu veux instrumenter le bloc hors étapes de `run.sh`** —
+   c'est là qu'est passé 85 % de la hausse de durée de cette nuit, et c'est
+   la seule zone non mesurée. C'est une écriture dans le chemin de la nuit,
+   donc ta décision.
+5. ⓘ **Le cri de position : à front ou à état ?** Question du 01/10,
+   toujours ouverte.
+
+**Ce que la surveillance regardera demain matin, sans rien décider :**
+
+6. La **durée** : troisième nuit de hausse ? Et la hausse est-elle encore
+   hors étapes ?
+7. La **mémoire** : le record de 3 420 Mo tient-il, et le coût par ligne
+   sort-il de la fourchette 1 686–1 717 ?
+8. La **purge** : 2 / 3 si la nuit est propre.
+9. Les **témoins du mélange** : le passage sous la barre se confirme-t-il ?
+   Si oui, la question d'un motif Jira revient.
+10. Le **webhook** : le journal doit désormais dire `ⓘ push parti (webhook,
+    HTTP 200)` — et nommer le code s'il échoue. Première vérification
+    réelle au prochain ⛔.
+11. L'**horaire** de la routine, deuxième matin d'affilée.
+12. `mutations_memoire` : 3 mutations non vues, dette antérieure.
