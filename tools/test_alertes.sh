@@ -574,12 +574,66 @@ check "H11b ⛔ et la fonction rend quand même 0 (elle ne tue jamais un runner)
 CODE_ALERTER=$(sed -n '/^alerter() {/,/^}/p' model-verif/run.sh | sed 's/^[[:space:]]*#.*$//')
 check "H13 ⭐ alerter() lit BW_WEBHOOK_URL (le push des ⛔, enfin câblé)" \
       "$(printf '%s\n' "$CODE_ALERTER" | grep -c 'BW_WEBHOOK_URL' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
-check "H13b ⛔ … et un banc (BW_AVERTIR_CONFIG_BANC) ne pousse pas sur le téléphone" \
-      "$(printf '%s\n' "$CODE_ALERTER" | grep -c 'BW_AVERTIR_CONFIG_BANC' | tr -d ' ')" "1"
+# ⚠️ RÉÉCRIT LE 07/10/2026. Cette vérification comptait « exactement 1 »
+# occurrence du drapeau de banc. Ce n'était pas l'invariant voulu, c'était
+# le nombre de canaux du jour : l'ajout du second canal (Discord) l'a fait
+# rougir alors que le comportement était devenu PLUS correct — les deux
+# canaux respectent le drapeau. On vérifie donc l'invariant lui-même :
+# TOUT canal de push garde dans sa condition le drapeau de banc. Ajouter
+# un troisième canal ne cassera plus ce test ; en OUBLIER le garde, si.
+check "H13b ⛔ … et un banc (BW_AVERTIR_CONFIG_BANC) ne pousse sur AUCUN canal" \
+      "$(printf '%s\n' "$CODE_ALERTER" \
+          | grep -E '^[[:space:]]*if \[\[.*_WEBHOOK_URL' \
+          | grep -vc 'BW_AVERTIR_CONFIG_BANC' | tr -d ' ')" "0"
+check "H13b-bis ⛔ … et il y a bien au moins un canal de push à garder" \
+      "$(printf '%s\n' "$CODE_ALERTER" \
+          | grep -cE '^[[:space:]]*if \[\[.*_WEBHOOK_URL' | tr -d ' ' \
+          | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
+# ⭐ H13c — le second canal du téléphone (07/10/2026). ntfy dépend d'un
+# quota partagé par préfixe /64 : trois cris réels perdus en 429.
+check "H13c ⭐ alerter() lit BW_DISCORD_WEBHOOK_URL (le second canal)" \
+      "$(printf '%s\n' "$CODE_ALERTER" | grep -c 'BW_DISCORD_WEBHOOK_URL' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
+# ⛔ H13d — LE CANAL DOIT S'EXPLIQUER. L'ancien appel finissait par
+# `>/dev/null 2>&1` et a caché un 429 pendant huit jours. Le code HTTP
+# doit partir au journal, et l'appel ntfy doit forcer `--ipv4`.
+check "H13d ⛔ l'appel ntfy d'alerter() force --ipv4 (quota du /64 partagé)" \
+      "$(printf '%s\n' "$CODE_ALERTER" | grep -A2 'curl .*--ipv4' | grep -c 'BW_WEBHOOK_URL' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
+check "H13e ⛔ alerter() ne jette plus la raison de l'échec du push (http_code au journal)" \
+      "$(printf '%s\n' "$CODE_ALERTER" | grep -c 'http_code' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
 check "H14 ⛔ bw_jira.sh ne touche PAS à BW_WEBHOOK_URL (deux canaux, deux fonctions)" \
       "$(sed 's/^[[:space:]]*#.*$//' tools/bw_jira.sh | grep -c 'BW_WEBHOOK_URL' | tr -d ' ')" "0"
 check "H15 le runner du contrôle appelle bw_jira_signaler ET a un repli si le fichier manque" \
       "$(grep -c 'bw_jira_signaler' model-verif/controle_quotidien.sh | tr -d ' ' | awk '$1>=2{print "oui"} $1<2{print "non"}')" "oui"
+
+# ══════════════════════════════════════════════════════════════════════
+#  ⛔ H16 — LE GARDE-FOU « UN COMMENTAIRE PAR JOUR » LIT LES DEUX MAGASINS
+#  (07/10/2026). Il y a deux écrivains sur les mêmes motifs et ils ne
+#  peuvent PAS écrire au même endroit : les services ont
+#  `ProtectHome=read-only`, donc $HOME leur est interdit. Le garde-fou doit
+#  donc LIRE les deux. Relevé le 06/10 : bw-purge-57014 valait 2026-10-06
+#  d'un côté et 2026-10-05 de l'autre, et rien n'empêchait un doublon.
+# ══════════════════════════════════════════════════════════════════════
+CODE_SIGNALER=$(sed -n '/^bw_jira_signaler() {/,/^}/p' tools/bw_jira.sh | sed 's/^[[:space:]]*#.*$//')
+check "H16 ⛔ le garde-fou du jour lit AUSSI le magasin de l'autre écrivain" \
+      "$(printf '%s\n' "$CODE_SIGNALER" | grep -c 'BW_MODEL_VERIF_ETAT' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
+check "H16b ⛔ … et il parcourt plusieurs dossiers, pas un seul" \
+      "$(printf '%s\n' "$CODE_SIGNALER" | grep -cE 'for [a-z]+ in ' | tr -d ' ' | awk '$1>=1{print "oui"} $1<1{print "non"}')" "oui"
+# ⚠️ L'appel est sur PLUSIEURS LIGNES (le corps du commentaire contient
+# des sauts de ligne littéraux), donc un grep ligne à ligne ne le voit
+# pas — première écriture rouge. ⚠️ Et l'aplatir avec `tr` puis un
+# intervalle `.{0,400}` marche sous GNU grep mais rend VIDE sous le grep
+# BSD de macOS, où les scripts de banc tournent aussi : deuxième écriture
+# rouge. D'où `awk`, qui regarde les 4 lignes qui suivent l'appel et se
+# comporte pareil des deux côtés.
+check "H16c ⚠️ le contrôle passe TOUJOURS son \$ETAT (ProtectHome=read-only : son seul chemin inscriptible)" \
+      "$(awk '/bw_jira_signaler/{f=4} f&&/\$ETAT/{t=1} f{f--} END{print (t?"oui":"non")}' model-verif/controle_quotidien.sh)" "oui"
+# ⭐ H17 — le commentaire DÉLIBÉRÉ, hors garde-fou (arbitrage du 07/10).
+# Il prend une CLÉ, donc il ne peut pas créer de ticket par accident, et
+# c'est lui qui remplace les scripts jetables des 01, 06 et 07/10 sur KAN-3.
+check "H17 ⭐ bw_jira.sh expose bw_jira_commenter (le POST délibéré sur une clé)" \
+      "$(grep -c '^bw_jira_commenter() {' tools/bw_jira.sh | tr -d ' ')" "1"
+check "H17b ⛔ … et il ne CHERCHE ni ne CRÉE rien (aucun risque de doublon)" \
+      "$(sed -n '/^bw_jira_commenter() {/,/^}/p' tools/bw_jira.sh | sed 's/^[[:space:]]*#.*$//' | grep -cE 'bw_jira_chercher|/rest/api/3/issue"' | tr -d ' ')" "0"
 
 # ══════════════════════════════════════════════════════════════════════
 echo

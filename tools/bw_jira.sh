@@ -52,6 +52,71 @@
 BW_JIRA_LABEL_SURVEILLANCE="bw-surveillance"
 BW_JIRA_DERNIER=""
 
+# ══════════════════════════════════════════════════════════════════════
+#  bw_jira_commenter — LE COMMENTAIRE DÉLIBÉRÉ, hors garde-fou
+#  Arbitrage de Yann du 07/10/2026.
+#
+#  ⛔ CE N'EST PAS UN CONTOURNEMENT, C'EST UN CHOIX ASSUMÉ, ET LA
+#  DIFFÉRENCE TIENT À UN SEUL MOT : « délibéré ». `bw_jira_signaler` est
+#  le canal AUTOMATIQUE — il cherche, il crée au besoin, et il se tait si
+#  le motif a déjà parlé aujourd'hui. Cette fonction-ci est le canal
+#  HUMAIN : une session qui a LU le journal du contrôle, qui sait qu'il a
+#  déjà commenté, et qui a davantage à dire (les chiffres, la répartition
+#  par étape, une correction d'une lecture de la veille).
+#
+#  ⛔ ELLE EXISTE AUSSI PARCE QU'UN TICKET « Terminé » EST INTOUCHABLE
+#  AUTREMENT. `bw_jira_chercher` filtre sur `statusCategory != Done` :
+#  appeler `bw_jira_signaler` sur le motif d'un ticket clos CRÉE un ticket
+#  neuf. C'est ce qui a imposé le POST à la main sur KAN-3 les 01/10,
+#  06/10 et 07/10 — trois fois le même script jetable, d'où cette
+#  fonction.
+#
+#  ⚠️ Elle prend la CLÉ du ticket, pas un motif : aucune recherche, aucune
+#  création, aucune transition, et surtout aucun risque d'ouvrir un doublon.
+#  ⚠️ Elle NE touche PAS au jeton du jour — le canal automatique garde son
+#  garde-fou intact, et deux écritures délibérées le même jour restent
+#  possibles si une session le décide vraiment.
+#  ⚠️ `curl -K -`, jamais `-u` : même règle que tout ce fichier.
+#
+#  Usage : bw_jira_commenter KAN-3 "sujet" "corps"
+#  Rend 0 si le commentaire est parti, 1 sinon. `BW_JIRA_DERNIER` porte la
+#  clé touchée.
+# ══════════════════════════════════════════════════════════════════════
+bw_jira_commenter() {
+  local cle="${1:-}" sujet="${2:-}" corps="${3:-}"
+  BW_JIRA_DERNIER=""
+  [ -n "$cle" ] || { printf '⚠️ bw_jira_commenter : clé de ticket manquante\n' >&2; return 1; }
+
+  local manque="" v
+  for v in BW_JIRA_URL BW_JIRA_MAIL BW_JIRA_TOKEN; do
+    eval "[ -n \"\${$v:-}\" ]" || manque="$manque $v"
+  done
+  if [ -n "$manque" ]; then
+    printf '⚠️ canal Jira non configuré (%s absente) — « %s » reste dans le journal\n' \
+      "${manque# }" "$sujet" >&2
+    return 1
+  fi
+
+  local trav code
+  trav=$(mktemp -d "${TMPDIR:-/tmp}/bw-jira.XXXXXX") || return 1
+  chmod 700 "$trav"
+  code=$(bw_jira_http POST "/rest/api/3/issue/$cle/comment" \
+    "{\"body\":$(bw_jira_adf "$sujet
+$corps
+
+Machine : $(hostname 2>/dev/null || echo '?') · $(date -u +%Y-%m-%dT%H:%MZ)
+ⓘ Commentaire DÉLIBÉRÉ d'une session (bw_jira_commenter) — hors garde-fou du jour, par choix.")}" \
+    "$trav/comment.json")
+  rm -rf "$trav"
+  if [ "$code" = "201" ]; then
+    printf 'Jira : commentaire délibéré ajouté à %s\n' "$cle"
+    BW_JIRA_DERNIER="$cle"
+    return 0
+  fi
+  printf '⚠️ Jira : commentaire délibéré sur %s refusé (HTTP %s)\n' "$cle" "$code" >&2
+  return 1
+}
+
 # ── Une chaîne → un littéral JSON (sans les guillemets) ──────────────
 # ⚠️ Pas de python ici : ce fichier doit vivre dans un runner shell nu.
 bw_jira_chaine() {

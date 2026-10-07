@@ -400,7 +400,7 @@ dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG";
 # production ne doit pas mourir parce qu'un fichier d'outillage manque.
 # Le `dire` d'origine, lui, reste en place quoi qu'il arrive.
 # shellcheck source=/dev/null
-if [ -r "$ICI/../tools/bw_avertir_config.sh" ]; then . "$ICI/../tools/bw_avertir_config.sh"; else bw_avertir_config() { :; }; fi
+if [ -r "$ICI/../tools/bw_avertir_config.sh" ]; then . "$ICI/../tools/bw_avertir_config.sh"; else bw_avertir_config() { :; }; bw_push_discord() { BW_PUSH_DISCORD_CODE="000"; return 0; }; fi
 
 # ⚠️ `ALERTE_LIVREE` (02/09/2026) : `alerter` rend TOUJOURS 0 (chaque
 # canal est en `|| dire …`, et c'est voulu : un canal cassé ne doit pas
@@ -467,6 +467,27 @@ alerter() {
     else
       dire "⚠️ push non parti (webhook) — HTTP ${push_code:-000}, curl=$push_sortie$(
         [[ "$push_code" == "429" ]] && printf '%s' " — quota ntfy épuisé pour ce visiteur ; vérifier \`curl --ipv4 https://ntfy.sh/v1/account\`")"
+    fi
+  fi
+
+  # ── Webhook Discord : LE SECOND CANAL DU TÉLÉPHONE (07/10/2026) ──────
+  # ⛔ Un canal d'urgence qui dépend d'un quota partagé avec des inconnus
+  # n'est pas un canal d'urgence. ntfy compte les visiteurs anonymes par
+  # /64 IPv6, le nôtre est un préfixe OVH partagé, et trois cris réels ont
+  # été perdus en 429 entre le 30/09 et le 07/10. `--ipv4` nous rend notre
+  # quota, mais 250 messages / 12 h restent un plafond qu'on ne maîtrise
+  # pas ; Discord n'a pas ce défaut. Muet tant que
+  # `BW_DISCORD_WEBHOOK_URL` est absente — donc rien ne change sans elle.
+  # ⚠️ Et il NE remplace PAS ntfy : les deux partent, exprès.
+  # ⚠️ On lit `BW_PUSH_DISCORD_CODE`, PAS la valeur de retour : la fonction
+  # rend toujours 0 exprès, donc un `if bw_push_discord …` dirait « parti »
+  # même sur un refus.
+  if [[ -n "${BW_DISCORD_WEBHOOK_URL:-}" && -z "${BW_AVERTIR_CONFIG_BANC:-}" ]]; then
+    bw_push_discord "Balise Watch - $sujet" "$corps" 2>/dev/null
+    if [[ "${BW_PUSH_DISCORD_CODE:-000}" == 2?? ]]; then
+      dire "ⓘ push Discord parti (second canal, HTTP $BW_PUSH_DISCORD_CODE)"
+    else
+      dire "⚠️ push Discord non parti (second canal, HTTP ${BW_PUSH_DISCORD_CODE:-000})"
     fi
   fi
 

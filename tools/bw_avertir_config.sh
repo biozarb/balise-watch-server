@@ -54,6 +54,59 @@
 
 # ⚠️ Sous `set -u`, un `${1:-}` protège de l'appel mal formé : ce fichier
 # est chargé par des scripts qui tournent en production la nuit.
+# ══════════════════════════════════════════════════════════════════════
+#  bw_push_discord — LE SECOND CANAL DU TÉLÉPHONE, ajouté le 07/10/2026
+#
+#  ⛔ POURQUOI IL EXISTE. ntfy.sh limite les visiteurs ANONYMES à 250
+#  messages / 12 h et les compte PAR PRÉFIXE /64 en IPv6
+#  (`visitor-prefix-bits-ipv6`, défaut 64 : « all visitors in the same /64
+#  subnet are treated as one visitor »). Le VPS sort sur un /64 OVH
+#  PARTAGÉ : du 30/09 au 07/10, trois cris réels sont repartis en HTTP 429
+#  parce que des VOISINS avaient mangé le quota. Mesuré le 07/10 : notre
+#  propre trafic est de 2 à 7 messages par jour, donc ce n'est pas nous.
+#  ⚠️ ET UN COMPTE NTFY GRATUIT NE CHANGE RIEN : les comptes free
+#  authentifiés restent limités PAR IP, « by design » (issue #1726, fermée
+#  par le mainteneur). Seul un palier PAYANT déplace la limite. D'où ce
+#  canal-ci, qui n'a pas de quota de voisinage.
+#
+#  ⚠️ Discord veut du JSON (`content`, 2 000 caractères max), ntfy veut du
+#  texte brut avec le titre dans un EN-TÊTE. Deux canaux, deux formes —
+#  même remarque qu'en tête de bw_jira.sh. NE MÉLANGE PAS les variables.
+#  ⚠️ Pas de python ici : ce fichier doit vivre dans un runner shell nu.
+#  ⚠️ Rend toujours 0 : un canal ne tue pas un runner (règle du 10/09).
+#  ⚠️ DONC la valeur de retour ne dit RIEN du succès — c'est
+#  `BW_PUSH_DISCORD_CODE` qui le dit (`000` = pas même tenté, `2xx` = parti,
+#  le reste = refusé). Même patron qu'`ALERTE_LIVREE` dans run.sh, et pour
+#  la même raison : l'appelant a parfois besoin de savoir, le runner ne
+#  doit jamais tomber. Un `if bw_push_discord …` serait toujours vrai.
+# ══════════════════════════════════════════════════════════════════════
+BW_PUSH_DISCORD_CODE="000"
+bw_push_discord() {
+  bw_pd_titre="${1:-Balise Watch}"; bw_pd_corps="${2:-}"
+  BW_PUSH_DISCORD_CODE="000"
+  [ -n "${BW_DISCORD_WEBHOOK_URL:-}" ] || return 0
+  [ -z "${BW_AVERTIR_CONFIG_BANC:-}" ] || return 0
+
+  # Un littéral JSON : antislash et guillemet échappés, tabulations et
+  # sauts de ligne en \t et \n. Même patron que bw_jira_chaine.
+  bw_pd_json=$(printf '%s\n\n%s' "$bw_pd_titre" "$bw_pd_corps" \
+    | cut -c1-1900 \
+    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' \
+    | awk 'NR>1{printf "\\n"} {printf "%s", $0}')
+
+  bw_pd_code=$(printf '{"username":"Balise Watch","content":"%s"}' "$bw_pd_json" \
+    | curl -sS --max-time 10 -o /dev/null -w '%{http_code}' \
+           -H 'Content-Type: application/json' \
+           --data-binary @- "$BW_DISCORD_WEBHOOK_URL" 2>/dev/null) || bw_pd_code="000"
+  BW_PUSH_DISCORD_CODE="${bw_pd_code:-000}"
+  case "${bw_pd_code:-000}" in
+    2??) return 0 ;;
+    429) printf '⚠️ push Discord refusé (HTTP 429 — Discord limite le webhook, pas nous)\n' >&2 ;;
+    *)   printf '⚠️ push Discord non parti (HTTP %s)\n' "${bw_pd_code:-000}" >&2 ;;
+  esac
+  return 0
+}
+
 bw_avertir_config() {
   bw_ac_var="${1:-}"; bw_ac_fichier="${2:-}"
   bw_ac_etiq="${3:-balise-watch}"; bw_ac_quoi="${4:-CE JOB}"
@@ -157,6 +210,11 @@ Les canaux extérieurs (webhook, e-mail) n'ont pas été appelés."
       *) printf '⚠️ bw_avertir_config : push non parti (HTTP %s)\n' "${bw_ac_push:-000}" >&2 ;;
     esac
   fi
+
+  # ── 2-bis. Webhook Discord, le second canal du téléphone ────────────
+  # Deux canaux valent mieux qu'un quand le premier dépend d'un quota
+  # qu'on ne contrôle pas (07/10/2026). Muet si la variable est absente.
+  bw_push_discord "Balise Watch - $bw_ac_sujet" "$bw_ac_corps"
 
   # ── 3. E-mail via msmtp ─────────────────────────────────────────────
   if [ -n "${BW_ALERTE_MAIL:-}" ] && [ -z "$bw_ac_banc" ] \
