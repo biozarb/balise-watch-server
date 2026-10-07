@@ -159,6 +159,72 @@ class LeCasDuLot(unittest.TestCase):
         cs = {c["motif"]: c for c in C.constats(serie[:-1], date(2026, 9, 11))}
         self.assertNotIn(C.MOTIF_PURGE, cs)
 
+    # ══════════════════════════════════════════════════════════════════
+    #  ⛔ LE BUG DU 06/10/2026 : un rejeu RÉUSSI comptait comme un échec.
+    #  `incidents` garde la ligne d'avertissement même après un rejeu qui
+    #  passe ; le contrôle a donc écrit à KAN-5 « purge en échec cette
+    #  nuit » alors que 124 678 lignes avaient bien été effacées en
+    #  8 tranches. Ces quatre tests sont ceux qui l'auraient attrapé.
+    # ══════════════════════════════════════════════════════════════════
+    def _nuit_avec(self, incidents, journal_texte=None):
+        serie = reel_jusqu_au("2026-09-10")
+        serie[-1]["incidents"] = list(incidents)
+        chemin = None
+        if journal_texte is not None:
+            d = tempfile.TemporaryDirectory()
+            self.addCleanup(d.cleanup)
+            chemin = pathlib.Path(d.name) / "score.log"
+            chemin.write_text(journal_texte, encoding="utf-8")
+        return {c["motif"]: c for c in
+                C.constats(serie, date(2026, 9, 10), journal=chemin)}
+
+    def test_une_tranche_rejouee_PUIS_RATTRAPEE_n_est_PAS_un_echec(self):
+        cs = self._nuit_avec(
+            ["⚠️ purge model_score_zone (?as_of=eq.2026-09-28&regime=eq.fluxW)"
+             " : HTTP 500"],
+            "  ⚠️ purge model_score_zone (?as_of=eq.2026-09-28&regime=eq.fluxW)"
+            " : HTTP 500 — rejouée dans 5 s\n"
+            "  → purge model_score_zone : 124678 ligne(s) effacée(s)"
+            " en 8 tranche(s)\n")
+        self.assertNotIn(C.MOTIF_PURGE, cs,
+                         "le 06/10 : la purge AVAIT abouti, le canal doit se taire")
+
+    def test_une_tranche_qui_expire_SANS_bilan_reste_un_echec(self):
+        cs = self._nuit_avec(
+            ["⚠️ purge model_score_zone : HTTP 500"],
+            "  ⚠️ purge model_score_zone : HTTP 500 — rejouée dans 5 s\n"
+            "  ⚠️ purge model_score_zone : HTTP 500 — deux refus, échec\n")
+        self.assertIn(C.MOTIF_PURGE, cs, "aucun bilan après l'avertissement")
+        self.assertIn("NON rattrapée", cs[C.MOTIF_PURGE]["texte"])
+
+    def test_la_SONDE_qui_bronche_n_est_pas_une_tranche(self):
+        # « plus vieille journée illisible » = la sonde, pas une tranche.
+        # La purge a abouti : rien à crier.
+        cs = self._nuit_avec(
+            ["⚠️ purge model_score_zone : plus vieille journée illisible"
+             " (essai 1/2 : 57014)"],
+            "  → purge model_score_zone : 126857 ligne(s) effacée(s)"
+            " en 8 tranche(s)\n")
+        self.assertNotIn(C.MOTIF_PURGE, cs)
+
+    def test_un_bilan_a_point_d_interrogation_ne_vaut_pas_rattrapage(self):
+        # « ? ligne(s) » = un Content-Range non lu : la purge a tourné,
+        # mais le chiffre manque. On parle, en le disant.
+        cs = self._nuit_avec(
+            ["⚠️ purge model_score_zone : HTTP 500"],
+            "  ⚠️ purge model_score_zone : HTTP 500\n"
+            "  → purge model_score_zone : ? ligne(s) effacée(s)"
+            " en 540 tranche(s)\n")
+        self.assertIn(C.MOTIF_PURGE, cs)
+        self.assertIn("Content-Range", cs[C.MOTIF_PURGE]["texte"])
+
+    def test_sans_journal_le_doute_profite_au_constat(self):
+        # Pas de `journal` : on ne peut pas savoir, donc on parle — mais
+        # en disant que le statut réel est inconnu. Jamais un faux calme.
+        cs = self._nuit_avec(["⚠️ purge model_score_zone : HTTP 500"])
+        self.assertIn(C.MOTIF_PURGE, cs)
+        self.assertIn("INCONNU", cs[C.MOTIF_PURGE]["texte"])
+
 
 class Silence(unittest.TestCase):
     """⛔ Un contrôle bavard est un contrôle mort."""

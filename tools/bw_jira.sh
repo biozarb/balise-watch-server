@@ -145,13 +145,39 @@ bw_jira_signaler() {
   fi
 
   # ── Un commentaire par jour et par motif ────────────────────────
-  local jour jeton
+  # ⛔ LE GARDE-FOU ÉTAIT COUPÉ EN DEUX — corrigé le 07/10/2026. Il y a
+  # DEUX écrivains sur les mêmes trois motifs, et ils n'écrivent pas leur
+  # jeton au même endroit :
+  #   · le contrôle de 07:30 (`controle_quotidien.sh`) passe son `$ETAT`,
+  #     soit `/var/lib/bw-model-verif` — et il n'a PAS LE CHOIX : son
+  #     unit porte `ProtectHome=read-only` avec
+  #     `ReadWritePaths=/var/lib/bw-model-verif`, donc `$HOME` lui est
+  #     interdit en écriture. ⚠️ NE « CORRIGE » DONC PAS LE CONTRÔLE EN
+  #     LUI RETIRANT `$ETAT` : son jeton ne s'écrirait plus jamais et il
+  #     commenterait le même motif TOUS LES MATINS, sans fin.
+  #   · la routine Balise Watch, qui tourne par ssh, écrit dans
+  #     `$HOME/.balise-watch-etat-alertes` (le défaut ci-dessus).
+  # Relevé le 06/10 : `cri.jira.bw-purge-57014` valait 2026-10-06 côté
+  # contrôle et 2026-10-05 côté routine. Le garde-fou protégeait chacun
+  # contre lui-même et AUCUN contre l'autre : un `bw_jira_signaler` de la
+  # routine aurait doublé le commentaire du contrôle sans un mot. Ce
+  # matin-là, seule une lecture humaine du journal l'a évité.
+  # ⇒ ON LIT LES DEUX, et il suffit qu'UN SEUL dise « déjà aujourd'hui ».
+  # On continue d'ÉCRIRE dans `$etat` (le seul où l'appelant sait écrire).
+  local jour jeton d
   jour="$(date -u +%Y-%m-%d)"
   jeton="$etat/cri.jira.$motif"
-  if [ -r "$jeton" ] && [ "$(cat "$jeton" 2>/dev/null)" = "$jour" ]; then
-    printf 'ⓘ Jira : « %s » déjà signalé aujourd'"'"'hui (%s)\n' "$motif" "$jour"
-    return 0
-  fi
+  for d in "$etat" \
+           "${BW_MODEL_VERIF_ETAT:-/var/lib/bw-model-verif}" \
+           "${BW_ETAT_ALERTES:-$HOME/.balise-watch-etat-alertes}"; do
+    [ -n "$d" ] || continue
+    if [ -r "$d/cri.jira.$motif" ] \
+       && [ "$(cat "$d/cri.jira.$motif" 2>/dev/null)" = "$jour" ]; then
+      printf 'ⓘ Jira : « %s » déjà signalé aujourd'"'"'hui (%s, jeton de %s)\n' \
+        "$motif" "$jour" "$d"
+      return 0
+    fi
+  done
 
   local trav
   trav=$(mktemp -d "${TMPDIR:-/tmp}/bw-jira.XXXXXX") || return 0

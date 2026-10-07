@@ -144,10 +144,18 @@ Les canaux extérieurs (webhook, e-mail) n'ont pas été appelés."
   # ⚠️ Le titre part dans un EN-TÊTE HTTP, qui ne transporte pas d'UTF-8
   # (défaut du 03/08) : `$bw_ac_sujet` est écrit en ASCII pur plus haut,
   # exprès, et non translittéré ici.
+  # ⛔ `--ipv4` : voir `alerter()` de run.sh, entrée du 07/10/2026. ntfy.sh
+  # groupe les visiteurs anonymes par PRÉFIXE /64 en IPv6 ; celui du VPS
+  # est partagé chez OVH, donc le quota de 250 messages / 12 h était mangé
+  # par les voisins et tout push repartait en 429. L'IPv4 est à nous seuls.
   if [ -n "${BW_WEBHOOK_URL:-}" ] && [ -z "$bw_ac_banc" ]; then
-    curl -fsS --max-time 10 -o /dev/null \
+    bw_ac_push=$(curl -sS --ipv4 --max-time 10 -o /dev/null -w '%{http_code}' \
          -H "Title: Balise Watch - $bw_ac_sujet" -H "Priority: default" \
-         -d "$bw_ac_corps" "$BW_WEBHOOK_URL" >/dev/null 2>&1 || true
+         -d "$bw_ac_corps" "$BW_WEBHOOK_URL" 2>/dev/null) || true
+    case "${bw_ac_push:-000}" in
+      2??) : ;;
+      *) printf '⚠️ bw_avertir_config : push non parti (HTTP %s)\n' "${bw_ac_push:-000}" >&2 ;;
+    esac
   fi
 
   # ── 3. E-mail via msmtp ─────────────────────────────────────────────

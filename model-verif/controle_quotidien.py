@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -98,6 +99,11 @@ FENETRE_RELEVES = int(os.environ.get("BW_CONTROLE_FENETRE", "10"))
 MOTIF_DUREE = "bw-pente-duree"
 MOTIF_MEMOIRE = "bw-pente-memoire"
 MOTIF_PURGE = "bw-purge-57014"
+
+#: Le journal du run, à côté du registre dans le même dossier d'état. Lu
+#: en SEULE LECTURE, et seulement pour le constat de purge : le registre
+#: ne porte aucun champ de bilan de purge, le journal si.
+NOM_JOURNAL = os.environ.get("BW_CONTROLE_JOURNAL_NOM", "score.log")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -181,12 +187,17 @@ def _serie(releves, cle: str):
 
 
 def constats(releves: list[dict], jour: date, horizon_j: int = HORIZON_J,
-             seuil_mo: float = MAX_RSS_MO) -> list[dict]:
+             seuil_mo: float = MAX_RSS_MO, journal=None) -> list[dict]:
     """Les constats du matin : au plus un pour la durée, un pour la
     mémoire, et AUCUN quand rien ne monte vers rien d'atteignable.
 
     Chaque constat porte `motif` (le label de déduplication du canal),
     `texte` (la ligne lisible), `date` (le franchissement) et les chiffres.
+
+    `journal` est le chemin de `score.log` (ou `None`). Il ne sert QU'au
+    constat de purge, pour distinguer une tranche rejouée-puis-rattrapée
+    d'un vrai échec — voir `bilan_purge`. Sans lui, le doute profite au
+    constat : on parle, mais en disant que le statut réel est inconnu.
     """
     out: list[dict] = []
     comparables = [r for r in releves if comparable(r)]
@@ -216,17 +227,116 @@ def constats(releves: list[dict], jour: date, horizon_j: int = HORIZON_J,
     # double la suivante (enquete-pente-10-09.md §1.4). Il est dit chaque
     # matin où il se produit ; c'est le canal (un commentaire par jour
     # sur le même ticket) qui empêche le bruit, pas le silence.
+    #
+    # ⛔ MAIS UN REJEU RÉUSSI N'EST PAS UN ÉCHEC — corrigé le 07/10/2026.
+    # `incidents` CONSERVE la ligne « ⚠️ purge … HTTP 500 » même quand la
+    # tranche est rejouée 5 s plus tard et qu'elle passe. Le 06/10 ce code
+    # a donc écrit à KAN-5 « purge en échec cette nuit » alors que la
+    # purge avait ABOUTI : 8 tranches, 124 678 lignes effacées. C'est
+    # exactement l'erreur de lecture du 28/09, côté machine cette fois.
+    # Le registre ne porte aucun champ de bilan de purge ; le journal, si
+    # (`score.log`, écrit par run.sh). On va donc LE lire — en lecture
+    # seule, après la notation, hors du chemin critique de la nuit.
+    # ⚠️ Et on distingue la SONDE de la TRANCHE : « plus vieille journée
+    # illisible » n'est pas une tranche qui a expiré, c'est la sonde qui
+    # lit ce qui reste en base. Elle a ses deux essais à elle.
     releve_nuit = releves[-1] if releves else {}
-    purges = [i for i in (releve_nuit.get("incidents") or [])
-              if i.startswith("⚠️ purge ") and "HTTP" in i]
-    if purges and releve_nuit.get("jour") == jour.isoformat():
-        tables = ", ".join(i.split(" ")[2] for i in purges)
-        out.append({"motif": MOTIF_PURGE, "date": jour.isoformat(),
-                    "valeur": len(purges), "pente": None, "cible": None,
-                    "texte": (f"purge en échec cette nuit ({tables}) : "
-                              f"{'; '.join(purges)} — chaque nuit ratée "
-                              f"double la suivante")})
+    if releve_nuit.get("jour") != jour.isoformat():
+        return out
+    avertis = [i for i in (releve_nuit.get("incidents") or [])
+               if i.startswith("⚠️ purge ")]
+    tranches_ko = [i for i in avertis if "HTTP" in i and "illisible" not in i]
+    sonde_ko = [i for i in avertis if "illisible" in i]
+    if not tranches_ko and not sonde_ko:
+        return out
+
+    bilan = bilan_purge(journal)
+    if tranches_ko and bilan and bilan.get("lignes") is not None:
+        # Rejouée ET rattrapée : le canal se TAIT. La trace reste au
+        # journal du contrôle (controle_quotidien.sh la recopie), pour
+        # qu'un rejeu se compte sans occuper un ticket.
+        return out
+    if not tranches_ko and sonde_ko and bilan and bilan.get("lignes") is not None:
+        # Seule la sonde a bronché : la purge a abouti. Rien à crier —
+        # mais la lecture de « rien ne RESTE en base » est, cette
+        # nuit-là, moins concluante. Dit au journal, pas à Jira.
+        return out
+
+    # ⚠️ Dédoublonné mais DANS L'ORDRE du journal, pas trié : l'ordre dit
+    # laquelle a lâché la première, et c'est l'ordre que le ticket porte
+    # depuis le 10/09. `dict.fromkeys` et non `set`.
+    tables = ", ".join(dict.fromkeys(i.split(" ")[2] for i in avertis))
+    if bilan is None:
+        suite = ("aucun bilan de purge lisible au journal — "
+                 "statut réel INCONNU")
+    elif bilan.get("lignes") is None:
+        suite = (f"bilan au journal sans compte lisible "
+                 f"({bilan.get('tranches')} tranche(s), « ? » ligne(s)) — "
+                 f"un Content-Range n'a pas été lu")
+    else:
+        suite = (f"bilan au journal : {bilan['lignes']} ligne(s) effacée(s) "
+                 f"en {bilan['tranches']} tranche(s)")
+    quoi = ("tranche(s) de purge en échec, NON rattrapée(s)" if tranches_ko
+            else "sonde de purge en échec")
+    out.append({"motif": MOTIF_PURGE, "date": jour.isoformat(),
+                "valeur": len(tranches_ko) or len(sonde_ko),
+                "pente": None, "cible": None,
+                "texte": (f"{quoi} cette nuit ({tables}) : "
+                          f"{'; '.join(avertis)} — {suite} ; "
+                          f"chaque nuit vraiment ratée double la suivante")})
     return out
+
+
+#: Combien de lignes de queue de `score.log` on relit pour trouver le
+#: bilan de purge de la nuit. Le bloc purge est dans les toutes dernières
+#: lignes du run ; 400 couvre largement une nuit, et jamais deux.
+QUEUE_JOURNAL = int(os.environ.get("BW_CONTROLE_QUEUE_JOURNAL", "400"))
+
+_RE_BILAN = re.compile(
+    r"→ purge model_score_zone\s*:\s*(\?|\d+)\s*ligne\(s\) effacée\(s\)"
+    r"\s*en\s*(\d+)\s*tranche\(s\)")
+_RE_AVERTI = re.compile(r"⚠️ purge model_score_zone")
+
+
+def bilan_purge(journal) -> dict | None:
+    """Le bilan de la purge de la DERNIÈRE nuit, lu dans `score.log`.
+
+    Rend `{"lignes": int | None, "tranches": int}` quand le journal porte
+    un « → purge model_score_zone : N ligne(s) effacée(s) en T tranche(s) »
+    APRÈS le dernier avertissement de purge — c'est-à-dire quand la purge
+    a abouti, rejeu compris. `lignes` vaut `None` si le compte est « ? »
+    (un Content-Range non lu : la purge a tourné, le chiffre manque).
+
+    Rend `None` quand il n'y a pas de journal lisible, ou quand le dernier
+    avertissement n'est suivi d'aucun bilan — là, l'échec est réel.
+
+    ⚠️ LECTURE SEULE, et elle ne doit JAMAIS faire échouer le contrôle :
+    un journal absent rend `None`, pas une exception.
+    """
+    if journal is None:
+        return None
+    try:
+        p = Path(journal)
+        if not p.is_file():
+            return None
+        lignes = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    queue = lignes[-QUEUE_JOURNAL:]
+    dernier_bilan = dernier_averti = -1
+    trouve = None
+    for n, ligne in enumerate(queue):
+        if _RE_AVERTI.search(ligne):
+            dernier_averti = n
+        m = _RE_BILAN.search(ligne)
+        if m:
+            dernier_bilan = n
+            trouve = m
+    if trouve is None or dernier_bilan < dernier_averti:
+        return None
+    brut = trouve.group(1)
+    return {"lignes": None if brut == "?" else int(brut),
+            "tranches": int(trouve.group(2))}
 
 
 def _constat(serie, cible: float, jour: date, horizon_j: int, motif: str,
@@ -328,7 +438,11 @@ def main(argv=None) -> int:
               f"(rétro-remplissage : registre_nuit.py --retro)", file=sys.stderr)
         return 2
 
-    cs = constats(releves, jour, a.horizon_j)
+    # ⚠️ `score.log` est passé pour LE SEUL constat de purge : il permet de
+    # voir qu'une tranche expirée a été rejouée puis rattrapée (07/10/2026).
+    # Son absence n'est pas une erreur — `bilan_purge` rend alors `None`.
+    cs = constats(releves, jour, a.horizon_j,
+                  journal=Path(a.out) / NOM_JOURNAL)
     if a.verbeux:
         n_comp = sum(1 for r in releves if comparable(r))
         s_d, s_m = _serie(releves, "duree_s"), _serie(releves, "jalon_max_mo")

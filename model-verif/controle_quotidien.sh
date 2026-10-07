@@ -27,6 +27,17 @@
 set -uo pipefail
 ICI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ETAT="${BW_MODEL_VERIF_ETAT:-/var/lib/bw-model-verif}"
+# ⛔ `$ETAT` EST AUSSI LE DOSSIER DE JETONS PASSÉ À `bw_jira_signaler` ET À
+# `bw_avertir_config` (plus bas), ET CE N'EST PAS UNE ERREUR — note du
+# 07/10/2026, après qu'une session a cru le contraire. L'unit de ce service
+# porte `ProtectHome=read-only` avec `ReadWritePaths=/var/lib/bw-model-verif` :
+# `$HOME/.balise-watch-etat-alertes`, où la routine Balise Watch écrit ses
+# jetons, nous est INTERDIT EN ÉCRITURE. Retirer `$ETAT` de ces appels ferait
+# tomber le jeton sur un chemin non inscriptible, il ne s'écrirait JAMAIS, et
+# ce contrôle commenterait le même motif Jira tous les matins, sans fin.
+# ⇒ Le garde-fou « un commentaire par jour et par motif » est réparé DANS
+# `tools/bw_jira.sh`, qui lit MAINTENANT LES DEUX dossiers avant de parler.
+# Ne « simplifie » pas cette ligne sans relire ce commentaire-là.
 LOG="$ETAT/controle.log"
 ALERTES_FILE="${BW_ALERTES_FILE:-$HOME/.balise-watch-alertes.env}"
 ATTENTE_MAX_S="${BW_CONTROLE_ATTENTE_MAX_S:-2400}"

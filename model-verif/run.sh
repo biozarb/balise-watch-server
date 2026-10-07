@@ -437,15 +437,37 @@ alerter() {
   # ⛔ Et UN BANC NE POUSSE PAS SUR LE TÉLÉPHONE : même drapeau que
   # `bw_avertir_config` (`BW_AVERTIR_CONFIG_BANC`, posé par
   # test_run_selftest.py). Le cri reste dans journald et dans le journal.
+  # ⛔ `--ipv4` N'EST PAS UN DÉTAIL — 07/10/2026, trois cris perdus (30/09,
+  # 02/10, 07/10). ntfy.sh limite les visiteurs ANONYMES à 250 messages
+  # par 12 h et les regroupe PAR PRÉFIXE /64 en IPv6. Le VPS sort en
+  # IPv6 sur `2001:41d0:404:200::/64`, un préfixe OVH PARTAGÉ : les
+  # voisins mangeaient le quota et le cri repartait en HTTP 429. Mesuré
+  # le 07/10 à la même seconde : `/v1/account` en IPv6 → 250/250,
+  # restants 0 ; en IPv4 → 0/250, restants 250 ; le POST en IPv4 → 200,
+  # en IPv6 → 429. L'IPv4 du VPS est à lui seul, donc le quota aussi.
+  # ⛔ ET ON NE JETTE PLUS L'ERREUR. L'ancien `>/dev/null 2>&1` a caché
+  # la raison pendant huit jours : le journal disait « push non parti »
+  # sans jamais dire pourquoi. Le code HTTP et le code de sortie curl
+  # partent maintenant dans le journal — un canal cassé doit s'expliquer.
   if [[ -n "${BW_WEBHOOK_URL:-}" && -z "${BW_AVERTIR_CONFIG_BANC:-}" ]]; then
     local titre_h
     titre_h=$(printf 'Balise Watch - %s' "$sujet" \
       | { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; } \
       | LC_ALL=C tr -cd '\40-\176')
-    curl -fsS --max-time 10 -o /dev/null \
+    # ⚠️ `|| push_sortie=$?` et pas un `;` nu : run.sh est en `set -uo
+    # pipefail` aujourd'hui, mais si quelqu'un y ajoute un jour `set -e`,
+    # une affectation depuis un curl en échec tuerait la nuit entière pour
+    # un canal d'alerte. Un canal ne tue pas un runner — règle du 10/09.
+    local push_code="" push_sortie=0
+    push_code=$(curl -sS --ipv4 --max-time 10 -o /dev/null -w '%{http_code}' \
          -H "Title: ${titre_h:-Balise Watch}" -H "Priority: high" \
-         -d "$corps" "$BW_WEBHOOK_URL" >/dev/null 2>&1 \
-      || dire "⚠️ push non parti (webhook)"
+         -d "$corps" "$BW_WEBHOOK_URL" 2>/dev/null) || push_sortie=$?
+    if [[ "$push_sortie" -eq 0 && "$push_code" == 2?? ]]; then
+      dire "ⓘ push parti (webhook, HTTP $push_code)"
+    else
+      dire "⚠️ push non parti (webhook) — HTTP ${push_code:-000}, curl=$push_sortie$(
+        [[ "$push_code" == "429" ]] && printf '%s' " — quota ntfy épuisé pour ce visiteur ; vérifier \`curl --ipv4 https://ntfy.sh/v1/account\`")"
+    fi
   fi
 
   # ⚠️ `Subject:` ne transporte pas d'UTF-8 (bug du 03/08 : un « é »

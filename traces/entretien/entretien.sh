@@ -121,7 +121,12 @@ alerter() {   # $1 = titre, $2 = message
       | { iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null || cat; } \
       | LC_ALL=C tr -cd '\40-\176')
     [[ -z "$titre_h" ]] && titre_h="Balise Watch"
-    http=$(curl -fsS --max-time 10 -o /dev/null -w '%{http_code}' \
+    # ⛔ `--ipv4` : le 429 annoncé ci-dessous a bel et bien eu lieu, trois
+    # fois (30/09, 02/10, 07/10/2026). Cause trouvée le 07/10 : ntfy.sh
+    # groupe les visiteurs anonymes par PRÉFIXE /64 en IPv6, et celui du
+    # VPS (`2001:41d0:404:200::/64`) est partagé chez OVH — les voisins
+    # mangeaient les 250 messages / 12 h. En IPv4 le quota est à nous.
+    http=$(curl -fsS --ipv4 --max-time 10 -o /dev/null -w '%{http_code}' \
          -H "Title: $titre_h" -H "Priority: high" \
          -d "$msg" "$BW_WEBHOOK_URL" 2>/dev/null) \
       || dire "⚠️ webhook injoignable (HTTP ${http:-?}) — 429 = quota du service, pas un bug d'ici"
