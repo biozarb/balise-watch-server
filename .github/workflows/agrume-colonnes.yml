@@ -136,6 +136,7 @@ jobs:
           # et Wyoming en vrai) — seule sa logique pure l'est.
           python3 verif/test_confronter_quotidien.py
           python3 agrume/test_grille.py
+          python3 agrume/test_publier_grilles.py
           # ⚠️ Ces trois-là ne protègent PAS l'ingestion : ils protègent
           # la LECTURE (profil, coupe, confrontation au ballon). Ils sont
           # quand même ici parce que ce dépôt n'a pas d'autre CI, et

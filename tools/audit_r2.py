@@ -575,6 +575,11 @@ def rapprocher(index, cle_index: str, prefixe: str, objets,
     for e in index.get("runs") or []:
         reclamees.update(e.get("cles") or [])
     restes = set(index.get("restes") or [])
+    # ⓘ 10/10 — `en_vol` (produit B) : clés déclarées par une passe AVANT
+    # sa première écriture. Tant qu'elles y sont, la passe suivante les
+    # reprend en purge : ce ne sont pas des orphelins, ce sont des restes
+    # annoncés. Comptées avec les restes, pas avec les réclamées.
+    restes |= set(index.get("en_vol") or [])
 
     presentes = {o[1]: o[2] for o in objets if o[1].startswith(prefixe)}
     ecrit_le = {o[1]: (o[3] if len(o) > 3 else None) for o in objets

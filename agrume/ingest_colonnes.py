@@ -887,7 +887,7 @@ def publier_grilles(paquets, ref, crier=journal_horodate, run_vise=None):
     objets = sum(len(cles_du_run(ref, d, g.steps)) + 1 for d, g, _ in paquets)
     mo = sum(g.octets_publies() / 1e6 for _, g, _ in paquets)
     plafond = verifier_dimensionnement(
-        "agrume-grille", objets_par_run=objets + 2, runs_par_jour=8,
+        "agrume-grille", objets_par_run=objets + 3, runs_par_jour=8,
         mo_par_run=round(mo * RETENTION_RUNS, 2))
     store = Storage("agrume-grille", "AGRUME_BUCKET", "wind-grid", plafond)
 
@@ -943,6 +943,54 @@ def publier_grilles(paquets, ref, crier=journal_horodate, run_vise=None):
     #  sur deux objets. `colonnes.bin` n'est jamais tiré en entier — la
     #  coupe en lit 24 Ko par Range.
     # ══════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════
+    #  1-bis. ⛔ 10/10 — LES CLÉS « EN VOL », DÉCLARÉES AVANT LA 1ʳᵉ ÉCRITURE
+    #
+    #  Constat du garde-fou R2 (08 → 10/10, 3 nuits rouges) : deux tampons
+    #  `nord-alpes/2026-10-07T06:00:00Z/e141.bin` et `e144.bin`, écrits le
+    #  07/10 à 13:28 Z, réclamés par AUCUNE entrée de l'index. Le run a été
+    #  purgé normalement ensuite — sauf eux. Ils ne sont que sur nord-alpes
+    #  (le premier domaine publié), et seuls les tampons qu'AUCUNE autre
+    #  passe de ce run n'a republiés sont restés : la signature d'une passe
+    #  qui a écrit ses objets puis est tombée AVANT l'étape 3 (l'`except`
+    #  large de `main()` la garde verte, c'est voulu). Ses clés n'étaient
+    #  alors écrites nulle part : sans `ListObjects`, elles sortaient de
+    #  la mémoire du produit pour toujours.
+    #
+    #  ⇒ Avant la première écriture, les clés que cette passe va publier
+    #  et que l'index ne réclame pas déjà sont inscrites sous `en_vol`.
+    #  Une passe qui va au bout écrit l'étape 3 avec un index SANS
+    #  `en_vol` (`index_apres` repart d'`INDEX_VIDE`) ; une passe qui
+    #  tombe le laisse, et la SUIVANTE le verse dans `restes` — la purge
+    #  emporte ce qu'elle ne republie pas, le garde-fou de fin d'étape 3
+    #  protège ce qu'elle republie. Une écriture Class A de plus, et
+    #  seulement quand la passe publie une clé neuve (une rallonge, une
+    #  couture plus longue, un run neuf) — pas sur une repasse identique.
+    # ══════════════════════════════════════════════════════════════════
+    vol_prec = list(index.get("en_vol") or [])
+    if vol_prec:
+        deja = list(index.get("restes") or [])
+        index = dict(index, restes=deja + [c for c in vol_prec
+                                           if c not in deja])
+        crier(f"⚠️ index : {len(vol_prec)} clé(s) « en vol » laissée(s) par "
+              f"une passe tombée avant l'étape 3 — versées aux restes, la "
+              f"purge emportera celles que cette passe ne republie pas")
+    index.pop("en_vol", None)
+    reclamees_avant = {c for e in (index.get("runs") or [])
+                       for c in (e.get("cles") or [])}
+    en_vol = [c for dom, gr, _ in paquets
+              for c in cles_du_run(ref, dom, gr.steps)
+              + [f"{prefixe_run(ref, dom)}/zsol.bin"]
+              if c not in reclamees_avant]
+    if en_vol:
+        verifier_prefixe(en_vol)
+        store.put(CLE_INDEX,
+                  json.dumps(dict(index, en_vol=en_vol),
+                             ensure_ascii=False).encode(),
+                  cache_control=CACHE_REECRIT)
+        crier(f"▶ index : {len(en_vol)} clé(s) neuve(s) déclarée(s) en vol "
+              f"avant publication")
+
     a_supprimer, nouveau = [], index
     for dom, gr, manifeste in paquets:
         base = prefixe_run(ref, dom)
@@ -986,6 +1034,15 @@ def publier_grilles(paquets, ref, crier=journal_horodate, run_vise=None):
               f"({gr.octets() / 1e6:.1f} Mo en mémoire)")
 
     # ── 3. l'index NOUVEAU, avant toute suppression ───────────────────
+    # ⛔ 10/10 — LE GARDE-FOU `encore` DE `index_apres` NE VOIT QUE LE
+    # DOMAINE EN COURS. Appelé domaine par domaine, il laisse passer dans
+    # `sup` du 1ᵉʳ domaine une clé (un reste, une clé « en vol ») que le
+    # 2ᵉ domaine republie juste après. Ce qu'on s'apprête à supprimer est
+    # donc refiltré ici contre l'index COMPLET : on ne supprime jamais
+    # une clé que l'index qu'on publie réclame.
+    reclamees = {c for e in (nouveau.get("runs") or [])
+                 for c in (e.get("cles") or [])}
+    a_supprimer = [c for c in a_supprimer if c not in reclamees]
     nouveau = dict(nouveau, restes=list(a_supprimer))
     nouveau["ecrit_le"] = datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
