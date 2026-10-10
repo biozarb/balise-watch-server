@@ -6,6 +6,38 @@
 
 ---
 
+## 10/10/2026 (produit B) — une passe qui tombe APRÈS ses écritures et AVANT l'index laisse des orphelins à vie
+
+Garde-fou R2 rouge trois nuits (08 → 10/10) pour **deux** objets :
+`agrume/grille/nord-alpes/2026-10-07T06:00:00Z/e141.bin` et `e144.bin`
+(écrits le 07/10 à 13:28 Z). Le reste du run a été purgé normalement.
+Ce n'est **pas** le bug du 26/09 (`bc45aca` est en place et juste).
+
+1. **`publier_grilles` écrit les objets (étape 2) avant l'index
+   (étape 3)**, et l'`except` large de `main()` garde le run vert si la
+   publication tombe — voulu. Mais entre les deux, les clés que cette
+   passe était la SEULE à publier (ici : une couture plus longue, e141 et
+   e144, sur le 1ᵉʳ domaine seulement) ne sont écrites nulle part. Sans
+   `ListObjects`, une clé hors index ne sera jamais purgée.
+   → les clés neuves sont déclarées sous **`en_vol`** dans l'index AVANT
+   la première écriture ; la passe suivante les verse aux `restes`.
+   Une écriture Class A de plus, et seulement quand la passe publie une
+   clé que l'index ne réclame pas encore. `audit_r2.py` compte `en_vol`
+   avec les restes.
+2. **Le garde-fou `encore` d'`index_apres` ne voit que le domaine en
+   cours.** Appelé domaine par domaine, il laissait le 1ᵉʳ domaine envoyer
+   en purge un reste que le 2ᵉ republie juste après. Latent jusqu'ici,
+   inévitable avec `en_vol` → `a_supprimer` est **refiltré contre l'index
+   complet** juste avant l'étape 3.
+
+**Piège réutilisable :** « écrire les objets, puis l'index » n'est sûr
+que si une panne entre les deux laisse une trace. Toute mémoire par index
+(sans `ListObjects`) doit annoncer ce qu'elle va écrire **avant** de
+l'écrire. Banc : `agrume/test_publier_grilles.py` (5 rouges sur l'ancien
+code, dont les deux orphelins exacts de la prod).
+
+---
+
 ## 07/10/2026 (alertes) — le push ne partait pas à cause du préfixe IPv6 PARTAGÉ d'OVH, et le `curl` cachait la raison depuis huit jours
 
 Trois cris réels perdus (30/09, 02/10, 07/10) : le mail arrivait, le
