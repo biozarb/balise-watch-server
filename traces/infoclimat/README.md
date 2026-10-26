@@ -25,6 +25,13 @@ succès : `Wrong ip address` en texte brut, une réponse non-JSON, et
 `status:"OK"` sans `hourly`. Les trois sont traités dans `fetch_lot()`.
 Ne pas « simplifier » en regardant le code de statut.
 
+**Un 5xx, c'est leur serveur qui tombe — on disjoncte (26/10).** Au
+premier HTTP 5xx ou timeout, le run s'arrête (lots suivants non envoyés)
+et le poller se met en pause 10 → 20 → 40 → 60 min, un seul lot-sonde
+par fin de pause. État dans `etat.json` → `panne_amont`. Code de sortie
+3 = « en pause », que `poller.sh` annonce comme panne Infoclimat (une
+alerte, un rappel toutes les 3 h, un mail « rétabli »). Voir BUGS.md.
+
 **Le VPS sort en IPv6 par défaut.** `gai.conf` est un filet, pas une
 garantie. `forcer_ipv4()` est obligatoire.
 

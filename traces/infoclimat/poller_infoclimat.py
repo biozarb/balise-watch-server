@@ -232,6 +232,20 @@ HISTORY_INTERVAL_MIN = 30
 HISTORY_HEURES = 30
 TOLERANCE_S = 90           # jitter du timer : ne pas rater un créneau
 
+# ── Disjoncteur sur panne amont (26/10/2026) ─────────────────────────
+# Le 26/10 vers 17 h UTC, Infoclimat a rendu HTTP 504 puis 502 sur TOUS
+# les lots, run après run. Le poller envoyait quand même ses 7 lots
+# toutes les 5 min (≈ 30 s d'attente chacun chez eux), à un serveur
+# bénévole déjà à genoux, et brûlait 7 appels du plafond quotidien par
+# run (357/500 à 17:15) — plafond qui aurait coupé le poller jusqu'à
+# minuit UTC, même après le retour d'Infoclimat.
+# Désormais : au premier 5xx / timeout, on COUPE le run (les lots
+# suivants ne partent pas) et on se met en pause, durée doublée à chaque
+# rechute : 10 → 20 → 40 → 60 min, plafonnée. Un seul lot-sonde par
+# pause. Coût d'une panne d'une nuit : ~15 appels au lieu de ~140.
+PAUSE_PANNE_MIN = [10, 20, 40, 60]
+CODE_PAUSE = 3             # code de sortie lu par poller.sh : panne AMONT
+
 ETAT_DIR = os.environ.get("BW_INFOCLIMAT_ETAT",
                           os.path.expanduser("~/.balise-watch-infoclimat"))
 ETAT_FICHIER = os.path.join(ETAT_DIR, "etat.json")
@@ -455,7 +469,12 @@ def lire_escalade(storage, etat, maintenant, log):
 #  APPEL À L'API
 # ══════════════════════════════════════════════════════════════════════
 def fetch_lot(cle, ids, jour_debut, jour_fin):
-    """Un lot. Renvoie (hourly | None, octets, diagnostic).
+    """Un lot. Renvoie (hourly | None, octets, diagnostic, panne_amont).
+
+    `panne_amont` = HTTP 5xx ou pas de réponse du tout (timeout, réseau) :
+    c'est LEUR serveur qui ne tient pas, insister ne fait qu'aggraver.
+    Un `Wrong ip address` ou un JSON refusé, au contraire, est un
+    problème de NOTRE requête — pas de pause, l'alerte doit sortir.
 
     ⚠️ Trois échecs de cette API arrivent en HTTP 200 et se ressemblent
     tous à un succès. Ils sont traités ici, dans l'ordre où on les a
@@ -471,23 +490,29 @@ def fetch_lot(cle, ids, jour_debut, jour_fin):
     params += [("stations[]", i) for i in ids]
     url = f"{OPENDATA}?{urllib.parse.urlencode(params)}"
     code, txt, octets = get(url)
+    panne = code == 0 or 500 <= code <= 599
+    if panne:
+        return None, octets, (f"HTTP {code} — {txt.strip()[:160]}" if code
+                              else f"pas de réponse — {txt[:160]}"), True
 
     if txt.strip() == "Wrong ip address":
         return None, octets, (f"Wrong ip address (HTTP {code}) — la clé "
-                              f"n'est pas valide depuis cette IP")
+                              f"n'est pas valide depuis cette IP"), False
     try:
         data = json.loads(txt)
     except ValueError:
-        return None, octets, f"réponse non-JSON (HTTP {code}) — {txt[:160]}"
+        return None, octets, (f"réponse non-JSON (HTTP {code}) — "
+                              f"{txt[:160]}"), False
     if data.get("status") != "OK":
         err = json.dumps(data.get("errors", data), ensure_ascii=False)
-        return None, octets, f"status={data.get('status')!r} — {err[:160]}"
+        return None, octets, (f"status={data.get('status')!r} — "
+                              f"{err[:160]}"), False
     hourly = data.get("hourly")
     if not isinstance(hourly, dict):
         return None, octets, ("status OK mais pas de clé `hourly` — requête "
                               f"refusée en silence ; clés : "
-                              f"{sorted(data.keys())}")
-    return hourly, octets, "OK"
+                              f"{sorted(data.keys())}"), False
+    return hourly, octets, "OK", False
 
 
 def parse_point(raw):
@@ -770,20 +795,56 @@ def run(args, log):
         log("--dry-run sans --reseau : on s'arrête avant le premier appel")
         return 0
 
+    # ── Disjoncteur : Infoclimat en panne, on ne l'appelle pas ────────
+    panne = etat.get("panne_amont")
+    if panne and maintenant < panne.get("jusqu_ts", 0):
+        log(f"⏸ Infoclimat en panne depuis "
+            f"{(maintenant - panne['depuis_ts']) // 60} min "
+            f"({panne.get('diag', '?')}) — pause jusqu'à "
+            f"{datetime.fromtimestamp(panne['jusqu_ts'], timezone.utc):%H:%MZ}"
+            f", aucun appel ; le précédent latest.json reste servi")
+        ecrire_etat(etat)
+        return CODE_PAUSE
+
     # ── Les appels ────────────────────────────────────────────────────
     # ⚠️ La JOURNÉE, et pas une fenêtre plus courte : elle n'existe pas
     #    (mesuré). On demande veille→jour pour que l'historique reste
     #    complet à cheval sur minuit, où la journée du jour est vide.
-    octets_total, neufs, echecs = 0, 0, 0
-    for lot in lots:
-        hourly, octets, diag = fetch_lot(cle, lot, veille, jour)
+    octets_total, neufs, echecs, reussis = 0, 0, 0, 0
+    coupe = False
+    for n_lot, lot in enumerate(lots):
+        hourly, octets, diag, panne_amont = fetch_lot(cle, lot, veille, jour)
         etat["appels_jour"][jour] = etat["appels_jour"].get(jour, 0) + 1
         octets_total += octets
         if hourly is None:
             echecs += 1
             log(f"❌ lot de {len(lot)} : {diag}")
+            if panne_amont:
+                # ⚠️ DISJONCTEUR. Les lots suivants ne partent pas : un
+                # serveur qui vient de rendre un 5xx au lot n ne rendra
+                # pas mieux au lot n+1, 30 s plus tard.
+                p = etat.get("panne_amont") or {"depuis_ts": maintenant,
+                                                "essais": 0}
+                p["essais"] = p.get("essais", 0) + 1
+                pause = PAUSE_PANNE_MIN[min(p["essais"],
+                                            len(PAUSE_PANNE_MIN)) - 1]
+                p["jusqu_ts"] = maintenant + pause * 60 - TOLERANCE_S
+                p["diag"] = diag[:80]
+                etat["panne_amont"] = p
+                reste = len(lots) - n_lot - 1
+                log(f"⏸ disjoncteur : Infoclimat ne tient pas — "
+                    f"{reste} lot(s) non envoyé(s), pause de {pause} min "
+                    f"(rechute n°{p['essais']})")
+                coupe = True
+                break
             # Pas de réessai, jamais. Le lot repassera au run suivant.
             continue
+        reussis += 1
+        if etat.get("panne_amont"):
+            p = etat.pop("panne_amont")
+            log(f"✅ Infoclimat répond à nouveau, après "
+                f"{(maintenant - p['depuis_ts']) // 60} min de panne "
+                f"et {p.get('essais', 0)} sonde(s)")
         for sid in lot:
             st = etat["stations"].setdefault(sid, {})
             st["dernier_poll_ts"] = maintenant
@@ -818,20 +879,21 @@ def run(args, log):
                                 if t >= limite]
 
     log(f"{octets_total / 1024:.0f} Ko sur le fil · {neufs} relevés neufs · "
-        f"{echecs} lot(s) en échec")
+        f"{echecs} lot(s) en échec"
+        + (f" · {len(lots) - reussis - echecs} non envoyé(s)" if coupe else ""))
 
     # ── Écritures R2 ──────────────────────────────────────────────────
     if not args.go:
         log("--dry-run : rien n'est écrit dans R2")
         ecrire_etat(etat)
-        return 0
-    if echecs == len(lots):
+        return CODE_PAUSE if (coupe and not reussis) else 0
+    if reussis == 0:
         # Tous les lots en échec : ne PAS écrire un latest.json appauvri
         # par-dessus un bon. Le précédent reste servi.
         log("tous les lots en échec — aucune écriture, le précédent "
             "latest.json reste servi")
         ecrire_etat(etat)
-        return 1
+        return CODE_PAUSE if coupe else 1
 
     from storage import CACHE_REECRIT
 

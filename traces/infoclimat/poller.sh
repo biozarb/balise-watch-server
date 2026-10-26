@@ -43,6 +43,10 @@ VERROU="$ETAT/verrou"
 MAX_MINUTES="${BW_POLLER_MAX_MINUTES:-8}"
 MAX_LOG_MO=10
 SEUIL_ALERTE=3
+# Rappel tant que ça dure : toutes les 36 runs (≈ 3 h au pas de 5 min).
+# Avant le 26/10, l'alerte repartait à CHAQUE run au-delà du seuil — une
+# panne Infoclimat d'une soirée = un e-mail toutes les 5 min.
+RAPPEL_RUNS=36
 
 mkdir -p "$ETAT"
 dire() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG"; }
@@ -168,7 +172,14 @@ code=$?
 duree=$(( $(date +%s) - debut ))
 
 if (( code == 0 )); then
+  avant=$(cat "$ECHECS" 2>/dev/null || echo 0)
   echo 0 > "$ECHECS"
+  # Fin d'incident : si une alerte est partie, on dit que c'est fini —
+  # sinon le dernier mail reçu reste « en échec » indéfiniment.
+  if (( avant >= SEUIL_ALERTE )); then
+    alerter "poller Infoclimat retabli" \
+      "Run OK après $avant run(s) en échec (≈ $(( avant * 5 )) min). Rien à faire."
+  fi
   # Ping de vie : c'est le SEUL canal capable de signaler que ce script
   # ne tourne PLUS DU TOUT — aucune ligne d'ici ne s'exécuterait pour le
   # dire. Healthchecks alerte depuis l'extérieur, sur le silence.
@@ -191,10 +202,24 @@ fi
 
 n=$(( $(cat "$ECHECS" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$ECHECS"
-dire "run en ÉCHEC (code $code, ${duree}s) — $n consécutif(s)"
-if (( n >= SEUIL_ALERTE )); then
-  alerter "poller Infoclimat en echec" \
-    "$n runs consécutifs en échec (code $code). Dernières lignes :
+# Code 3 = disjoncteur : Infoclimat rend des 5xx / ne répond plus. Ce
+# n'est pas NOTRE panne — le poller s'est mis en pause tout seul et
+# reprendra seul. On le dit dans le sujet pour que le mail se lise d'un
+# coup d'œil.
+if (( code == 3 )); then
+  dire "run en PAUSE (panne Infoclimat, ${duree}s) — $n consécutif(s)"
+  sujet="Infoclimat indisponible (panne chez eux, poller en pause)"
+  intro="Infoclimat rend des erreurs serveur (5xx) ou ne répond plus. Le poller s'est mis en pause tout seul (10 → 60 min entre deux sondes, un seul appel par sonde) et reprendra seul au retour d'Infoclimat. Rien à faire de notre côté ; le dernier latest.json reste servi."
+else
+  dire "run en ÉCHEC (code $code, ${duree}s) — $n consécutif(s)"
+  sujet="poller Infoclimat en echec"
+  intro="$n runs consécutifs en échec (code $code)."
+fi
+if (( n == SEUIL_ALERTE || (n > SEUIL_ALERTE && (n - SEUIL_ALERTE) % RAPPEL_RUNS == 0) )); then
+  (( n > SEUIL_ALERTE )) && sujet="$sujet - toujours en cours"
+  alerter "$sujet" \
+    "$intro
+$n run(s) consécutif(s) sans données neuves. Dernières lignes :
 $(tail -n 20 "$LOG")"
 fi
 # ⚠️ On sort en 0 : un échec de poll n'est pas un échec de SERVICE.

@@ -6,6 +6,40 @@
 
 ---
 
+## 26/10/2026 (poller Infoclimat) — une panne CHEZ EUX traitée comme une erreur de lot : 7 appels toutes les 5 min, et un mail par run
+
+Vers 17 h UTC, Infoclimat rend `HTTP 504` (`error code: 504`, ~30 s
+d'attente) puis `502` sur **tous** les lots. Rien de faux dans notre
+requête — mais le poller aggravait tout :
+
+1. **Il envoyait les 7 lots quand même**, run après run, à un serveur
+   bénévole qui venait de tomber sur le premier. ~3,5 min d'attente par
+   run, 7 appels comptés.
+2. **Le plafond quotidien fondait** : 357/500 à 17:15, plafond atteint
+   vers 19 h → `Abort` jusqu'à minuit UTC, *même après* le retour
+   d'Infoclimat. Un échec ne remet pas `dernier_poll_ts` : toutes les
+   stations restent dues à chaque run.
+3. **`poller.sh` réalertait à chaque run** au-delà du seuil (`n >= 3`) :
+   un mail toutes les 5 min pendant toute la panne, et aucun mail de fin.
+
+→ **Disjoncteur** dans `poller_infoclimat.py` : un 5xx ou une absence de
+réponse (`code 0`) = panne amont → le run s'arrête net (lots suivants non
+envoyés), pause 10 → 20 → 40 → 60 min (plafonnée) dans `etat.json`
+(`panne_amont`), un seul lot-sonde à chaque fin de pause, sortie
+`CODE_PAUSE = 3`. Effacé au premier lot réussi.
+`Wrong ip address`, non-JSON en 200, `status` ≠ OK restent des erreurs
+de NOTRE requête : pas de pause, l'alerte doit sortir.
+→ **`poller.sh`** : alerte au 3ᵉ run, rappel tous les 36 runs (≈ 3 h),
+mail « rétabli » au premier run OK après alerte. Code 3 → sujet
+« Infoclimat indisponible (panne chez eux, poller en pause) ».
+
+**Piège réutilisable** : « pas de réessai » ne suffit pas à être sobre.
+Ne pas réessayer un lot, mais envoyer le lot suivant au même serveur
+30 s plus tard, c'est réessayer quand même. Un 5xx parle du serveur, pas
+du lot.
+
+---
+
 ## 10/10/2026 (produit B) — une passe qui tombe APRÈS ses écritures et AVANT l'index laisse des orphelins à vie
 
 Garde-fou R2 rouge trois nuits (08 → 10/10) pour **deux** objets :
