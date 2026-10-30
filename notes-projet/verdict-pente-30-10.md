@@ -902,3 +902,46 @@ relu ; **note en section horodatée** par prudence de collision (§0).
    Jira avec `/home/debian/venv-balise/bin/python3` dans un `mktemp -d`, en
    **lecture seule**. Le même script sert avant et après écriture, ce qui rend
    la comparaison exacte.
+
+## 08:11–08:20 (Paris, CET) — SECOND run du jour : vérification seule, RIEN refait
+
+⛔ **La collision annoncée au §0 a bien eu lieu.** L'occurrence du **30/10 à
+07:09 UTC** est partie à **07:11 UTC (08:11 CET)**, soit **16 minutes** après
+que le run précédent (l'occurrence du 29/10, tirée en retard) ait fini d'écrire.
+Étape 0 appliquée : `git log --since=midnight` a montré **`a003d19`**
+(07:53:54 CET, miroir du 30/10), et `project_read` a rendu la note **déjà
+écrite** à 06:55:17Z. ⇒ **Le travail du matin était fait. Il n'a pas été
+refait**, et cette section **fusionne** au lieu de remplacer (règle n°2 — c'est
+exactement le cas du 11/09/2026 que le README documente, évité cette fois).
+
+**Ce qui a été revérifié, en lecture seule, et ce que ça donne :**
+
+| vérification | résultat |
+|---|---|
+| **Jira, GET des trois tickets** | ✅ **KAN-3** Terminé/`done`, **35** comm. · **KAN-4** À faire/`new`, **49** comm. · **KAN-5** À faire/`new`, **32** comm. — **exactement** les comptes annoncés au §10, derniers commentaires à **07:44:30/31/32**. **Aucun doublon, aucun changement d'état, aucun quatrième commentaire.** |
+| **Registre des nuits, 2 dernières lignes** | ✅ **conforme au §1 au chiffre près** : `duree_s` 4 921 puis 4 934 · `cpu_s` 3 868,7 puis 3 900,2 · `jalon_max_mo` 3 424 puis 3 400 · `swap_peak_mo` 2 431,8 puis 2 149,3 · `n_57014` 1 et 1 · `lancement = timer` · `result = success` |
+| **`incidents`** | ✅ **deux** les deux nuits, **tous deux de mémoire** (rejeu d'archive 2 995 / 2 982 Mo ; oubli de la fenêtre 3 424 / 3 400 Mo). **Aucun avertissement de purge** ⇒ le compteur KAN-5 à **4 / 3** est confirmé par une seconde lecture. |
+| **Contrôle de 07:30** | ✅ une **seule** ligne aujourd'hui : `07:30:08 … rien à dire : pente plate ou négative, ou échéance hors horizon`. Pas de second tir, pas de second jeton. |
+| **Miroir git** | ✅ `verdict-pente-30-10.md` présent (56 113 o, 07:52) et **commité** (`a003d19`). ⛔ Les deux miroirs en souffrance sont **inchangés** : 24/10 absent, 26/10 présent mais **non suivi** (`?? notes-projet/verdict-pente-26-10.md`). **Rien fabriqué, rien commité de plus** — c'est la décision n°5, elle reste à Yann. |
+
+⇒ ✅ **Le verdict du run précédent est CONFIRMÉ par une relecture indépendante
+des sources.** Rien n'est à corriger, rien n'est à compléter sur le fond.
+
+⛔ **Les deux décisions prioritaires restent entières et personne n'y a
+répondu** : (1) la **fermeture de KAN-5**, critère rempli depuis le 29/10
+(4 / 3) ; (2) **R2 facture** — palier gratuit dépassé deux nuits de suite
+(10,291 puis 10,276 Go). La liste du §12 est à jour telle quelle.
+
+### Respect des règles sur ce second run
+
+✅ **VPS en LECTURE SEULE** : trois `ssh` seulement — un `sed` sur `bw_jira.sh`,
+un GET Jira (`bw_jira_http GET`, aucun POST), un `tail` du registre plus
+`journalctl`. Aucun `systemctl`, aucun SQL, aucun rsync, rien écrit dans
+`~/balise-watch` ni `/etc`. ✅ **Aucune écriture Jira** : pas un seul
+`bw_jira_signaler`, pas un seul `bw_jira_commenter`. ✅ **Aucun secret lu par
+valeur** (`.balise-watch-alertes.env` **sourcé**, `curl -K -`). ✅ **Desktop
+Commander exclusivement** ; sorties redirigées vers des fichiers du Mac et
+relues avec `read_file` (piège n°2), `SSH_AUTH_SOCK` exporté (piège n°1), les
+trois « did not respond within 60s » **jamais relancés** (piège n°3). ⛔ **Aucun
+`git push`.** ✅ **Lire avant d'écrire** : `project_read` avant ce `project_write`,
+qui est une **fusion**.
