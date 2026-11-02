@@ -1,6 +1,6 @@
 {
  "produit": "AGRUME — axe des balises, figé (tous domaines)",
- "ecrit_le": "2026-09-22T05:55:36Z",
+ "ecrit_le": "2026-11-02T07:20:39Z",
  "domaines": {
   "nord-alpes": {
    "latmin": 43.7,
@@ -47,14 +47,14 @@
    "lonmax": 2.53
   }
  },
- "n": 1286,
+ "n": 1308,
  "n_par_domaine": {
-  "nord-alpes": 778,
+  "nord-alpes": 793,
   "tarn-aveyron-herault": 113,
-  "pyrenees": 256,
-  "hors domaine": 139
+  "pyrenees": 262,
+  "hors domaine": 140
  },
- "n_hors_domaine": 136,
+ "n_hors_domaine": 137,
  "note": "Fusion À AJOUT SEUL : une balise hors ligne n'est jamais retirée, sinon l'axe de l'archive se décalerait et son historique deviendrait orphelin. ⚠️ L'ajout seul garantit qu'aucune balise ne DISPARAÎT ; il ne garantit PAS que les positions dans ce fichier ne bougent pas — l'axe est trié par identifiant (cf. `_rang`), donc une balise d'identifiant plus petit décale les suivantes. Chaque archive porte SA propre liste et la recherche se fait par identifiant, jamais par indice. ⚠️ Le nom du fichier dit « nord-alpes » pour des raisons de continuité ; l'axe couvre tous les domaines de `domaine.DOMAINES`. Régénérer avec `python3 agrume/freeze_balises.py`.",
  "balises": [
   {
@@ -566,6 +566,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "000IL",
+   "source": "infoclimat",
+   "lat": 45.213,
+   "lon": 5.56,
+   "name": "infoclimat 000IL",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "000J4",
@@ -1866,6 +1876,16 @@
    "position_suspecte": false,
    "hors_domaine": true,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "1037X",
+   "source": "aemet",
+   "lat": 43.0518,
+   "lon": -2.3371,
+   "name": "aemet 1037X",
+   "position_suspecte": false,
+   "hors_domaine": true,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "1037Y",
@@ -3518,6 +3538,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "STATIC0305",
+   "source": "infoclimat",
+   "lat": 46.0289,
+   "lon": 6.4245,
+   "name": "infoclimat STATIC0305",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "STATIC0307",
    "source": "infoclimat",
    "lat": 43.5228,
@@ -3936,6 +3966,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-28"
+  },
+  {
+   "id": "STATIC0478",
+   "source": "infoclimat",
+   "lat": 42.5055,
+   "lon": 2.0401,
+   "name": "infoclimat STATIC0478",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "STATIC0479",
@@ -5858,6 +5898,16 @@
    "vue_le": "2026-08-28"
   },
   {
+   "id": "ffvl-3528",
+   "source": "windsmobi",
+   "lat": 44.5729,
+   "lon": 6.2193,
+   "name": "Windbird 1528",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "ffvl-3536",
    "source": "windsmobi",
    "lat": 45.3651,
@@ -6546,6 +6596,16 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-09-22"
+  },
+  {
+   "id": "ffvl-52",
+   "source": "windsmobi",
+   "lat": 43.4417,
+   "lon": 2.0703,
+   "name": "Montagne Noire",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "ffvl-54",
@@ -8171,12 +8231,19 @@
   {
    "id": "175",
    "source": "pioupiou",
-   "lat": 42.9656,
-   "lon": 1.2281,
+   "lat": 42.9644,
+   "lon": 1.2224,
    "name": "Col de la Core",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    42.9656,
+    1.2281
+   ],
+   "deplacee_le": "2026-11-02",
+   "deplacee_de_m": 483,
+   "hors_domaine": false
   },
   {
    "id": "184",
@@ -8217,6 +8284,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "249",
+   "source": "pioupiou",
+   "lat": 42.7881,
+   "lon": 1.3005,
+   "name": "Guzet",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "260",
@@ -8921,6 +8998,26 @@
    "vue_le": "2026-08-10"
   },
   {
+   "id": "966",
+   "source": "pioupiou",
+   "lat": 42.7709,
+   "lon": 1.9126,
+   "name": "Pic de Pénédis 1808m",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
+   "id": "967",
+   "source": "pioupiou",
+   "lat": 42.7716,
+   "lon": 1.9132,
+   "name": "Pic de Pénédis 1808m ",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "968",
    "source": "pioupiou",
    "lat": 45.6336,
@@ -9193,6 +9290,16 @@
    "vue_le": "2026-08-16"
   },
   {
+   "id": "1317",
+   "source": "pioupiou",
+   "lat": 46.0987,
+   "lon": 5.8498,
+   "name": "WindBird 1317",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "1332",
    "source": "pioupiou",
    "lat": 42.9694,
@@ -9431,13 +9538,19 @@
   {
    "id": "1378",
    "source": "pioupiou",
-   "lat": 43.6496,
-   "lon": 3.2292,
+   "lat": 46.1792,
+   "lon": 5.6769,
    "name": "Col de la Merquiere",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "hors_domaine": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    43.6496,
+    3.2292
+   ],
+   "deplacee_le": "2026-11-02",
+   "deplacee_de_m": 340980
   },
   {
    "id": "1380",
@@ -9464,7 +9577,7 @@
    "source": "pioupiou",
    "lat": 45.6365,
    "lon": 5.9629,
-   "name": " Passage du Croc Sire 1405m",
+   "name": "Passage du Croc Sire 1405m",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
@@ -9474,7 +9587,7 @@
    "source": "pioupiou",
    "lat": 44.0031,
    "lon": 2.1435,
-   "name": "WindBird 1406",
+   "name": "Cap Découverte ",
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-15"
@@ -9785,6 +9898,16 @@
    "vue_le": "2026-09-22"
   },
   {
+   "id": "1521",
+   "source": "pioupiou",
+   "lat": 46.0987,
+   "lon": 5.8498,
+   "name": "Windbird 1521",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "1525",
    "source": "pioupiou",
    "lat": 44.6868,
@@ -9893,6 +10016,16 @@
    "vue_le": "2026-08-10"
   },
   {
+   "id": "1549",
+   "source": "pioupiou",
+   "lat": 46.1827,
+   "lon": 5.7,
+   "name": "Decollo Panettone",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "1551",
    "source": "pioupiou",
    "lat": 45.4579,
@@ -9932,6 +10065,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "1555",
+   "source": "pioupiou",
+   "lat": 46.0987,
+   "lon": 5.8502,
+   "name": "Windbird 1555",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "1558",
@@ -10199,7 +10342,7 @@
    "source": "pioupiou",
    "lat": 44.1068,
    "lon": 1.8863,
-   "name": "Marnaves",
+   "name": "Marnaves décollage Michel Cantaloube",
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-15"
@@ -10446,6 +10589,16 @@
    "vue_le": "2026-08-10"
   },
   {
+   "id": "1741",
+   "source": "pioupiou",
+   "lat": 45.9448,
+   "lon": 6.6822,
+   "name": "Windbird 1741",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "1743",
    "source": "pioupiou",
    "lat": 42.7987,
@@ -10627,7 +10780,7 @@
    "source": "pioupiou",
    "lat": 46.0987,
    "lon": 5.8498,
-   "name": "WINDBIRD - Atterrissage A1 LUMBIN",
+   "name": "pioupiou 2023",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
@@ -10641,6 +10794,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "2028",
+   "source": "pioupiou",
+   "lat": 45.5979,
+   "lon": 5.8799,
+   "name": "Balise Perso",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "2031",
@@ -10661,6 +10824,16 @@
    "seen_at": "2026-08-07",
    "position_suspecte": false,
    "vue_le": "2026-08-10"
+  },
+  {
+   "id": "2037",
+   "source": "pioupiou",
+   "lat": 42.9197,
+   "lon": 1.647,
+   "name": " ",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "2041",
@@ -10986,12 +11159,19 @@
   {
    "id": "2171",
    "source": "pioupiou",
-   "lat": 42.7456,
-   "lon": 1.5187,
+   "lat": 42.986,
+   "lon": 1.8657,
    "name": "Windbird 2171",
    "seen_at": "2026-08-07",
    "position_suspecte": false,
-   "vue_le": "2026-08-12"
+   "vue_le": "2026-08-12",
+   "ancienne_position": [
+    42.7456,
+    1.5187
+   ],
+   "deplacee_le": "2026-11-02",
+   "deplacee_de_m": 38915,
+   "hors_domaine": false
   },
   {
    "id": "2176",
@@ -11012,6 +11192,16 @@
    "position_suspecte": false,
    "hors_domaine": true,
    "vue_le": "2026-08-15"
+  },
+  {
+   "id": "2183",
+   "source": "pioupiou",
+   "lat": 45.9025,
+   "lon": 6.8837,
+   "name": " Plan de l’Aiguille",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "2185",
@@ -11081,6 +11271,36 @@
    "vue_le": "2026-09-22"
   },
   {
+   "id": "2220",
+   "source": "pioupiou",
+   "lat": 45.074,
+   "lon": 5.7068,
+   "name": "Les Busards",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
+   "id": "2224",
+   "source": "pioupiou",
+   "lat": 46.2889,
+   "lon": 6.172,
+   "name": "Yachting Club CERN",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
+   "id": "2228",
+   "source": "pioupiou",
+   "lat": 42.8019,
+   "lon": 0.4048,
+   "name": "Windbird 2228",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
    "id": "2338",
    "source": "pioupiou",
    "lat": 45.2397,
@@ -11099,6 +11319,26 @@
    "position_suspecte": false,
    "hors_domaine": false,
    "vue_le": "2026-08-16"
+  },
+  {
+   "id": "2389",
+   "source": "pioupiou",
+   "lat": 44.2529,
+   "lon": 5.5055,
+   "name": "Windbird 2389",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
+  },
+  {
+   "id": "2390",
+   "source": "pioupiou",
+   "lat": 45.8556,
+   "lon": 6.2474,
+   "name": "Col des Frètes",
+   "position_suspecte": false,
+   "hors_domaine": false,
+   "vue_le": "2026-11-02"
   },
   {
    "id": "9170",
