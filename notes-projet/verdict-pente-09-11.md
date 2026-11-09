@@ -277,7 +277,10 @@ deux nuits (144 170 → 141 261 → 141 805).
 compte à **107 %** du palier, alors que `agrume/pi` seul fait **+0,582 Go/mois**.
 Le 25ᵉ centile des différences, encore lui.
 - `agrume/pi` : **1,917 → 1,938 Go**, **4 339 → 4 387 objets**, soit **+48
-  objets par nuit**, **27ᵉ et 28ᵉ nuit sans un seul recul**.
+  objets par nuit**, **26ᵉ et 27ᵉ nuit sans un seul recul**.
+  ⓘ *Rectification faite dans la minute : le message de commit `e028ed5` dit
+  « 28 nuits », c'est faux. La note du 07/11 comptait la **25ᵉ** ⇒ 08/11 = 26ᵉ,
+  09/11 = **27ᵉ**. Le chiffre qui vaut est celui-ci.*
 - `agrume/grille` : **5,323 Go / 766 objets les deux nuits**, au Mo et à l'objet
   près — identique au 07/11. ⚠️ **Mais la fermeture du 31/10 avait déjà « tenu »
   avant de ne plus tenir** (creux d'une nuit le 05/11, exactement comme le
