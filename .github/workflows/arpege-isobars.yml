@@ -44,7 +44,39 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install deps
-        run: pip install --quiet omfiles fsspec s3fs numpy matplotlib scipy
+        # ⛔ 11/11/2026 — `boto3` EST DANS CETTE LIGNE, et il ne doit plus
+        # en sortir. Il était installé par un SECOND `pip install` à
+        # l'étape d'ingestion ci-dessous, et c'est ce qui a tué les runs
+        # #408 et #409 : `s3fs` tire `aiobotocore`, qui épingle
+        # `botocore<1.43.118` ; un `pip install boto3` lancé APRÈS, sans
+        # contrainte, a pris botocore 1.44.0 (sorti le 10/11 à 20:22 UTC,
+        # 20 min avant le #408) et `NEW_RETRIES_ENABLED` avait disparu de
+        # `botocore.retries.standard` → `ImportError` au premier
+        # `fsspec.open("blockcache::s3://…")`, en 3 s, avant tout octet
+        # lu. En une seule ligne, le résolveur de pip arbitre les deux
+        # clients S3 d'un coup (boto3 1.43.117 aujourd'hui) et reprendra
+        # tout seul un boto3 plus récent dès qu'aiobotocore l'autorisera.
+        #
+        # ⚠️ Les autres workflows gardent leur `pip install boto3` à
+        # l'étape d'ingestion sans danger : aucun n'installe `s3fs`, donc
+        # aucun n'a d'aiobotocore à contredire. Ce n'est pas une
+        # incohérence, c'est la seule chaîne qui lit du S3 par fsspec.
+        run: pip install --quiet omfiles fsspec s3fs numpy matplotlib scipy boto3
+
+      - name: Aucun conflit de dépendances (2 s, avant tout téléchargement)
+        # ⛔ LA PANNE DU 10/11 EST PASSÉE PAR UNE ÉTAPE VERTE. `pip
+        # install` ÉCRIT « ERROR: pip's dependency resolver does not
+        # currently take into account all the packages that are
+        # installed » puis rend 0 : l'environnement était cassé et
+        # l'étape d'installation affichait un ✓. C'est exactement le faux
+        # vert que ce dépôt refuse ailleurs.
+        # `pip check` rend 1 sur ce conflit-là et NOMME les deux paquets ;
+        # l'import de `s3fs` attrape en plus une rupture non déclarée dans
+        # les métadonnées. Deux secondes, hors réseau de données.
+        run: |
+          pip check
+          python -c "import s3fs, boto3, botocore; print(f's3fs {s3fs.__version__} / boto3 {boto3.__version__} / botocore {botocore.__version__} — cohabitation OK')"
+
       - name: Ingest ARPEGE isobars
         working-directory: arpege-isobars
         env:
@@ -77,6 +109,4 @@ jobs:
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ vars.R2_BUCKET_ISOBARS }}
-        run: |
-          pip install --quiet boto3
-          python ingest.py
+        run: python ingest.py

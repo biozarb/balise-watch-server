@@ -6,6 +6,49 @@
 
 ---
 
+## 11/11/2026 (arpege-isobars) — DEUX `pip install` dans le même job : le second a cassé le premier, et l'étape d'installation est restée VERTE
+
+Runs **#408** (10/11 20:42 Z) et **#409** (11/11 08:54 Z) en échec, même
+commit que le #407 réussi onze heures plus tôt : **rien n'avait changé
+dans le code**. L'étape « Ingest » tombait en 3 à 5 s, avant le moindre
+octet lu sur S3.
+
+Le job installait ses dépendances en **deux temps** :
+`pip install omfiles fsspec s3fs numpy matplotlib scipy` à l'étape
+« Install deps », puis `pip install boto3` en première ligne de l'étape
+d'ingestion. Or `s3fs` tire `aiobotocore`, qui épingle
+`botocore<1.43.118`. Le second `pip install`, sans contrainte, a pris
+**botocore 1.44.0 — publié le 10/11 à 20:22 Z, vingt minutes avant le
+#408** — où `NEW_RETRIES_ENABLED` a disparu de
+`botocore.retries.standard`. `aiobotocore` l'importe au chargement :
+`ImportError` au premier `fsspec.open("blockcache::s3://…")`.
+
+Les cinq autres chaînes (arome-wind, arome-thermal, arome-gustfront,
+arpege-thermal, agrume-colonnes) sont restées **vertes sur la même
+fenêtre** avec le même `pip install boto3` tardif : aucune n'installe
+`s3fs`, donc aucune n'a d'aiobotocore à contredire. C'est ce contraste
+qui a nommé le coupable avant d'avoir lu une seule ligne de log (les logs
+Actions demandent les droits admin ; l'API publique ne donne que le nom
+de l'étape).
+
+→ `boto3` passe **dans l'unique `pip install`** : une seule passe du
+résolveur arbitre les deux clients S3 (boto3 1.43.117 aujourd'hui), et
+reprendra seule un boto3 plus récent dès qu'aiobotocore l'autorisera.
+Aucune version figée à maintenir.
+→ Étape de garde `pip check` + import de `s3fs`, **avant** tout
+téléchargement, 2 s.
+
+**Piège réutilisable** : `pip install` affiche `ERROR: pip's dependency
+resolver does not currently take into account all the packages that are
+installed`, liste le conflit… **et rend 0**. L'environnement était cassé
+et l'étape portait un ✓ — un faux vert de plus, de la même famille que
+le sparse-checkout vide du 13/08. Deux `pip install` dans un même job ne
+négocient pas entre eux : le second ignore ce que le premier a épinglé.
+`pip check` est la ligne qui transforme ce silence en rouge, et elle
+coûte deux secondes.
+
+---
+
 ## 26/10/2026 (poller Infoclimat) — une panne CHEZ EUX traitée comme une erreur de lot : 7 appels toutes les 5 min, et un mail par run
 
 Vers 17 h UTC, Infoclimat rend `HTTP 504` (`error code: 504`, ~30 s
