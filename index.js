@@ -4333,6 +4333,139 @@ async function fetchWindsmobi(path) {
   return r.json();
 }
 
+// ════════════════════════════════════════════════════════════════════
+// FFVL EN DIRECT — open data data.gouv.fr (13/11/2026)
+// ════════════════════════════════════════════════════════════════════
+// La FFVL a rouvert son open data (data.gouv.fr, Licence Ouverte 2.0 :
+// usage commercial permis, mention « FFVL » + date obligatoire, crédit
+// dans AboutModal). Deux fichiers, sans clé :
+//   · balises.json — métadonnées (644 balises), régénéré chaque nuit ;
+//   · releves.json — dernier relevé (~195 balises), toutes les 5 min.
+// Cf. le doc projet `claude/ffvl-open-data-reouverture-13-11.md`.
+//
+// ⚠️ MÊMES IDENTIFIANTS QUE WINDS.MOBI, À DESSEIN. winds.mobi publie la
+// FFVL sous `ffvl-<idBalise>` ; on garde exactement ces ids, le même
+// `reseau: 'ffvl'` et la même place dans le cache. Vérifié le 13/11 :
+// les 164 balises communes portent le MÊME relevé des deux côtés (moy,
+// rafale, direction identiques). Donc `user_watched.beacon_id`, les
+// favoris, `/windsmobi-history/:id` et model-verif ne voient aucun
+// changement d'identité — seul le tuyau change.
+//
+// ⚠️ CE QUI DISPARAÎT, ET C'EST VOULU. winds.mobi republiait aussi les
+// balises OpenWindMap que la FFVL référence (306 dans la boîte) ; les
+// relevés FFVL directs les EXCLUENT (le jeu renvoie vers openwindmap.org).
+// 30 d'entre elles passaient le dédoublonnage de 180 m — position FFVL à
+// 200 m–39 km du GPS du Pioupiou — et faisaient double marqueur avec la
+// Pioupiou qu'on a déjà en direct (mesuré le 13/11 sur /windsmobi-stations).
+// Elles cessent d'exister ; la Pioupiou reste. Un pilote qui surveillait
+// l'une d'elles sous son id `ffvl-` la perd : vérification à faire avec
+// web/verif_ffvl_owm_watched_13-11.sql (préparé, jamais exécuté ici).
+//
+// ⚠️ REPLI winds.mobi. Si l'un des deux fichiers ne répond pas,
+// ffvlDirectRows() rend null et refreshWindsmobiProviders interroge
+// winds.mobi pour 'ffvl' comme avant — même forme de lignes, même ids.
+//
+// Les lignes sont rendues dans la FORME winds.mobi (`_id`, `loc`,
+// `last['w-avg']`…) pour passer telles quelles dans la boucle
+// d'ingestion existante : boîte, fraîcheur, dédup 180 m, écriture en
+// place réseau par réseau — rien n'est dupliqué.
+//
+// ⚠️ Données personnelles : balises.json contient nom, téléphone et
+// e-mail du responsable de chaque balise. Ils ne sont NI copiés NI
+// journalisés — seuls les champs listés dans ffvlDirectRows() sortent.
+const FFVL_BALISES_URL = 'https://www.data.gouv.fr/api/1/datasets/r/8d795154-9145-4ab2-99de-6768a36f31ea';
+const FFVL_RELEVES_URL = 'https://www.data.gouv.fr/api/1/datasets/r/047b2ab9-627f-4e5f-9d68-5b948433c61d';
+const FFVL_UA = 'balise-watch.app';
+// balises.json n'est régénéré qu'une fois par nuit : le relire toutes
+// les 6 h suffit largement, et un échec garde la version précédente.
+const FFVL_META_MAX_AGE_MS = 6 * 3600 * 1000;
+const FFVL_ALERTE_MAX_LEN = 300;
+
+let ffvlMeta = new Map(); // idBalise -> {nom, lat, lon, alt, maintenance, alerte, type}
+let ffvlMetaAt = 0;
+let ffvlDirectStatus = { ok: false, at: 0, error: null, releves: 0 };
+
+async function fetchFfvlJson(url) {
+  const r = await fetch(url, { headers: { 'user-agent': FFVL_UA }, redirect: 'follow' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+async function refreshFfvlMeta() {
+  const rows = await fetchFfvlJson(FFVL_BALISES_URL);
+  if (!Array.isArray(rows) || !rows.length) throw new Error('balises.json vide');
+  const next = new Map();
+  for (const b of rows) {
+    if (!Number.isFinite(b?.idBalise)) continue;
+    const alerte = typeof b.alert_message === 'string'
+      ? b.alert_message.replace(/\s+/g, ' ').trim().slice(0, FFVL_ALERTE_MAX_LEN) || null
+      : null;
+    next.set(b.idBalise, {
+      nom: (b.nom || '').trim(),
+      lat: Number(b.latitude), lon: Number(b.longitude),
+      alt: Number.isFinite(b.altitude) ? b.altitude : null,
+      maintenance: b.en_maintenance === 1 || b.en_maintenance === true,
+      alerte,
+      type: b.station_type || null,
+    });
+  }
+  ffvlMeta = next;
+  ffvlMetaAt = Date.now();
+  console.log(`refreshFfvlMeta: ${next.size} balises FFVL (open data)`);
+}
+
+/** Relevés FFVL directs dans la forme d'une réponse winds.mobi
+ *  `/stations/?provider=ffvl`, ou null si la source directe est
+ *  indisponible (l'appelant retombe alors sur winds.mobi). */
+async function ffvlDirectRows() {
+  try {
+    if (!ffvlMeta.size || Date.now() - ffvlMetaAt > FFVL_META_MAX_AGE_MS) {
+      try { await refreshFfvlMeta(); }
+      catch (e) { if (!ffvlMeta.size) throw new Error(`balises.json: ${e.message}`); console.error('refreshFfvlMeta (version précédente gardée):', e.message); }
+    }
+    const releves = await fetchFfvlJson(FFVL_RELEVES_URL);
+    if (!Array.isArray(releves)) throw new Error('releves.json: pas un tableau');
+    const out = [];
+    for (const r of releves) {
+      const m = ffvlMeta.get(r?.idbalise);
+      if (!m || !Number.isFinite(m.lat) || !Number.isFinite(m.lon)) continue;
+      // Ceinture : le jeu exclut déjà OpenWindMap, mais si une Pioupiou
+      // y réapparaissait elle referait le double marqueur décrit plus haut.
+      if (m.type === 'OPENWINDMAP') continue;
+      const t = Date.parse(r.date);
+      if (!Number.isFinite(t)) continue;
+      const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+      out.push({
+        _id: `ffvl-${r.idbalise}`,
+        loc: { type: 'Point', coordinates: [m.lon, m.lat] },
+        alt: m.alt,
+        name: m.nom || `FFVL ${r.idbalise}`,
+        status: 'green',
+        'pv-name': 'ffvl.fr',
+        url: { default: `https://www.balisemeteo.com/balise.php?idBalise=${r.idbalise}` },
+        // km/h, comme winds.mobi (vérifié le 13/11 : valeurs identiques).
+        last: {
+          _id: Math.round(t / 1000),
+          'w-avg': num(r.vitesseVentMoy),
+          'w-max': num(r.vitesseVentMax),
+          'w-dir': num(r.directVentMoy),
+          temp: num(r.temperature),
+        },
+        _via: 'ffvl',
+        _maintenance: m.maintenance,
+        _alerte: m.alerte,
+      });
+    }
+    if (!out.length) throw new Error('aucun relevé exploitable');
+    ffvlDirectStatus = { ok: true, at: Date.now(), error: null, releves: out.length };
+    return out;
+  } catch (e) {
+    ffvlDirectStatus = { ...ffvlDirectStatus, ok: false, at: Date.now(), error: e.message };
+    console.error('ffvlDirectRows: repli winds.mobi —', e.message);
+    return null;
+  }
+}
+
 // ⚠️ `pressure` n'est JAMAIS repris de winds.mobi, décision explicite.
 // La convention de réduction (QFE/QNH/QFF) diffère d'un réseau source à
 // l'autre et l'API ne la dit pas — le champ `pres` n'est même présent
@@ -4353,7 +4486,11 @@ async function refreshWindsmobiProviders(providers) {
   let dropped = 0, kept = 0;
   for (const provider of providers) {
     try {
-      const rows = await fetchWindsmobi(`/stations/?provider=${encodeURIComponent(provider)}&limit=0`);
+      // FFVL : source directe d'abord (open data, 13/11/2026), winds.mobi
+      // seulement en repli — cf. ffvlDirectRows(). Les deux `await` sont
+      // AVANT la purge ci-dessous : la règle d'écriture en place tient.
+      let rows = provider === 'ffvl' ? await ffvlDirectRows() : null;
+      if (!rows) rows = await fetchWindsmobi(`/stations/?provider=${encodeURIComponent(provider)}&limit=0`);
       if (!Array.isArray(rows)) continue; // échec : on garde l'ancien cache de CE réseau
 
       // ⚠️ ÉCRITURE EN PLACE, RÉSEAU PAR RÉSEAU — et surtout PAS un
@@ -4415,6 +4552,15 @@ async function refreshWindsmobiProviders(providers) {
           reseau: provider,
           reseauNom: s['pv-name'] || provider,
           url: s.url?.default ?? null,
+          // Tuyau réel (13/11/2026) : 'ffvl' = open data FFVL en direct,
+          // 'windsmobi' = relayé par l'agrégateur (y compris la FFVL en
+          // repli). Le client en tire le badge et la mention de source.
+          via: s._via || 'windsmobi',
+          // Infos publiées par la FFVL elle-même pour la balise : drapeau
+          // « en maintenance » et message d'alerte de la balise (« direction
+          // du vent erronée », interdictions locales…). null hors FFVL directe.
+          maintenance: s._maintenance === true,
+          alerte: s._alerte ?? null,
         });
         kept++;
       }
@@ -6760,6 +6906,9 @@ function windsmobiStationsPayload() {
       dd: obs.dir, ff: obs.moy, raf10: obs.raf, ddraf10: null,
       pres: null, pmer: null, temp: obs.temp ?? null,
       reseau: obs.reseau, reseauNom: obs.reseauNom, url: obs.url,
+      via: obs.via || 'windsmobi',
+      maintenance: obs.maintenance === true,
+      alerte: obs.alerte ?? null,
       validityTime: Number.isFinite(obs.t) ? new Date(obs.t).toISOString() : null,
     });
   }
@@ -6767,7 +6916,9 @@ function windsmobiStationsPayload() {
 }
 
 app.get('/windsmobi-stations', (req, res) => {
-  res.json({ stations: windsmobiStationsPayload(), fetchedAt: windsmobiFetchedAt, lastError: windsmobiLastError });
+  // `ffvlDirect` : état de la source FFVL directe (13/11/2026) — `ok:false`
+  // = la FFVL repasse par winds.mobi en repli, à lire avec `error`.
+  res.json({ stations: windsmobiStationsPayload(), fetchedAt: windsmobiFetchedAt, lastError: windsmobiLastError, ffvlDirect: ffvlDirectStatus });
 });
 
 // ── winds.mobi — historique d'une station ───────────────────────────
