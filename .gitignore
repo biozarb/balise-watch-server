@@ -40,3 +40,6 @@ traces/*.log
 # model-verif/latence/README.md dit comment le rapatrier.
 model-verif/latence/agrume_latence.ndjson
 model-verif/latence/runs_actions.json
+# Cache local de fusion_ffvl.py — dernière copie de terrains.json (FFVL,
+# open data), repli si data.gouv ne répond pas. Régénérable.
+arome-thermal/.cache_ffvl/

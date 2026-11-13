@@ -4,6 +4,14 @@
 #  près des décos (`KK7_LAUNCH_DISCOUNT_RADIUS`, fusion expérimentale).
 #  Depuis le 27/07/2026, écrit AUSSI `atterros.json` (cf. § ATTERROS).
 #
+#  ⚠️ MISE À JOUR DU 13/11/2026 : la FFVL a ROUVERT son open data
+#  (data.gouv.fr, sans clé). Les terrains FFVL sont désormais FUSIONNÉS
+#  à la sortie de ce script — doublon → FFVL, uniques des deux côtés
+#  gardés — par `fusion_ffvl.py`, qui documente la règle, les seuils
+#  mesurés et la migration de clés qu'elle impose. Le paragraphe
+#  ci-dessous reste vrai pour ce qu'il raconte (juillet 2026) ;
+#  `--sans-ffvl` reproduit l'ancienne sortie à l'octet près.
+#
 #  ── POURQUOI ParaglidingEarth ET PAS FFVL ────────────────────────
 #  FFVL était la source recommandée en premier
 #  (PROPOSITION_FUSION_CALQUES_THERMIQUES.md §7) : jeu de données
@@ -138,6 +146,13 @@ OUT = os.path.join(
 OUT_LANDINGS = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "web", "public", "data", "atterros.json"
 )
+# Fusion FFVL (13/11/2026) — cf. fusion_ffvl.py.
+OUT_DETAILS = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "web", "public", "data", "sites_ffvl.json"
+)
+OUT_KEYMAP_SQL = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "web", "supabase_step72_sites_ffvl_keymap.sql"
+)
 
 
 def fetch(cc: str) -> bytes:
@@ -250,7 +265,10 @@ def main() -> None:
             land = parse_landing(props)
             if land is not None and land not in seen_landings:
                 seen_landings.add(land)
-                landings.append([land[0], land[1], name])
+                # 3e élément = INDEX du déco parent (13/11/2026), plus son
+                # nom : la fusion FFVL peut renommer ce déco, le lien doit
+                # suivre. Réécrit en nom par fusion_ffvl.fuse().
+                landings.append([land[0], land[1], len(points) - 1])
         print(
             f"  {cc}: +{len(points) - n_before} décos, "
             f"+{len(landings) - n_land_before} atterros",
@@ -263,6 +281,20 @@ def main() -> None:
             f"pgEarth n'en renvoyait aucune le 27/07/2026, vérifier ce qui a changé",
             file=sys.stderr,
         )
+
+    # ── Fusion FFVL (13/11/2026) — cf. fusion_ffvl.py ──────────────
+    # `--sans-ffvl` : sortie pgEarth seule, au format historique
+    # (debug / comparaison ; ne pas déployer ce résultat).
+    if "--sans-ffvl" in sys.argv:
+        landings = [[l[0], l[1], points[l[2]][2]] for l in landings]
+    else:
+        from fusion_ffvl import fuse, write_keymap_sql
+        points, landings, details, keymap, stats = fuse(points, landings)
+        print(f"\nFusion FFVL : {json.dumps(stats, ensure_ascii=False)}", file=sys.stderr)
+        with open(OUT_DETAILS, "w") as f:
+            json.dump(details, f, separators=(",", ":"), ensure_ascii=False)
+        write_keymap_sql(keymap, OUT_KEYMAP_SQL)
+        print(f"{len(keymap)} clés de site changent → {OUT_KEYMAP_SQL} (à jouer par Yann)", file=sys.stderr)
 
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as f:
